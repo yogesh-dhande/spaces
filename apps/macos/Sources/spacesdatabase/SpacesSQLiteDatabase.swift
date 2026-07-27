@@ -7,6 +7,10 @@ import Foundation
 #endif
 
 public final class SpacesSQLiteDatabase {
+    /// Domain of every error this type raises, so a caller can tell a fault SQLite reported from one its
+    /// own code decided.
+    public static let errorDomain = "spaces.database"
+
     private let db: OpaquePointer
     private let databasePath: String
     private let busyTimeoutMS: Int32 = 5000
@@ -23,14 +27,14 @@ public final class SpacesSQLiteDatabase {
         if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "Failed opening sqlite db at \(path)"
             if let handle { sqlite3_close(handle) }
-            throw NSError(domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
-        guard let handle else { throw NSError(domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"]) }
+        guard let handle else { throw NSError(domain: Self.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "DB handle is nil"]) }
         db = handle
         guard sqlite3_busy_timeout(db, busyTimeoutMS) == SQLITE_OK else {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(
-                domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
+                domain: Self.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
         }
         try configureConnectionPragmas()
         try initializeSchema(withMigrationAuthorization: withMigrationAuthorization)
@@ -58,7 +62,7 @@ public final class SpacesSQLiteDatabase {
 
         if try stepWithRetry(statement: statement) != SQLITE_DONE {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "spaces.database", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: 4, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
@@ -70,7 +74,7 @@ public final class SpacesSQLiteDatabase {
         if result == SQLITE_DONE { return nil }
         guard result == SQLITE_ROW else {
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "spaces.database", code: 6, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: 6, userInfo: [NSLocalizedDescriptionKey: message])
         }
         return extractRow(statement: statement)
     }
@@ -88,7 +92,7 @@ public final class SpacesSQLiteDatabase {
             }
             if result == SQLITE_DONE { break }
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "spaces.database", code: 8, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: 8, userInfo: [NSLocalizedDescriptionKey: message])
         }
         return rows
     }
@@ -133,7 +137,7 @@ public final class SpacesSQLiteDatabase {
 
     private func validateIntegrity() throws {
         guard let row = try queryRow(sql: "PRAGMA integrity_check"), row.first == "ok" else {
-            throw NSError(domain: "spaces.database", code: 45, userInfo: [NSLocalizedDescriptionKey: "PRAGMA integrity_check failed"])
+            throw NSError(domain: Self.errorDomain, code: 45, userInfo: [NSLocalizedDescriptionKey: "PRAGMA integrity_check failed"])
         }
     }
 
@@ -154,7 +158,7 @@ public final class SpacesSQLiteDatabase {
                 continue
             }
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "spaces.database", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: 2, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
@@ -170,7 +174,7 @@ public final class SpacesSQLiteDatabase {
                 continue
             }
             let message = String(cString: sqlite3_errmsg(db))
-            throw NSError(domain: "spaces.database", code: errorCode, userInfo: [NSLocalizedDescriptionKey: message])
+            throw NSError(domain: Self.errorDomain, code: errorCode, userInfo: [NSLocalizedDescriptionKey: message])
         }
     }
 
@@ -213,7 +217,7 @@ public final class SpacesSQLiteDatabase {
             case _ as NSNull: sqlite3_bind_null(statement, slot)
             default:
                 throw NSError(
-                    domain: "spaces.database", code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported sqlite binding type \(type(of: value))"])
+                    domain: Self.errorDomain, code: 8, userInfo: [NSLocalizedDescriptionKey: "Unsupported sqlite binding type \(type(of: value))"])
             }
         }
     }

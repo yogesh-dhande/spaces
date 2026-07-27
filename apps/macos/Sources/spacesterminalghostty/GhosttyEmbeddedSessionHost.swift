@@ -304,10 +304,9 @@
         private var latestRuntimeState: TerminalSessionRuntimeState?
         /// Durable persist marker — mirrors what was last SUCCESSFULLY written to disk. Advanced only on a
         /// successful write so `shouldPersistRuntimeState` retries after a failure rather than being
-        /// suppressed by a stale success marker/timestamp. Not the broadcast source (that is
+        /// suppressed by a stale success marker. Not the broadcast source (that is
         /// `latestRuntimeState`); this exists to drive persistence/retry decisions.
         private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
-        private var lastRuntimeStateWriteAt: Date?
         private var sessionStartedAt: Date?
         private var foregroundPIDOverrideForTesting: Int32?
         private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
@@ -638,19 +637,16 @@
             // this core's release (e.g. a session-close that drops the core right after termination).
             persistence.enqueueRuntimeStateWrite(
                 state, at: writeAt, paths: paths,
-                onPersisted: { [weak self] persistedState, persistedAt in
-                    Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState, at: persistedAt) }
-                })
+                onPersisted: { [weak self] persistedState, _ in Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState) } })
         }
 
         /// Advances the durable persist marker after a successful off-engine write and, when the persisted
         /// signature changed, fires the runtime-state notification/broadcast — so DB-reading consumers (the
         /// overview) observe the change only once it is durable while live subscribers still see live truth
         /// from `latestRuntimeState`.
-        private func markRuntimeStatePersisted(_ state: TerminalSessionRuntimeState, at writeAt: Date) {
+        private func markRuntimeStatePersisted(_ state: TerminalSessionRuntimeState) {
             let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
             lastPersistedRuntimeState = state
-            lastRuntimeStateWriteAt = writeAt
             if previousSignature != runtimeStateSignature(for: state) { postRuntimeStateDidChange() }
         }
 
@@ -1426,7 +1422,7 @@
             // Advance the in-memory authoritative state first so broadcasts show live truth immediately,
             // independent of when (or whether) the enqueued durable write lands.
             latestRuntimeState = state
-            let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
+            let shouldPersist = force || shouldPersistRuntimeState(state)
             guard shouldPersist else { return }
             // Persist off the engine. The durable marker advances and the change notification fires only when
             // the write succeeds (see `enqueueRuntimeStateWrite`/`markRuntimeStatePersisted`), so a failed
@@ -1449,11 +1445,23 @@
         /// the DB, which would still show the not-yet-committed detach — and the durable detach +
         /// ownership-transfer writes are enqueued (in order) onto the persistence queue so a burst of
         /// expiries can never block the engine on the DB lock.
+        ///
+        /// This runs once a second for every live session, so it first asks the in-memory attachment
+        /// snapshot whether the session has any client a lease could expire at all, and does nothing when it
+        /// does not. That is the overwhelming majority of sessions and of ticks: a local window client is
+        /// lease-exempt and a session nobody has attached to has no clients. The cache is authoritative for
+        /// this question by the same single-writer invariant that lets owner gating read it (see
+        /// `cachedAttachmentSnapshot`) — a lease-governed client can only appear through an attach on this
+        /// core, which invalidates the cache — so the gate can only skip a tick that had nothing to expire.
         @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
             let cutoff = now.addingTimeInterval(-TerminalSessionPersistence.remoteClientLeaseInterval)
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
+            guard hasLeaseGovernedAttachedClient() else {
+                expiredRemoteClientIDs.removeAll(keepingCapacity: true)
+                return []
+            }
             guard let databaseStaleClients = try? TerminalSessionPersistence.staleRemoteClients(paths: paths, now: now), !databaseStaleClients.isEmpty
             else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
@@ -1897,6 +1905,16 @@
             (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
         }
 
+        /// Whether any still-attached client is one whose liveness the lease decides, i.e. whether the
+        /// stale-client sweep has anything it could possibly expire. Mirrors the predicate
+        /// `TerminalSessionPersistence.staleRemoteClients` runs in SQL — attached, connected, and a kind
+        /// `livenessDependsOnLease` covers — against `currentAttachmentSnapshot()` instead of the database.
+        private func hasLeaseGovernedAttachedClient() -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return false }
+            let attachedClientIDs = Set(snapshot.attachments.filter { $0.detachedAt == nil }.map(\.clientID))
+            return snapshot.clients.contains { $0.disconnectedAt == nil && $0.kind.livenessDependsOnLease && attachedClientIDs.contains($0.id) }
+        }
+
         /// Drops the cached attachment snapshot so the next read reseeds from disk. Called by every in-core
         /// attachment-row write.
         private func invalidateAttachmentSnapshotCache() { cachedAttachmentSnapshot = nil }
@@ -1987,12 +2005,20 @@
             detachedClientWasOwner || remainingOwnerClientID == nil
         }
 
-        private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {
-            if let lastPersistedRuntimeState, runtimeStateSignature(for: lastPersistedRuntimeState) != runtimeStateSignature(for: state) {
-                return true
-            }
-            guard let lastRuntimeStateWriteAt else { return true }
-            return now.timeIntervalSince(lastRuntimeStateWriteAt) >= 5
+        /// A runtime state is persisted when it says something the stored row does not: the signature covers
+        /// every field of the row except `updated_at`, which is derived from the write itself.
+        ///
+        /// There is deliberately no periodic rewrite of an unchanged row. The 1 Hz refresh runs per session
+        /// for as long as the session lives, so rewriting on a timer meant every idle terminal committed a
+        /// transaction every few seconds forever, purely to move `updated_at` forward. Nothing reads that
+        /// column as a freshness signal: session liveness is decided by the service pid, stale recovery by
+        /// pid liveness, garbage collection by `exited_at`, and client liveness by
+        /// `terminal_clients.lease_refreshed_at`. Its readers — the overview payload, a terminated session's
+        /// `emittedAt`, the pane debug overlay — display it or pass it through, and a session that exits or
+        /// changes anything at all writes immediately because the signature changes.
+        private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState) -> Bool {
+            guard let lastPersistedRuntimeState else { return true }
+            return runtimeStateSignature(for: lastPersistedRuntimeState) != runtimeStateSignature(for: state)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {

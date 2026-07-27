@@ -171,4 +171,20 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
 
         XCTAssertNil(TerminalForegroundProcessInspector.workingDirectory(pid: pid))
     }
+
+    /// Pins the executable-name semantics the inspector needs, rather than whatever `URL` happened to do
+    /// with these shapes. `.` and `..` in particular must stay as they are: resolving them would name the
+    /// daemon's own working directory, which has nothing to do with the process being inspected.
+    func testExecutableNameIsTheTrailingPathComponent() {
+        let cases: [(String, String)] = [
+            ("/opt/homebrew/bin/codex", "codex"), ("codex", "codex"), ("/usr/bin/", "bin"), ("/usr/bin///", "bin"), ("/", ""), ("", ""), (".", "."),
+            ("..", ".."), ("./codex", "codex"),
+        ]
+        for (path, expected) in cases { XCTAssertEqual(TerminalForegroundProcessInspector.lastPathComponent(of: path), expected, "path: \(path)") }
+    }
+
+    func testSnapshotDerivesExecutableNameFromThePathWithoutResolvingIt() {
+        XCTAssertEqual(TerminalForegroundProcessSnapshot(pid: 1, executablePath: "/opt/homebrew/bin/opencode", argv: []).executableName, "opencode")
+        XCTAssertEqual(TerminalForegroundProcessSnapshot(pid: 2, executablePath: nil, argv: ["/usr/bin/claude", "-p"]).executableName, "claude")
+    }
 }

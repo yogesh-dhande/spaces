@@ -3784,7 +3784,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
+    ///
+    /// The process's own connections are released on both sides of the injection. Moving the files aside is
+    /// invisible to a connection already open on them — it holds the file, not the path — so without this
+    /// the injection would be partial: a write could still commit into the moved-aside file. Releasing is
+    /// also what a database that genuinely went away would force.
     private static func breakDatabase(at databasePath: String) throws {
+        TerminalSessionPersistence.closeDatabaseConnection()
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {
             let path = databasePath + suffix
@@ -3800,6 +3806,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let backup = databasePath + suffix + ".b4bak"
             if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
         }
+        TerminalSessionPersistence.closeDatabaseConnection()
     }
 
     private static func renderBaseline(from payload: GhosttyRemoteSessionStatePayload, baseline: GhosttyRenderUpdateBaseline?) throws

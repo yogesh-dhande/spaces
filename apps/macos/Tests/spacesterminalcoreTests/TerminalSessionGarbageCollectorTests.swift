@@ -228,6 +228,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     func testIsSessionShownFailsClosedWhenAttachmentReadThrows() throws {
         let paths = try seedSession(id: "corrupt-attachments", state: .running, servicePID: 999_999)
         // Corrupt the profile database so the live-attachments query throws instead of returning rows.
+        // Release the process's connections BEFORE corrupting the file: a connection already open holds the
+        // file rather than the path, so it would neither see the corruption nor leave it in place — its
+        // release checkpoints the WAL back over the bytes written here.
+        TerminalSessionPersistence.closeDatabaseConnection()
         try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: root.appendingPathComponent("spaces.db").path))
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: "corrupt-attachments", backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .running,
@@ -244,6 +248,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     // read is skipped entirely, so it must read as not shown.
     func testIsSessionShownIgnoresAttachmentsForEndedSession() throws {
         let paths = try seedSession(id: "corrupt-attachments", state: .exited, servicePID: 999_999)
+        // Release the process's connections BEFORE corrupting the file: a connection already open holds the
+        // file rather than the path, so it would neither see the corruption nor leave it in place — its
+        // release checkpoints the WAL back over the bytes written here.
+        TerminalSessionPersistence.closeDatabaseConnection()
         try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: root.appendingPathComponent("spaces.db").path))
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: "corrupt-attachments", backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .exited,

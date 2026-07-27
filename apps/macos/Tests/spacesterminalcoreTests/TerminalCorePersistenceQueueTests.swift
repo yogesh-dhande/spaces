@@ -422,6 +422,10 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// entry left by a sibling test (or a future test in this suite that forgets to reset the cache)
     /// could point this at a real, shared database. Refuse to touch anything outside this suite's own
     /// throwaway profile root instead of silently destroying it.
+    /// The process's own connections are released on both sides of the injection: moving the files aside is
+    /// invisible to a connection already open on them — it holds the file, not the path — so without this
+    /// the fault would not reach the write under test at all. Releasing is also what a database that
+    /// genuinely went away would force.
     private static func breakDatabase(at databasePath: String, allowedRoot: URL) throws {
         struct UnsafeDatabasePath: Error { let path: String }
         guard databasePath.hasPrefix(allowedRoot.path + "/") else {
@@ -431,6 +435,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
             XCTFail("refusing to break database at \(databasePath): outside this test's isolated root \(allowedRoot.path)")
             throw UnsafeDatabasePath(path: databasePath)
         }
+        TerminalSessionPersistence.closeDatabaseConnection()
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {
             let path = databasePath + suffix
@@ -446,5 +451,6 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
             let backup = databasePath + suffix + ".r47bak"
             if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
         }
+        TerminalSessionPersistence.closeDatabaseConnection()
     }
 }

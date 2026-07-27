@@ -202,34 +202,32 @@ public enum TerminalSessionPersistence {
     public static func writeLaunchConfiguration(_ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                try database.execute(
-                    sql: "DELETE FROM terminal_sessions WHERE root_directory = ? AND session_id <> ?", bindings: [root, configuration.sessionID])
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_sessions(
-                          session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command, created_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
-                        ON CONFLICT(session_id) DO UPDATE SET
-                          root_directory = excluded.root_directory,
-                          backend = excluded.backend,
-                          lifetime_policy = excluded.lifetime_policy,
-                          workspace_id = excluded.workspace_id,
-                          kind = excluded.kind,
-                          title = excluded.title,
-                          working_directory = excluded.working_directory,
-                          shell = excluded.shell,
-                          command = excluded.command,
-                          created_at = excluded.created_at
-                        """,
-                    bindings: [
-                        configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue,
-                        configuration.workspaceID, configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
-                        configuration.shell, configuration.command ?? "", configuration.createdAt,
-                    ])
-            }
+        try withProfileDatabaseTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM terminal_sessions WHERE root_directory = ? AND session_id <> ?", bindings: [root, configuration.sessionID])
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal_sessions(
+                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                      root_directory = excluded.root_directory,
+                      backend = excluded.backend,
+                      lifetime_policy = excluded.lifetime_policy,
+                      workspace_id = excluded.workspace_id,
+                      kind = excluded.kind,
+                      title = excluded.title,
+                      working_directory = excluded.working_directory,
+                      shell = excluded.shell,
+                      command = excluded.command,
+                      created_at = excluded.created_at
+                    """,
+                bindings: [
+                    configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue, configuration.workspaceID,
+                    configuration.kind.rawValue, configuration.title, configuration.workingDirectory, configuration.shell,
+                    configuration.command ?? "", configuration.createdAt,
+                ])
         }
     }
 
@@ -237,13 +235,11 @@ public enum TerminalSessionPersistence {
     /// the auto-updated runtime title when the session's effective title is computed.
     public static func writeUserTitle(_ userTitle: String, sessionID: String, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-                try database.execute(
-                    sql: "UPDATE terminal_sessions SET user_title = NULLIF(?, '') WHERE root_directory = ?", bindings: [userTitle, root])
-            }
+        try withProfileDatabaseTransaction { database in
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            try database.execute(
+                sql: "UPDATE terminal_sessions SET user_title = NULLIF(?, '') WHERE root_directory = ?", bindings: [userTitle, root])
         }
     }
 
@@ -254,49 +250,47 @@ public enum TerminalSessionPersistence {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(state.foregroundArgv)
-        try withProfileDatabase(at: databasePath) { database in
-            try database.withImmediateTransaction {
-                let existingSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard existingSessionID == state.sessionID else { throw TerminalSessionPersistenceError.unknownSession(state.sessionID) }
-                try database.execute(
-                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, state.sessionID])
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_runtime_states(
-                          session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
-                          foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
-                          foreground_detected_agent_kind, foreground_display_label, foreground_display_command
-                        )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
-                                NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
-                        ON CONFLICT(session_id) DO UPDATE SET
-                          root_directory = excluded.root_directory,
-                          backend = excluded.backend,
-                          service_pid = excluded.service_pid,
-                          child_pid = excluded.child_pid,
-                          title = excluded.title,
-                          working_directory = excluded.working_directory,
-                          columns = excluded.columns,
-                          rows = excluded.rows,
-                          state = excluded.state,
-                          updated_at = excluded.updated_at,
-                          exited_at = excluded.exited_at,
-                          foreground_pid = excluded.foreground_pid,
-                          foreground_executable_path = excluded.foreground_executable_path,
-                          foreground_executable_name = excluded.foreground_executable_name,
-                          foreground_argv_json = excluded.foreground_argv_json,
-                          foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
-                          foreground_display_label = excluded.foreground_display_label,
-                          foreground_display_command = excluded.foreground_display_command
-                        """,
-                    bindings: [
-                        state.sessionID, root, state.backend.rawValue, state.servicePID, state.childPID.map { Int($0) } as Any? ?? NSNull(),
-                        state.title ?? "", state.workingDirectory ?? "", state.columns as Any? ?? NSNull(), state.rows as Any? ?? NSNull(),
-                        state.state.rawValue, state.updatedAt, state.exitedAt ?? "", state.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
-                        state.foregroundExecutablePath ?? "", state.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
-                        state.foregroundDetectedAgentKind?.rawValue ?? "", state.foregroundDisplayLabel ?? "", state.foregroundDisplayCommand ?? "",
-                    ])
-            }
+        try withProfileDatabaseTransaction(at: databasePath) { database in
+            let existingSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard existingSessionID == state.sessionID else { throw TerminalSessionPersistenceError.unknownSession(state.sessionID) }
+            try database.execute(
+                sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, state.sessionID])
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal_runtime_states(
+                      session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
+                      foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
+                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command
+                    )
+                    VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
+                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
+                    ON CONFLICT(session_id) DO UPDATE SET
+                      root_directory = excluded.root_directory,
+                      backend = excluded.backend,
+                      service_pid = excluded.service_pid,
+                      child_pid = excluded.child_pid,
+                      title = excluded.title,
+                      working_directory = excluded.working_directory,
+                      columns = excluded.columns,
+                      rows = excluded.rows,
+                      state = excluded.state,
+                      updated_at = excluded.updated_at,
+                      exited_at = excluded.exited_at,
+                      foreground_pid = excluded.foreground_pid,
+                      foreground_executable_path = excluded.foreground_executable_path,
+                      foreground_executable_name = excluded.foreground_executable_name,
+                      foreground_argv_json = excluded.foreground_argv_json,
+                      foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
+                      foreground_display_label = excluded.foreground_display_label,
+                      foreground_display_command = excluded.foreground_display_command
+                    """,
+                bindings: [
+                    state.sessionID, root, state.backend.rawValue, state.servicePID, state.childPID.map { Int($0) } as Any? ?? NSNull(),
+                    state.title ?? "", state.workingDirectory ?? "", state.columns as Any? ?? NSNull(), state.rows as Any? ?? NSNull(),
+                    state.state.rawValue, state.updatedAt, state.exitedAt ?? "", state.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
+                    state.foregroundExecutablePath ?? "", state.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
+                    state.foregroundDetectedAgentKind?.rawValue ?? "", state.foregroundDisplayLabel ?? "", state.foregroundDisplayCommand ?? "",
+                ])
         }
     }
 
@@ -313,51 +307,46 @@ public enum TerminalSessionPersistence {
         // it. The writer already holds the decoded update (the render-update decode cache was seeded by
         // whoever materialized this frame), so computing it here costs nothing.
         let hasFinalRender = payload.renderSnapshot != nil
-        try withProfileDatabase(at: databasePath) { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard sessionID == payload.sessionID else { throw TerminalSessionPersistenceError.unknownSession(payload.sessionID) }
-                try database.execute(
-                    sql: "DELETE FROM terminal_remote_session_states WHERE root_directory = ? AND session_id <> ?",
-                    bindings: [root, payload.sessionID])
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json, has_final_render)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(session_id) DO UPDATE SET
-                          root_directory = excluded.root_directory,
-                          payload_json = excluded.payload_json,
-                          has_final_render = excluded.has_final_render
-                        """, bindings: [payload.sessionID, root, payloadJSON, hasFinalRender ? 1 : 0])
-            }
+        try withProfileDatabaseTransaction(at: databasePath) { database in
+            let sessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard sessionID == payload.sessionID else { throw TerminalSessionPersistenceError.unknownSession(payload.sessionID) }
+            try database.execute(
+                sql: "DELETE FROM terminal_remote_session_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, payload.sessionID])
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json, has_final_render)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                      root_directory = excluded.root_directory,
+                      payload_json = excluded.payload_json,
+                      has_final_render = excluded.has_final_render
+                    """, bindings: [payload.sessionID, root, payloadJSON, hasFinalRender ? 1 : 0])
         }
     }
 
     public static func writeAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                for attachment in snapshot.attachments where attachment.sessionID != sessionID {
-                    throw TerminalSessionPersistenceError.unknownSession(attachment.sessionID)
-                }
-                try database.execute(sql: "DELETE FROM terminal_attachments WHERE root_directory = ?", bindings: [root])
-                try database.execute(sql: "DELETE FROM terminal_clients WHERE root_directory = ?", bindings: [root])
-                for client in snapshot.clients {
-                    try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
-                }
-                for attachment in snapshot.attachments {
-                    try database.execute(
-                        sql: """
-                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
-                            VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))
-                            """,
-                        bindings: [
-                            attachment.id, root, sessionID, attachment.clientID, attachment.mode.rawValue, attachment.attachedAt,
-                            attachment.detachedAt ?? "",
-                        ])
-                }
+        try withProfileDatabaseTransaction { database in
+            let sessionID = try existingSessionID(rootDirectory: root, database: database)
+            for attachment in snapshot.attachments where attachment.sessionID != sessionID {
+                throw TerminalSessionPersistenceError.unknownSession(attachment.sessionID)
+            }
+            try database.execute(sql: "DELETE FROM terminal_attachments WHERE root_directory = ?", bindings: [root])
+            try database.execute(sql: "DELETE FROM terminal_clients WHERE root_directory = ?", bindings: [root])
+            for client in snapshot.clients {
+                try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
+            }
+            for attachment in snapshot.attachments {
+                try database.execute(
+                    sql: """
+                        INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+                        """,
+                    bindings: [
+                        attachment.id, root, sessionID, attachment.clientID, attachment.mode.rawValue, attachment.attachedAt,
+                        attachment.detachedAt ?? "",
+                    ])
             }
         }
     }
@@ -439,35 +428,33 @@ public enum TerminalSessionPersistence {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let environmentKeysJSON = try encodeEnvironmentKeys(event.environmentKeys)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard sessionID == event.sessionID else { throw TerminalSessionPersistenceError.unknownSession(event.sessionID) }
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_agent_signal_events(
-                          id, root_directory, session_id, event_type, workspace_id, workspace_path, provider, label, terminal_tracking_id,
-                          environment_keys_json, created_at, acknowledged_at
-                        )
-                        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL)
-                        ON CONFLICT(id) DO UPDATE SET
-                          root_directory = excluded.root_directory,
-                          session_id = excluded.session_id,
-                          event_type = excluded.event_type,
-                          workspace_id = excluded.workspace_id,
-                          workspace_path = excluded.workspace_path,
-                          provider = excluded.provider,
-                          label = excluded.label,
-                          terminal_tracking_id = excluded.terminal_tracking_id,
-                          environment_keys_json = excluded.environment_keys_json,
-                          created_at = excluded.created_at,
-                          acknowledged_at = NULL
-                        """,
-                    bindings: [
-                        event.id, root, event.sessionID, event.type, event.workspaceID ?? "", event.workspacePath ?? "", event.provider,
-                        event.label ?? "", event.terminalTrackingID ?? "", environmentKeysJSON, event.createdAt,
-                    ])
-            }
+        try withProfileDatabaseTransaction { database in
+            let sessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard sessionID == event.sessionID else { throw TerminalSessionPersistenceError.unknownSession(event.sessionID) }
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal_agent_signal_events(
+                      id, root_directory, session_id, event_type, workspace_id, workspace_path, provider, label, terminal_tracking_id,
+                      environment_keys_json, created_at, acknowledged_at
+                    )
+                    VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL)
+                    ON CONFLICT(id) DO UPDATE SET
+                      root_directory = excluded.root_directory,
+                      session_id = excluded.session_id,
+                      event_type = excluded.event_type,
+                      workspace_id = excluded.workspace_id,
+                      workspace_path = excluded.workspace_path,
+                      provider = excluded.provider,
+                      label = excluded.label,
+                      terminal_tracking_id = excluded.terminal_tracking_id,
+                      environment_keys_json = excluded.environment_keys_json,
+                      created_at = excluded.created_at,
+                      acknowledged_at = NULL
+                    """,
+                bindings: [
+                    event.id, root, event.sessionID, event.type, event.workspaceID ?? "", event.workspacePath ?? "", event.provider,
+                    event.label ?? "", event.terminalTrackingID ?? "", environmentKeysJSON, event.createdAt,
+                ])
         }
     }
 
@@ -493,30 +480,26 @@ public enum TerminalSessionPersistence {
         let normalizedIDs = ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !normalizedIDs.isEmpty else { return }
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-                let placeholders = Array(repeating: "?", count: normalizedIDs.count).joined(separator: ",")
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_agent_signal_events
-                        SET acknowledged_at = ?
-                        WHERE root_directory = ?
-                          AND session_id = ?
-                          AND id IN (\(placeholders))
-                        """, bindings: [acknowledgedAt, root, sessionID] + normalizedIDs)
-            }
+        try withProfileDatabaseTransaction { database in
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            let placeholders = Array(repeating: "?", count: normalizedIDs.count).joined(separator: ",")
+            try database.execute(
+                sql: """
+                    UPDATE terminal_agent_signal_events
+                    SET acknowledged_at = ?
+                    WHERE root_directory = ?
+                      AND session_id = ?
+                      AND id IN (\(placeholders))
+                    """, bindings: [acknowledgedAt, root, sessionID] + normalizedIDs)
         }
     }
 
     public static func upsertClient(_ client: TerminalClient, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
-            }
+        try withProfileDatabaseTransaction { database in
+            let sessionID = try existingSessionID(rootDirectory: root, database: database)
+            try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
         }
     }
 
@@ -528,16 +511,14 @@ public enum TerminalSessionPersistence {
         id clientID: String, paths: TerminalSessionPaths, touchedAt: String, databasePath: String? = nil
     ) throws -> Bool {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase(at: databasePath) { database in
-            try database.withImmediateTransaction {
-                let changes = try database.executeReturningChanges(
-                    sql: """
-                        UPDATE terminal_clients
-                        SET lease_refreshed_at = ?
-                        WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL
-                        """, bindings: [touchedAt, root, clientID])
-                return changes > 0
-            }
+        return try withProfileDatabaseTransaction(at: databasePath) { database in
+            let changes = try database.executeReturningChanges(
+                sql: """
+                    UPDATE terminal_clients
+                    SET lease_refreshed_at = ?
+                    WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL
+                    """, bindings: [touchedAt, root, clientID])
+            return changes > 0
         }
     }
 
@@ -546,87 +527,81 @@ public enum TerminalSessionPersistence {
     ) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try paths.ensureDirectories()
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-                let connectedClient = TerminalClient(
-                    id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: nil)
-                try upsertClient(connectedClient, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: attachedAt, database: database)
+        try withProfileDatabaseTransaction { database in
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            let connectedClient = TerminalClient(
+                id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: nil)
+            try upsertClient(connectedClient, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: attachedAt, database: database)
 
-                if mode == .owner {
-                    try database.execute(
-                        sql: """
-                            UPDATE terminal_attachments
-                            SET detached_at = ?
-                            WHERE root_directory = ?
-                              AND mode = 'owner'
-                              AND detached_at IS NULL
-                              AND client_id <> ?
-                            """, bindings: [attachedAt, root, client.id])
-                }
-
-                if let activeRow = try database.queryRow(
+            if mode == .owner {
+                try database.execute(
                     sql: """
-                        SELECT id, attached_at
-                        FROM terminal_attachments
-                        WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                        """, bindings: [root, client.id])
-                {
-                    try database.execute(
-                        sql: """
-                            UPDATE terminal_attachments
-                            SET session_id = ?, mode = ?
-                            WHERE id = ?
-                            """, bindings: [sessionID, mode.rawValue, activeRow[0]])
-                } else {
-                    try database.execute(
-                        sql: """
-                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
-                            VALUES (?, ?, ?, ?, ?, ?, NULL)
-                            """, bindings: [UUID().uuidString, root, sessionID, client.id, mode.rawValue, attachedAt])
-                }
+                        UPDATE terminal_attachments
+                        SET detached_at = ?
+                        WHERE root_directory = ?
+                          AND mode = 'owner'
+                          AND detached_at IS NULL
+                          AND client_id <> ?
+                        """, bindings: [attachedAt, root, client.id])
+            }
+
+            if let activeRow = try database.queryRow(
+                sql: """
+                    SELECT id, attached_at
+                    FROM terminal_attachments
+                    WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                    """, bindings: [root, client.id])
+            {
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_attachments
+                        SET session_id = ?, mode = ?
+                        WHERE id = ?
+                        """, bindings: [sessionID, mode.rawValue, activeRow[0]])
+            } else {
+                try database.execute(
+                    sql: """
+                        INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, NULL)
+                        """, bindings: [UUID().uuidString, root, sessionID, client.id, mode.rawValue, attachedAt])
             }
         }
     }
 
     public static func detachClient(id clientID: String, paths: TerminalSessionPaths, detachedAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_clients
-                        SET disconnected_at = ?
-                        WHERE root_directory = ? AND client_id = ?
-                        """, bindings: [detachedAt, root, clientID])
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_attachments
-                        SET detached_at = ?
-                        WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                        """, bindings: [detachedAt, root, clientID])
-            }
+        try withProfileDatabaseTransaction { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal_clients
+                    SET disconnected_at = ?
+                    WHERE root_directory = ? AND client_id = ?
+                    """, bindings: [detachedAt, root, clientID])
+            try database.execute(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET detached_at = ?
+                    WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                    """, bindings: [detachedAt, root, clientID])
         }
     }
 
     public static func detachActiveClients(paths: TerminalSessionPaths, detachedAt: String, databasePath: String? = nil) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase(at: databasePath) { database in
-            try database.withImmediateTransaction {
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_clients
-                        SET disconnected_at = ?
-                        WHERE root_directory = ? AND disconnected_at IS NULL
-                        """, bindings: [detachedAt, root])
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_attachments
-                        SET detached_at = ?
-                        WHERE root_directory = ? AND detached_at IS NULL
-                        """, bindings: [detachedAt, root])
-            }
+        try withProfileDatabaseTransaction(at: databasePath) { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal_clients
+                    SET disconnected_at = ?
+                    WHERE root_directory = ? AND disconnected_at IS NULL
+                    """, bindings: [detachedAt, root])
+            try database.execute(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET detached_at = ?
+                    WHERE root_directory = ? AND detached_at IS NULL
+                    """, bindings: [detachedAt, root])
         }
     }
 
@@ -648,61 +623,59 @@ public enum TerminalSessionPersistence {
     public static func finalizeSessionRepair(_ runtimeState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(runtimeState.foregroundArgv)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                try database.execute(
-                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, runtimeState.sessionID])
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_runtime_states(
-                          session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
-                          foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
-                          foreground_detected_agent_kind, foreground_display_label, foreground_display_command
-                        )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
-                                NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
-                        ON CONFLICT(session_id) DO UPDATE SET
-                          root_directory = excluded.root_directory,
-                          backend = excluded.backend,
-                          service_pid = excluded.service_pid,
-                          child_pid = excluded.child_pid,
-                          title = excluded.title,
-                          working_directory = excluded.working_directory,
-                          columns = excluded.columns,
-                          rows = excluded.rows,
-                          state = excluded.state,
-                          updated_at = excluded.updated_at,
-                          exited_at = excluded.exited_at,
-                          foreground_pid = excluded.foreground_pid,
-                          foreground_executable_path = excluded.foreground_executable_path,
-                          foreground_executable_name = excluded.foreground_executable_name,
-                          foreground_argv_json = excluded.foreground_argv_json,
-                          foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
-                          foreground_display_label = excluded.foreground_display_label,
-                          foreground_display_command = excluded.foreground_display_command
-                        """,
-                    bindings: [
-                        runtimeState.sessionID, root, runtimeState.backend.rawValue, runtimeState.servicePID,
-                        runtimeState.childPID.map { Int($0) } as Any? ?? NSNull(), runtimeState.title ?? "", runtimeState.workingDirectory ?? "",
-                        runtimeState.columns as Any? ?? NSNull(), runtimeState.rows as Any? ?? NSNull(), runtimeState.state.rawValue,
-                        runtimeState.updatedAt, runtimeState.exitedAt ?? "", runtimeState.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
-                        runtimeState.foregroundExecutablePath ?? "", runtimeState.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
-                        runtimeState.foregroundDetectedAgentKind?.rawValue ?? "", runtimeState.foregroundDisplayLabel ?? "",
-                        runtimeState.foregroundDisplayCommand ?? "",
-                    ])
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_clients
-                        SET disconnected_at = ?
-                        WHERE root_directory = ? AND disconnected_at IS NULL
-                        """, bindings: [detachedAt, root])
-                try database.execute(
-                    sql: """
-                        UPDATE terminal_attachments
-                        SET detached_at = ?
-                        WHERE root_directory = ? AND detached_at IS NULL
-                        """, bindings: [detachedAt, root])
-            }
+        try withProfileDatabaseTransaction { database in
+            try database.execute(
+                sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, runtimeState.sessionID])
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal_runtime_states(
+                      session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
+                      foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
+                      foreground_detected_agent_kind, foreground_display_label, foreground_display_command
+                    )
+                    VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
+                            NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
+                    ON CONFLICT(session_id) DO UPDATE SET
+                      root_directory = excluded.root_directory,
+                      backend = excluded.backend,
+                      service_pid = excluded.service_pid,
+                      child_pid = excluded.child_pid,
+                      title = excluded.title,
+                      working_directory = excluded.working_directory,
+                      columns = excluded.columns,
+                      rows = excluded.rows,
+                      state = excluded.state,
+                      updated_at = excluded.updated_at,
+                      exited_at = excluded.exited_at,
+                      foreground_pid = excluded.foreground_pid,
+                      foreground_executable_path = excluded.foreground_executable_path,
+                      foreground_executable_name = excluded.foreground_executable_name,
+                      foreground_argv_json = excluded.foreground_argv_json,
+                      foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
+                      foreground_display_label = excluded.foreground_display_label,
+                      foreground_display_command = excluded.foreground_display_command
+                    """,
+                bindings: [
+                    runtimeState.sessionID, root, runtimeState.backend.rawValue, runtimeState.servicePID,
+                    runtimeState.childPID.map { Int($0) } as Any? ?? NSNull(), runtimeState.title ?? "", runtimeState.workingDirectory ?? "",
+                    runtimeState.columns as Any? ?? NSNull(), runtimeState.rows as Any? ?? NSNull(), runtimeState.state.rawValue,
+                    runtimeState.updatedAt, runtimeState.exitedAt ?? "", runtimeState.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
+                    runtimeState.foregroundExecutablePath ?? "", runtimeState.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
+                    runtimeState.foregroundDetectedAgentKind?.rawValue ?? "", runtimeState.foregroundDisplayLabel ?? "",
+                    runtimeState.foregroundDisplayCommand ?? "",
+                ])
+            try database.execute(
+                sql: """
+                    UPDATE terminal_clients
+                    SET disconnected_at = ?
+                    WHERE root_directory = ? AND disconnected_at IS NULL
+                    """, bindings: [detachedAt, root])
+            try database.execute(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET detached_at = ?
+                    WHERE root_directory = ? AND detached_at IS NULL
+                    """, bindings: [detachedAt, root])
         }
     }
 
@@ -772,46 +745,44 @@ public enum TerminalSessionPersistence {
 
     public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-                guard
-                    try database.queryRow(
-                        sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
-                        != nil
-                else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
+        try withProfileDatabaseTransaction { database in
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            guard
+                try database.queryRow(
+                    sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
+                    != nil
+            else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
 
+            try database.execute(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET mode = 'viewer'
+                    WHERE root_directory = ?
+                      AND mode = 'owner'
+                      AND detached_at IS NULL
+                      AND client_id <> ?
+                    """, bindings: [root, newOwnerClientID])
+
+            if let existing = try database.queryRow(
+                sql: """
+                    SELECT id
+                    FROM terminal_attachments
+                    WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                    """, bindings: [root, newOwnerClientID])
+            {
                 try database.execute(
                     sql: """
                         UPDATE terminal_attachments
-                        SET mode = 'viewer'
-                        WHERE root_directory = ?
-                          AND mode = 'owner'
-                          AND detached_at IS NULL
-                          AND client_id <> ?
-                        """, bindings: [root, newOwnerClientID])
-
-                if let existing = try database.queryRow(
+                        SET session_id = ?, mode = 'owner'
+                        WHERE id = ?
+                        """, bindings: [sessionID, existing[0]])
+            } else {
+                try database.execute(
                     sql: """
-                        SELECT id
-                        FROM terminal_attachments
-                        WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                        """, bindings: [root, newOwnerClientID])
-                {
-                    try database.execute(
-                        sql: """
-                            UPDATE terminal_attachments
-                            SET session_id = ?, mode = 'owner'
-                            WHERE id = ?
-                            """, bindings: [sessionID, existing[0]])
-                } else {
-                    try database.execute(
-                        sql: """
-                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
-                            VALUES (?, ?, ?, ?, 'owner', ?, NULL)
-                            """, bindings: [UUID().uuidString, root, sessionID, newOwnerClientID, transferredAt])
-                }
+                        INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
+                        VALUES (?, ?, ?, ?, 'owner', ?, NULL)
+                        """, bindings: [UUID().uuidString, root, sessionID, newOwnerClientID, transferredAt])
             }
         }
     }
@@ -844,13 +815,11 @@ public enum TerminalSessionPersistence {
             try fileManager.removeItem(atPath: paths.rootDirectory)
         }
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
-            try database.withImmediateTransaction {
-                for table in [
-                    "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
-                    "terminal_runtime_states", "terminal_sessions",
-                ] { try database.execute(sql: "DELETE FROM \(table) WHERE root_directory = ?", bindings: [root]) }
-            }
+        try withProfileDatabaseTransaction { database in
+            for table in [
+                "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
+                "terminal_runtime_states", "terminal_sessions",
+            ] { try database.execute(sql: "DELETE FROM \(table) WHERE root_directory = ?", bindings: [root]) }
         }
     }
 
@@ -899,107 +868,105 @@ public enum TerminalSessionPersistence {
         databasePath: String? = nil
     ) throws -> ExpireClientsOutcome {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase(at: databasePath) { database in
-            try database.withImmediateTransaction {
-                var worldMoved = false
-                // Client IDs whose per-client detach compare-and-set actually landed in THIS transaction. The
-                // transfer guard keys off this — not off the input candidate list — so an owner whose detach was
-                // skipped (re-attached with a fresh lease, or heartbeated after the decision) never has ownership
-                // transferred away from it.
-                var detachedClientIDs: Set<String> = []
-                // Capture the durable active owner BEFORE any detach so the transfer supersession guard can tell
-                // whether ownership is still held by one of the clients we decided to expire. Read after the
-                // detach loop it would always be nil in the normal case (the stale owner we just detached),
-                // defeating the guard.
-                let preDetachOwnerClientID = try database.queryRow(
-                    sql: """
-                        SELECT client_id FROM terminal_attachments
-                        WHERE root_directory = ? AND mode = 'owner' AND detached_at IS NULL
-                        """, bindings: [root])?.first
+        return try withProfileDatabaseTransaction(at: databasePath) { database in
+            var worldMoved = false
+            // Client IDs whose per-client detach compare-and-set actually landed in THIS transaction. The
+            // transfer guard keys off this — not off the input candidate list — so an owner whose detach was
+            // skipped (re-attached with a fresh lease, or heartbeated after the decision) never has ownership
+            // transferred away from it.
+            var detachedClientIDs: Set<String> = []
+            // Capture the durable active owner BEFORE any detach so the transfer supersession guard can tell
+            // whether ownership is still held by one of the clients we decided to expire. Read after the
+            // detach loop it would always be nil in the normal case (the stale owner we just detached),
+            // defeating the guard.
+            let preDetachOwnerClientID = try database.queryRow(
+                sql: """
+                    SELECT client_id FROM terminal_attachments
+                    WHERE root_directory = ? AND mode = 'owner' AND detached_at IS NULL
+                    """, bindings: [root])?.first
 
-                for client in clients {
-                    // Heartbeat veto: a client that heartbeated after the expiry decision (generation advanced
-                    // past the snapshot) is left live. Its durable lease touch is queued FIFO-behind this expiry,
-                    // so the committed lease row below would still match the stale observed lease and wrongly
-                    // detach it. Taken here, inside the held transaction, so a heartbeat that arrived while this
-                    // write blocked on a contended lock is still seen.
-                    //
-                    // Accepted residual: a heartbeat acknowledged in the instant between this check and COMMIT
-                    // is detached anyway. That window is microseconds against a 20s heartbeat cadence, and no
-                    // check placement can remove it — closing it would require the engine's heartbeat accept to
-                    // block on this transaction, the exact engine-blocks-on-SQLite coupling the persistence
-                    // queue removes. The client's next heartbeat gets a notFound rejection and recovers by
-                    // re-attaching (client-side reaction tracked in issue #223).
-                    if heartbeatGate.generationAdvanced(forClientID: client.clientID, since: observedHeartbeatGenerations) {
-                        worldMoved = true
-                        continue
-                    }
-                    // Compare-and-set the detach against the observed lease: a client that re-attached or
-                    // refreshed its lease (different lease_refreshed_at) — or already got disconnected — since
-                    // the decision matches nothing here, so it is left live. Skipping flags the decision
-                    // superseded so the caller reseeds; it is not an error.
-                    let clientChanges = try database.executeReturningChanges(
-                        sql: """
-                            UPDATE terminal_clients
-                            SET disconnected_at = ?
-                            WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL AND lease_refreshed_at = ?
-                            """, bindings: [detachedAt, root, client.clientID, client.leaseRefreshedAt])
-                    guard clientChanges > 0 else {
-                        worldMoved = true
-                        continue
-                    }
-                    detachedClientIDs.insert(client.clientID)
-                    try database.execute(
-                        sql: """
-                            UPDATE terminal_attachments
-                            SET detached_at = ?
-                            WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                            """, bindings: [detachedAt, root, client.clientID])
+            for client in clients {
+                // Heartbeat veto: a client that heartbeated after the expiry decision (generation advanced
+                // past the snapshot) is left live. Its durable lease touch is queued FIFO-behind this expiry,
+                // so the committed lease row below would still match the stale observed lease and wrongly
+                // detach it. Taken here, inside the held transaction, so a heartbeat that arrived while this
+                // write blocked on a contended lock is still seen.
+                //
+                // Accepted residual: a heartbeat acknowledged in the instant between this check and COMMIT
+                // is detached anyway. That window is microseconds against a 20s heartbeat cadence, and no
+                // check placement can remove it — closing it would require the engine's heartbeat accept to
+                // block on this transaction, the exact engine-blocks-on-SQLite coupling the persistence
+                // queue removes. The client's next heartbeat gets a notFound rejection and recovers by
+                // re-attaching (client-side reaction tracked in issue #223).
+                if heartbeatGate.generationAdvanced(forClientID: client.clientID, since: observedHeartbeatGenerations) {
+                    worldMoved = true
+                    continue
                 }
-                guard let newOwnerClientID else { return worldMoved ? .superseded : .applied }
-                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
-                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-                guard
-                    try database.queryRow(
-                        sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
-                        != nil
-                else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
-
-                // Transfer supersession guard: only hand ownership away from an owner whose OWN detach landed in
-                // this transaction. If a different client became the active owner between the decision and this
-                // commit (e.g. a mobile takeover that was ack'd ok), or the stale owner synchronously re-attached
-                // so its detach CAS was skipped, leave ownership untouched — stomping it would durably demote a
-                // legitimate owner that enforcement already accepted.
-                guard let preDetachOwnerClientID, detachedClientIDs.contains(preDetachOwnerClientID) else { return .superseded }
-
+                // Compare-and-set the detach against the observed lease: a client that re-attached or
+                // refreshed its lease (different lease_refreshed_at) — or already got disconnected — since
+                // the decision matches nothing here, so it is left live. Skipping flags the decision
+                // superseded so the caller reseeds; it is not an error.
+                let clientChanges = try database.executeReturningChanges(
+                    sql: """
+                        UPDATE terminal_clients
+                        SET disconnected_at = ?
+                        WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL AND lease_refreshed_at = ?
+                        """, bindings: [detachedAt, root, client.clientID, client.leaseRefreshedAt])
+                guard clientChanges > 0 else {
+                    worldMoved = true
+                    continue
+                }
+                detachedClientIDs.insert(client.clientID)
                 try database.execute(
                     sql: """
                         UPDATE terminal_attachments
-                        SET mode = 'viewer'
-                        WHERE root_directory = ?
-                          AND mode = 'owner'
-                          AND detached_at IS NULL
-                          AND client_id <> ?
-                        """, bindings: [root, newOwnerClientID])
-
-                // Promote the target only if it still has an active attachment whose client row is connected.
-                // Never INSERT a fresh owner row: a target that detached in the race window must not be
-                // resurrected as a ghost durable owner (its client row is gone) that pins the session open.
-                let promoted = try database.executeReturningChanges(
-                    sql: """
-                        UPDATE terminal_attachments
-                        SET session_id = ?, mode = 'owner'
+                        SET detached_at = ?
                         WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                          AND EXISTS (
-                            SELECT 1 FROM terminal_clients c
-                            WHERE c.root_directory = terminal_attachments.root_directory
-                              AND c.client_id = terminal_attachments.client_id
-                              AND c.disconnected_at IS NULL
-                          )
-                        """, bindings: [sessionID, root, newOwnerClientID])
-                guard promoted > 0 else { return .superseded }
-                return worldMoved ? .superseded : .applied
+                        """, bindings: [detachedAt, root, client.clientID])
             }
+            guard let newOwnerClientID else { return worldMoved ? .superseded : .applied }
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            guard
+                try database.queryRow(
+                    sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
+                    != nil
+            else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
+
+            // Transfer supersession guard: only hand ownership away from an owner whose OWN detach landed in
+            // this transaction. If a different client became the active owner between the decision and this
+            // commit (e.g. a mobile takeover that was ack'd ok), or the stale owner synchronously re-attached
+            // so its detach CAS was skipped, leave ownership untouched — stomping it would durably demote a
+            // legitimate owner that enforcement already accepted.
+            guard let preDetachOwnerClientID, detachedClientIDs.contains(preDetachOwnerClientID) else { return .superseded }
+
+            try database.execute(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET mode = 'viewer'
+                    WHERE root_directory = ?
+                      AND mode = 'owner'
+                      AND detached_at IS NULL
+                      AND client_id <> ?
+                    """, bindings: [root, newOwnerClientID])
+
+            // Promote the target only if it still has an active attachment whose client row is connected.
+            // Never INSERT a fresh owner row: a target that detached in the race window must not be
+            // resurrected as a ghost durable owner (its client row is gone) that pins the session open.
+            let promoted = try database.executeReturningChanges(
+                sql: """
+                    UPDATE terminal_attachments
+                    SET session_id = ?, mode = 'owner'
+                    WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM terminal_clients c
+                        WHERE c.root_directory = terminal_attachments.root_directory
+                          AND c.client_id = terminal_attachments.client_id
+                          AND c.disconnected_at IS NULL
+                      )
+                    """, bindings: [sessionID, root, newOwnerClientID])
+            guard promoted > 0 else { return .superseded }
+            return worldMoved ? .superseded : .applied
         }
     }
 
@@ -1021,6 +988,54 @@ public enum TerminalSessionPersistence {
                 return KnownTerminalSession(
                     launchConfiguration: launchConfiguration,
                     paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[11]))
+            }
+        }
+    }
+
+    /// Every session whose stored runtime state is in an interactive state, paired with that state, as
+    /// one query. The other half of liveness — whether the recorded service process still exists — is
+    /// the caller's, since it is a question about the operating system rather than about a row.
+    ///
+    /// This is how liveness is decided in bulk. Asking each session for its runtime state separately
+    /// made the cost of "which sessions are live?" proportional to every session the device had ever
+    /// created rather than to the live ones, because the per-session read had to run before any part of
+    /// the liveness filter could. The join reproduces that filter's input exactly: both tables key their
+    /// rows on the same normalized `root_directory`, which is also what a per-session read looks a
+    /// runtime row up by, so a session is considered here if and only if its own read would have
+    /// returned a row. A session whose runtime row is missing is absent from both.
+    ///
+    /// The interactive states are derived from `TerminalSessionState.isInteractive` rather than written
+    /// out, so this pre-filter and the caller's own liveness rule cannot drift apart; it only drops rows
+    /// the caller would drop anyway, and dropping them in SQL is what keeps ended sessions from costing
+    /// anything to skip.
+    ///
+    /// A row whose runtime state cannot be decoded is skipped, matching a per-session read's failure
+    /// being treated as "no runtime state"; a row whose launch configuration cannot be decoded still
+    /// fails the whole call, because that is a corrupt session list rather than one unreadable session.
+    public static func listInteractiveSessionRuntimeStates() throws -> [KnownTerminalSessionRuntime] {
+        let interactiveStates = TerminalSessionState.allCases.filter(\.isInteractive).map(\.rawValue)
+        let interactiveStatePlaceholders = Array(repeating: "?", count: interactiveStates.count).joined(separator: ", ")
+        return try withProfileDatabase { database in
+            try database.queryRows(
+                sql: """
+                    SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), s.root_directory,
+                           r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
+                           COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
+                           COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
+                           COALESCE(r.foreground_executable_name, ''), COALESCE(r.foreground_argv_json, ''),
+                           COALESCE(r.foreground_detected_agent_kind, ''), COALESCE(r.foreground_display_label, ''),
+                           COALESCE(r.foreground_display_command, '')
+                    FROM terminal_sessions s
+                    JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
+                    WHERE r.state IN (\(interactiveStatePlaceholders))
+                    ORDER BY s.created_at, s.session_id
+                    """, bindings: interactiveStates
+            ).compactMap { row in
+                guard row.count >= 30 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+                let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
+                guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
+                return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
             }
         }
     }
@@ -1195,8 +1210,20 @@ public enum TerminalSessionPersistence {
     /// (see `withProfileDatabase(at:)`).
     public static func currentDatabasePath() throws -> String { try SpacesProfile.current().databasePath }
 
-    /// Every terminal-session read and write goes through here. The terminal database is profile-scoped,
-    /// never session-scoped, so this is the single place the database path is resolved.
+    /// Every terminal-session read goes through here. The terminal database is profile-scoped, never
+    /// session-scoped, so this and its writing counterpart are the only places the database path is
+    /// resolved.
+    ///
+    /// Reads run on their own connection, so a read taken inline on the terminal engine — owner gating,
+    /// stale-client liveness — never waits for a writer that is itself waiting on the database's write
+    /// lock. See `TerminalDatabaseConnection`.
+    private static func withProfileDatabase<T>(at databasePath: String? = nil, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
+        try TerminalDatabaseConnection.shared.read(path: try databasePath ?? currentDatabasePath(), body)
+    }
+
+    /// Every terminal-session mutation goes through here, as one `BEGIN IMMEDIATE` transaction on the
+    /// write connection. The transaction is opened by the funnel rather than by each body, so a mutation
+    /// cannot end up on the read connection — or outside a transaction — by omission.
     ///
     /// `databasePath` is the database this unit of work belongs to, and resolving the active profile is its
     /// only default. Deferred work — the per-core persistence queue, whose closures commit long after the
@@ -1205,15 +1232,15 @@ public enum TerminalSessionPersistence {
     /// happens to be current when the queue reaches it. A daemon's profile never changes mid-process, so
     /// this is inert in production; it is what makes a test's isolation hold for writes that outlive the
     /// test that produced them.
-    private static func withProfileDatabase<T>(at databasePath: String? = nil, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let resolvedPath = try databasePath ?? currentDatabasePath()
-        let database = try SpacesSQLiteDatabase(
-            path: resolvedPath,
-            withMigrationAuthorization: { migration in
-                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: resolvedPath, migration)
-            })
-        return try body(database)
+    private static func withProfileDatabaseTransaction<T>(at databasePath: String? = nil, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
+        try TerminalDatabaseConnection.shared.write(path: try databasePath ?? currentDatabasePath(), body)
     }
+
+    /// Releases the process's terminal-database connections, taking their final WAL checkpoints now rather
+    /// than leaving them to process teardown. The daemon calls this before replacing its own image at an
+    /// `execv` handoff, which no connection would survive cleanly; a later read or write simply opens a
+    /// fresh connection.
+    public static func closeDatabaseConnection() { TerminalDatabaseConnection.shared.close() }
 
     private static func normalizedRootDirectory(_ rootDirectory: String) -> String {
         URL(fileURLWithPath: rootDirectory, isDirectory: true).standardizedFileURL.path
