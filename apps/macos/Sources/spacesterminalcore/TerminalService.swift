@@ -83,9 +83,11 @@ import Foundation
         ///   `relaunch` passes `false`: it is replacing the daemon, so it must tolerate the outgoing
         ///   stale daemon still answering ping during its shutdown grace instead of aborting the wait.
         ///
-        /// A ping answered with `ok == false` and `errorCode == .shuttingDown` means the daemon is alive
+        /// A ping answered with `ok == false` and `errorCode == .handingOff` means the daemon is alive
         /// and mid exec-in-place handoff to an updated image, not dead — see `waitForLivePongThroughTransition`.
-        /// This waits for the replacement image instead of spawning a competing daemon.
+        /// This waits for the replacement image instead of spawning a competing daemon. A ping answered
+        /// with `.shuttingDown` means the opposite: the daemon is on its way out with no successor coming,
+        /// so this falls straight through to spawning a fresh daemon without waiting at all.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let startedAt = Date()
             let socketPath = try TerminalServicePaths.socketPath()
@@ -221,27 +223,31 @@ import Foundation
             return try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: timeout)
         }
 
-        /// Bounds how long `ensureRunning` waits for a transitional `.shuttingDown` ping to resolve into a
+        /// Bounds how long `ensureRunning` waits for a transitional `.handingOff` ping to resolve into a
         /// live pong before giving up and falling back to spawning a new daemon. The handoff preflight the
         /// old image runs before exec-ing (`DaemonHandoffPreflight.run`) can alone take up to 10s, and the
         /// replacement image then needs a further moment to exec and rebind the socket, so 15s leaves margin
-        /// without masking a daemon that genuinely vanished mid-handoff.
+        /// without masking a daemon that genuinely vanished mid-handoff. This wait is specific to a handoff:
+        /// a `.shuttingDown` ping never reaches it, because no successor is coming for `ensureRunning` to
+        /// wait for (issue #325's follow-up split — see `DaemonLivenessState.teardownRejection`'s doc).
         private static let handoffTransitionTimeout: TimeInterval = 15
 
         /// True when a ping response means "the daemon is alive but mid exec-handoff", i.e. answered its
-        /// own liveness probe rather than timing out or refusing to connect. Any other failure (a different
-        /// error code, or no response at all) is an ordinary "daemon looks dead" signal and must not pause
-        /// here waiting for a handoff that isn't happening.
-        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .shuttingDown }
+        /// own liveness probe with `.handingOff` rather than timing out, refusing to connect, or reporting
+        /// `.shuttingDown`. A `.shuttingDown` ping is also a live answer, but it promises no successor is
+        /// coming, so `ensureRunning` must not pause here waiting for one — it needs to fall straight
+        /// through to spawning a fresh daemon. Any other failure (a different error code, or no response at
+        /// all) is an ordinary "daemon looks dead" signal and gets the same immediate-spawn treatment.
+        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .handingOff }
 
-        /// Polls liveness until the daemon that reported a transitional `.shuttingDown` ping answers a live
+        /// Polls liveness until the daemon that reported a transitional `.handingOff` ping answers a live
         /// pong again, or `handoffTransitionTimeout` elapses. Returns the live response, or `nil` on timeout
         /// so the caller falls back to the normal lock-and-spawn path (safe even if the daemon never comes
         /// back, since spawning is guarded by the launch flock and the daemon instance lock).
         ///
         /// An unreachable socket during the wait is expected, not a failure: the old image stops its socket
         /// server before `execv`, and the new image needs a moment to rebind the same path, so it is treated
-        /// exactly like another `.shuttingDown` reply — keep polling.
+        /// exactly like another `.handingOff` reply — keep polling.
         static func waitForLivePongThroughTransition(socketPath: String) -> TerminalServiceResponse? {
             let deadline = Date().addingTimeInterval(handoffTransitionTimeout)
             while Date() < deadline {

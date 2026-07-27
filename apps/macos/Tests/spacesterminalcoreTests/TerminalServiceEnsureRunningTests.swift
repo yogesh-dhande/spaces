@@ -5,9 +5,14 @@ import XCTest
 @testable import spacesterminalcore
 
 #if os(macOS)
-    /// Covers `ensureRunning`'s handling of a `.shuttingDown` liveness ping during a daemon's
+    /// Covers `ensureRunning`'s handling of a `.handingOff` liveness ping during a daemon's
     /// exec-in-place handoff (issue #188 follow-up): the daemon is alive and mid-handoff, not dead, so
-    /// the client must wait for the replacement image instead of racing to spawn a second daemon.
+    /// the client must wait for the replacement image instead of racing to spawn a second daemon. It also
+    /// covers the sibling `.shuttingDown` case (issue #325/#334 follow-up): the daemon is alive but no
+    /// successor is coming, so the client must NOT wait — `ensureRunning`'s only gate on the 15s
+    /// `handoffTransitionTimeout` wait is `isTransitionalHandoffPing`, so proving that predicate rejects
+    /// `.shuttingDown` is a direct, deterministic proxy for "ensureRunning does not take the 15s wait on a
+    /// shutdown" without needing to race a real timeout.
     ///
     /// These tests exercise `TerminalService.isTransitionalHandoffPing` and
     /// `TerminalService.waitForLivePongThroughTransition` directly against a real `TerminalServiceServer`
@@ -17,14 +22,19 @@ import XCTest
     /// guarantee that path is never reached. Testing the helper in isolation pins the same product
     /// contract without any risk of a test launching a real daemon.
     final class TerminalServiceEnsureRunningTests: XCTestCase {
-        func testIsTransitionalHandoffPingOnlyMatchesShuttingDownFailures() {
+        func testIsTransitionalHandoffPingOnlyMatchesHandoffCode() {
             let live = TerminalServiceResponse(ok: true, message: "pong")
-            let shuttingDown = TerminalServiceResponse(ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown)
+            let handingOff = TerminalServiceResponse(ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .handingOff)
+            let shuttingDown = TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown)
             let otherFailure = TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .internalError)
             let noErrorCode = TerminalServiceResponse(ok: false, message: "connection reset")
 
             XCTAssertFalse(TerminalService.isTransitionalHandoffPing(live))
-            XCTAssertTrue(TerminalService.isTransitionalHandoffPing(shuttingDown))
+            XCTAssertTrue(TerminalService.isTransitionalHandoffPing(handingOff))
+            // The headline case: a shutdown is a live answer too, but carries no promise of a successor,
+            // so it must NOT be treated as transitional — this is what keeps `ensureRunning` from stalling
+            // out the full 15s `handoffTransitionTimeout` waiting for a daemon that isn't coming back.
+            XCTAssertFalse(TerminalService.isTransitionalHandoffPing(shuttingDown))
             XCTAssertFalse(TerminalService.isTransitionalHandoffPing(otherFailure))
             XCTAssertFalse(TerminalService.isTransitionalHandoffPing(noErrorCode))
         }
@@ -46,7 +56,7 @@ import XCTest
                 livenessResponder: {
                     if Date() < transitionEndsAt {
                         return TerminalServiceResponse(
-                            ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: 111)
+                            ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .handingOff, servicePID: 111)
                     }
                     return TerminalServiceResponse(ok: true, message: "pong", servicePID: 222)
                 }

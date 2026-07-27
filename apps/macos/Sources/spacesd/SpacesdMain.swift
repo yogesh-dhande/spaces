@@ -31,7 +31,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     private var certificateFingerprint: String?
     /// Mirrors the main actor's `handoffInProgress` flag. Without this, the fast ping path would report
     /// the daemon live for the entire up-to-10s exec-handoff preflight window during which `handle(_:)`
-    /// is already rejecting every real request with `.shuttingDown` — a client polling liveness would
+    /// is already rejecting every real request with `.handingOff` — a client polling liveness would
     /// see "ok" and adopt a daemon that refuses everything else.
     private var handoffInProgress = false
     /// Mirrors the main actor's `shutdownInProgress` flag. `shutdown()` sets it BEFORE it stops shared
@@ -110,16 +110,21 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// (`createSessionOffMain`/`createSession`/`startSessionCoreResponse`), and the liveness `.ping`
     /// responder (`pingResponse`). Returns the rejection response to send, or `nil` to admit.
     ///
-    /// An in-progress exec handoff and an in-progress shutdown both mean the same thing to a caller —
-    /// "this daemon is going away, refuse the request" — so they are folded into one predicate here
-    /// rather than replicated per guard: a future third teardown reason is added once, on this function,
-    /// instead of risking one guard remembering it and several others not (see issue #325, which is
-    /// exactly that drift — `shutdownInProgress` originally fed only the session-create gate while
-    /// `handoffInProgress` reached every command). The two latches carry distinct messages but the same
-    /// `.shuttingDown` wire code (which `SpacesDeviceAPIServer` also maps
-    /// `WorkspaceError.daemonHandoffInProgress` onto), so no client needs to tell them apart — see
-    /// `TerminalService.isTransitionalHandoffPing`, which already treats any `.shuttingDown` ping as "the
-    /// daemon answered, keep waiting" regardless of which latch produced it.
+    /// An in-progress exec handoff and an in-progress shutdown both mean "refuse the request" to every
+    /// command gate, so admission is folded into one predicate here rather than replicated per guard: a
+    /// future third teardown reason is added once, on this function, instead of risking one guard
+    /// remembering it and several others not (see issue #325, which is exactly that drift —
+    /// `shutdownInProgress` originally fed only the session-create gate while `handoffInProgress` reached
+    /// every command).
+    ///
+    /// The two latches carry distinct wire codes, though, because they mean different things to a
+    /// *waiting* caller: `.handingOff` tells `TerminalService.isTransitionalHandoffPing` that a successor
+    /// is about to rebind the socket, worth waiting `handoffTransitionTimeout` (15s) for; `.shuttingDown`
+    /// tells it no successor is coming, so it must fall straight through to spawning a fresh daemon
+    /// instead of stalling out that same 15s for nothing (issue #334's sibling problem, on the local
+    /// transport). Every other consumer of this response treats both codes identically ("this daemon is
+    /// going away, refuse the request") and needs no change — see `LocalDaemonReachabilityProbe`, which
+    /// treats any non-`ok` ping as "did not answer" without inspecting the code at all.
     ///
     /// The session-CREATE family is the one caller that also re-checks this on the terminal engine actor
     /// after its own git-prep/off-actor early-out — see `startSessionCoreResponse`'s doc for why create
@@ -134,7 +139,7 @@ final class DaemonLivenessState: @unchecked Sendable {
         }
         if snapshot.handoffInProgress {
             return TerminalServiceResponse(
-                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .handingOff, servicePID: getpid())
         }
         return nil
     }
@@ -2452,7 +2457,10 @@ enum SpacesDaemonProfileCommandRouting {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            case .daemonHandoffInProgress: return .shuttingDown
+            // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
+            // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
+            // handoff code, not the generic teardown one.
+            case .daemonHandoffInProgress: return .handingOff
             }
         }
         if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }

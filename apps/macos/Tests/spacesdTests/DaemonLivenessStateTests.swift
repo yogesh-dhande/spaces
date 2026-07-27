@@ -8,9 +8,11 @@ import XCTest
     /// A liveness `.ping` is answered off the main actor from `DaemonLivenessState` so a health probe
     /// stays fast even while the main actor is saturated (issue #188). That fast path must not drift
     /// from `handle(_:)`'s own behavior: while a handoff or a shutdown is in progress, `handle(_:)`
-    /// rejects every real request with `.shuttingDown`, so the ping must report the same thing rather
-    /// than "ok" — a client must never conclude the daemon is available when everything else it asks for
-    /// is refused.
+    /// rejects every real request — with `.handingOff` or `.shuttingDown` respectively — so the ping must
+    /// report the same code rather than "ok" — a client must never conclude the daemon is available when
+    /// everything else it asks for is refused, and must be able to tell the two teardown reasons apart
+    /// (see issue #325's follow-up: a client waits out a handoff but must not wait out a shutdown, since
+    /// no successor is coming).
     final class DaemonLivenessStateTests: XCTestCase {
         func testFreshStatePingsOkWithNoSessions() {
             let state = DaemonLivenessState()
@@ -64,7 +66,7 @@ import XCTest
             let response = state.pingResponse()
 
             XCTAssertFalse(response.ok)
-            XCTAssertEqual(response.errorCode, .shuttingDown)
+            XCTAssertEqual(response.errorCode, .handingOff)
         }
 
         func testPingResumesOkOnceHandoffClears() {
@@ -135,8 +137,28 @@ import XCTest
             let rejection = state.teardownRejection()
 
             XCTAssertNotNil(rejection)
-            XCTAssertEqual(rejection?.errorCode, .shuttingDown)
+            XCTAssertEqual(rejection?.errorCode, .handingOff)
             XCTAssertEqual(rejection?.message, "spacesd is handing off to an updated daemon.")
+        }
+
+        /// Issue #325's follow-up: the two teardown latches must produce distinct wire codes, because a
+        /// waiting client (`TerminalService.ensureRunning`) treats them oppositely — it waits out a
+        /// handoff (a successor is coming) but must spawn immediately on a shutdown (nothing is coming).
+        /// Sharing one code, as both latches did before this test existed, would silently reintroduce the
+        /// 15s stall issue #334 flags for a plain shutdown.
+        func testShutdownAndHandoffProduceDistinctErrorCodes() {
+            let shuttingDownState = DaemonLivenessState()
+            shuttingDownState.storeShutdownInProgress(true)
+
+            let handingOffState = DaemonLivenessState()
+            handingOffState.storeHandoffInProgress(true)
+
+            let shutdownCode = shuttingDownState.teardownRejection()?.errorCode
+            let handoffCode = handingOffState.teardownRejection()?.errorCode
+
+            XCTAssertEqual(shutdownCode, .shuttingDown)
+            XCTAssertEqual(handoffCode, .handingOff)
+            XCTAssertNotEqual(shutdownCode, handoffCode)
         }
 
         func testShutdownFlagIsMonotonicAcrossSnapshots() {
