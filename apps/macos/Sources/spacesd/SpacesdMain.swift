@@ -1111,6 +1111,15 @@ enum SpacesDaemonProfileCommandRouting {
                 runtimeManifest: request.runtimeManifest, worktreeRefresh: request.worktreeRefresh,
                 workingDirectory: workspaceCommand.workingDirectory)
             let logPath = try workspaceCommandLogPath(workspaceCommand.logPath)
+            // Re-check at the launch boundary: the entry check above only proves the request was admitted
+            // before `prepareWorkspace` started, but that call can spend up to 120s in git fetch/clone/merge,
+            // and a shutdown or handoff can latch at any point during that window. Without this recheck a
+            // teardown that lands mid-prep would never be observed, and `runShellCommand` below spawns an
+            // arbitrary `/bin/bash -lc` child that the daemon has no further chance to refuse. This handler
+            // runs nonisolated on the transport thread with no engine-queue serialization (unlike the
+            // create path's `startSessionCoreResponse` recheck), so this only narrows the race to the
+            // instant between this check and the spawn a few lines below — it does not close it.
+            if let rejection = livenessState.teardownRejection() { return rejection }
             let result = try runShellCommand(workspaceCommand, logPath: logPath, manifest: request.runtimeManifest)
             let message = result.exitCode == 0 ? "Workspace command completed." : "Workspace command exited with code \(result.exitCode)."
             return TerminalServiceResponse(ok: true, message: message, servicePID: getpid(), commandResult: result)

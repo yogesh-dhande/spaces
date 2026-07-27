@@ -272,6 +272,13 @@ import Foundation
         /// daemon's exit instead. Any other failure (a different error code, or no response at all) is an
         /// ordinary "daemon looks dead" signal and gets the same immediate-spawn treatment — that gate
         /// runs regardless, so it also catches the no-response case.
+        ///
+        /// Peers are lockstep on `SpacesWireProtocol` (exact-version match, no backward compatibility), so
+        /// this predicate only ever interprets a response from a same-version daemon. A foreign-version
+        /// daemon's teardown responses carry no contract here: the worst a misread one costs is one bounded
+        /// wait — `handoffTransitionTimeout` for a code misread as a handoff, `shutdownExitTimeout`'s
+        /// lock-owner gate otherwise — before `ensureRunning` falls through to its normal spawn-and-poll
+        /// path and recovers.
         static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .handingOff }
 
         /// Polls liveness until the daemon that reported a transitional `.handingOff` ping answers a live
