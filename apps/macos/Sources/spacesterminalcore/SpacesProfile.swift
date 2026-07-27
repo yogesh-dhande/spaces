@@ -132,19 +132,28 @@ public struct SpacesProfile: Sendable, Equatable {
     ) throws -> SpacesProfile {
         // A test process must never resolve a profile the user's own app, daemon, or CLI is serving —
         // installed or development, and however the path was arrived at, including an explicit
-        // SPACES_DB_PATH. Test targets create and mutate real terminal-session state through the resolved
-        // profile, so an unisolated run writes fixture sessions into a live database. The rule is a static
-        // one about WHERE the database is rather than whether something currently owns it, so the guard
-        // cannot depend on whether the developer's app happens to be running. It refuses loudly rather than
-        // redirecting to a scratch profile: a redirect would hide the missing isolation and leave the test
-        // asserting against a profile it never chose. The check precedes every side effect, so a refused
-        // resolution creates no directories.
-        if SpacesTestHost.isRunningUnderXCTest(), isLiveUserProfileDatabase(databasePath) {
-            throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(databasePath: databasePath)
+        // SPACES_DB_PATH or SPACES_RUNTIME_DIR. Test targets create and mutate real terminal-session state
+        // through the resolved profile, so an unisolated run writes fixture sessions into a live database
+        // and puts session directories, sockets, and the daemon instance lock inside a live runtime root.
+        // BOTH halves are checked because they are independent overrides: a test that binds its own
+        // database but inherits a shell's runtime directory is otherwise a live profile in all but name.
+        // The rule is a static one about WHERE the profile is rather than whether something currently owns
+        // it, so the guard cannot depend on whether the developer's app happens to be running. It refuses
+        // loudly rather than redirecting to a scratch profile: a redirect would hide the missing isolation
+        // and leave the test asserting against a profile it never chose. Both checks precede every side
+        // effect, so a refused resolution creates no directories.
+        let runtimeDirectory = runtimeDirectoryURL(
+            environment: environment, currentDirectoryPath: currentDirectoryPath, profileRoot: profileRoot)
+        if SpacesTestHost.isRunningUnderXCTest() {
+            if isLiveUserProfilePath(databasePath) {
+                throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(component: .database, path: databasePath)
+            }
+            if isLiveUserProfilePath(runtimeDirectory.path) {
+                throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(component: .runtimeDirectory, path: runtimeDirectory.path)
+            }
         }
         try fileManager.createDirectory(at: profileRoot, withIntermediateDirectories: true)
-        let runtimeDirectory = try resolvedRuntimeDirectory(
-            environment: environment, currentDirectoryPath: currentDirectoryPath, profileRoot: profileRoot, fileManager: fileManager)
+        try fileManager.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
         return SpacesProfile(
             source: source, databasePath: databasePath, rootDirectory: profileRoot.path, runtimeDirectory: runtimeDirectory.path,
             ipcNotificationObject: ipcObject(profileRoot: profileRoot.path), developmentContext: developmentContext, branchSlug: branchSlug,
@@ -157,22 +166,22 @@ public struct SpacesProfile: Sendable, Equatable {
         return directory.appendingPathComponent("spaces.db", isDirectory: false).path
     }
 
-    /// Whether `databasePath` lives inside a Spaces state root that this account's own app, daemon, or CLI
-    /// serves: `~/.spaces/` (installed) or `~/.spaces-dev/profiles/` (per-worktree development profiles),
+    /// Whether `path` — a resolved database or runtime directory — lives inside a Spaces state root that
+    /// this account's own app, daemon, or CLI serves: `~/.spaces/` (installed) or `~/.spaces-dev/profiles/` (per-worktree development profiles),
     /// under the account's own home read from the password database rather than `HOME`. A test that points
     /// `HOME` at a scratch directory is already isolated and resolves normally.
     ///
     /// An unreadable password database answers `true`. That is the safety decision, not a convenience:
     /// "the account home could not be identified" must never be reported as "this is not a live profile",
     /// which would drop the protection in exactly the case where nothing can vouch for the path.
-    private static func isLiveUserProfileDatabase(_ databasePath: String) -> Bool {
+    private static func isLiveUserProfilePath(_ path: String) -> Bool {
         guard let accountHomePath = accountHomeDirectoryPath() else { return true }
         let accountHome = URL(fileURLWithPath: accountHomePath, isDirectory: true)
         let liveProfileRoots = [
             accountHome.appendingPathComponent(".spaces", isDirectory: true),
             accountHome.appendingPathComponent(".spaces-dev", isDirectory: true).appendingPathComponent("profiles", isDirectory: true),
         ]
-        return liveProfileRoots.contains { isPath(databasePath, under: $0) }
+        return liveProfileRoots.contains { isPath(path, under: $0) }
     }
 
     /// Path containment compared component-wise on canonical paths. A string-prefix test would report
@@ -363,17 +372,13 @@ public struct SpacesProfile: Sendable, Equatable {
         }
     }
 
-    private static func resolvedRuntimeDirectory(
-        environment: [String: String], currentDirectoryPath: String, profileRoot: URL, fileManager: FileManager
-    ) throws -> URL {
+    /// The runtime root this profile resolves to, WITHOUT creating it. Kept separate from creating the
+    /// directory so `makeProfile` can refuse a live runtime root before anything is written to disk.
+    private static func runtimeDirectoryURL(environment: [String: String], currentDirectoryPath: String, profileRoot: URL) -> URL {
         if let override = trimmed(environment[runtimeDirectoryEnvironmentVariable]), !override.isEmpty {
-            let overrideURL = absoluteFileURL(path: override, currentDirectoryPath: currentDirectoryPath)
-            try fileManager.createDirectory(at: overrideURL, withIntermediateDirectories: true)
-            return overrideURL
+            return absoluteFileURL(path: override, currentDirectoryPath: currentDirectoryPath)
         }
-        let runtimeURL = profileRoot.appendingPathComponent("runtime", isDirectory: true)
-        try fileManager.createDirectory(at: runtimeURL, withIntermediateDirectories: true)
-        return runtimeURL
+        return profileRoot.appendingPathComponent("runtime", isDirectory: true)
     }
 
     private static func absoluteFileURL(path: String, currentDirectoryPath: String) -> URL {
@@ -386,6 +391,28 @@ public struct SpacesProfile: Sendable, Equatable {
     private static func trimmed(_ value: String?) -> String? { value?.trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
+/// Which half of a profile a refusal names. The two are independently overridable, so a caller told only
+/// "a live profile" would not know which variable to change.
+public enum SpacesProfileComponent: Sendable {
+    case database
+    case runtimeDirectory
+
+    /// The environment variable that overrides this half.
+    public var environmentVariable: String {
+        switch self {
+        case .database: return SpacesProfile.databasePathEnvironmentVariable
+        case .runtimeDirectory: return SpacesProfile.runtimeDirectoryEnvironmentVariable
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .database: return "database"
+        case .runtimeDirectory: return "runtime directory"
+        }
+    }
+}
+
 /// Raised while resolving `SpacesProfile` for a binary that was built inside a Spaces checkout.
 /// Such a binary must never fall back to the installed profile, so a failed git probe surfaces
 /// loudly instead of silently pointing a development build at the installed daemon's database.
@@ -394,9 +421,9 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
     /// executable path, the detected repo root, and the underlying git failure (when there was one).
     case repoBuiltGitProbeFailed(executablePath: String, repoRoot: String, underlyingError: (any Error)?)
 
-    /// A test process resolved a database inside one of this account's live Spaces profile roots. Carries
-    /// the refused database path.
-    case testHostRefusedLiveUserProfile(databasePath: String)
+    /// A test process resolved part of a profile inside one of this account's live Spaces profile roots.
+    /// Names which half was refused, so a caller knows which override to change, and the refused path.
+    case testHostRefusedLiveUserProfile(component: SpacesProfileComponent, path: String)
 
     public var description: String {
         switch self {
@@ -405,12 +432,14 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
             return "repo-built executable \(executablePath) could not resolve its development profile from repo root \(repoRoot): "
                 + "\(reason). Refusing to fall back to the installed profile (~/.spaces) so a development build cannot open the "
                 + "installed daemon's database."
-        case .testHostRefusedLiveUserProfile(let databasePath):
-            return "a test process resolved \(databasePath), which is inside one of this account's live Spaces profile roots "
-                + "(~/.spaces and ~/.spaces-dev/profiles). Refusing it so tests cannot read or write a profile the app, daemon, or CLI "
-                + "is serving. Isolate the test by setting \(SpacesProfile.databasePathEnvironmentVariable) to a database OUTSIDE those "
-                + "roots — one under the system temporary directory — for the whole test, including any work its background queues "
-                + "finish later."
+        case .testHostRefusedLiveUserProfile(let component, let path):
+            return "a test process resolved \(path) as its \(component.description), which is inside one of this account's live Spaces "
+                + "profile roots (~/.spaces and ~/.spaces-dev/profiles). Refusing it so tests cannot read or write a profile the app, "
+                + "daemon, or CLI is serving. Isolate the test by setting \(component.environmentVariable) to a path OUTSIDE those roots "
+                + "— one under the system temporary directory — for the whole test, including any work its background queues finish "
+                + "later. Both \(SpacesProfile.databasePathEnvironmentVariable) and "
+                + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable) have to be isolated, or neither: binding one and inheriting the "
+                + "other leaves the test half-attached to a live profile."
         }
     }
 
