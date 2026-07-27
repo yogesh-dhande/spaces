@@ -1,7 +1,7 @@
 import XCTest
-import spacesterminalcore
 
 @testable import spacesclientcore
+@testable import spacesterminalcore
 
 final class SpacesDevicePairingClientTests: XCTestCase {
     func testLinuxInstallerRendersVersionPinnedOneLiner() {
@@ -160,7 +160,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
                 runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed", developmentContext: nil,
                 branchSlug: nil, worktreeHash: nil)
 
-            XCTAssertEqual(SpacesDevicePairingClient.remotePairCommand(profile: profile), SpacesDevicePairingClient.baseRemotePairCommand)
+            XCTAssertEqual(try SpacesDevicePairingClient.remotePairCommand(profile: profile), SpacesDevicePairingClient.baseRemotePairCommand)
         }
     }
 
@@ -173,9 +173,59 @@ final class SpacesDevicePairingClientTests: XCTestCase {
                 ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
 
             XCTAssertEqual(
-                SpacesDevicePairingClient.remotePairCommand(profile: profile),
+                try SpacesDevicePairingClient.remotePairCommand(profile: profile),
                 #"SPACES_DB_PATH="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/spaces.db" SPACES_RUNTIME_DIR="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/runtime" ~/.spaces/bin/spaces device pair --json"#
             )
+        }
+    }
+
+    /// Issue #322: `remoteDevelopmentProfileRoot`'s `providedProfile ?? SpacesProfile.current()` fallback
+    /// used to discard a test-host refusal with `try?`, so a caller that passed no profile (or a test
+    /// exercising this function directly, as here) would silently get `nil` — indistinguishable from
+    /// "this account genuinely has no development profile" — and fall through to `baseRemotePairCommand`,
+    /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileRoot` already `throw`
+    /// end to end, so nothing but the fix itself stands between the refusal and the caller now.
+    func testRemotePairCommandRethrowsTestHostRefusalInsteadOfDegradingToInstalledDefault() throws {
+        let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+
+        try withRemoteDeviceRootOverride(nil) {
+            try withProfileEnvironmentOverride(home: accountHomePath) {
+                SpacesProfile.resetCacheForTesting()
+                defer { SpacesProfile.resetCacheForTesting() }
+
+                XCTAssertThrowsError(try SpacesDevicePairingClient.remotePairCommand(profile: nil)) { error in
+                    guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
+                        return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #322 follow-up: `localMacClientInstallationID`'s `profile ?? SpacesProfile.current()` fallback
+    /// used to discard a test-host refusal with `try?` and land on the same `NSHomeDirectory()` fallback
+    /// as an ordinary "no profile" outcome, with nothing to tell the two apart. It cannot become `throws`
+    /// (it backs a default parameter value on `SpacesDeviceClient.macOSClientApp`, itself defaulted across
+    /// dozens of call sites — Swift rejects a throwing default argument outright) and, called from that
+    /// default position on essentially every Device API request across the whole app, it is far too widely
+    /// shared to trap on either; see `SpacesProfile.currentOrNilLoggingRefusal`'s doc comment. This proves
+    /// the wiring survives a refusal end to end: a refused resolution still lands on the documented
+    /// fallback — the same id a profile explicitly rooted at `NSHomeDirectory()` would produce — rather
+    /// than crashing or producing something else.
+    func testLocalMacClientInstallationIDFallsBackToHomeDirectoryIDWhenProfileResolutionIsRefused() throws {
+        let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
+        let homeDirectory = NSHomeDirectory()
+        let fallbackProfile = SpacesProfile(
+            source: .installedFallback, databasePath: "\(homeDirectory)/.spaces/spaces.db", rootDirectory: homeDirectory,
+            runtimeDirectory: "\(homeDirectory)/.spaces/runtime", ipcNotificationObject: "unused-in-this-test", developmentContext: nil,
+            branchSlug: nil, worktreeHash: nil)
+        let expectedFallbackID = SpacesDevicePairingClient.localMacClientInstallationID(profile: fallbackProfile)
+
+        try withProfileEnvironmentOverride(home: accountHomePath) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            XCTAssertEqual(SpacesDevicePairingClient.localMacClientInstallationID(), expectedFallbackID)
         }
     }
 
@@ -431,6 +481,20 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let original = getenv(name).map { String(cString: $0) }
         if let value { setenv(name, value, 1) } else { unsetenv(name) }
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
+        try run()
+    }
+
+    /// Points `HOME` at the real account home and clears both profile overrides, the shape a shell bound
+    /// to a live profile (e.g. `spacese2e profile-show --shell`) leaves behind — the case `SpacesProfile`
+    /// refuses to resolve for a test host. Restores all three afterward; this test class runs its methods
+    /// serially in one XCTest process, so the temporary global mutation cannot race a sibling test here.
+    private func withProfileEnvironmentOverride(home: String, run: () throws -> Void) throws {
+        let names = ["HOME", SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        let originals = names.map { ($0, getenv($0).map { String(cString: $0) }) }
+        setenv("HOME", home, 1)
+        unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+        unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+        defer { for (name, value) in originals { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
         try run()
     }
 }

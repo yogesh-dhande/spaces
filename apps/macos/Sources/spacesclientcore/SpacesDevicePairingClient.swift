@@ -304,8 +304,16 @@ public enum SpacesDevicePairingClient {
         return hosts
     }
 
+    /// `installationID` is a default parameter value on `SpacesDeviceClient.macOSClientApp(...)`, which is
+    /// itself a default parameter value on dozens of `SpacesDeviceClient` methods — Swift rejects a
+    /// throwing expression in a default argument outright, so this can never become `throws` without
+    /// threading an explicit installation id through every one of those call sites, most of which have
+    /// nothing to do with this issue. It uses `currentOrNilLoggingRefusal()` rather than `try?`, so a
+    /// test-host refusal reached from this widely-shared default is reported (see that function's doc
+    /// comment) instead of looking identical to the genuine "no profile" case this function already
+    /// degrades on by falling back to `NSHomeDirectory()`.
     public static func localMacClientInstallationID(profile: SpacesProfile? = nil) -> String {
-        let profileRoot = (try? (profile ?? SpacesProfile.current()).rootDirectory) ?? NSHomeDirectory()
+        let profileRoot = (profile ?? SpacesProfile.currentOrNilLoggingRefusal())?.rootDirectory ?? NSHomeDirectory()
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in profileRoot.utf8 {
             hash ^= UInt64(byte)
@@ -451,17 +459,22 @@ public enum SpacesDevicePairingClient {
         return try parseRemotePairingMetadataResult(result, destination: destination, probe: probe, appVersion: appVersion)
     }
 
-    static func remotePairCommand(profile: SpacesProfile?) -> String {
-        guard let remoteProfileRoot = remoteDevelopmentProfileRoot(profile: profile) else { return baseRemotePairCommand }
+    static func remotePairCommand(profile: SpacesProfile?) throws -> String {
+        guard let remoteProfileRoot = try remoteDevelopmentProfileRoot(profile: profile) else { return baseRemotePairCommand }
         let databasePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)spaces.db" : "\(remoteProfileRoot)/spaces.db"
         let runtimePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)runtime" : "\(remoteProfileRoot)/runtime"
         return "\(SpacesProfile.databasePathEnvironmentVariable)=\(remoteShellPathExpression(databasePath)) "
             + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(remoteShellPathExpression(runtimePath)) \(baseRemotePairCommand)"
     }
 
-    private static func remoteDevelopmentProfileRoot(profile providedProfile: SpacesProfile?) -> String? {
+    /// Falls back to `SpacesProfile.currentOrNilIfUnresolved()` — not `current()` swallowed with `try?`
+    /// — when the caller passed no profile: a genuine "no profile could be resolved" still degrades to
+    /// `nil` here (this function already treats `nil` as "no development profile, use the installed
+    /// command"), but a test-host refusal is not that, and this whole call chain already `throws`, so
+    /// there is no reason for it to be silenced instead of propagated like every other resolution error.
+    private static func remoteDevelopmentProfileRoot(profile providedProfile: SpacesProfile?) throws -> String? {
         if let override = normalized(ProcessInfo.processInfo.environment["SPACES_E2E_REMOTE_DEVICE_ROOT"]) { return override }
-        let profile = providedProfile ?? (try? SpacesProfile.current())
+        let profile = try providedProfile ?? SpacesProfile.currentOrNilIfUnresolved()
         guard let profile else { return nil }
         let marker = "/.spaces-dev/profiles/spaces/"
         let canonicalRoot = SpacesProfile.canonicalPath(profile.rootDirectory)

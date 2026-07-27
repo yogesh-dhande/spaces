@@ -87,7 +87,7 @@ import systembridge
         // Start the probe before the first step renders, so a cold `spacesd` warms up while the user
         // works through the Chrome Automation screen instead of after it.
         if Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: AgentHookCommand.hookVersion) {
-            let profile = try? SpacesProfile.current()
+            let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
             localAgentStatusTask = Task.detached(priority: .userInitiated) { Self.localAgentStatus(profile: profile) }
         }
         if AppKitController.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
