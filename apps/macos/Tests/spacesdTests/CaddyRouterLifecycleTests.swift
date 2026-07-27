@@ -111,6 +111,17 @@ import XCTest
             // `stop()` which serializes on that same lock cannot have returned: it establishes exactly "stop()
             // must not return until the ensureRunning it interrupted has released the lock", i.e. has
             // returned.
+            //
+            // Accepted detection limit: against a regressed `stop()` that skips the lock, these two asserts
+            // alone can still pass — `stopEntered` fires before the lock attempt, and a lock-free `stop()`
+            // spends milliseconds in its caddy-stop child, so `stopFinished` can legitimately still read
+            // false here. What catches that regression is the tail of the test: a `stop()` that ran early
+            // removed no socket (none existed yet) and never released the fake's `run` loop, so the final
+            // no-socket assert fails whenever stop's cleanup landed before the fake touched the socket.
+            // That makes detection scheduling-dependent (an intermittent failure, not a certain one);
+            // proving "stop is blocked on the lock" deterministically would require instrumenting the
+            // production lock itself, and any such seam is deleted by the same regression it would guard
+            // against.
             XCTAssertTrue(waitUntil(timeout: 30) { stopEntered.value })
             XCTAssertFalse(stopFinished.value)
 
