@@ -656,13 +656,21 @@ import Foundation
             #else
                 let startedUnit: String? = nil
             #endif
-            repeat {
-                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
+            // Polling is entered only while budget remains, and each ping is bounded by what is left of it.
+            // Starting the unit can consume the whole window on its own, and a `repeat` would then spend one
+            // more ping and sleep past the deadline the caller asked to be held to. The ping keeps a small
+            // floor because a timeout of a few microseconds is not a request anything can answer — it would
+            // report an unreachable daemon rather than a slow one.
+            while true {
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { break }
+                let pingTimeout = max(0.05, min(remaining, 1))
+                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: pingTimeout), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     return startedUnit != nil
                 }
                 Thread.sleep(forTimeInterval: 0.05)
-            } while Date() < deadline
+            }
             throw TerminalServiceError.serviceUnavailable(socketPath: socketPath, startedUnit: startedUnit)
         }
 
