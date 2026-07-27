@@ -181,10 +181,16 @@ public struct SpacesProfile: Sendable, Equatable {
             accountHome.appendingPathComponent(".spaces", isDirectory: true),
             accountHome.appendingPathComponent(".spaces-dev", isDirectory: true).appendingPathComponent("profiles", isDirectory: true),
         ]
-        return liveProfileRoots.contains { isPath(path, under: $0) }
+        return liveProfileRoots.contains { isPath(path, atOrUnder: $0) }
     }
 
-    /// Path containment compared component-wise on canonical paths. A string-prefix test would report
+    /// Path containment compared component-wise on canonical paths, INCLUSIVE of the root itself: a root
+    /// like `~/.spaces` is live user state in its own right, so a profile that resolves exactly onto it is
+    /// the same harm as one inside it — a test would create its session directories, sockets and instance
+    /// lock directly in the live state root. Only the runtime directory can land there in practice, since
+    /// a database path always names a file within a root rather than the root.
+    ///
+    /// A string-prefix test would report
     /// `~/.spaces-devil/spaces.db` as living under `~/.spaces-dev`, and would be defeated by a `..` segment
     /// or a symlinked route into the root; canonicalizing first and comparing whole components is neither.
     ///
@@ -195,10 +201,10 @@ public struct SpacesProfile: Sendable, Equatable {
     /// nobody writes that spelling by accident; the only reliable way to recover the on-disk case is
     /// `URL.resourceValues(forKeys: [.canonicalPathKey])`, which requires the path to exist and so would
     /// forfeit this check running before anything is created.
-    private static func isPath(_ path: String, under root: URL) -> Bool {
+    private static func isPath(_ path: String, atOrUnder root: URL) -> Bool {
         let pathComponents = URL(fileURLWithPath: canonicalPath(path)).pathComponents
         let rootComponents = URL(fileURLWithPath: canonicalPath(root.path)).pathComponents
-        guard pathComponents.count > rootComponents.count else { return false }
+        guard pathComponents.count >= rootComponents.count else { return false }
         return Array(pathComponents.prefix(rootComponents.count)) == rootComponents
     }
 

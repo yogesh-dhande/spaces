@@ -64,6 +64,9 @@ final class SpacesProfileTests: XCTestCase {
         let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
         let repoRoot = try makeFakeRepoRoot()
         let context = SpacesDevelopmentContext(worktreeRoot: tempHomeURL.appendingPathComponent("worktree").path, branchName: "feature/x")
+        let expectedRefusedRoot = accountHomeURL.appendingPathComponent(
+            ".spaces-dev/profiles/spaces/feature-x-\(SpacesProfile.shortStableHash(SpacesProfile.canonicalPath(context.worktreeRoot)))")
+        addTeardownBlock { try? FileManager.default.removeItem(at: expectedRefusedRoot) }
 
         XCTAssertThrowsError(
             try SpacesProfile.resolve(
@@ -87,6 +90,11 @@ final class SpacesProfileTests: XCTestCase {
     func testResolveRefusesExplicitOverrideInsideDevelopmentProfileRootForTestHost() throws {
         let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
         let overridePath = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123/spaces.db").path
+        // Never created while the refusal holds; cleaned up so proving this test fails without the guard
+        // leaves nothing behind in the developer's real profile.
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123"))
+        }
 
         XCTAssertThrowsError(
             try SpacesProfile.resolve(
@@ -113,6 +121,9 @@ final class SpacesProfileTests: XCTestCase {
         let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
         let isolatedDatabasePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)/spaces.db").path
         let liveRuntimePath = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123/runtime").path
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123"))
+        }
 
         XCTAssertThrowsError(
             try SpacesProfile.resolve(
@@ -135,6 +146,44 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: URL(fileURLWithPath: isolatedDatabasePath).deletingLastPathComponent().path),
             "A refused resolution must not have created the profile root either.")
+    }
+
+    /// A runtime override spelled as a live root EXACTLY is refused, for each root. The root is live user
+    /// state itself, so resolving onto it would put session directories, sockets and the daemon instance
+    /// lock straight into it — the same harm as resolving inside it.
+    func testResolveRefusesRuntimeDirectorySpelledAsALiveRootExactly() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let liveRoots = [
+            accountHomeURL.appendingPathComponent(".spaces", isDirectory: true).path,
+            accountHomeURL.appendingPathComponent(".spaces-dev/profiles", isDirectory: true).path,
+        ]
+
+        for liveRoot in liveRoots {
+            // The database half is isolated, so only the runtime spelling can be what is refused. Its
+            // profile root is a fresh temporary directory, which doubles as the create-nothing probe: the
+            // live roots already exist on a developer machine, so their presence proves nothing.
+            let isolatedProfileRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let isolatedDatabasePath = isolatedProfileRoot.appendingPathComponent("spaces.db", isDirectory: false).path
+
+            XCTAssertThrowsError(
+                try SpacesProfile.resolve(
+                    environment: [
+                        SpacesProfile.databasePathEnvironmentVariable: isolatedDatabasePath,
+                        SpacesProfile.runtimeDirectoryEnvironmentVariable: liveRoot,
+                    ], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+                    executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil)),
+                "Expected \(liveRoot) to be refused as a runtime directory."
+            ) { error in
+                guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                    return XCTFail("Expected testHostRefusedLiveUserProfile for \(liveRoot), got \(error).")
+                }
+                XCTAssertEqual(component, .runtimeDirectory)
+                XCTAssertEqual(path, liveRoot)
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: isolatedProfileRoot.path),
+                "A refused resolution must not have created anything, including the profile root.")
+        }
     }
 
     /// Both halves bound outside the live roots — the normal isolated test — still resolves, and the

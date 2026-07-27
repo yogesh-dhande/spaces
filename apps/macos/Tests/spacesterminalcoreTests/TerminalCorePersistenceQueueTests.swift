@@ -214,6 +214,10 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     func testQueuedWriteWhoseProfileFailedToResolveIsNotReboundToALaterProfile() throws {
         let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
         let refusedRoot = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/queue-\(UUID().uuidString)", isDirectory: true)
+        // The refusal means this is never created; the teardown matters when the guard is deliberately
+        // stubbed out to prove this test fails without it, which otherwise leaves fixtures in the
+        // developer's real profile — the very thing under test.
+        addTeardownBlock { try? FileManager.default.removeItem(at: refusedRoot) }
         let laterDatabasePath = try makeProfileRoot().appendingPathComponent("spaces.db").path
         let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
