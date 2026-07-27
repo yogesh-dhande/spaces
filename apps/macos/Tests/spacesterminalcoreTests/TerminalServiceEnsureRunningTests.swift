@@ -8,20 +8,21 @@ import XCTest
     /// Covers `ensureRunning`'s handling of a `.handingOff` liveness ping during a daemon's
     /// exec-in-place handoff (issue #188 follow-up): the daemon is alive and mid-handoff, not dead, so
     /// the client must wait for the replacement image instead of racing to spawn a second daemon. It also
-    /// covers the sibling `.shuttingDown` case (issue #325/#334 follow-up): the daemon is alive but no
+    /// covers the sibling shutdown case (issue #325/#334/#341 follow-up): the daemon is alive but no
     /// successor is coming, so `ensureRunning` must not wait for one — `isTransitionalHandoffPing`
     /// rejecting `.shuttingDown` is what keeps it out of the 15s `handoffTransitionTimeout` wait. It must
     /// still wait, bounded by the much shorter `shutdownExitTimeout`, for the outgoing daemon to actually
     /// release `TerminalServiceInstanceLock` before spawning a replacement: spawning while the old process
     /// still holds the lock only produces a competitor whose `SpacesDaemonController.init` collides with
     /// it and exits immediately, and `ensureRunning`'s spawn-poll loop never retries the spawn itself.
+    /// That wait is keyed off the instance lock itself, not a ping response, so it also covers a daemon
+    /// whose accept source is already cancelled and answers no ping at all while it drains persistence.
     ///
-    /// These tests exercise `TerminalService.isTransitionalHandoffPing`, `isShuttingDownPing`,
-    /// `waitForLivePongThroughTransition`, and `waitForShuttingDownServiceExit` directly against a real
-    /// `TerminalServiceServer` rather than the full `ensureRunning`. `ensureRunning` falls back to
-    /// spawning a real `spacesd` process (via `resolveExecutableURL`, which can resolve an actual built
-    /// binary on a dev machine) once these helpers give up waiting, and a test has no safe way to
-    /// guarantee that path is never reached. Testing the helpers in isolation pins the same product
+    /// These tests exercise `TerminalService.isTransitionalHandoffPing`, `waitForLivePongThroughTransition`,
+    /// and `waitForInstanceLockOwnerToExit` directly rather than the full `ensureRunning`. `ensureRunning`
+    /// falls back to spawning a real `spacesd` process (via `resolveExecutableURL`, which can resolve an
+    /// actual built binary on a dev machine) once these helpers give up waiting, and a test has no safe way
+    /// to guarantee that path is never reached. Testing the helpers in isolation pins the same product
     /// contract without any risk of a test launching a real daemon.
     final class TerminalServiceEnsureRunningTests: XCTestCase {
         func testIsTransitionalHandoffPingOnlyMatchesHandoffCode() {
@@ -81,71 +82,95 @@ import XCTest
             XCTAssertLessThan(elapsed, 5, "The helper must adopt promptly once the replacement image answers, not wait out the full timeout")
         }
 
-        func testIsShuttingDownPingOnlyMatchesShuttingDownCode() {
-            let live = TerminalServiceResponse(ok: true, message: "pong")
-            let handingOff = TerminalServiceResponse(ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .handingOff)
-            let shuttingDown = TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown)
-            let otherFailure = TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .internalError)
-            let noErrorCode = TerminalServiceResponse(ok: false, message: "connection reset")
+        /// The JSON shape `TerminalServiceInstanceLock.acquire` writes (its `LockRecord` is private, so
+        /// this test writes the same wire shape directly rather than reaching into that type).
+        private struct FakeInstanceLockRecord: Codable { let pid: Int32; let token: String }
 
-            XCTAssertFalse(TerminalService.isShuttingDownPing(live))
-            XCTAssertFalse(TerminalService.isShuttingDownPing(handingOff))
-            XCTAssertTrue(TerminalService.isShuttingDownPing(shuttingDown))
-            XCTAssertFalse(TerminalService.isShuttingDownPing(otherFailure))
-            XCTAssertFalse(TerminalService.isShuttingDownPing(noErrorCode))
+        private func writeFakeInstanceLock(pid: Int32, path: String) throws {
+            try JSONEncoder().encode(FakeInstanceLockRecord(pid: pid, token: UUID().uuidString)).write(to: URL(fileURLWithPath: path))
         }
 
-        /// Reproduces the bug `waitForShuttingDownServiceExit` exists to fix: a `.shuttingDown` rejection
-        /// is not proof the daemon is gone — the outgoing daemon keeps answering pings with that same
-        /// rejection right up until it actually exits (`DaemonLivenessState.teardownRejection()` answers
-        /// every ping this way while `shutdownInProgress` is set). If `ensureRunning` treated the
-        /// rejection itself as "gone" and spawned immediately, the replacement would collide with the
-        /// still-live instance lock and die before ever binding the socket. This proves the helper instead
-        /// waits for the socket to stop answering ANY ping at all — standing in for the process actually
-        /// exiting — before returning.
-        func testWaitForShuttingDownServiceExitWaitsForTheSocketToStopAnsweringEntirely() throws {
+        func testWaitForInstanceLockOwnerToExitReturnsImmediatelyWhenNoLockFileExists() {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let lockPath = root.appendingPathComponent("instance.lock").path
+            let socketPath = root.appendingPathComponent("service.sock").path
+
+            let start = Date()
+            TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
+            XCTAssertLessThan(
+                Date().timeIntervalSince(start), 1, "an absent lock file names no owner, so there is nothing to wait for")
+        }
+
+        /// Reproduces the half of the gate that must NOT wait: a lock file naming a pid that has already
+        /// exited is stale, not a live owner, so `TerminalServiceInstanceLock.activeOwnerProcessID` reports
+        /// no owner and the gate must return immediately rather than paying the full `shutdownExitTimeout`.
+        func testWaitForInstanceLockOwnerToExitReturnsImmediatelyWhenOwnerIsAlreadyDead() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
 
+            let lockPath = root.appendingPathComponent("instance.lock").path
             let socketPath = root.appendingPathComponent("service.sock").path
-            let queue = DispatchQueue(label: "terminal-service-ensure-running-shutdown-test")
 
-            // `servicePID: 0` is a sentinel `isProcessAlive` always reports dead (it rejects pid <= 0
-            // outright), so the only thing that can make the helper report "gone" here is the socket
-            // itself going silent — exactly the behavior under test.
-            //
-            // `nonisolated(unsafe)`: `server.stop()` below is called from a background queue to
-            // simulate the outgoing daemon's real exit. `TerminalServiceServer` is not `Sendable`, but
-            // `stop()` only cancels a dispatch source and clears a reference — safe to call from any
-            // thread, and already done that way by every other test in this file via `defer`.
-            nonisolated(unsafe) let server = TerminalServiceServer(
-                socketPath: socketPath, queue: queue,
-                livenessResponder: { TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown, servicePID: 0) }
-            ) { _ in TerminalServiceResponse(ok: false, message: "unexpected non-ping request") }
-            try server.start()
-            defer { server.stop() }
+            // Spawn and reap a child so its pid is guaranteed dead (not merely unlikely to be reused).
+            let deadProcess = Process()
+            deadProcess.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+            try deadProcess.run()
+            deadProcess.waitUntilExit()
 
-            // Confirm the rejection is actually being served before timing the wait, so this test fails
-            // loudly (rather than trivially passing) if the fake server never came up.
-            let firstPing = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 1)
-            XCTAssertFalse(firstPing.ok)
-            XCTAssertTrue(TerminalService.isShuttingDownPing(firstPing))
-
-            // Simulate the outgoing daemon's real exit: stop answering entirely after a delay, standing
-            // in for the moment its process actually terminates rather than merely having announced it.
-            let stopDelay = 0.3
-            DispatchQueue.global().asyncAfter(deadline: .now() + stopDelay) { server.stop() }
+            try writeFakeInstanceLock(pid: deadProcess.processIdentifier, path: lockPath)
 
             let start = Date()
-            TerminalService.waitForShuttingDownServiceExit(socketPath: socketPath, rejection: firstPing)
-            let elapsed = Date().timeIntervalSince(start)
-
-            XCTAssertGreaterThan(
-                elapsed, stopDelay - 0.1,
-                "The helper must wait for the outgoing daemon to actually stop answering, not return as soon as it sees a .shuttingDown rejection")
+            TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
             XCTAssertLessThan(
-                elapsed, 3, "The helper must return promptly once the daemon is actually gone rather than waiting out the full shutdownExitTimeout")
+                Date().timeIntervalSince(start), 1, "a dead owner pid must not incur the full shutdownExitTimeout wait")
+        }
+
+        /// Reproduces the bug this gate exists to fix (P1 follow-up to #325/#334): a live instance-lock
+        /// owner is not proof the daemon is reachable — its accept source may already be cancelled and
+        /// answering no ping at all while it drains persistence, so this gate must not depend on a ping
+        /// response the daemon might never send. It reads the lock directly and waits for the owner pid
+        /// itself to exit, standing in for the outgoing daemon's real exit rather than anything it says.
+        func testWaitForInstanceLockOwnerToExitWaitsForALiveOwnerToExit() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let lockPath = root.appendingPathComponent("instance.lock").path
+            // No server ever listens here: `waitForServiceExit`'s socket half of its dual gate treats a
+            // nonexistent path as an instant "not answering", isolating this test to the pid-liveness half.
+            let socketPath = root.appendingPathComponent("service.sock").path
+
+            let liveProcess = Process()
+            liveProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            liveProcess.arguments = ["60"]
+            try liveProcess.run()
+            defer { if liveProcess.isRunning { liveProcess.terminate() } }
+
+            try writeFakeInstanceLock(pid: liveProcess.processIdentifier, path: lockPath)
+
+            let expectation = XCTestExpectation(description: "waitForInstanceLockOwnerToExit returns once the owner exits")
+            nonisolated(unsafe) var elapsed: TimeInterval = 0
+            let start = Date()
+            DispatchQueue.global().async {
+                TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
+                elapsed = Date().timeIntervalSince(start)
+                expectation.fulfill()
+            }
+
+            // The lock is already written with the live pid, so it is safe to end the process immediately:
+            // the background wait above either observes it still alive on its first poll and catches the
+            // exit on a subsequent one, or observes it already gone — either way it must not block past
+            // `shutdownExitTimeout`, which the `wait(timeout:)` bound below enforces.
+            liveProcess.terminate()
+            liveProcess.waitUntilExit()
+
+            wait(for: [expectation], timeout: 5)
+            XCTAssertLessThan(
+                elapsed, 3, "must return once the owner actually exits, not wait out the full shutdownExitTimeout")
         }
     }
 #endif
