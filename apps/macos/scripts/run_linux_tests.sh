@@ -38,6 +38,15 @@ fi
 # still runs distinct suites in parallel, so two env-mutating suites in one `swift test` run
 # clobber each other's environment. Run each suite in its OWN invocation so each gets an
 # isolated process; the shared build is cached, so the extra invocations are cheap.
+#
+# A suite named here that the Linux test targets do not compile is a silent hole, not an error:
+# `swift test --filter` finds nothing, reports "Test run with 0 tests in 0 suites passed", and exits
+# 0, so the lane stays green while the suite never runs. That is what happened to
+# GhosttyLinuxHeadlessKeyEncodingTests, which sat in this list while Package.swift's Linux `sources:`
+# whitelist omitted its file. Every invocation is therefore checked for that zero-match line and
+# fails the lane.
+suite_log="$(mktemp)"
+trap 'rm -f "$suite_log"' EXIT
 for suite in \
   SpacesTestHostDetectionTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
@@ -48,5 +57,11 @@ for suite in \
   swift test \
     --scratch-path /root/spaces-test-build \
     --jobs 4 \
-    --filter "$suite" 2>&1
+    --filter "$suite" 2>&1 | tee "$suite_log"
+  if grep -q 'Test run with 0 tests in 0 suites' "$suite_log"; then
+    echo "error: $suite matched no tests, so it did not run." >&2
+    echo "The Linux test targets do not compile it. Add its source file to the Linux 'sources:' list" >&2
+    echo "for the matching test target in apps/macos/Package.swift, or remove it from this list." >&2
+    exit 1
+  fi
 done
