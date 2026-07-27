@@ -24,13 +24,8 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
     /// Returns the current overview as one newline-terminated line, or nil if it
     /// cannot be built right now (the connection then waits for the next change).
     private let lineProvider: @Sendable () -> Data?
-    private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var clientSources: [Int32: DispatchSourceRead] = [:]
-    /// Filesystem identity of the socket file this server bound. The socket path is profile-global,
-    /// so a replacement server can already be listening on a freshly bound file by the time this
-    /// server's teardown runs; the identity is what keeps that teardown from unlinking it.
-    private var listenSocketFileIdentity: SocketFileIdentity?
 
     init(socketPath: String, queue: DispatchQueue, lineProvider: @escaping @Sendable () -> Data?) {
         self.socketPath = socketPath
@@ -61,11 +56,24 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
             throw POSIXError(code)
         }
         try Self.setNonBlocking(socketFD)
-        listenSocketFD = socketFD
-        listenSocketFileIdentity = Self.socketFileIdentity(at: socketPath)
+        // Captured by value (not read back off `self`) for the cancel handler below: the socket path is
+        // profile-global, so a replacement server can already be listening on a freshly bound file by
+        // the time this server's teardown runs, and the identity comparison is what keeps that teardown
+        // from unlinking the replacement's file instead of its own.
+        let socketPath = socketPath
+        let boundIdentity = Self.socketFileIdentity(at: socketPath)
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in self?.handleAcceptSourceCancel() }
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+        // The listening descriptor belongs to the dispatch source, not to this object: `stop()` drops
+        // the last reference to this server in the same breath it cancels the source, so a cancel
+        // handler reaching back through `self` would find it deallocated and never close the descriptor
+        // (and would also skip the identity-guarded unlink below, leaving a stray socket file). Neither
+        // `socketFD` nor `boundIdentity` needs `self`, so the whole handler runs unconditionally.
+        source.setCancelHandler {
+            close(socketFD)
+            guard boundIdentity != nil, boundIdentity == Self.socketFileIdentity(at: socketPath) else { return }
+            try? Self.removeSocketFile(at: socketPath)
+        }
         acceptSource = source
         source.resume()
     }
@@ -86,7 +94,7 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
         }
     }
 
-    private func acceptReadyConnections() {
+    private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)
             if clientFD < 0 { return }
@@ -122,15 +130,6 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
     private func closeClient(_ clientFD: Int32) {
         guard let source = clientSources.removeValue(forKey: clientFD) else { return }
         source.cancel()
-    }
-
-    private func handleAcceptSourceCancel() {
-        if listenSocketFD >= 0 { close(listenSocketFD) }
-        listenSocketFD = -1
-        let boundIdentity = listenSocketFileIdentity
-        listenSocketFileIdentity = nil
-        guard boundIdentity != nil, boundIdentity == Self.socketFileIdentity(at: socketPath) else { return }
-        try? Self.removeSocketFile(at: socketPath)
     }
 
     /// Device and inode of the socket file at `path`, or nil when nothing is there.

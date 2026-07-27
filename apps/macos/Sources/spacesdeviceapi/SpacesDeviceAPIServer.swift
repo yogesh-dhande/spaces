@@ -393,7 +393,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             private let identity: TerminalServiceTLSIdentity
             private let server: SpacesDeviceAPIServer
             private let queue: DispatchQueue
-            private var listenSocketFD: Int32 = -1
             private var acceptSource: DispatchSourceRead?
             private var sslContext: OpaquePointer?
             private let activeConnectionLock = NSLock()
@@ -416,18 +415,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try Self.setCloseOnExec(socketFD)
                 try Self.setNonBlocking(socketFD)
                 sslContext = context
-                listenSocketFD = socketFD
                 listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
 
                 let startup = DispatchSemaphore(value: 0)
                 let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-                source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
+                source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+                // Both the descriptor and the TLS context belong to the dispatch source, not to this
+                // object: a cancel handler that reached back through `self` would find it deallocated on a
+                // dropped owner and release neither, leaking the descriptor and the `SSL_CTX` heap
+                // allocation for the process's lifetime. `context` is captured by value so `SSL_CTX_free`
+                // runs unconditionally; `self?.sslContext = nil` afterward is best-effort hygiene for a
+                // caller that is still alive.
+                //
+                // This listener binds a TCP host:port, not a filesystem path, so there is no socket file to
+                // remove here.
                 source.setCancelHandler { [weak self] in
-                    guard let self else { return }
-                    if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-                    if let sslContext = self.sslContext { SSL_CTX_free(sslContext) }
-                    self.listenSocketFD = -1
-                    self.sslContext = nil
+                    close(socketFD)
+                    SSL_CTX_free(context)
+                    self?.sslContext = nil
                 }
                 acceptSource = source
                 source.resume()
@@ -443,7 +448,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             func closeConnections(forInstallationID installationID: String) { closeActiveConnections { $0 == installationID } }
 
-            private func acceptReadyConnections() {
+            private func acceptReadyConnections(listenSocketFD: Int32) {
                 while true {
                     let clientFD = accept(listenSocketFD, nil, nil)
                     if clientFD < 0 {

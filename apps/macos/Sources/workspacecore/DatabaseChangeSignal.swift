@@ -71,7 +71,6 @@ public enum DatabaseChangeSignal {
         private let socketPath: String
         private let queue: DispatchQueue
         private let onSignal: @Sendable () -> Void
-        private var listenSocketFD: Int32 = -1
         private var acceptSource: DispatchSourceRead?
 
         public init(socketPath: String? = nil, queue: DispatchQueue, onSignal: @escaping @Sendable () -> Void) throws {
@@ -102,10 +101,17 @@ public enum DatabaseChangeSignal {
                 throw POSIXError(code)
             }
             try Self.setNonBlocking(socketFD)
-            listenSocketFD = socketFD
             let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-            source.setEventHandler { [weak self] in self?.acceptReadySignals() }
-            source.setCancelHandler { [weak self] in self?.handleAcceptSourceCancel() }
+            source.setEventHandler { [weak self] in self?.acceptReadySignals(listenSocketFD: socketFD) }
+            // The listening descriptor belongs to the dispatch source, not to this object: `stop()` can
+            // drop the last reference to this receiver (see the test teardown) while the cancellation it
+            // triggers is still pending on `queue`. A cancel handler that reached back through `self`
+            // would find it deallocated and never close the descriptor. Capturing `socketFD` by value
+            // closes it regardless of whether `self` is still alive.
+            //
+            // The socket PATH is deliberately not touched here. `start()` already clears a stale path
+            // before binding, so a stray file left behind by a delayed cancel is removed there.
+            source.setCancelHandler { close(socketFD) }
             acceptSource = source
             source.resume()
         }
@@ -117,7 +123,7 @@ public enum DatabaseChangeSignal {
             }
         }
 
-        private func acceptReadySignals() {
+        private func acceptReadySignals(listenSocketFD: Int32) {
             while true {
                 let clientFD = accept(listenSocketFD, nil, nil)
                 if clientFD < 0 {
@@ -127,12 +133,6 @@ public enum DatabaseChangeSignal {
                 close(clientFD)
                 onSignal()
             }
-        }
-
-        private func handleAcceptSourceCancel() {
-            if listenSocketFD >= 0 { close(listenSocketFD) }
-            listenSocketFD = -1
-            try? Self.removeSocketFile(at: socketPath)
         }
 
         private static func removeSocketFile(at path: String) throws {

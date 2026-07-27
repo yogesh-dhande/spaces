@@ -240,7 +240,6 @@ final class SpacesDeviceAPIControlServer {
     private let socketPath: String
     private let queue: DispatchQueue
     private let handleRequest: @Sendable (SpacesDeviceAPIControlRequest) throws -> SpacesDeviceAPIControlResponse
-    private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     init(
@@ -278,14 +277,20 @@ final class SpacesDeviceAPIControlServer {
         }
         try setNonBlocking(socketFD)
 
-        listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-            if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-            try? self.removeSocketIfPresent()
-        }
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+        // The listening descriptor belongs to the dispatch source, not to this object:
+        // `SpacesDeviceAPISupervisor.stop()` drops its last reference to this server in the same breath
+        // it cancels the source, and a later `start()` can recreate a new server bound to the same
+        // profile-scoped control socket path. A cancel handler that reached back through `self` would
+        // find it deallocated and never close the descriptor; capturing `socketFD` by value closes it
+        // regardless.
+        //
+        // The socket PATH is deliberately not touched here. `start()` already clears a stale path
+        // before binding, so a stray file left behind by a delayed cancel is removed there; unlinking it
+        // from this handler could otherwise race that same restart and delete the new server's socket
+        // file instead.
+        source.setCancelHandler { close(socketFD) }
         acceptSource = source
         source.resume()
     }
@@ -295,7 +300,7 @@ final class SpacesDeviceAPIControlServer {
         acceptSource = nil
     }
 
-    private func acceptReadyConnections() {
+    private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)
             if clientFD < 0 {
