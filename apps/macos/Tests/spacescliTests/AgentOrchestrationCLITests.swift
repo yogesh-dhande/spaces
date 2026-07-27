@@ -171,10 +171,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertFalse(spawn.json)
     }
 
-    func testAgentInterruptAndKillTakeRequiredPositionalSession() throws {
-        XCTAssertEqual(try AgentInterruptCommand.parse(["session-1"]).session, "session-1")
+    func testAgentKillTakesRequiredPositionalSession() throws {
         XCTAssertEqual(try AgentKillCommand.parse(["session-1"]).session, "session-1")
-        XCTAssertThrowsError(try AgentInterruptCommand.parse([]))
         XCTAssertThrowsError(try AgentKillCommand.parse([]))
     }
 
@@ -193,7 +191,6 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertEqual(try AgentStatusCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentAnnotateCommand.parse(["note", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentSpawnCommand.parse(["--command", "claude", "--workspace", "workspace-1", "--device", "phone"]).device, "phone")
-        XCTAssertEqual(try AgentInterruptCommand.parse(["session-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentKillCommand.parse(["session-1", "--device", "phone"]).device, "phone")
     }
 

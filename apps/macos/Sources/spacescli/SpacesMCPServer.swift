@@ -344,23 +344,6 @@ final class SpacesMCPStdioServer {
                             deviceID: result.deviceID, subscribed: result.subscribed, open: result.open)))
             },
             MCPToolDescriptor(
-                name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
-                properties: [
-                    "session": stringSchema("Child terminal session ID to interrupt."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ], required: ["session"]
-            ) { server, arguments in
-                let sessionID = try server.requiredString(arguments["session"], field: "session")
-                if let device = try server.resolvedDevice(arguments) {
-                    let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, bytes: Data([27]), appendNewline: false, device: device, clientApp: cliDeviceClientApp())
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
-                }
-                return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalSend(.init(sessionID: sessionID, input: .bytes(Data([27])), appendNewline: false)), timeout: 5))
-            },
-            MCPToolDescriptor(
                 name: "spaces_agent_kill", description: "Terminate a coding-agent session and its terminal.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to terminate."),
