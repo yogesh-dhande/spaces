@@ -33,8 +33,8 @@ import workspacecore
 /// daemon re-execs itself across updates, and a connection re-opened after the owning service
 /// stopped would still be holding the database when the replacement daemon starts. `close()`
 /// therefore latches, and a pass that lands afterwards does nothing at all rather than opening a
-/// connection nobody will ever close. That keeps the guarantee a property of this type instead of a
-/// property of each caller's shutdown ordering.
+/// connection nobody will ever close, and it does not return until the release has happened. That keeps
+/// the guarantee a property of this type instead of a property of each caller's shutdown ordering.
 ///
 /// `@unchecked Sendable` is sound because the only mutable state is `store` and `isClosed`, both
 /// confined to `queue`; everything else is immutable.
@@ -77,14 +77,22 @@ final class DaemonReconcileStore: @unchecked Sendable {
         }
     }
 
-    /// Permanently releases the connection so its final WAL checkpoint happens when the owning
-    /// service stops rather than only at process exit. Enqueued on the owning queue, so it cannot
-    /// race a pass, and idempotent: a second call finds the connection already released, so the
-    /// checkpoint happens exactly once.
+    /// Permanently releases the connection so its final WAL checkpoint happens when the owning service
+    /// stops rather than only at process exit, and does not return until that has happened. The release
+    /// runs on the owning queue, so it cannot race a pass, and it is idempotent: a second call finds the
+    /// connection already released, so the checkpoint happens exactly once.
+    ///
+    /// Waiting for it is the point. The daemon hands the database to a replacement across a re-exec, so
+    /// "the connection is released" has to be a fact a caller can establish, not merely the likely outcome
+    /// of a queue draining faster than the rest of shutdown. `close()` returning is that fact.
+    ///
+    /// `queue.sync` cannot deadlock here: the queue only ever runs reconcile passes, no pass waits on the
+    /// caller's actor, and no caller closes from the queue itself — both owners stop on the main actor.
+    /// The wait is therefore bounded by the one pass that may be in flight.
     func close() {
-        queue.async {
-            self.isClosed = true
-            self.store = nil
+        queue.sync {
+            isClosed = true
+            store = nil
         }
     }
 

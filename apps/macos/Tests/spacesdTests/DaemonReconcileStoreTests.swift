@@ -139,17 +139,31 @@ final class DaemonReconcileStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "Close must not create the database.")
     }
 
-    /// `close()` and a pass submitted at the same moment race onto the owning queue in either order.
-    /// Whichever wins, the store must end up with no open connection.
+    /// `close()` submitted while a pass is running is the harder of the two queue orders: the close lands
+    /// behind work that still holds the connection. It must still be terminal by the time it returns.
+    ///
+    /// The pass reports when it starts running, so the close is submitted while that pass demonstrably owns
+    /// the queue — the order under test is constructed here, not left to whichever context the scheduler
+    /// happens to reach first. Both assertions are then consequences of `close()` having waited: it cannot
+    /// return while the pass ahead of it is still running, and it cannot return with the connection open.
     func testCloseRacingAPassLeavesNoOpenConnection() async throws {
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in _ = try store.projects() }
+        let progress = PassProgressBox()
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in
+            progress.noteStarted()
+            _ = try store.projects()
+            progress.noteFinished()
+        }
+        // Opens the connection, so the WAL stays non-empty until the close checkpoints it.
         try await reconcileStore.runPass()
+        XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
         async let racingPass: Void = reconcileStore.runPass()
+        await progress.waitUntilStarted(2)
         reconcileStore.close()
-        try await racingPass
 
-        XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive close, whichever order the queue saw.")
+        XCTAssertEqual(progress.finished, 2, "Close must not return while the pass it queued behind is still running.")
+        XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive a close that has returned.")
+        try await racingPass
     }
 
     /// SQLite runs a truncating checkpoint when the last connection to a database closes, so an
@@ -182,6 +196,52 @@ private final class LockedRoutesBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return routes.first { $0.host == host }?.upstream
+    }
+}
+
+/// Progress reported by a reconcile pass from the store's own queue. `waitUntilStarted` lets a test wait
+/// until a particular pass is genuinely running there — so work submitted afterwards is unambiguously
+/// queued behind it — and `finished` says how many passes have returned. Continuation-based rather than
+/// semaphore-based because the waiting side is an async test, and blocking a cooperative thread to wait on
+/// a dispatch queue is exactly the shape that turns an ordering test into a scheduling one.
+private final class PassProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startCount = 0
+    private var finishedCount = 0
+    private var waiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func noteStarted() {
+        lock.lock()
+        startCount += 1
+        let reached = waiters.filter { $0.threshold <= startCount }
+        waiters.removeAll { $0.threshold <= startCount }
+        lock.unlock()
+        for waiter in reached { waiter.continuation.resume() }
+    }
+
+    func noteFinished() {
+        lock.lock()
+        finishedCount += 1
+        lock.unlock()
+    }
+
+    var finished: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return finishedCount
+    }
+
+    func waitUntilStarted(_ threshold: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if startCount >= threshold {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append((threshold, continuation))
+            lock.unlock()
+        }
     }
 }
 

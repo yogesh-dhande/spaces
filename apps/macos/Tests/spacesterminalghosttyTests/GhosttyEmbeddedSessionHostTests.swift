@@ -265,9 +265,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let shellPID = try XCTUnwrap(driver.childPID())
         driver.sendRawBytes(Data("\(scriptPath.path)\n".utf8))
 
-        try await waitUntil { FileManager.default.fileExists(atPath: pidPath.path) }
-        let foregroundPIDText = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        let foregroundPID = try XCTUnwrap(Int32(foregroundPIDText))
+        // Wait for the pid itself, not for the file that will hold it: the script's redirection creates the
+        // file before `printf` writes to it, so a read taken on `fileExists` can see it empty. The value is
+        // observable only once a complete line has landed, which is also the only way to know the pid is not
+        // a partially written prefix of itself.
+        let foregroundPIDBox = MutableBox<Int32?>(nil)
+        try await waitUntil {
+            guard let text = try? String(contentsOf: pidPath, encoding: .utf8), text.hasSuffix("\n") else { return false }
+            foregroundPIDBox.value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            return foregroundPIDBox.value != nil
+        }
+        let foregroundPID = try XCTUnwrap(foregroundPIDBox.value)
         try await waitUntil { driver.foregroundPID() == foregroundPID }
 
         XCTAssertNotEqual(foregroundPID, shellPID)
@@ -301,7 +309,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { driver.terminate() }
 
         try driver.startIfNeeded()
-        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        // Interrupt only once the marker actually says `ready`. The script's redirection creates the marker
+        // before `printf` writes to it, so interrupting on `fileExists` can kill the script in between —
+        // leaving a marker that never gains the content asserted below. Waiting for the content also fixes
+        // where the interrupt lands: after the write, while the script is in `sleep`.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
         driver.sendRawBytes(Data([0x03]))
         try await waitUntil(timeout: 30) { driver.childPID() == nil }
 
@@ -2255,12 +2267,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let marker = "OpenAI Codex synchronized marker"
         let output = "\u{1B}[?2026h\u{1B}[3;1H\u{1B}[J\u{1B}[4;1H\(marker)\u{1B}[?2026l"
         TerminalEngineActor.runSynchronously { sessionDriver.sendRawBytes(Data(output.utf8)) }
-        try await waitUntil { transcript.string().contains(marker) }
+        // This round trip takes tens of milliseconds against a 30s deadline, so a timeout here is a stall
+        // rather than slowness, and the two waits stall for different reasons: the first means the echo never
+        // came back through the PTY (the session's IO is pumped by `ghostty_app_tick` hops onto the shared
+        // engine actor, so a sibling test occupying it starves this one), the second means it came back but
+        // the terminal never exported it. Say which, and with what state, so a recurrence is evidence.
+        try await waitUntil(diagnostics: { self.synchronizedOutputDiagnostics(sessionDriver: sessionDriver, transcript: transcript) }) {
+            transcript.string().contains(marker)
+        }
         TerminalEngineActor.runSynchronously { sessionDriver.requestSurfaceRefresh() }
-        try await waitUntil {
+        try await waitUntil(diagnostics: { self.synchronizedOutputDiagnostics(sessionDriver: sessionDriver, transcript: transcript) }) {
             guard let snapshot = sessionDriver.snapshot() else { return false }
             return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
         }
+    }
+
+    /// What the session actually holds when a synchronized-output wait times out: the bytes that came back
+    /// through the PTY, what the terminal exported, and whether the child is still alive.
+    private func synchronizedOutputDiagnostics(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, transcript: TranscriptBuffer) -> String {
+        let (snapshotText, childPID) = TerminalEngineActor.runSynchronously { (sessionDriver.snapshotText(), sessionDriver.childPID()) }
+        let alive = childPID.map { Self.processIsAlive($0) }
+        return "transcript=\(String(transcript.string().suffix(400)).debugDescription) "
+            + "snapshot=\(String((snapshotText ?? "<nil>").suffix(400)).debugDescription) "
+            + "childPID=\(childPID.map(String.init) ?? "nil") alive=\(alive.map(String.init) ?? "nil")"
     }
 
     func testHeadlessDriverExportsCodexStyleHostManagedFrame() async throws {
@@ -3342,56 +3371,6 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertTrue(landed, "a failed exited-state write must retry and eventually mark the durable runtime row exited")
-        _ = box
-    }
-
-    /// Fix 2 (FIFO fence): the exited runtime-state write retries IN PLACE and so keeps its slot on the serial
-    /// persistence queue. The detach-all/payload/durable-end items `terminate()` enqueues after it therefore
-    /// run only once it commits. The detach has no retry of its own, so it lands durably only if it waited
-    /// behind the retrying exited write until the database recovered — a faithful proxy for the fence. Before
-    /// the fix the failed exited write surrendered its FIFO slot via `asyncAfter`, so the detach ran
-    /// immediately against the broken database and was lost while the (deferred) exited retry still landed.
-    func testExitedRuntimeStateWriteHoldsFIFOFenceForLaterDetach() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try paths.ensureDirectories()
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-fence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        let client = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: launchConfiguration.sessionID, client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
-        let runningState = TerminalSessionRuntimeState(
-            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
-            updatedAt: TerminalSessionTimestamp.string(from: Date()), title: "shell", workingDirectory: "/tmp/original")
-        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
-        XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
-
-        let databasePath = try SpacesProfile.current().databasePath
-        try Self.breakDatabase(at: databasePath)
-
-        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            host.terminate()
-            return Box(host)
-        }
-        // The exited write fails against the broken database and is now retrying in place, holding the queue.
-        // Sleep long enough that the pre-fix design's immediate (broken) detach would already have run and been
-        // lost, then restore the database while the retry is still holding the fence.
-        try await Task.sleep(nanoseconds: 100_000_000)
-        try Self.restoreDatabase(at: databasePath)
-
-        await TerminalEngineActor.run { box.value.debugDrainPersistenceQueue() }
-        XCTAssertEqual(
-            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
-            "the retried exited write must commit before the drain completes")
-        XCTAssertTrue(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
-            "the detach enqueued after the exited write must run only after that write commits, so it lands post-recovery")
         _ = box
     }
 

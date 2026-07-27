@@ -47,6 +47,10 @@ import workspacecore
     /// Quiesces the loop and releases the database connection, taking its final WAL checkpoint. Every
     /// gate the loop consults is on the main actor along with this, so once `stopped` is set no
     /// further pass can be submitted and the close is the last thing the store ever does.
+    ///
+    /// `close()` waits for that release, so returning from here establishes it: whatever the daemon does
+    /// next — including re-execing a replacement against the same database — starts after this loop's
+    /// connection is gone and its final checkpoint has been taken.
     func stop() {
         stopped = true
         pending = false
