@@ -11,6 +11,10 @@ import spacesterminalcore
 /// limit, after which the daemon can open neither sockets nor its SQLite database. These tests assert
 /// the descriptors are released at teardown, keyed on the session's own socket paths so a concurrently
 /// running test's descriptors cannot mask or fake the result.
+///
+/// `testStoppingTerminalServiceServerReleasesItsDescriptorAfterTheServerIsDropped` below covers the
+/// daemon's single main request-accepting socket (`TerminalServiceServer`), which shares the exact same
+/// accept-source cancel-handler shape but is one-per-process rather than one-per-session (see #306).
 final class SessionSocketDescriptorLifetimeTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
@@ -82,6 +86,28 @@ final class SessionSocketDescriptorLifetimeTests: XCTestCase {
         // descriptor must be closed without the server object being alive to do it.
         var server: TerminalControlServer? = TerminalControlServer(socketPath: socketPath, queue: queue) { _ in
             TerminalControlResponse(ok: true, message: "ack")
+        }
+        try server?.start()
+        XCTAssertEqual(Self.openDescriptorCount(forSocketPaths: [socketPath]), 1)
+        server?.stop()
+        server = nil
+
+        try await waitUntil(timeout: 10) { Self.openDescriptorCount(forSocketPaths: [socketPath]) == 0 }
+    }
+
+    func testStoppingTerminalServiceServerReleasesItsDescriptorAfterTheServerIsDropped() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let socketPath = root.appendingPathComponent("service.sock").path
+        let queue = DispatchQueue(label: "session-socket-descriptor-lifetime-test-terminal-service")
+
+        // Mirrors the daemon's own shape: `SpacesdMain.stopSharedServices()` cancels this server's
+        // accept source, and a failed exec-in-place handoff restarts the SAME long-lived instance on
+        // the same socket path while the earlier cancellation may still be queued on `queue`.
+        var server: TerminalServiceServer? = TerminalServiceServer(socketPath: socketPath, queue: queue) { _ in
+            TerminalServiceResponse(ok: true, message: "ack")
         }
         try server?.start()
         XCTAssertEqual(Self.openDescriptorCount(forSocketPaths: [socketPath]), 1)

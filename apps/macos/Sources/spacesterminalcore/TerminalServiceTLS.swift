@@ -339,7 +339,6 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             private let server: TerminalServiceTLSServer
             private var buffer = Data()
             private var relaySource: DispatchSourceRead?
-            private var relaySocketFD: Int32 = -1
 
             init(connection: NWConnection, server: TerminalServiceTLSServer) {
                 self.connection = connection
@@ -441,16 +440,16 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                 do {
                     let socketFD = try server.connectUnixSocket(path: socketPath)
                     try server.setNonBlocking(socketFD)
-                    relaySocketFD = socketFD
                     let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: server.queue)
-                    source.setEventHandler { [weak self] in self?.relayReadableData() }
-                    source.setCancelHandler { [weak self] in
-                        guard let self else { return }
-                        if self.relaySocketFD >= 0 {
-                            shutdown(self.relaySocketFD, SHUT_RDWR)
-                            close(self.relaySocketFD)
-                            self.relaySocketFD = -1
-                        }
+                    source.setEventHandler { [weak self] in self?.relayReadableData(relaySocketFD: socketFD) }
+                    // The relay descriptor belongs to the dispatch source, not to this connection object:
+                    // `finishStreamRelay()` cancels this source and drops the last reference to `self` in
+                    // the same breath, so a cancel handler reaching back through `self` would find it
+                    // deallocated and never close the descriptor. This isn't a listener and holds no socket
+                    // path, so there is nothing else to release here.
+                    source.setCancelHandler {
+                        shutdown(socketFD, SHUT_RDWR)
+                        close(socketFD)
                     }
                     relaySource = source
                     source.resume()
@@ -468,8 +467,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                 }
             }
 
-            private func relayReadableData() {
-                guard relaySocketFD >= 0 else { return }
+            private func relayReadableData(relaySocketFD: Int32) {
                 var readBuffer = [UInt8](repeating: 0, count: 65_536)
                 while true {
                     let count = read(relaySocketFD, &readBuffer, readBuffer.count)
@@ -633,7 +631,6 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private let identity: TerminalServiceTLSIdentity
         private let queue: DispatchQueue
         private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
-        private var listenSocketFD: Int32 = -1
         private var acceptSource: DispatchSourceRead?
         private var sslContext: OpaquePointer?
 
@@ -660,19 +657,24 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             let socketFD = try Self.makeListenSocket(host: host, port: port)
             try Self.setCloseOnExec(socketFD)
             try Self.setNonBlocking(socketFD)
-            listenSocketFD = socketFD
             sslContext = context
             listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
 
             let startup = DispatchSemaphore(value: 0)
             let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-            source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
+            source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+            // Both the descriptor and the TLS context belong to the dispatch source, not to this object:
+            // a cancel handler that reached back through `self` would find it deallocated on a dropped
+            // owner and release neither, leaking the descriptor and the `SSL_CTX` heap allocation for the
+            // process's lifetime. `context` is captured by value so `SSL_CTX_free` runs unconditionally;
+            // `self?.sslContext = nil` afterward is best-effort hygiene for a caller that is still alive.
+            //
+            // This listener binds a TCP host:port, not a filesystem path, so there is no socket file to
+            // remove here.
             source.setCancelHandler { [weak self] in
-                guard let self else { return }
-                if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-                if let sslContext = self.sslContext { SSL_CTX_free(sslContext) }
-                self.listenSocketFD = -1
-                self.sslContext = nil
+                close(socketFD)
+                SSL_CTX_free(context)
+                self?.sslContext = nil
             }
             acceptSource = source
             source.resume()
@@ -685,7 +687,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             acceptSource = nil
         }
 
-        private func acceptReadyConnections() {
+        private func acceptReadyConnections(listenSocketFD: Int32) {
             while true {
                 let clientFD = accept(listenSocketFD, nil, nil)
                 if clientFD < 0 {
