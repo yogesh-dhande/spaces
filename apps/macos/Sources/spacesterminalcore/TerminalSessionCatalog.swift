@@ -37,8 +37,9 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
 
 public enum TerminalSessionCatalog {
     public static func listLiveSessions(fileManager: FileManager = .default) throws -> [TerminalSessionCatalogEntry] {
-        try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { launchConfiguration in
-            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+        try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { knownSession in
+            let launchConfiguration = knownSession.launchConfiguration
+            let paths = knownSession.paths
             guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
             guard isInteractiveServiceAlive(for: runtimeState) else { return nil }
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()

@@ -27,6 +27,10 @@ import Foundation
 /// A plain (non-`execv`) daemon shutdown needs nothing beyond the dead-pid case: the successor runs
 /// under a different pid, so the predecessor's rows fall to "dead pid → repair".
 ///
+/// Sessions are read through the root their row stores, so a row is repaired on the pid matrix alone —
+/// a session whose directory has vanished, or whose root this profile no longer derives, still gets its
+/// phantom `.running` claim corrected rather than being skipped on every restart forever.
+///
 /// This sweep is a best-effort backstop, not a guarantee. The repair itself is a durable write, and a
 /// write that cannot commit within a bounded in-place retry — the same pathological writer-lock or
 /// storage fault that can drop a predecessor's exited-state write — leaves the row in its prior live
@@ -96,8 +100,9 @@ public enum TerminalSessionStaleRecovery {
         let nowString = ISO8601DateFormatter().string(from: now)
         var finalized: [FinalizedSession] = []
         var unrepaired: [String] = []
-        for launchConfiguration in try TerminalSessionPersistence.listKnownSessions() {
-            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+        for knownSession in try TerminalSessionPersistence.listKnownSessions() {
+            let launchConfiguration = knownSession.launchConfiguration
+            let paths = knownSession.paths
             guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
             guard runtimeState.state == .starting || runtimeState.state == .running else { continue }
 
@@ -127,9 +132,7 @@ public enum TerminalSessionStaleRecovery {
             // exited-state write), do NOT report the session as finalized: leave the row in its prior
             // live state so nothing observes a false terminal state, record it as unrepaired for the
             // caller to log, and let the next daemon restart heal it via the dead-pid branch.
-            guard commitRepair(
-                finalizedState, detachedAt: nowString, paths: paths, retryDelay: repairWriteRetryDelay, sleep: sleep
-            ) else {
+            guard commitRepair(finalizedState, detachedAt: nowString, paths: paths, retryDelay: repairWriteRetryDelay, sleep: sleep) else {
                 unrepaired.append(launchConfiguration.sessionID)
                 continue
             }

@@ -1257,6 +1257,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
             createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try seedSessionRow(sessionID: sessionID, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-05T00:00:01Z",
@@ -1446,6 +1447,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-stale-size", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1483,6 +1485,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-render", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-render", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-17T00:00:00Z",
@@ -1506,6 +1509,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-truncate", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-truncate", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1870,6 +1874,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-handoff-snapshot", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1991,6 +1996,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-history-refresh", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-history-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -2029,6 +2035,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-query-responses", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-query-responses", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -2221,8 +2228,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         await host.drainInputQueueForTesting()
         XCTAssertEqual(
-            sender.controlRequestTexts, ["first"],
-            "the link-is-gone verdict on the first send must discard the queued backlog rather than deliver it")
+            sender.controlRequestTexts, ["first"], "the link-is-gone verdict on the first send must discard the queued backlog rather than deliver it"
+        )
     }
 
     /// The other half of Change 2's contract: a reachable daemon's coded rejection is not evidence the
@@ -2308,6 +2315,17 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTFail("Timed out waiting for \(label)")
     }
 
+    /// Writes the `terminal_sessions` row a session's runtime state hangs off. The session host writes its
+    /// launch configuration as the first thing `startIfNeeded` does, before any runtime-state write, and
+    /// every other per-session table is keyed off that row — so a fixture that persists runtime state for a
+    /// session has to establish it the same way.
+    private func seedSessionRow(sessionID: String, paths: TerminalSessionPaths) throws {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+    }
+
     private func snapshot(text: String) -> GhosttyTerminalSnapshot {
         let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let columns = rows.map(\.count).max() ?? 0
@@ -2330,7 +2348,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// A running remote session's launch/paths/final-frame payload, shared by the lost-link tests above:
     /// each needs a running (interactive) session so its control sends are not turned away by
     /// `isInteractiveRuntimeStateForControl()`.
-    private struct RunningSessionFixture { let launchConfiguration: TerminalSessionLaunchConfiguration; let paths: TerminalSessionPaths
+    private struct RunningSessionFixture {
+        let launchConfiguration: TerminalSessionLaunchConfiguration
+        let paths: TerminalSessionPaths
         let payload: GhosttyRemoteSessionStatePayload
     }
 

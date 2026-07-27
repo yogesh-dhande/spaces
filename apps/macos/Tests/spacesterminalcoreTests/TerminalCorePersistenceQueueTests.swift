@@ -183,6 +183,14 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let state = makeRunningState(sessionID: "session-enqueue-time-profile", title: "queued")
 
         setenv("SPACES_DB_PATH", enqueueTimeDatabasePath, 1)
+        // The session belongs to the enqueue-time profile, so its `terminal_sessions` row is written there —
+        // the way a core writes its launch configuration into the current profile before enqueuing any
+        // runtime-state write against it. Only this profile gets the row, which is what keeps the
+        // execution-time assertion below an honest "no row here at all".
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: state.sessionID, title: "queued", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .shell), paths: paths)
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.enqueue-time-profile")
         // Park the serial queue so the runtime-state write is still pending when the profile moves.
         let barrier = DispatchSemaphore(value: 0)
@@ -276,8 +284,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // production delay: it proves the first attempt genuinely failed and is now paused before we restore
         // the database.
         let retryGate = RetryGate()
-        let queue = TerminalCorePersistenceQueue(
-            label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         let updatedState = makeRunningState(sessionID: launchConfiguration.sessionID, title: "after")
         queue.enqueueRuntimeStateWrite(updatedState, at: Date(), paths: paths) { state, _ in recorder.record(state.title ?? "") }

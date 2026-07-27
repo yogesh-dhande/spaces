@@ -451,8 +451,9 @@ import Foundation
         }
 
         private static func listXCTestCompatibilitySessions() throws -> [TerminalServiceSessionSummary] {
-            try TerminalSessionPersistence.listKnownSessions().compactMap { launchConfiguration in
-                let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+            try TerminalSessionPersistence.listKnownSessions().compactMap { knownSession in
+                let launchConfiguration = knownSession.launchConfiguration
+                let paths = knownSession.paths
                 guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
                 guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
                 guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }

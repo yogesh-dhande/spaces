@@ -397,6 +397,7 @@ extension OrchestratorTests {
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
                 FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                 try! TerminalSessionPersistence.writeRuntimeState(
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: nil, state: .running,

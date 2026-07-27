@@ -21,24 +21,64 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         serviceLogPath = URL(fileURLWithPath: rootDirectory).appendingPathComponent("service.log").path
     }
 
+    /// Paths for a session this profile owns, with the root derived under the profile's runtime
+    /// directory. This is how a session is addressed when it is created and whenever it is reached by
+    /// id alone; a session discovered from its persisted row is addressed through `forStoredSession`
+    /// instead, so a row whose root the current profile no longer derives stays reachable.
     public static func forSession(id: String) throws -> TerminalSessionPaths {
         try validateSessionID(id)
-        let runtimeDirectory = try spacesRuntimeDirectory()
-        let profileRootDirectory = try spacesProfileRootDirectory()
-        let root = runtimeDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
-            .appendingPathComponent(id, isDirectory: true)
-        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
-        let socketNamePrefix = socketPathComponent(for: profileRootDirectory.path, sessionID: id)
-        let controlSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix).sock").path
-        let subscriptionSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix)-subscription.sock").path
-        return TerminalSessionPaths(rootDirectory: root.path, controlSocketPath: controlSocketPath, subscriptionSocketPath: subscriptionSocketPath)
+        let root = try profileSessionRootDirectory(id: id)
+        return try paths(id: id, rootDirectory: root)
+    }
+
+    /// Paths for a session whose root directory is read from its persisted `terminal_sessions` row.
+    ///
+    /// Socket paths are still this profile's: control and subscription sockets live in the profile's
+    /// secure socket root, are named from the profile root and session id, and are recreated on every
+    /// run, so there is nothing about them to read from the row. The session id is not validated here
+    /// because it is never joined into a path — the root comes from the row — so one unparseable id
+    /// cannot fail a whole sweep.
+    public static func forStoredSession(id: String, rootDirectory: String) throws -> TerminalSessionPaths {
+        try paths(id: id, rootDirectory: rootDirectory)
+    }
+
+    /// Whether `rootDirectory` is a session directory this profile owns, i.e. a direct child of the
+    /// profile's terminal-sessions root. Sessions are discovered from the root their row stores, and a
+    /// row can name a path this profile does not own (a runtime directory that moved, or rows a
+    /// predecessor daemon left behind), so this is what keeps directory deletion inside the profile.
+    public static func isProfileOwnedSessionRoot(_ rootDirectory: String) throws -> Bool {
+        let standardized = URL(fileURLWithPath: rootDirectory, isDirectory: true).standardizedFileURL
+        guard !standardized.lastPathComponent.isEmpty, standardized.lastPathComponent != "/" else { return false }
+        return standardized.deletingLastPathComponent().standardizedFileURL.path == (try profileSessionsRootDirectory())
     }
 
     public static func sessionsRootDirectory(fileManager: FileManager = .default) throws -> String {
-        let runtimeDirectory = try spacesRuntimeDirectory(fileManager: fileManager)
-        let root = runtimeDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        return root.path
+        let root = try profileSessionsRootDirectory(fileManager: fileManager)
+        try fileManager.createDirectory(atPath: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    /// The profile's terminal-sessions root, without creating it. `sessionsRootDirectory` is the
+    /// creating variant; containment checks must not create directories as a side effect.
+    private static func profileSessionsRootDirectory(fileManager: FileManager = .default) throws -> String {
+        try spacesRuntimeDirectory(fileManager: fileManager).appendingPathComponent("terminal", isDirectory: true).appendingPathComponent(
+            "sessions", isDirectory: true
+        ).path
+    }
+
+    private static func profileSessionRootDirectory(id: String, fileManager: FileManager = .default) throws -> String {
+        URL(fileURLWithPath: try profileSessionsRootDirectory(fileManager: fileManager), isDirectory: true).appendingPathComponent(
+            id, isDirectory: true
+        ).path
+    }
+
+    private static func paths(id: String, rootDirectory: String) throws -> TerminalSessionPaths {
+        let profileRootDirectory = try spacesProfileRootDirectory()
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
+        let socketNamePrefix = socketPathComponent(for: profileRootDirectory.path, sessionID: id)
+        return TerminalSessionPaths(
+            rootDirectory: rootDirectory, controlSocketPath: socketRoot.appendingPathComponent("\(socketNamePrefix).sock").path,
+            subscriptionSocketPath: socketRoot.appendingPathComponent("\(socketNamePrefix)-subscription.sock").path)
     }
 
     public func ensureDirectories(fileManager: FileManager = .default) throws {

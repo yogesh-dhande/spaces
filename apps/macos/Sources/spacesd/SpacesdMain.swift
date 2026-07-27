@@ -1180,8 +1180,8 @@ enum SpacesDaemonProfileCommandRouting {
 
     private func listSessions() -> TerminalServiceResponse {
         do {
-            let configurations = try TerminalSessionPersistence.listKnownSessions()
-            let sessions = try configurations.compactMap { configuration in try summaryIfLive(for: configuration) }
+            let knownSessions = try TerminalSessionPersistence.listKnownSessions()
+            let sessions = try knownSessions.compactMap { knownSession in try summaryIfLive(for: knownSession) }
             return TerminalServiceResponse(ok: true, message: "Listed terminal sessions.", sessions: sessions)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
     }
@@ -2065,8 +2065,9 @@ enum SpacesDaemonProfileCommandRouting {
         return try summary(for: launchConfiguration, paths: paths)
     }
 
-    private func summaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary? {
-        let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+    private func summaryIfLive(for knownSession: KnownTerminalSession) throws -> TerminalServiceSessionSummary? {
+        let launchConfiguration = knownSession.launchConfiguration
+        let paths = knownSession.paths
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
         guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
@@ -2085,7 +2086,7 @@ enum SpacesDaemonProfileCommandRouting {
             childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
             launchConfiguration: launchConfiguration, runtimeState: runtimeState,
             attachmentSnapshot: (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot(),
-            hasFinalRender: (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderSnapshot != nil)
+            hasFinalRender: (try? TerminalSessionPersistence.hasFinalRender(paths: paths)) ?? false)
     }
 
     /// Off-main state read for the `.state` handler. Only the live in-process core lookup is a narrow

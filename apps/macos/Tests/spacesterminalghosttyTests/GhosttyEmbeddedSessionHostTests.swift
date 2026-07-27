@@ -399,17 +399,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // session through the natural-exit path and terminate() would return at its `closed` guard, so no
         // escalation stage would run at all.
         let script = """
-        import os, signal, time
+            import os, signal, time
 
-        def release_pty_and_survive(signum, frame):
-            for fd in (0, 1, 2):
-                os.close(fd)
+            def release_pty_and_survive(signum, frame):
+                for fd in (0, 1, 2):
+                    os.close(fd)
 
-        signal.signal(signal.SIGHUP, release_pty_and_survive)
-        with open("\(markerPath.path)", "w") as marker:
-            marker.write("ready")
-        time.sleep(120)
-        """
+            signal.signal(signal.SIGHUP, release_pty_and_survive)
+            with open("\(markerPath.path)", "w") as marker:
+                marker.write("ready")
+            time.sleep(120)
+            """
         let scriptPath = root.appendingPathComponent("release-pty.py")
         try script.write(to: scriptPath, atomically: true, encoding: .utf8)
 
@@ -1493,6 +1493,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-4", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
                 command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             let process = Process()
@@ -1525,6 +1526,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-foreground-agent-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             let foregroundPID: Int32 = 42
@@ -1559,6 +1561,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-foreground-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             host.debugSetLastKnownChildPID(childPID)
@@ -1598,6 +1601,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-dead-child-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
                 shell: "/bin/zsh", command: "printf done", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             let process = Process()
@@ -1673,6 +1677,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-5", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
                 command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.terminate()
@@ -1699,6 +1704,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-deferred-refresh-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.debugMarkStartedForTesting()
@@ -1787,6 +1793,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-close-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
                 shell: "/bin/zsh", command: "printf done", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             host.debugPersistRuntimeState()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())

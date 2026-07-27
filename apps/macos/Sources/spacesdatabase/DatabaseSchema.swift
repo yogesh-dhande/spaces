@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -164,13 +164,47 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_subscriptions_new RENAME TO agent_subscriptions;
                     """)
         },
+        // Stores the "does this row carry a replayable final frame" answer the device overview asks for
+        // every ended session, several times a second, instead of JSON-decoding the whole ~36 KB payload
+        // per row per build.
+        //
+        // The frozen pre-v8 shape is created first because a database that predates the terminal tables
+        // carries none of them (they were only ever created by the fresh-schema SQL), and the ALTER needs
+        // a table to alter; on a database that already has the table the CREATE is a no-op.
+        //
+        // Existing rows are backfilled so an ended pane that could replay before the upgrade still
+        // replays after it. A stored payload's render update is always a materialized full frame — the
+        // state reducer either materializes one or clears the field — so the presence of `renderUpdate`
+        // is exactly the fact a decode computed. The match is on the raw JSON text rather than a JSON
+        // function because it needs no JSON1 build option, and it cannot false-positive: a quote inside
+        // a JSON string value is backslash-escaped, so the unescaped byte sequence `"renderUpdate":"`
+        // can only ever be the key itself.
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Add terminal_remote_session_states.has_final_render", requiresBackup: true)
+        { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      payload_json TEXT NOT NULL
+                    );
+                    ALTER TABLE terminal_remote_session_states ADD COLUMN has_final_render INTEGER NOT NULL DEFAULT 0;
+                    UPDATE terminal_remote_session_states SET has_final_render = 1 WHERE payload_json LIKE '%"renderUpdate":"%';
+                    """)
+        },
     ]
 
+    /// The persisted final-render state of a session, one row per session. `has_final_render` stores
+    /// whether `payload_json` carries a replayable final frame, because that single fact is read for
+    /// every ended session on every device-overview build while the payload itself is a ~36 KB
+    /// base64 grid snapshot; deriving it meant decoding the whole payload per row per build.
     static let terminalRemoteSessionStateSQL = """
             CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
               session_id TEXT PRIMARY KEY,
               root_directory TEXT NOT NULL UNIQUE,
-              payload_json TEXT NOT NULL
+              payload_json TEXT NOT NULL,
+              has_final_render INTEGER NOT NULL DEFAULT 0
             );
         """
 

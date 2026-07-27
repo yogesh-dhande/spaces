@@ -43,8 +43,10 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState) throws -> TerminalSessionPaths {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState, rootDirectory: String? = nil) throws
+        -> TerminalSessionPaths
+    {
+        let paths = try rootDirectory.map { TerminalSessionPaths(rootDirectory: $0) } ?? TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
@@ -109,6 +111,27 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
+    }
+
+    /// A phantom `running` row must be repaired on the pid matrix alone. Sessions are read through the
+    /// root their row stores, so a row whose root this profile does not derive — a runtime directory that
+    /// moved, or rows a predecessor daemon left behind — is repaired like any other instead of being
+    /// skipped on every restart while claiming to be running. The repair is rows-only: it must not create
+    /// the vanished directory outside the profile.
+    func testDeadPidRowStoredOutsideTheProfileIsRepaired() throws {
+        let sessionID = "session-foreign-root"
+        let foreignRoot = try XCTUnwrap(databaseRoot).appendingPathComponent("foreign-runtime", isDirectory: true).appendingPathComponent(
+            sessionID, isDirectory: true)
+        let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, rootDirectory: foreignRoot.path)
+        try FileManager.default.removeItem(at: foreignRoot)
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in false })
+
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: foreignRoot.path), "The repair writes rows only and must not recreate a directory it does not own."
+        )
     }
 
     func testLiveForeignPidRowIsLeftRunning() throws {

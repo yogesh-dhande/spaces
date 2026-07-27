@@ -1674,7 +1674,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
-        let workspaceRows = loadWorkspaceTerminalRows(workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
+        // One query for the whole build: the alternative asked per row, and each answer opened its own
+        // connection and JSON-decoded a ~36 KB payload to test a single field.
+        let sessionIDsWithFinalRender = try TerminalSessionPersistence.sessionIDsWithFinalRender()
+        let workspaceRows = loadWorkspaceTerminalRows(
+            workspaces: workspaces, sessions: sessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender)
         // Reuse the records the overview already scanned to tally restart impact, so the inline
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
@@ -1699,8 +1703,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `loadOverview` from the same store queries — so this reuses them instead of re-querying per
     /// workspace, which otherwise doubled the process/agent reads on the refresh hot path.
     private func loadWorkspaceTerminalRows(
-        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
-        hasFinalRenderBySessionID: [String: Bool]
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry], sessionIDsWithFinalRender: Set<String>
     ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
@@ -1717,7 +1720,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: process.templateName, rowKind: .process, rowSourceID: process.id,
-                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
 
             let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
@@ -1730,7 +1733,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
-                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
         }
         return rows
@@ -1806,11 +1809,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
             isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
             isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
-    }
-
-    private func terminalFinalRenderAvailable(sessionID: String) -> Bool {
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        return (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderSnapshot != nil
     }
 
     private func normalizedTerminalSessionID(_ value: String?) -> String? {
