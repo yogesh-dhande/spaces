@@ -87,7 +87,8 @@ import Foundation
         /// and mid exec-in-place handoff to an updated image, not dead — see `waitForLivePongThroughTransition`.
         /// This waits for the replacement image instead of spawning a competing daemon. A ping answered
         /// with `.shuttingDown` means the opposite: the daemon is on its way out with no successor coming,
-        /// so this falls straight through to spawning a fresh daemon without waiting at all.
+        /// so instead of waiting for a replacement this only waits for that daemon to actually exit (see
+        /// `waitForShuttingDownServiceExit`) before spawning a fresh one of its own.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let startedAt = Date()
             let socketPath = try TerminalServicePaths.socketPath()
@@ -129,8 +130,6 @@ import Foundation
             while flock(lockDescriptor, LOCK_EX) != 0 { guard errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) } }
             defer { flock(lockDescriptor, LOCK_UN) }
 
-            let deadline = Date().addingTimeInterval(timeout)
-
             // The lock winner may be adopting a daemon another launcher finished starting first.
             if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1) {
                 if response.ok {
@@ -149,7 +148,22 @@ import Foundation
                         success: true, detail: "launched=0 adopted=1 transitioned=1")
                     return false
                 }
+                // The winner is looking at a daemon that is going away with no successor coming. It still
+                // holds `TerminalServiceInstanceLock`, so spawning now would only race a doomed
+                // competitor: the child's `SpacesDaemonController.init` throws `alreadyRunning` and exits,
+                // and the spawn-poll below never retries the spawn itself (it only pings), so the caller's
+                // operation would fail even though a working daemon was moments away. Wait for the
+                // outgoing daemon to actually release the lock — not merely to have announced it is
+                // leaving — before falling through to spawn. This runs only here, after the flock is held,
+                // so exactly one caller (the launch winner) pays the wait; every other concurrent caller is
+                // already parked on the flock and simply adopts whatever the winner ends up starting.
+                if isShuttingDownPing(response) { waitForShuttingDownServiceExit(socketPath: socketPath, rejection: response) }
             }
+
+            // Computed after the shutdown-exit wait above, not before it, so a slow-to-exit outgoing
+            // daemon never eats into the budget the spawn-poll loop below needs to observe a freshly
+            // spawned replacement.
+            let deadline = Date().addingTimeInterval(timeout)
 
             let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
             let process = Process()
@@ -236,8 +250,9 @@ import Foundation
         /// own liveness probe with `.handingOff` rather than timing out, refusing to connect, or reporting
         /// `.shuttingDown`. A `.shuttingDown` ping is also a live answer, but it promises no successor is
         /// coming, so `ensureRunning` must not pause here waiting for one — it needs to fall straight
-        /// through to spawning a fresh daemon. Any other failure (a different error code, or no response at
-        /// all) is an ordinary "daemon looks dead" signal and gets the same immediate-spawn treatment.
+        /// through to `isShuttingDownPing`'s own bounded wait for that daemon's exit instead. Any other
+        /// failure (a different error code, or no response at all) is an ordinary "daemon looks dead"
+        /// signal and gets the same immediate-spawn treatment.
         static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .handingOff }
 
         /// Polls liveness until the daemon that reported a transitional `.handingOff` ping answers a live
@@ -259,6 +274,38 @@ import Foundation
                 Thread.sleep(forTimeInterval: 0.05)
             }
             return nil
+        }
+
+        /// Bounds how long `ensureRunning` waits for an outgoing `.shuttingDown` daemon to actually exit
+        /// before spawning a replacement. Unlike `handoffTransitionTimeout`, this waits for nothing to
+        /// *arrive* — there is no successor — only for the outgoing process to release
+        /// `TerminalServiceInstanceLock`. `shutdown()`'s dominant cost is draining each live session's
+        /// queued persistence writes through a SQLite connection whose busy timeout is 5s
+        /// (`SpacesSQLiteDatabase.busyTimeoutMS`), so a single contended session can legitimately take that
+        /// long; this matches that budget rather than borrowing the handoff constant's extra margin for an
+        /// exec preflight a shutdown never runs.
+        private static let shutdownExitTimeout: TimeInterval = 5
+
+        /// True when a ping response means "the daemon is alive but on its way out with no successor
+        /// coming", i.e. `DaemonLivenessState.teardownRejection()`'s `.shuttingDown` answer. The sibling
+        /// predicate to `isTransitionalHandoffPing`: that one gates a wait for a replacement to arrive,
+        /// this one gates a wait for the current process to leave — see `waitForShuttingDownServiceExit`.
+        static func isShuttingDownPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .shuttingDown }
+
+        /// Waits for a daemon that answered `.shuttingDown` to actually release
+        /// `TerminalServiceInstanceLock`, not merely to have said it is leaving — a rejection alone proves
+        /// nothing, since the outgoing daemon keeps answering pings with it right up until it exits.
+        /// Reuses `waitForServiceExit`'s dual gate (the candidate pid is dead AND the socket refuses to
+        /// answer even a rejection), which is what tells "gone" apart from "going", bounded by
+        /// `shutdownExitTimeout`. The caller proceeds to its normal spawn either way: if the outgoing
+        /// daemon is still alive when this returns, the spawn fails exactly as it would have without this
+        /// wait, just after giving the exit a fair, bounded chance instead of none at all — this is not a
+        /// retry loop, only the one wait `ensureRunning` was already going to need before its one spawn
+        /// attempt.
+        static func waitForShuttingDownServiceExit(socketPath: String, rejection: TerminalServiceResponse) {
+            var candidatePIDs = Set<pid_t>()
+            if let servicePID = rejection.servicePID { candidatePIDs.insert(pid_t(servicePID)) }
+            _ = waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: shutdownExitTimeout)
         }
 
         private static func stopExistingService(socketPath: String, timeout: TimeInterval) {
@@ -295,7 +342,16 @@ import Foundation
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
                 let livePIDs = candidatePIDs.filter { isProcessAlive(pid: Int($0)) }
-                let canPing = FileManager.default.fileExists(atPath: socketPath) && ((try? pingResponse(timeout: 0.2)) != nil)
+                // Pings the given `socketPath` directly, the same way `waitForLivePongThroughTransition`
+                // does, rather than going through `pingResponse()` (which re-resolves the canonical
+                // profile socket path). Every caller passes its own already-resolved canonical path today,
+                // so this is behavior-preserving, but it keeps this check honoring its own parameter like
+                // the `fileExists` check beside it, instead of silently depending on the two paths always
+                // agreeing.
+                let canPing =
+                    FileManager.default.fileExists(atPath: socketPath)
+                    && ((try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2))
+                        != nil)
                 if livePIDs.isEmpty && !canPing { return true }
                 Thread.sleep(forTimeInterval: 0.05)
             }
