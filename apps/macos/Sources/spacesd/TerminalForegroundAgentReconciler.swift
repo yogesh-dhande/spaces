@@ -48,17 +48,20 @@ import workspacecore
     /// gate the loop consults is on the main actor along with this, so once `stopped` is set no
     /// further pass can be submitted and the close is the last thing the store ever does.
     ///
-    /// `close()` waits for that release, so returning from here establishes it: whatever the daemon does
-    /// next — including re-execing a replacement against the same database — starts after this loop's
-    /// connection is gone and its final checkpoint has been taken.
-    func stop() {
+    /// Awaiting the close is what establishes the release: returning from here means this loop's
+    /// connection is gone and its final checkpoint taken, so whatever the daemon does next — including
+    /// re-execing a replacement against the same database — starts after that. Awaiting rather than
+    /// blocking also matters: the pass this close may be queued behind can hop synchronously onto the
+    /// terminal engine actor, which is allowed to hop synchronously back to main, so the main actor has
+    /// to stay free while the store's queue drains.
+    func stop() async {
         stopped = true
         pending = false
         if let observer {
             NotificationCenter.default.removeObserver(observer)
             self.observer = nil
         }
-        reconcileStore.close()
+        await reconcileStore.close()
     }
 
     private func reconcile() {

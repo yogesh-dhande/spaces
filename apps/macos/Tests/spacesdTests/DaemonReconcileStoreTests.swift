@@ -55,7 +55,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
         let reconcileStore = DaemonReconcileStore(label: "test.reconcile.routes", databasePath: databasePath) { store in
             observedRoutes.set(try WorkspaceOrchestrator(store: store).caddyRouteTable())
         }
-        defer { reconcileStore.close() }
+        addTeardownBlock { await reconcileStore.close() }
 
         try await reconcileStore.runPass()
         let slug = SpacesProfile.workspaceHostSlug(
@@ -84,7 +84,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
             _ = try store.projects()
             if shouldFail.value { throw NSError(domain: "test.reconcile", code: 7) }
         }
-        defer { reconcileStore.close() }
+        addTeardownBlock { await reconcileStore.close() }
 
         try await reconcileStore.runPass()
 
@@ -114,7 +114,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
         XCTAssertEqual(passCount.value, 1)
         XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
-        reconcileStore.close()
+        await reconcileStore.close()
         try await reconcileStore.runPass()
 
         XCTAssertEqual(passCount.value, 1, "A pass after close must not run.")
@@ -131,8 +131,8 @@ final class DaemonReconcileStoreTests: XCTestCase {
             _ = try store.projects()
         }
 
-        reconcileStore.close()
-        reconcileStore.close()
+        await reconcileStore.close()
+        await reconcileStore.close()
         try await reconcileStore.runPass()
 
         XCTAssertEqual(passCount.value, 0)
@@ -140,27 +140,56 @@ final class DaemonReconcileStoreTests: XCTestCase {
     }
 
     /// `close()` submitted while a pass is running is the harder of the two queue orders: the close lands
-    /// behind work that still holds the connection. It must still be terminal by the time it returns.
+    /// behind work that still holds the connection. It must be terminal by the time it returns, and it must
+    /// reach that point by suspending its caller rather than by holding the caller's thread.
     ///
-    /// The pass reports when it starts running, so the close is submitted while that pass demonstrably owns
-    /// the queue — the order under test is constructed here, not left to whichever context the scheduler
-    /// happens to reach first. Both assertions are then consequences of `close()` having waited: it cannot
-    /// return while the pass ahead of it is still running, and it cannot return with the connection open.
-    func testCloseRacingAPassLeavesNoOpenConnection() async throws {
+    /// Both properties come out of one constructed interleaving, and the gate is what constructs it. The
+    /// racing pass reports that it started and then parks on the gate, so it is provably still running — it
+    /// cannot have released the store's queue — for as long as the gate is held. The only thing that opens
+    /// the gate is a block enqueued on the MAIN queue before the close is called. This test is
+    /// `@MainActor`, so that block cannot run inside the same main-actor turn that submits it: it runs only
+    /// once the close yields the main actor.
+    ///
+    /// That makes each assertion a fact rather than a hope:
+    /// - A close that returns without waiting returns while the gate is still shut, so it observes an
+    ///   unfinished pass and an open connection.
+    /// - A close that waits by BLOCKING the main thread never lets the gate open at all. It is the shape
+    ///   the daemon must not have: a reconcile pass can reach the process-wide terminal terminator, which
+    ///   enters the terminal engine actor, which may hop synchronously back to main. The gate's wait is
+    ///   bounded so that shape fails this test with `mainQueueRanDuringClose` false instead of hanging the
+    ///   suite the way the real three-way deadlock would.
+    @MainActor func testCloseBehindARunningPassYieldsTheMainActorAndLeavesNoOpenConnection() async throws {
         let progress = PassProgressBox()
+        let gate = PassGate()
         let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in
             progress.noteStarted()
+            gate.waitUntilOpened()
             _ = try store.projects()
             progress.noteFinished()
         }
-        // Opens the connection, so the WAL stays non-empty until the close checkpoints it.
+        // Opens the connection, so the WAL stays non-empty until the close checkpoints it. The gate starts
+        // open so this priming pass runs straight through.
+        gate.open()
         try await reconcileStore.runPass()
         XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
+        gate.shut()
         async let racingPass: Void = reconcileStore.runPass()
         await progress.waitUntilStarted(2)
-        reconcileStore.close()
 
+        // Enqueued while this main-actor test still owns the main actor, so it cannot run until the close
+        // below yields it. Nothing else opens the gate the racing pass is parked on.
+        let mainQueueRanDuringClose = LockedFlagBox()
+        DispatchQueue.main.async {
+            mainQueueRanDuringClose.set(true)
+            gate.open()
+        }
+        await reconcileStore.close()
+
+        XCTAssertTrue(
+            mainQueueRanDuringClose.value,
+            "Close must suspend the main actor while it waits, not hold its thread: main-queue work enqueued before the close has to run while it waits."
+        )
         XCTAssertEqual(progress.finished, 2, "Close must not return while the pass it queued behind is still running.")
         XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive a close that has returned.")
         try await racingPass
@@ -242,6 +271,36 @@ private final class PassProgressBox: @unchecked Sendable {
             waiters.append((threshold, continuation))
             lock.unlock()
         }
+    }
+}
+
+/// Parks a reconcile pass on the store's own queue until the test opens it, so "a close submitted while a
+/// pass is still running" is a constructed fact rather than a hoped-for scheduling outcome. Blocking is the
+/// point: the pass body runs on the store's private serial queue, and holding that queue is the state under
+/// test. The wait is bounded so that a `close()` which blocks its caller's thread — leaving nothing able to
+/// open the gate — fails its test with a diagnosis rather than hanging the suite.
+private final class PassGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var opened = true
+
+    func open() {
+        condition.lock()
+        opened = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func shut() {
+        condition.lock()
+        opened = false
+        condition.unlock()
+    }
+
+    func waitUntilOpened() {
+        let deadline = Date().addingTimeInterval(10)
+        condition.lock()
+        while !opened, Date() < deadline { condition.wait(until: deadline) }
+        condition.unlock()
     }
 }
 

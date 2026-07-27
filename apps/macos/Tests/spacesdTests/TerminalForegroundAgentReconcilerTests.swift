@@ -44,7 +44,7 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
         NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil)
-        reconciler.stop()
+        await reconciler.stop()
 
         try await settle()
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "A reconcile triggered across the stop must not run.")
@@ -55,7 +55,7 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
     @MainActor func testNotificationsAfterStopDoNoDatabaseWork() async throws {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
-        reconciler.stop()
+        await reconciler.stop()
 
         for _ in 0..<50 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
         try await settle()
@@ -73,14 +73,11 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
         try await Task.sleep(nanoseconds: 20_000_000)
         for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
-        reconciler.stop()
+        await reconciler.stop()
 
-        try await settle()
         XCTAssertTrue(FileManager.default.fileExists(atPath: databasePath), "The burst should have run passes before the stop.")
-        // The close is enqueued behind whatever pass was in flight, and a saturated main queue can
-        // delay the burst's last pass, so wait for the release rather than assuming it has landed.
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, !databaseIsCheckpointed() { try await Task.sleep(nanoseconds: 50_000_000) }
+        // No settling first: `stop()` awaits the release, so returning from it is what establishes that the
+        // connection those passes opened is gone. A poll here would hide a stop that did not wait.
         XCTAssertTrue(databaseIsCheckpointed(), "The connection those passes opened must be released at stop.")
     }
 
@@ -90,8 +87,8 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
     @MainActor func testStopBeforeAnyPassAndRepeatedStopAreSafe() async throws {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
-        reconciler.stop()
-        reconciler.stop()
+        await reconciler.stop()
+        await reconciler.stop()
 
         try await settle()
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath))

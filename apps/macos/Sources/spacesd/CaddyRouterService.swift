@@ -67,15 +67,18 @@
         /// Every gate the loop consults is on the main actor along with this, so once `stopped` is
         /// set no further pass can be submitted and the close is the last thing the store ever does.
         ///
-        /// `close()` waits for that release, so returning from here establishes it: whatever the daemon
-        /// does next — including re-execing a replacement against the same database — starts after this
-        /// loop's connection is gone and its final checkpoint has been taken.
-        func stop() {
+        /// Awaiting the close is what establishes the release: returning from here means this loop's
+        /// connection is gone and its final checkpoint taken, so whatever the daemon does next —
+        /// including re-execing a replacement against the same database — starts after that. Awaiting
+        /// rather than blocking also keeps the main actor free while the store's queue drains the pass
+        /// this close is queued behind, which a pass that hops onto the terminal engine actor (and from
+        /// there synchronously back to main) depends on.
+        func stop() async {
             stopped = true
             pending = false
             reconcileTask = nil
             lifecycle.stop()
-            reconcileStore.close()
+            await reconcileStore.close()
         }
     }
 

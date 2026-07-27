@@ -485,7 +485,7 @@ enum SpacesDaemonProfileCommandRouting {
         // engine queue) and is refused instead of leaking a child `exit(0)` never reaps. Monotonic: the
         // process exits, so it is never cleared.
         shutdownInProgress = true
-        stopSharedServices()
+        await stopSharedServices()
         // `terminateAllSessions` is engine-isolated (it drives `terminateSession`/Ghostty per core). Hop
         // with the ASYNC `run` — a main-actor context must never sync-wait on the engine (the one-way
         // rule). `terminate()` no longer blocks (PTY teardown is deferred), so this returns promptly after
@@ -508,7 +508,12 @@ enum SpacesDaemonProfileCommandRouting {
     /// observers/receivers, device-runtime services, the Device API supervisor, and the main
     /// request-accepting socket server. Shared by `shutdown()` and the exec-in-place handoff, which
     /// stops intake here and then quiesces (rather than terminates) the session cores.
-    private func stopSharedServices() {
+    ///
+    /// Async because stopping a reconcile loop awaits the release of its database connection instead of
+    /// blocking the main thread on it. Every notification source that could re-arm a loop is torn down
+    /// before the first await, so the suspensions cannot let new work in; a reconcile task already
+    /// committed before the stop only submits a pass the stopped loop's store discards.
+    private func stopSharedServices() async {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
         if let databaseChangeObserver {
@@ -531,14 +536,14 @@ enum SpacesDaemonProfileCommandRouting {
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
-        terminalForegroundAgentReconciler?.stop()
+        await terminalForegroundAgentReconciler?.stop()
         terminalForegroundAgentReconciler = nil
         remoteAgentWatchService?.stop()
         remoteAgentWatchService = nil
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
-            caddyRouterService?.stop()
+            await caddyRouterService?.stop()
             caddyRouterService = nil
         #endif
         deviceAPISupervisor.stop()
@@ -753,7 +758,7 @@ enum SpacesDaemonProfileCommandRouting {
         }
         writeStandardError("spacesd handoff_preflight_ok\n")
 
-        stopSharedServices()
+        await stopSharedServices()
         writeStandardError("spacesd handoff_intake_stopped\n")
 
         // Flush agent-notification lines already enqueued from main-actor callers (RemoteAgentWatchService
