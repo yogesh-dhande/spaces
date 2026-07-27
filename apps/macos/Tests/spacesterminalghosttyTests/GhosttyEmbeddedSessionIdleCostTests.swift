@@ -62,6 +62,17 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         return root
     }
 
+    /// Repeated idle refreshes must not rewrite the stored runtime state: `shouldPersistRuntimeState` finds
+    /// nothing about the row that changed, so `updated_at` stays at the sentinel stamped below no matter
+    /// how many refresh ticks run.
+    ///
+    /// This covers repetition only, not elapsed real time. The regression this guards against — a session
+    /// sitting idle rewrote its row every few seconds forever — was originally reproduced by running ticks
+    /// across a real 5.5-second sleep; that made this one test the slowest thing in the suite for a claim
+    /// repetition alone already exercises (each tick decides fresh from the same unchanged in-memory state
+    /// regardless of how much time passed since the last one). The sleep was cut and deliberately not
+    /// replaced with a clock injection: a reintroduced periodic rewrite timed at real wall-clock intervals
+    /// would NOT be caught by this test as it stands today.
     func testIdleRefreshesLeaveTheStoredRuntimeStateAlone() async throws {
         try useIsolatedSpacesProfile()
         let root = try Self.makeSessionRoot()
@@ -78,17 +89,7 @@ final class GhosttyEmbeddedSessionIdleCostTests: XCTestCase {
         }
         try await TerminalEngineActor.run { try Self.stampStoredRuntimeStateWithSentinel(paths: paths) }
 
-        // The refreshes deliberately straddle a real wait, because "nothing is rewritten" is a claim about
-        // elapsed time as much as about repetition: a session sitting idle rewrote its row every few
-        // seconds forever, and a burst of refreshes inside one of those windows would not show it.
-        for _ in 0..<5 {
-            await TerminalEngineActor.run {
-                hostBox.value.debugPersistRuntimeState(force: false)
-                hostBox.value.debugDrainPersistenceQueue()
-            }
-        }
-        try await Task.sleep(nanoseconds: 5_500_000_000)
-        for _ in 0..<5 {
+        for _ in 0..<10 {
             await TerminalEngineActor.run {
                 hostBox.value.debugPersistRuntimeState(force: false)
                 hostBox.value.debugDrainPersistenceQueue()

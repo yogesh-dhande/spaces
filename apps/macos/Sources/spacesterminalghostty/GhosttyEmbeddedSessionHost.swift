@@ -1453,12 +1453,25 @@
         /// this question by the same single-writer invariant that lets owner gating read it (see
         /// `cachedAttachmentSnapshot`) — a lease-governed client can only appear through an attach on this
         /// core, which invalidates the cache — so the gate can only skip a tick that had nothing to expire.
+        ///
+        /// The gate also requires `expiredRemoteClientIDs` to be empty. A client already marked expired here
+        /// is, by construction, no longer in `hasLeaseGovernedAttachedClient()`'s view — `markClientsExpiredInCache`
+        /// optimistically detaches it in the same cache this gate reads, before its durable detach write has
+        /// committed. Without this second condition, the very first tick after an expiry decision would see
+        /// no lease-governed attached client and take the fast path below, which clears `expiredRemoteClientIDs`.
+        /// That erases the pending marker `isClientDurablyDisconnected` depends on to veto a rescuing heartbeat
+        /// (see its doc comment) while the expiry write can still be sitting in the queue — e.g. behind a
+        /// contended SQLite write lock — so a heartbeat arriving in that window would be rejected instead of
+        /// vetoing the pending detach, disconnecting a client that was actually still alive. Keeping the ids
+        /// around costs nothing while nothing is pending; it only routes ticks with an in-flight decision
+        /// through the full (still cheap) logic below, which already ignores ids it re-derives as no longer
+        /// stale.
         @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
             let cutoff = now.addingTimeInterval(-TerminalSessionPersistence.remoteClientLeaseInterval)
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
-            guard hasLeaseGovernedAttachedClient() else {
+            guard hasLeaseGovernedAttachedClient() || !expiredRemoteClientIDs.isEmpty else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
                 return []
             }

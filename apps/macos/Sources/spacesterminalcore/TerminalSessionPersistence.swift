@@ -353,23 +353,27 @@ public enum TerminalSessionPersistence {
 
     public static func readLaunchConfiguration(paths: TerminalSessionPaths) throws -> TerminalSessionLaunchConfiguration {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
-            let row = try database.queryRow(
+        // The lane returns the raw row only; decoding (enum lookups, string slicing) is CPU work that does
+        // not touch the connection, so it happens after the lane releases — see `TerminalDatabaseConnection`.
+        let row = try withProfileDatabase { database in
+            try database.queryRow(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
                            created_at, COALESCE(user_title, '')
                     FROM terminal_sessions
                     WHERE root_directory = ?
                     """, bindings: [root])
-            guard let row else { throw TerminalSessionPersistenceError.unknownSession(root) }
-            return try decodeLaunchConfiguration(row: row)
         }
+        guard let row else { throw TerminalSessionPersistenceError.unknownSession(root) }
+        return try decodeLaunchConfiguration(row: row)
     }
 
     public static func readRuntimeState(paths: TerminalSessionPaths) throws -> TerminalSessionRuntimeState {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
-            let row = try database.queryRow(
+        // See `readLaunchConfiguration`: the lane returns the raw row, decoding (including the foreground
+        // argv JSON) happens after it releases.
+        let row = try withProfileDatabase { database in
+            try database.queryRow(
                 sql: """
                     SELECT session_id, backend, service_pid, COALESCE(child_pid, ''), COALESCE(title, ''), COALESCE(working_directory, ''),
                            COALESCE(columns, ''), COALESCE(rows, ''), state, updated_at, COALESCE(exited_at, ''),
@@ -380,14 +384,15 @@ public enum TerminalSessionPersistence {
                     FROM terminal_runtime_states
                     WHERE root_directory = ?
                     """, bindings: [root])
-            guard let row else { throw TerminalSessionPersistenceError.unknownSession(root) }
-            return try decodeRuntimeState(row: row)
         }
+        guard let row else { throw TerminalSessionPersistenceError.unknownSession(root) }
+        return try decodeRuntimeState(row: row)
     }
 
     public static func readAttachmentSnapshot(paths: TerminalSessionPaths) throws -> TerminalSessionAttachmentSnapshot {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
+        // See `readLaunchConfiguration`: the lane returns the raw rows, decoding happens after it releases.
+        let (clientRows, attachmentRows) = try withProfileDatabase { database -> ([[String]], [[String]]) in
             let clients = try database.queryRows(
                 sql: """
                     SELECT client_id, kind, identity_label, COALESCE(identity_host_name, ''), COALESCE(identity_device_name, ''),
@@ -395,33 +400,37 @@ public enum TerminalSessionPersistence {
                     FROM terminal_clients
                     WHERE root_directory = ?
                     ORDER BY connected_at, client_id
-                    """, bindings: [root]
-            ).map(decodeClient(row:))
+                    """, bindings: [root])
             let attachments = try database.queryRows(
                 sql: """
                     SELECT id, session_id, client_id, mode, attached_at, COALESCE(detached_at, '')
                     FROM terminal_attachments
                     WHERE root_directory = ?
                     ORDER BY attached_at, id
-                    """, bindings: [root]
-            ).map(decodeAttachment(row:))
-            return TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
+                    """, bindings: [root])
+            return (clients, attachments)
         }
+        let clients = try clientRows.map(decodeClient(row:))
+        let attachments = try attachmentRows.map(decodeAttachment(row:))
+        return TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
     }
 
     public static func readRemoteSessionState(paths: TerminalSessionPaths) throws -> GhosttyRemoteSessionStatePayload {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
-            let row = try database.queryRow(
+        // The lane returns the raw payload string only. Decoding it is a JSON parse of a render-frame
+        // payload that can run tens of KB, and it does not touch the connection, so it happens after the
+        // lane releases — see `TerminalDatabaseConnection`.
+        let payloadJSON = try withProfileDatabase { database -> String? in
+            try database.queryRow(
                 sql: """
                     SELECT payload_json
                     FROM terminal_remote_session_states
                     WHERE root_directory = ?
-                    """, bindings: [root])
-            guard let payloadJSON = row?.first else { throw TerminalSessionPersistenceError.unknownSession(root) }
-            guard let data = payloadJSON.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>") }
-            return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
+                    """, bindings: [root])?.first
         }
+        guard let payloadJSON else { throw TerminalSessionPersistenceError.unknownSession(root) }
+        guard let data = payloadJSON.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>") }
+        return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
     }
 
     public static func appendPendingAgentSignal(_ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths) throws {
@@ -460,10 +469,12 @@ public enum TerminalSessionPersistence {
 
     public static func pendingAgentSignals(sessionID: String, paths: TerminalSessionPaths) throws -> [TerminalServiceAgentSignalEvent] {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
+        // The canonical-session check needs the connection, so it stays in the lane; decoding the returned
+        // rows (including each event's environment-keys JSON) does not, so it happens after release.
+        let rows = try withProfileDatabase { database -> [[String]] in
             let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
             guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
-            let rows = try database.queryRows(
+            return try database.queryRows(
                 sql: """
                     SELECT id, session_id, COALESCE(workspace_id, ''), COALESCE(workspace_path, ''), event_type, provider, COALESCE(label, ''),
                            COALESCE(terminal_tracking_id, ''),
@@ -472,8 +483,8 @@ public enum TerminalSessionPersistence {
                     WHERE root_directory = ? AND session_id = ? AND acknowledged_at IS NULL
                     ORDER BY created_at, id
                     """, bindings: [root, sessionID])
-            return try rows.map(decodeAgentSignalEvent(row:))
         }
+        return try rows.map(decodeAgentSignalEvent(row:))
     }
 
     public static func acknowledgeAgentSignals(ids: [String], sessionID: String, paths: TerminalSessionPaths, acknowledgedAt: String) throws {
@@ -716,8 +727,10 @@ public enum TerminalSessionPersistence {
         // filter and `liveAttachments` cannot disagree about which kinds the lease governs.
         let leaseExemptKinds = TerminalClientKind.allCases.filter { !$0.livenessDependsOnLease }.map(\.rawValue)
         let leaseExemptPlaceholders = Array(repeating: "?", count: leaseExemptKinds.count).joined(separator: ", ")
-        return try withProfileDatabase { database in
-            let rows = try database.queryRows(
+        // The lane returns the raw candidate rows only; the cutoff comparison against `now` is CPU work
+        // that does not touch the connection, so it happens after the lane releases.
+        let rows = try withProfileDatabase { database in
+            try database.queryRows(
                 sql: """
                     SELECT c.client_id, c.lease_refreshed_at
                     FROM terminal_clients c
@@ -728,13 +741,13 @@ public enum TerminalSessionPersistence {
                       AND c.kind NOT IN (\(leaseExemptPlaceholders))
                     ORDER BY c.client_id
                     """, bindings: [root] + leaseExemptKinds)
-            let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
-            return rows.compactMap { row in
-                guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else {
-                    return StaleRemoteClient(clientID: row[0], leaseRefreshedAt: row[1])
-                }
-                return nil
+        }
+        let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
+        return rows.compactMap { row in
+            guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else {
+                return StaleRemoteClient(clientID: row[0], leaseRefreshedAt: row[1])
             }
+            return nil
         }
     }
 
@@ -974,21 +987,24 @@ public enum TerminalSessionPersistence {
     /// is read from the row rather than re-derived from the current profile so a session the profile no
     /// longer derives a matching path for is still readable, repairable, and collectable.
     public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [KnownTerminalSession] {
-        try withProfileDatabase { database in
+        // The lane returns raw rows only. Decoding each row and resolving its paths (`forStoredSession`
+        // reads the profile root and the secure socket root) are not connection work, so both happen after
+        // the lane releases — the pattern `TerminalSessionCatalog.listLiveSessions` also follows.
+        let rows = try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
                            created_at, COALESCE(user_title, ''), root_directory
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
-                    """
-            ).map { row in
-                guard row.count >= 12 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-                let launchConfiguration = try decodeLaunchConfiguration(row: row)
-                return KnownTerminalSession(
-                    launchConfiguration: launchConfiguration,
-                    paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[11]))
-            }
+                    """)
+        }
+        return try rows.map { row in
+            guard row.count >= 12 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: row)
+            return KnownTerminalSession(
+                launchConfiguration: launchConfiguration,
+                paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[11]))
         }
     }
 
@@ -1015,7 +1031,9 @@ public enum TerminalSessionPersistence {
     public static func listInteractiveSessionRuntimeStates() throws -> [KnownTerminalSessionRuntime] {
         let interactiveStates = TerminalSessionState.allCases.filter(\.isInteractive).map(\.rawValue)
         let interactiveStatePlaceholders = Array(repeating: "?", count: interactiveStates.count).joined(separator: ", ")
-        return try withProfileDatabase { database in
+        // The lane returns raw rows only; decoding each pair of rows into a launch configuration and
+        // runtime state does not touch the connection, so it happens after the lane releases.
+        let rows = try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
                     SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
@@ -1030,13 +1048,13 @@ public enum TerminalSessionPersistence {
                     JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
                     WHERE r.state IN (\(interactiveStatePlaceholders))
                     ORDER BY s.created_at, s.session_id
-                    """, bindings: interactiveStates
-            ).compactMap { row in
-                guard row.count >= 30 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-                let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
-                guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
-                return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
-            }
+                    """, bindings: interactiveStates)
+        }
+        return try rows.compactMap { row in
+            guard row.count >= 30 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
         }
     }
 
@@ -1216,7 +1234,9 @@ public enum TerminalSessionPersistence {
     ///
     /// Reads run on their own connection, so a read taken inline on the terminal engine — owner gating,
     /// stale-client liveness — never waits for a writer that is itself waiting on the database's write
-    /// lock. See `TerminalDatabaseConnection`.
+    /// lock. That connection is also shared by every other reader, so `body` must return raw rows and
+    /// leave decoding, path resolution, and any other non-SQLite work to its caller — see
+    /// `TerminalDatabaseConnection`'s note on why that discipline matters.
     private static func withProfileDatabase<T>(at databasePath: String? = nil, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
         try TerminalDatabaseConnection.shared.read(path: try databasePath ?? currentDatabasePath(), body)
     }

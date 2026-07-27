@@ -3154,6 +3154,53 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
     }
 
+    /// Regression for the fast-path gate at the top of `expireStaleRemoteClientsIfNeeded`: once a tick decides
+    /// to expire a client, `markClientsExpiredInCache` optimistically detaches it in the in-memory attachment
+    /// cache immediately, before the durable detach (parked here on the persistence queue) commits. A second
+    /// tick that runs in that window sees `hasLeaseGovernedAttachedClient() == false` — the cache already shows
+    /// nothing left to expire — so a gate that only checks that predicate takes the fast path and clears
+    /// `expiredRemoteClientIDs`. That erases the pending marker `isClientDurablyDisconnected` relies on to
+    /// veto a rescuing heartbeat, so a heartbeat arriving after the wipe is rejected as durably-disconnected
+    /// instead of vetoing the still-pending detach. Deterministic: the persistence queue is held with
+    /// `debugHoldPersistenceQueue()` rather than relying on real write contention or a sleep, so the parked
+    /// window is exact, not timing-dependent.
+    func testSecondTickWhilePendingExpiryIsUncommittedDoesNotDropHeartbeatVeto() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-second-tick-pending", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // A stale (2000-era lease) remote viewer so the first tick decides to expire it.
+            let staleClient = TerminalClient(
+                id: "remote-second-tick", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            // Park the persistence queue so the first tick's atomic detach is enqueued but cannot commit.
+            let gate = host.debugHoldPersistenceQueue()
+            let firstTick = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(firstTick, [staleClient.id], "the first tick must decide to expire the stale viewer")
+            // Second tick while the detach is still parked: the cache already shows the client detached, so
+            // this must not re-decide the expiry NOR clear the pending marker.
+            let secondTick = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(secondTick, [], "the second tick must not re-decide an already-pending expiry")
+            let heartbeat = host.handleControlRequest(.init(command: "heartbeat", clientID: staleClient.id))
+            XCTAssertTrue(
+                heartbeat.ok,
+                "a heartbeat for a client whose expiry is still pending (parked, not yet committed) must be accepted, vetoing the pending "
+                    + "detach — not rejected as durably disconnected")
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+        }
+    }
+
     /// Enforcement/advertisement coherence: a stale-client expiry promotes the transfer target to owner in the
     /// in-memory attachment cache and broadcasts that immediately, while the atomic `expireClients` write is
     /// only enqueued (here held off by a competing write lock, standing in for the up-to-5s busy-timeout window).

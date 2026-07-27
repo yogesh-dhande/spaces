@@ -25,9 +25,16 @@ import spacesdatabase
 /// introduced to remove. Two connections keep the guarantee while still opening each of them once.
 ///
 /// Writers share one connection and therefore serialize, which is what they already did on the database
-/// file — through a busy-timeout retry loop that slept between attempts. Readers likewise share one and
-/// serialize with each other, which costs nothing worth having: a WAL read never waits on the write lock,
-/// so no reader can hold the lane for long.
+/// file — through a busy-timeout retry loop that slept between attempts. Readers likewise share one
+/// connection and serialize with each other, but only for the SQLite statement itself: a WAL read never
+/// waits on the write lock, so that part of the lane is briefly held no matter how many readers are
+/// queued behind it. That guarantee does NOT extend to whatever a caller's closure does with the row once
+/// SQLite has returned it — decoding a value, resolving a path, walking a socket directory — because none
+/// of that needs the connection, yet it still runs while the lane (and every other reader behind it) waits.
+/// Every read below is written to return raw rows from the lane and do that work after leaving it, the
+/// same shape `TerminalSessionCatalog.listLiveSessions` uses; a call that skips this coupling an unrelated
+/// reader's stall to work that has nothing to do with SQLite is a bug in that call, not a cost this lane
+/// is willing to accept.
 ///
 /// ## Why a dedicated serial queue owns each connection
 /// `SpacesSQLiteDatabase` wraps one `sqlite3` handle, and a transaction (`BEGIN IMMEDIATE` … `COMMIT`) is a
