@@ -178,6 +178,18 @@ import Foundation
             // before this point is ever reached.
             waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: try TerminalServicePaths.instanceLockPath())
 
+            // The gate above can end two ways: the owner actually left, or a live daemon answered `ok`
+            // while still wearing the owner's pid (an exec-in-place successor never changes pid). Re-check
+            // for the latter here, before spawning: spawning into an already-live daemon would only create
+            // a doomed competitor that loses the instance lock and exits.
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                TerminalPerformance.logMetric(
+                    "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "launched=0 adopted=1 lockgate=1")
+                return false
+            }
+
             // Computed after the instance-lock-owner wait above, not before it, so a slow-to-exit outgoing
             // daemon never eats into the budget the spawn-poll loop below needs to observe a freshly
             // spawned replacement.
@@ -313,19 +325,40 @@ import Foundation
         private static let shutdownExitTimeout: TimeInterval = 5
 
         /// Waits for the process recorded as the profile's live `TerminalServiceInstanceLock` owner (if
-        /// any) to actually exit, bounded by `shutdownExitTimeout`. This is the gate `ensureRunning`'s
-        /// flock winner runs before spawning: a live owner means a spawn right now is doomed (the child's
-        /// `SpacesDaemonController.init` collides with the still-held lock and exits), so the winner waits
-        /// for the owner to leave rather than spawning straight into that collision. See the call site's
-        /// comment in `ensureRunning` for why reading the lock — rather than depending on a ping response —
-        /// is what lets this cover an outgoing daemon whose accept source is already cancelled and answers
-        /// no ping at all.
+        /// any) to actually leave — either by exiting, or by a live daemon answering the socket — bounded
+        /// by `shutdownExitTimeout`. This is the gate `ensureRunning`'s flock winner runs before spawning:
+        /// a live owner means a spawn right now is doomed (the child's `SpacesDaemonController.init`
+        /// collides with the still-held lock and exits), so the winner waits for the owner to leave rather
+        /// than spawning straight into that collision. See the call site's comment in `ensureRunning` for
+        /// why reading the lock — rather than depending on a ping response — is what lets this cover an
+        /// outgoing daemon whose accept source is already cancelled and answers no ping at all.
+        ///
+        /// An exec-in-place handoff successor keeps the outgoing process's pid, so "pid alive" alone can't
+        /// tell an outgoing daemon from a live successor wearing the same pid. This runs its own poll loop
+        /// (rather than delegating to `waitForServiceExit`, whose other callers genuinely want "gone" and
+        /// for whom a live-pong exit would be wrong) so it can also return the moment a ping answers
+        /// `ok: true`: that is a healthy daemon, not one on its way out, so there is nothing left to wait
+        /// for and the caller's post-gate adoption check picks it up instead. Without this early exit, that
+        /// case would burn the full `shutdownExitTimeout` waiting for a pid that will never die, and
+        /// `ensureRunning` would then spawn a doomed competitor before its own poll loop finally adopted
+        /// the live successor.
         ///
         /// Returns immediately, without waiting, when the lock file is absent or names a pid that is
         /// already dead: only a live owner can block a spawn, so there is nothing to wait for otherwise.
         static func waitForInstanceLockOwnerToExit(socketPath: String, lockPath: String) {
             guard let ownerPID = try? TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath) else { return }
-            _ = waitForServiceExit(socketPath: socketPath, candidatePIDs: [ownerPID], timeout: shutdownExitTimeout)
+            let deadline = Date().addingTimeInterval(shutdownExitTimeout)
+            while Date() < deadline {
+                // Mirrors `waitForServiceExit`'s own per-iteration checks (its pid-liveness helper and its
+                // short-timeout ping probe on `socketPath`), plus the ok-pong early exit described above.
+                let response =
+                    FileManager.default.fileExists(atPath: socketPath)
+                    ? try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2)
+                    : nil
+                if let response, response.ok { return }
+                if !isProcessAlive(pid: Int(ownerPID)) && response == nil { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
 
         private static func stopExistingService(socketPath: String, timeout: TimeInterval) {

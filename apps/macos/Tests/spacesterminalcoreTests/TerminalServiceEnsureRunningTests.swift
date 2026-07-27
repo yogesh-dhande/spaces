@@ -172,5 +172,38 @@ import XCTest
             XCTAssertLessThan(
                 elapsed, 3, "must return once the owner actually exits, not wait out the full shutdownExitTimeout")
         }
+
+        /// Reproduces the exec-in-place handoff case (P2 follow-up to #325/#334/#341): the successor keeps
+        /// the outgoing process's pid, so the lock's recorded owner pid stays alive even once a healthy
+        /// daemon is answering on the socket. The gate must not treat that pid-alive signal as "still
+        /// going" and burn the full `shutdownExitTimeout` — a live `ok: true` pong settles it immediately.
+        func testWaitForInstanceLockOwnerToExitReturnsPromptlyWhenALiveDaemonAnswersUnderTheSamePID() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let lockPath = root.appendingPathComponent("instance.lock").path
+            let socketPath = root.appendingPathComponent("service.sock").path
+            let queue = DispatchQueue(label: "terminal-service-ensure-running-test-handoff")
+
+            // The lock names the current test process's own pid: it is guaranteed alive for the whole
+            // test, standing in for the exec successor that keeps the outgoing image's pid.
+            try writeFakeInstanceLock(pid: getpid(), path: lockPath)
+
+            let server = TerminalServiceServer(
+                socketPath: socketPath, queue: queue,
+                livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: Int32(getpid())) }
+            ) { _ in TerminalServiceResponse(ok: false, message: "unexpected non-ping request") }
+            try server.start()
+            defer { server.stop() }
+
+            let start = Date()
+            TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
+            let elapsed = Date().timeIntervalSince(start)
+
+            XCTAssertLessThan(
+                elapsed, 3,
+                "a live ok pong must end the gate immediately even though the owner pid (this test process) never dies")
+        }
     }
 #endif
