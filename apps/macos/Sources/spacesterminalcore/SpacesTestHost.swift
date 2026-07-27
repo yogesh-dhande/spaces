@@ -14,8 +14,8 @@ public enum SpacesTestHost {
     ///   every macOS Swift Testing suite; `SpacesTestHostDetectionTests` fails if it goes.
     /// - Linux has no Objective-C runtime, so that check is compiled out. `swift test` there execs the
     ///   test binary directly and its `argv[0]` is `<Package>PackageTests.xctest`, which is the only
-    ///   signal on that platform — hence the argument scan, and hence that suite runs in the Linux lane
-    ///   too.
+    ///   signal on that platform — hence `executableIsTestBundle`, and hence that suite runs in the
+    ///   Linux lane too.
     ///
     /// `Bundle.allBundles` is deliberately NOT consulted. On Linux (corelibs-foundation, Swift 6.2) it
     /// dereferences null inside `CFBundleGetAllBundles` and takes the process down with SIGSEGV, and it
@@ -26,6 +26,17 @@ public enum SpacesTestHost {
         #if canImport(ObjectiveC)
             if NSClassFromString("XCTestCase") != nil { return true }
         #endif
-        return CommandLine.arguments.contains { $0.hasSuffix(".xctest") }
+        return executableIsTestBundle(arguments: CommandLine.arguments)
+    }
+
+    /// Whether the running executable — `argv[0]`, and only `argv[0]` — is a test bundle.
+    ///
+    /// Restricted to the executable on purpose. The rest of `argv` is data the executable was asked to
+    /// operate on, and a Spaces command may legitimately name a test bundle in it: running
+    /// `spaces terminal command 'xcrun xctest ./Foo.xctest'`, or tailing a path under a `.xctest`
+    /// directory, must not make the CLI classify itself as a test host and then refuse the user's own
+    /// live profile. Empty arguments answer `false` rather than trapping.
+    static func executableIsTestBundle(arguments: [String]) -> Bool {
+        arguments.first?.hasSuffix(".xctest") ?? false
     }
 }
