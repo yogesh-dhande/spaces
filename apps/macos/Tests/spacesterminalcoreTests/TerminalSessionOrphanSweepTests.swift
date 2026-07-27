@@ -10,18 +10,22 @@ import XCTest
 /// non-directory strays, untouched.
 final class TerminalSessionOrphanSweepTests: XCTestCase {
     private var originalRuntimeDirectory: String?
+    private var originalDatabasePath: String?
     private var root: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db", isDirectory: false).path, 1)
     }
 
     override func tearDownWithError() throws {
         if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
         try? FileManager.default.removeItem(at: root)
         try super.tearDownWithError()
     }

@@ -13,6 +13,9 @@ import XCTest
 /// sentinel being replaced means it performed one. That counts real database writes without instrumenting
 /// product code.
 final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     private static let sentinelLease = "1999-01-01T00:00:00Z"
 
     /// Carries the engine-isolated core to the engine bridge from a background thread; the core is only ever

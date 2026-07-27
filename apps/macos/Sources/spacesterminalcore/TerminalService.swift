@@ -367,7 +367,7 @@ import Foundation
         }
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {
-            isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
+            SpacesTestHost.isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
         }
 
         public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
@@ -533,13 +533,6 @@ import Foundation
             }
 
             throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
-        }
-
-        private static func isRunningUnderXCTest() -> Bool {
-            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return true }
-            if NSClassFromString("XCTestCase") != nil { return true }
-            if CommandLine.arguments.contains(where: { $0.hasSuffix(".xctest") }) { return true }
-            return Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
         }
 
         private static func isProcessAlive(pid: Int) -> Bool {

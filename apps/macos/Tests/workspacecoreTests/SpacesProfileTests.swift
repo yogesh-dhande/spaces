@@ -36,6 +36,223 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(profile.databasePath, tempHomeURL.appendingPathComponent(".spaces/spaces.db").path)
     }
 
+    /// Test targets create and mutate real terminal-session state through the resolved profile, so a test
+    /// process that reaches a live profile writes fixture sessions into a database the app or daemon is
+    /// serving. Resolution refuses that instead of falling through to it — here via the installed fallback.
+    func testResolveRefusesInstalledProfileForTestHost() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: accountHomeURL, currentDirectoryPath: tempHomeURL.path,
+                executablePath: "/tmp/spacesPackageTests.xctest/Contents/MacOS/spacesPackageTests", gitProbe: StubGitProfileProbe(context: nil))
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+            }
+            XCTAssertEqual(component, .database)
+            XCTAssertEqual(path, accountHomeURL.appendingPathComponent(".spaces/spaces.db").path)
+            XCTAssertEqual(error.localizedDescription, String(describing: error))
+        }
+    }
+
+    /// The development branch resolves a per-worktree profile the developer's debug app serves, so it is
+    /// refused on the same terms as the installed one. `current()` cannot reach this branch from a test
+    /// host (the test executable is the toolchain's, outside any checkout), so it is driven through
+    /// `resolve` with a repo-built executable path.
+    func testResolveRefusesDevelopmentProfileForTestHost() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let repoRoot = try makeFakeRepoRoot()
+        let context = SpacesDevelopmentContext(worktreeRoot: tempHomeURL.appendingPathComponent("worktree").path, branchName: "feature/x")
+        let expectedRefusedRoot = accountHomeURL.appendingPathComponent(
+            ".spaces-dev/profiles/spaces/feature-x-\(SpacesProfile.shortStableHash(SpacesProfile.canonicalPath(context.worktreeRoot)))")
+        addTeardownBlock { try? FileManager.default.removeItem(at: expectedRefusedRoot) }
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: accountHomeURL, currentDirectoryPath: repoRoot.path,
+                executablePath: repoRoot.appendingPathComponent("apps/macos/.build/debug/spacesd").path,
+                gitProbe: StubGitProfileProbe(context: context))
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+            }
+            XCTAssertEqual(component, .database)
+            XCTAssertTrue(
+                path.hasPrefix(accountHomeURL.appendingPathComponent(".spaces-dev/profiles").path),
+                "Expected the refused path to be a development profile, got \(path).")
+        }
+    }
+
+    /// An explicit `SPACES_DB_PATH` is how tests isolate, so it is not exempt: a shell bound to a live dev
+    /// profile (what `spacese2e profile-show --shell` exports) is the most likely way a test run reaches
+    /// one, and the override branch runs before any other.
+    func testResolveRefusesExplicitOverrideInsideDevelopmentProfileRootForTestHost() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let overridePath = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123/spaces.db").path
+        // Never created while the refusal holds; cleaned up so proving this test fails without the guard
+        // leaves nothing behind in the developer's real profile.
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123"))
+        }
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [SpacesProfile.databasePathEnvironmentVariable: overridePath], homeDirectoryURL: tempHomeURL,
+                currentDirectoryPath: tempHomeURL.path, executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp",
+                gitProbe: StubGitProfileProbe(context: nil))
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+            }
+            XCTAssertEqual(component, .database)
+            XCTAssertEqual(path, overridePath)
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: URL(fileURLWithPath: overridePath).deletingLastPathComponent().path),
+            "A refused resolution must not have created the profile directory.")
+    }
+
+    /// The mixed state: a test binds its own temporary database but inherits a shell's `SPACES_RUNTIME_DIR`
+    /// (a shell bound by `spacese2e profile-show --shell` exports both). The database half looks isolated
+    /// while session directories, sockets, and the daemon instance lock would land in a live runtime root,
+    /// so the runtime half is refused on the same terms — and the error names that half, not the database.
+    func testResolveRefusesLiveRuntimeDirectoryEvenWithAnIsolatedDatabaseForTestHost() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let isolatedDatabasePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)/spaces.db").path
+        let liveRuntimePath = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123/runtime").path
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/main-abc123"))
+        }
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [
+                    SpacesProfile.databasePathEnvironmentVariable: isolatedDatabasePath,
+                    SpacesProfile.runtimeDirectoryEnvironmentVariable: liveRuntimePath,
+                ], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+                executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil))
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+            }
+            XCTAssertEqual(component, .runtimeDirectory)
+            XCTAssertEqual(path, liveRuntimePath)
+            XCTAssertTrue(
+                String(describing: error).contains(SpacesProfile.runtimeDirectoryEnvironmentVariable),
+                "The message must name the override to change: \(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: liveRuntimePath), "A refused runtime override must not have been created.")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: URL(fileURLWithPath: isolatedDatabasePath).deletingLastPathComponent().path),
+            "A refused resolution must not have created the profile root either.")
+    }
+
+    /// A runtime override spelled as a live root EXACTLY is refused, for each root. The root is live user
+    /// state itself, so resolving onto it would put session directories, sockets and the daemon instance
+    /// lock straight into it — the same harm as resolving inside it.
+    func testResolveRefusesRuntimeDirectorySpelledAsALiveRootExactly() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let liveRoots = [
+            accountHomeURL.appendingPathComponent(".spaces", isDirectory: true).path,
+            accountHomeURL.appendingPathComponent(".spaces-dev/profiles", isDirectory: true).path,
+        ]
+
+        for liveRoot in liveRoots {
+            // The database half is isolated, so only the runtime spelling can be what is refused. Its
+            // profile root is a fresh temporary directory, which doubles as the create-nothing probe: the
+            // live roots already exist on a developer machine, so their presence proves nothing.
+            let isolatedProfileRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let isolatedDatabasePath = isolatedProfileRoot.appendingPathComponent("spaces.db", isDirectory: false).path
+
+            XCTAssertThrowsError(
+                try SpacesProfile.resolve(
+                    environment: [
+                        SpacesProfile.databasePathEnvironmentVariable: isolatedDatabasePath,
+                        SpacesProfile.runtimeDirectoryEnvironmentVariable: liveRoot,
+                    ], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+                    executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil)),
+                "Expected \(liveRoot) to be refused as a runtime directory."
+            ) { error in
+                guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                    return XCTFail("Expected testHostRefusedLiveUserProfile for \(liveRoot), got \(error).")
+                }
+                XCTAssertEqual(component, .runtimeDirectory)
+                XCTAssertEqual(path, liveRoot)
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: isolatedProfileRoot.path),
+                "A refused resolution must not have created anything, including the profile root.")
+        }
+    }
+
+    /// Both halves bound outside the live roots — the normal isolated test — still resolves, and the
+    /// runtime override is honoured rather than derived.
+    func testResolveAcceptsTemporaryDatabaseAndRuntimeDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let databasePath = root.appendingPathComponent("spaces.db", isDirectory: false).path
+        let runtimePath = root.appendingPathComponent("runtime", isDirectory: true).path
+
+        let profile = try SpacesProfile.resolve(
+            environment: [
+                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimePath,
+            ], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+            executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp", gitProbe: StubGitProfileProbe(context: nil))
+
+        XCTAssertEqual(profile.databasePath, databasePath)
+        XCTAssertEqual(profile.runtimeDirectory, runtimePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: runtimePath), "An accepted runtime directory is still created.")
+    }
+
+    /// The refusal must not swallow the mechanism the whole suite isolates with: an override outside the
+    /// live roots — what every isolated test binds — still resolves.
+    func testResolveAcceptsExplicitOverrideOutsideLiveProfileRoots() throws {
+        let overridePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)/spaces.db").path
+
+        let profile = try SpacesProfile.resolve(
+            environment: [SpacesProfile.databasePathEnvironmentVariable: overridePath], homeDirectoryURL: tempHomeURL,
+            currentDirectoryPath: tempHomeURL.path, executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp",
+            gitProbe: StubGitProfileProbe(context: nil))
+        addTeardownBlock { try? FileManager.default.removeItem(at: URL(fileURLWithPath: overridePath).deletingLastPathComponent()) }
+
+        XCTAssertEqual(profile.source, .explicitDatabasePath)
+        XCTAssertEqual(profile.databasePath, overridePath)
+    }
+
+    /// Containment is by path component, not string prefix: a sibling of a live root whose name merely
+    /// extends it is not inside it. The sibling must live in the real account home for the predicate to see
+    /// it at all, so its name carries a UUID — the test can then only ever delete a directory it created.
+    func testResolveAcceptsOverrideInDirectoryWhoseNameExtendsALiveProfileRoot() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+        let siblingRoot = accountHomeURL.appendingPathComponent(".spaces-dev-sibling-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: siblingRoot) }
+        let overridePath = siblingRoot.appendingPathComponent("spaces.db", isDirectory: false).path
+
+        let profile = try SpacesProfile.resolve(
+            environment: [SpacesProfile.databasePathEnvironmentVariable: overridePath], homeDirectoryURL: tempHomeURL,
+            currentDirectoryPath: tempHomeURL.path, executablePath: "/Applications/Spaces.app/Contents/MacOS/SpacesApp",
+            gitProbe: StubGitProfileProbe(context: nil))
+
+        XCTAssertEqual(profile.databasePath, overridePath)
+    }
+
+    /// The refusal has to hold for the profile the process actually uses, not only for a directly called
+    /// `resolve`: every persistence path reaches the database through `current()`.
+    func testCurrentProfileRefusesInstalledProfileForTestHost() throws {
+        let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil, "HOME": accountHomePath,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            XCTAssertThrowsError(try SpacesProfile.current())
+            XCTAssertThrowsError(try DatabaseLocator.defaultPath())
+        }
+    }
+
     func testResolveExplicitDatabaseOverrideWins() throws {
         let overridePath = tempHomeURL.appendingPathComponent("profiles/custom/spaces.db").path
 
@@ -256,7 +473,7 @@ final class SpacesProfileTests: XCTestCase {
         defer { if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") } }
 
         let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
-        let leaseDirectory = SpacesLeaseCoordinator.desktopControlLeaseDirectory()
+        let leaseDirectory = try SpacesLeaseCoordinator.desktopControlLeaseDirectory()
 
         XCTAssertEqual(leaseDirectory, "\(accountHomePath)/.spaces/leases/desktop-control")
         XCTAssertNotEqual(leaseDirectory, "\(tempHomeURL!.path)/.spaces/leases/desktop-control")

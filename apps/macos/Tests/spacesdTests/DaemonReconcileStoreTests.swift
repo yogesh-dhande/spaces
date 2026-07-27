@@ -13,14 +13,24 @@ import workspacecore
 final class DaemonReconcileStoreTests: XCTestCase {
     private var directory: URL!
     private var databasePath: String!
+    private var originalDatabasePath: String?
 
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-reconcile-store-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         databasePath = directory.appendingPathComponent("spaces.db").path
+        // Opening a store authorizes schema migration against the active profile, so the test database
+        // has to be the active profile too — otherwise the test resolves the developer's.
+        originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
     }
 
     override func tearDownWithError() throws {
+        if let originalDatabasePath {
+            setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+        } else {
+            unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+        }
         if let directory, FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
         directory = nil
         databasePath = nil

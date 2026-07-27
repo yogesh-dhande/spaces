@@ -12,24 +12,35 @@ func makeTempDirectory() throws -> URL {
 }
 
 extension XCTestCase {
-    /// A store backed by a fresh temporary database, with the profile environment scoped to this test.
+    /// Points the profile environment at `databasePath` for the rest of this test, restoring the previous
+    /// values in a teardown block so the override never leaks into later tests in the same process.
     ///
-    /// `SQLiteStore` is given the explicit path, but downstream code (terminal-session persistence, runtime
-    /// paths) still resolves the active profile from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`. Those are set
-    /// here and restored in a teardown block so the override never leaks into later tests in the same
-    /// process — previously they were set and never restored, which left a stale (deleted) profile path
-    /// pinned for the rest of the run.
-    func makeTemporaryStore() throws -> SQLiteStore {
-        _ = installHermeticGitEnvironment
-        let dir = try makeTempDirectory()
-        let dbURL = dir.appendingPathComponent("spaces-test.db")
-        let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
+    /// Anything a test reaches — the workspace store's migration authorization, terminal-session
+    /// persistence, runtime paths — resolves the active profile from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`,
+    /// so passing an explicit database path to one component is not isolation on its own.
+    func bindSpacesProfileForTest(databasePath: String) {
+        let runtimePath = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("runtime", isDirectory: true).path
         let keys = [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]
         let originalValues = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
         addTeardownBlock { for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
-        setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
-        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
-        return try SQLiteStore(path: dbURL.path)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimePath, 1)
+    }
+
+    /// Binds the profile environment to a fresh throwaway profile for the rest of this test. Use it in
+    /// `setUpWithError` so no code path a test reaches — including work its background queues finish
+    /// later — can resolve the developer's profile.
+    func useIsolatedSpacesProfile() throws {
+        bindSpacesProfileForTest(databasePath: try makeTempDirectory().appendingPathComponent("spaces.db").path)
+    }
+
+    /// A store backed by a fresh temporary database, with the profile environment scoped to this test.
+    func makeTemporaryStore() throws -> SQLiteStore {
+        _ = installHermeticGitEnvironment
+        let dir = try makeTempDirectory()
+        let databasePath = dir.appendingPathComponent("spaces-test.db").path
+        bindSpacesProfileForTest(databasePath: databasePath)
+        return try SQLiteStore(path: databasePath)
     }
 }
 

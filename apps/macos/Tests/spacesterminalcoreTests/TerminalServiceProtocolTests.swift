@@ -388,12 +388,19 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalRuntimeDir = getenv(SpacesProfile.runtimeDirectoryEnvironmentVariable).map { String(cString: $0) }
+        let originalDatabasePath = getenv(SpacesProfile.databasePathEnvironmentVariable).map { String(cString: $0) }
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
         defer {
             if let originalRuntimeDir {
                 setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1)
             } else {
                 unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
             }
             try? FileManager.default.removeItem(at: root)
         }

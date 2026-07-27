@@ -11,6 +11,9 @@ import spacesdevicecore
 /// device runs at most one `listAgentSessions` pull at a time so a stale response can never overwrite
 /// newer state.
 final class RemoteAgentWatchServiceTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle { func stop() {} }
 
     /// Scriptable transport: records every connection's callbacks so tests can fire overview signals

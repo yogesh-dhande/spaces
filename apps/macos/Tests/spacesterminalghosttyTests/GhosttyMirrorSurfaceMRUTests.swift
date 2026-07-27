@@ -15,6 +15,11 @@ import spacesterminalcore
     private var secondaryWindow: NSWindow?
     private var mainQueueDrained = false
 
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try useIsolatedSpacesProfile()
+    }
+
     override func setUp() {
         super.setUp()
         GhosttyMirrorSurfaceMRU.shared.resetForTesting()

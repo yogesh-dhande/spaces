@@ -39,6 +39,7 @@ fi
 # clobber each other's environment. Run each suite in its OWN invocation so each gets an
 # isolated process; the shared build is cached, so the extra invocations are cheap.
 for suite in \
+  SpacesTestHostDetectionTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \

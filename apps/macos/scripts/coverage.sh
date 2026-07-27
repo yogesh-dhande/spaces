@@ -2,8 +2,6 @@
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-repo_root="$(cd "$root/../.." && pwd)"
-source "$repo_root/scripts/spaces-profile-helpers.sh"
 . "$root/scripts/silence-watchdog.sh"
 start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
@@ -25,10 +23,6 @@ if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
     exit 1
 fi
 
-cli="$root/.build/debug/spaces"
-if [ -x "$cli" ]; then
-    spaces_profile_eval_shell_env "$cli"
-fi
 unset SPACES_DEVICE_API_PORT
 
 codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path)"

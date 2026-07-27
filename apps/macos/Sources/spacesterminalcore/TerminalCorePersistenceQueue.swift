@@ -112,18 +112,68 @@ public final class TerminalCorePersistenceQueue: Sendable {
         self.sleep = sleep
     }
 
+    /// The database a queued write belongs to, resolved when the write is ENQUEUED and handed to it so it
+    /// commits to the profile that was current when the engine decided the write — not to whatever profile
+    /// is current whenever the serial queue reaches it. A daemon's profile never changes mid-process, so
+    /// this is inert in production; it is what keeps a test's final writes (a core's `terminate()` returns
+    /// with them still queued) inside the profile that test bound.
+    private enum EnqueueTimeDatabase: Sendable {
+        case resolved(String)
+        /// Carries the failure's description rather than the error itself: this crosses onto the
+        /// persistence queue, where `any Error` is not `Sendable`, and it only ever explains the write
+        /// that was abandoned.
+        case unresolved(reason: String)
+    }
+
+    /// Resolves the enqueue-time database, keeping "could not resolve" distinct from "resolved".
+    ///
+    /// A failure must NOT collapse into the persistence API's `nil`, which means "no explicit database,
+    /// resolve the active profile when you run": that would let a write whose profile could not be
+    /// determined commit to whatever profile happened to be current when the queue reached it — exactly
+    /// the reassignment the enqueue-time capture exists to prevent. The failure is reachable, not
+    /// theoretical: profile resolution refuses a live user profile in a test process, so a test bound
+    /// inside one throws here.
+    private static func enqueueTimeDatabase() -> EnqueueTimeDatabase {
+        do { return .resolved(try TerminalSessionPersistence.currentDatabasePath()) } catch {
+            return .unresolved(reason: String(describing: error))
+        }
+    }
+
+    /// Runs `write` against the enqueue-time database, or abandons it. A write that cannot be attributed
+    /// to a profile is dropped where it would have committed rather than committing somewhere else, and
+    /// says so on stderr — silently discarding durable state is how this class of bug hides.
+    private static func withEnqueueTimeDatabase(_ database: EnqueueTimeDatabase, _ write: (String) -> Void) {
+        switch database {
+        case .resolved(let databasePath): write(databasePath)
+        case .unresolved(let reason):
+            FileHandle.standardError.write(
+                Data("spaces: abandoned a queued terminal-session write; its profile could not be resolved when it was enqueued: \(reason)\n".utf8))
+        }
+    }
+
     /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
-    /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-    public func enqueueWrite(_ write: @escaping @Sendable () -> Void) { queue.async(execute: write) }
+    /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order. The closure
+    /// receives the database resolved at enqueue time and must pass it to the persistence call it makes.
+    public func enqueueWrite(_ write: @escaping @Sendable (String) -> Void) {
+        let database = Self.enqueueTimeDatabase()
+        queue.async { Self.withEnqueueTimeDatabase(database) { write($0) } }
+    }
+
+    /// Enqueue work that touches no database but must observe the queue's FIFO order — the trailing
+    /// durable-end notification fence, and the test gate that parks the queue. Kept apart from
+    /// `enqueueWrite` so it neither asks for a database it will not use nor gets abandoned when a
+    /// database write's profile cannot be resolved; its ordering guarantee is all it needs.
+    public func enqueueOrderedWork(_ work: @escaping @Sendable () -> Void) { queue.async(execute: work) }
 
     /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
     /// collapses to one write of the newest value (see `PersistenceCoalescingGate`). FIFO order across keys.
-    public func enqueueCoalescedWrite(key: String, _ write: @escaping @Sendable () -> Void) {
+    public func enqueueCoalescedWrite(key: String, _ write: @escaping @Sendable (String) -> Void) {
         let generation = coalescingGate.nextGeneration(forKey: key)
         let gate = coalescingGate
+        let database = Self.enqueueTimeDatabase()
         queue.async {
             guard gate.isLatest(generation, forKey: key) else { return }
-            write()
+            Self.withEnqueueTimeDatabase(database) { write($0) }
         }
     }
 
@@ -164,18 +214,21 @@ public final class TerminalCorePersistenceQueue: Sendable {
         let sleep = self.sleep
         let gate = coalescingGate
         let generation = gate.nextGeneration(forKey: key)
+        let database = Self.enqueueTimeDatabase()
         queue.async {
-            var attempt = 0
-            while true {
-                guard gate.isLatest(generation, forKey: key) else { return }
-                do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths) } catch {
-                    attempt += 1
-                    guard attempt < maxAttempts else { return }
-                    sleep(retryDelay)
-                    continue
+            Self.withEnqueueTimeDatabase(database) { databasePath in
+                var attempt = 0
+                while true {
+                    guard gate.isLatest(generation, forKey: key) else { return }
+                    do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths, databasePath: databasePath) } catch {
+                        attempt += 1
+                        guard attempt < maxAttempts else { return }
+                        sleep(retryDelay)
+                        continue
+                    }
+                    onPersisted(state, writeAt)
+                    return
                 }
-                onPersisted(state, writeAt)
-                return
             }
         }
     }

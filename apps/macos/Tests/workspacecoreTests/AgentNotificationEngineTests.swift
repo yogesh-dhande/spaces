@@ -17,6 +17,9 @@ import spacesterminalcore
 /// self/cycle subscriptions are rejected. Drives the same engine the daemon chokepoint attaches, with a
 /// recorder standing in for the real terminal-send delivery.
 final class AgentNotificationEngineTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     /// Records delivered lines and can be told to fail specific sessions to simulate a dead subscriber.
     private final class DeliveryRecorder: @unchecked Sendable {
         var delivered: [(sessionID: String, line: String)] = []
