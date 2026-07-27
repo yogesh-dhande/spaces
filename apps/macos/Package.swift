@@ -214,6 +214,8 @@ let executableTargets: [Target] = [
 // `#if os(Linux)` suites (headless terminal core, handoff, resize) with `swift test`.
 #if os(Linux)
     let testTargets: [Target] = [
+        // This directory compiles whole on Linux (its macOS-only suites carry their own `#if os(macOS)`),
+        // so a Linux suite added here needs only the run_linux_tests.sh per-suite filter entry.
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
         // The ghostty test directory mixes macOS-only suites (AppKit/GhosttyKit imports) with the
         // Linux headless suites, so the Linux target compiles an explicit whitelist. A new Linux

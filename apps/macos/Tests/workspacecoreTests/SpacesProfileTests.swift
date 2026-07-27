@@ -401,6 +401,118 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(profile.worktreeHash, expectedHash)
     }
 
+    /// A development build deployed onto a device has no checkout to derive a profile from, so it states
+    /// which profile it serves by where it was installed: inside that profile's own root. Resolution reads
+    /// the binary's own location, which is why a `HOME` that has nothing to do with the deployment (what
+    /// systemd or an SSH command happens to hand the daemon) cannot move it onto another profile — least of
+    /// all onto the installed one, whose production database it would then open.
+    func testResolveDeployedDevelopmentProfileFromTheExecutablesOwnLocation() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/feature-add-ipc-0123456789ab", isDirectory: true)
+        let executablePath = profileRoot.appendingPathComponent("daemon/current/bin/spacesd", isDirectory: false).path
+        // The resolved root comes from the canonicalized executable path, so the expectation is spelled the
+        // same way rather than assuming the temporary directory has no symlinked ancestor.
+        let expectedRoot = SpacesProfile.canonicalPath(profileRoot.path)
+
+        let profile = try SpacesProfile.resolve(
+            environment: [:], homeDirectoryURL: tempHomeURL.appendingPathComponent("unrelated-home", isDirectory: true),
+            currentDirectoryPath: tempHomeURL.path, executablePath: executablePath, gitProbe: StubGitProfileProbe(context: nil))
+
+        XCTAssertEqual(profile.source, .deployedDevelopmentProfile)
+        XCTAssertEqual(profile.rootDirectory, expectedRoot)
+        XCTAssertEqual(profile.databasePath, "\(expectedRoot)/spaces.db")
+        XCTAssertEqual(profile.runtimeDirectory, "\(expectedRoot)/runtime")
+        // The directory name a deployment was given carries the worktree identity of the profile it
+        // mirrors, and that identity is what labels the device's Bonjour service.
+        XCTAssertEqual(profile.branchSlug, "feature-add-ipc")
+        XCTAssertEqual(profile.worktreeHash, "0123456789ab")
+    }
+
+    /// An explicit `SPACES_DB_PATH` still wins over the deployed-profile rule, exactly as it does over
+    /// every other branch: the override is a statement of intent from whoever launched the process, and the
+    /// location-derived rules exist only for the automatic path.
+    func testResolveExplicitOverrideWinsOverDeployedDevelopmentProfileLocation() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/feature-x-0123456789ab", isDirectory: true)
+        let executablePath = profileRoot.appendingPathComponent("daemon/current/bin/spacesd", isDirectory: false).path
+        let overridePath = tempHomeURL.appendingPathComponent("profiles/override/spaces.db").path
+
+        let profile = try SpacesProfile.resolve(
+            environment: [SpacesProfile.databasePathEnvironmentVariable: overridePath], homeDirectoryURL: tempHomeURL,
+            currentDirectoryPath: tempHomeURL.path, executablePath: executablePath, gitProbe: StubGitProfileProbe(context: nil))
+
+        XCTAssertEqual(profile.source, .explicitDatabasePath)
+        XCTAssertEqual(profile.databasePath, overridePath)
+    }
+
+    /// A deployed profile's directory name is only read as a worktree identity when it has the exact
+    /// `<branch-slug>-<12 lowercase hex>` shape a derived name has. Anything else leaves BOTH halves absent:
+    /// they are meaningful only as the pair naming the worktree the profile mirrors, and a half-parsed name
+    /// would put a bogus label in the device's Bonjour service name.
+    func testResolveDeployedDevelopmentProfileCarriesNoIdentityForANameThatIsNotDerived() throws {
+        let names = [
+            "demo",  // no trailing hash at all
+            "feature-x-0123456789a",  // 11 hex digits, one short
+            "feature-x-0123456789abc",  // 13 hex digits, one too many
+            "feature-x-0123456789ag",  // right length, not hex
+            "feature-x-0123456789AB",  // right length, uppercase hex is not what the producer emits
+            "feature-x_0123456789ab",  // right length, separator is not a hyphen
+            "0123456789ab",  // the hash alone, with no slug and no separator
+            "-0123456789ab",  // a separator with an empty slug
+        ]
+
+        for name in names {
+            let profileRoot = tempHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/\(name)", isDirectory: true)
+            let profile = try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: tempHomeURL.path,
+                executablePath: profileRoot.appendingPathComponent("daemon/current/bin/spaces", isDirectory: false).path,
+                gitProbe: StubGitProfileProbe(context: nil))
+
+            XCTAssertEqual(profile.source, .deployedDevelopmentProfile, "'\(name)' is still a deployed profile, whatever its name says.")
+            XCTAssertNil(profile.branchSlug, "'\(name)' is not a derived profile name, so it carries no branch slug.")
+            XCTAssertNil(profile.worktreeHash, "'\(name)' is not a derived profile name, so it carries no worktree hash.")
+        }
+    }
+
+    /// The layout is matched as a run of whole path components, so a binary that merely lives *near* the
+    /// development-profiles tree is not claimed by it. Each of these would resolve to a profile root that
+    /// does not exist, and the deployed daemon would then serve a database nobody deployed.
+    func testDeployedDevelopmentProfileRootRejectsPathsThatOnlyResembleTheLayout() {
+        let nonMatchingPaths = [
+            "/Users/tester/.spaces-devil/profiles/spaces/feature-x/daemon/current/bin/spaces",
+            "/Users/tester/.spaces-dev/profiles/other/feature-x/daemon/current/bin/spaces",
+            "/Users/tester/.spaces-dev/spaces/profiles/feature-x/daemon/current/bin/spaces",
+            "/Users/tester/.spaces/bin/spaces",
+            "/Applications/Spaces.app/Contents/MacOS/SpacesApp",
+        ]
+
+        for path in nonMatchingPaths {
+            XCTAssertNil(
+                SpacesProfile.deployedDevelopmentProfileRoot(executablePath: path), "\(path) does not live inside a deployed profile root.")
+        }
+    }
+
+    /// The executable has to sit strictly inside a profile root for the root to own it. A path that stops at
+    /// the root itself — or above it — names no executable, so there is no deployment to infer.
+    func testDeployedDevelopmentProfileRootRequiresAnExecutableBelowTheProfileRoot() {
+        XCTAssertNil(SpacesProfile.deployedDevelopmentProfileRoot(executablePath: "/Users/tester/.spaces-dev/profiles/spaces/feature-x"))
+        XCTAssertNil(SpacesProfile.deployedDevelopmentProfileRoot(executablePath: "/Users/tester/.spaces-dev/profiles/spaces"))
+        XCTAssertEqual(
+            SpacesProfile.deployedDevelopmentProfileRoot(executablePath: "/Users/tester/.spaces-dev/profiles/spaces/feature-x/spacesd")?.path,
+            SpacesProfile.canonicalPath("/Users/tester/.spaces-dev/profiles/spaces/feature-x"),
+            "One component below the root is already inside it.")
+    }
+
+    /// With a nested `.spaces-dev/profiles/spaces` tree the OUTERMOST match is the profile: the outer
+    /// sequence is what a deployment installed into, and the inner one is content that ended up sitting
+    /// inside it. Choosing the inner match would serve a database inside another profile's root.
+    func testDeployedDevelopmentProfileRootPrefersTheOutermostMatch() {
+        let nestedPath =
+            "/Users/tester/.spaces-dev/profiles/spaces/outer-0123456789ab/.spaces-dev/profiles/spaces/inner-abcdef012345/daemon/current/bin/spaces"
+
+        XCTAssertEqual(
+            SpacesProfile.deployedDevelopmentProfileRoot(executablePath: nestedPath)?.path,
+            SpacesProfile.canonicalPath("/Users/tester/.spaces-dev/profiles/spaces/outer-0123456789ab"))
+    }
+
     func testSameBranchDifferentWorktreesResolveDifferentProfiles() throws {
         let repoRoot = try makeFakeRepoRoot()
         let branchName = "feature/shared"

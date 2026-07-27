@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux.",
+      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair.",
   },
   {
     href: "/docs/getting-started",

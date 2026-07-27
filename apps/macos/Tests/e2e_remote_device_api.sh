@@ -11,9 +11,14 @@ REMOTE_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
 REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_HOST}"
-REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
 REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
-REMOTE_E2E_ROOT="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+# This lane runs its own isolated remote daemon as a development profile, so it never touches the
+# remote account's installed profile. The profile name fixes the root, the unit instance, and the
+# CLI the lane drives it with; the daemon assigns its own Device API port, read back after install.
+REMOTE_E2E_PROFILE_NAME="remote-device-e2e"
+REMOTE_E2E_ROOT="~/.spaces-dev/profiles/spaces/$REMOTE_E2E_PROFILE_NAME"
+REMOTE_E2E_CLI="$REMOTE_E2E_ROOT/daemon/current/bin/spaces"
+REMOTE_DAEMON_PORT=""
 REMOTE_PERFORMANCE_LOG="${SPACES_E2E_REMOTE_PERFORMANCE_LOG:-$REMOTE_E2E_ROOT/mobile-terminal-performance.jsonl}"
 TMP_ROOT="${TMPDIR:-/tmp}/spaces-remote-device-e2e.$$"
 RESULT_JSON="${SPACES_E2E_REMOTE_DEVICE_RESULT_JSON:-$TMP_ROOT/result.json}"
@@ -91,41 +96,49 @@ trap cleanup EXIT
 require_remote_config() {
   [[ -n "$REMOTE_HOST" ]] || fail "SPACES_E2E_REMOTE_SSH_HOST is required for remote paired-device E2E."
   [[ -n "$REMOTE_DAEMON_HOST" ]] || fail "SPACES_E2E_REMOTE_DAEMON_HOST or SPACES_E2E_REMOTE_SSH_HOST is required."
-  [[ "$REMOTE_DAEMON_PORT" =~ ^[0-9]+$ ]] || fail "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric."
   [[ -x "$SPACES_E2E_BIN" ]] || fail "spacese2e not found at $SPACES_E2E_BIN."
   command -v ssh >/dev/null 2>&1 || fail "ssh is required for remote paired-device E2E."
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for remote paired-device E2E."
 }
 
 prepare_remote_daemon() {
-  local artifact_assignments artifact_url artifact_sha256 archive_path install_root performance_log_path db_path runtime_dir
-  local quoted_archive quoted_install quoted_performance_log quoted_db_path quoted_runtime_dir
-  SPACES_E2E_REMOTE_DAEMON_PORT="$REMOTE_DAEMON_PORT" \
-    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
+  local artifact_assignments artifact_url archive_path install_root performance_log_path
+  local quoted_archive quoted_install quoted_performance_log quoted_profile_name
+  # Cleanup stops and disables this profile's unit and removes its root, so the daemon is always
+  # installed and started fresh here -- there is no running daemon left to reuse. The install root
+  # is pointed at this lane's own profile root (where the archive is extracted) so cleanup's default
+  # does not delete the uploaded artifact the deploy helper caches on the remote host.
+  SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
     SPACES_E2E_REMOTE_INSTALL_ROOT="$REMOTE_E2E_ROOT" \
-    SPACES_E2E_REMOTE_DEVICE_ROOT="$REMOTE_E2E_ROOT" \
     "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
   artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
-  artifact_sha256="${artifact_sha256:-}"
   [[ "$artifact_url" == file://* ]] || fail "Remote artifact URL must be file://, got: $artifact_url"
   archive_path="${artifact_url#file://}"
-  if remote_daemon_cache_ready "$artifact_sha256"; then
-    printf '[remote-device] reusing installed Linux spacesd artifact %s\n' "$artifact_sha256"
-    return
-  fi
   install_root="$(remote_expand_path "$REMOTE_E2E_ROOT/install")"
   performance_log_path="$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
-  db_path="$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")"
-  runtime_dir="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
   quoted_performance_log="$(shell_quote "$performance_log_path")"
-  quoted_db_path="$(shell_quote "$db_path")"
-  quoted_runtime_dir="$(shell_quote "$runtime_dir")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DB_PATH=$quoted_db_path SPACES_RUNTIME_DIR=$quoted_runtime_dir SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$quoted_performance_log $quoted_install/install.sh" >/dev/null
-  write_remote_daemon_cache_marker "$artifact_sha256"
+  quoted_profile_name="$(shell_quote "$REMOTE_E2E_PROFILE_NAME")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name --performance-log $quoted_performance_log" >/dev/null
+}
+
+# The Device API port the daemon assigned itself for this profile and persisted at first start. The
+# lane never picks a port, so every client address it builds comes from here.
+resolve_remote_daemon_port() {
+  local settings_path
+  settings_path="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime/terminal/device-api.json")"
+  REMOTE_DAEMON_PORT="$(remote_ssh "python3 - $(shell_quote "$settings_path")" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    print(json.load(handle)["port"])
+PY
+  )"
+  [[ "$REMOTE_DAEMON_PORT" =~ ^[0-9]+$ ]] || fail "remote profile $REMOTE_E2E_PROFILE_NAME reported no numeric Device API port."
 }
 
 wait_for_remote_daemon_from_mac() {
@@ -155,27 +168,10 @@ wait_until_reachable("follow-up check")
 PY
 }
 
-remote_daemon_reachable_from_mac() {
-  python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY' >/dev/null 2>&1
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-with socket.create_connection((host, port), timeout=2):
-    pass
-PY
-}
-
-remote_profile_env_prefix() {
-  local db_path runtime_dir
-  db_path="$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")"
-  runtime_dir="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")"
-  printf 'SPACES_DB_PATH=%s SPACES_RUNTIME_DIR=%s' "$(shell_quote "$db_path")" "$(shell_quote "$runtime_dir")"
-}
-
+# The profile's own CLI, which resolves this profile from its own path -- so no profile environment
+# is passed, and the installed profile's CLI is never involved.
 remote_spaces_pair_json() {
-  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces device pair --json"
+  remote_ssh "$REMOTE_E2E_CLI device pair --json"
 }
 
 wait_for_remote_daemon() {
@@ -198,40 +194,6 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote daemon port {port} did not open: {last_error}")
 PY
-}
-
-remote_daemon_cache_marker_path() {
-  remote_expand_path "~/.spaces/daemon/current/.spaces-e2e-artifact-cache"
-}
-
-remote_daemon_cache_marker_value() {
-  local artifact_sha256="$1"
-  printf '%s port=%s db=%s runtime=%s performance_log=%s\n' \
-    "$artifact_sha256" \
-    "$REMOTE_DAEMON_PORT" \
-    "$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")" \
-    "$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")" \
-    "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
-}
-
-remote_daemon_cache_ready() {
-  local artifact_sha256="$1"
-  local marker_path expected actual
-  [[ -n "$artifact_sha256" ]] || return 1
-  marker_path="$(remote_daemon_cache_marker_path)" || return 1
-  expected="$(remote_daemon_cache_marker_value "$artifact_sha256")"
-  actual="$(remote_ssh "cat $(shell_quote "$marker_path") 2>/dev/null || true" 2>/dev/null || true)"
-  [[ "$actual" == "$expected" ]] || return 1
-  remote_daemon_reachable_from_mac || return 1
-}
-
-write_remote_daemon_cache_marker() {
-  local artifact_sha256="$1"
-  local marker_path expected
-  [[ -n "$artifact_sha256" ]] || return 0
-  marker_path="$(remote_daemon_cache_marker_path)"
-  expected="$(remote_daemon_cache_marker_value "$artifact_sha256")"
-  remote_ssh "printf '%s\n' $(shell_quote "$expected") > $(shell_quote "$marker_path")" >/dev/null
 }
 
 open_remote_pairing_window() {
@@ -662,8 +624,9 @@ main() {
   mkdir -p "$TMP_ROOT"
   printf '[remote-device] validating SSH target %s\n' "$(remote_destination)"
   remote_ssh "printf 'ssh-ok\n'" >/dev/null
-  printf '[remote-device] deploying Linux spacesd artifact\n'
+  printf '[remote-device] deploying Linux spacesd artifact into remote profile %s\n' "$REMOTE_E2E_PROFILE_NAME"
   prepare_remote_daemon
+  resolve_remote_daemon_port
   printf '[remote-device] verifying remote daemon survives SSH setup disconnect on %s:%s\n' "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT"
   wait_for_remote_daemon_from_mac
   printf '[remote-device] waiting for remote daemon on %s:%s\n' "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT"

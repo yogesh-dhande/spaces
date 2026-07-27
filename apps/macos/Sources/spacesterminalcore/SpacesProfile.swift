@@ -9,6 +9,7 @@ import Foundation
 public enum SpacesProfileSource: String, Sendable, Codable, Equatable {
     case explicitDatabasePath = "explicit-db-path"
     case developmentWorktree = "development-worktree"
+    case deployedDevelopmentProfile = "deployed-dev-profile"
     case installedFallback = "installed-fallback"
 }
 
@@ -111,14 +112,10 @@ public struct SpacesProfile: Sendable, Equatable {
     /// both `currentOrNilIfUnresolved()` and tests can drive it directly without needing a whole resolved
     /// `SpacesProfile`.
     static func nilUnlessRefused<T>(_ body: () throws -> T) throws -> T? {
-        do {
-            return try body()
-        } catch let error as SpacesProfileResolutionError {
+        do { return try body() } catch let error as SpacesProfileResolutionError {
             if case .testHostRefusedLiveUserProfile = error { throw error }
             return nil
-        } catch {
-            return nil
-        }
+        } catch { return nil }
     }
 
     /// Non-throwing counterpart of `currentOrNilIfUnresolved()` for a call site that is not `throws` and,
@@ -137,16 +134,13 @@ public struct SpacesProfile: Sendable, Equatable {
     /// So a refusal here is reported, not hidden or trapped: `diagnoseRefusal` runs (by default, writes to
     /// stderr, matching this codebase's existing non-fatal diagnostic convention) and the caller's
     /// existing "no profile" degrade applies exactly as it would for any other resolution failure.
-    public static func currentOrNilLoggingRefusal(diagnoseRefusal: (SpacesProfileResolutionError) -> Void = logRefusalToStandardError) -> SpacesProfile?
+    public static func currentOrNilLoggingRefusal(diagnoseRefusal: (SpacesProfileResolutionError) -> Void = logRefusalToStandardError)
+        -> SpacesProfile?
     {
-        do {
-            return try nilUnlessRefused { try current() }
-        } catch let error as SpacesProfileResolutionError {
+        do { return try nilUnlessRefused { try current() } } catch let error as SpacesProfileResolutionError {
             diagnoseRefusal(error)
             return nil
-        } catch {
-            return nil
-        }
+        } catch { return nil }
     }
 
     public static func logRefusalToStandardError(_ error: SpacesProfileResolutionError) {
@@ -164,6 +158,24 @@ public struct SpacesProfile: Sendable, Equatable {
                 environment: environment, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
         }
 
+        // A development build deployed onto a device has no Spaces checkout to derive a profile from, so it
+        // states which profile it belongs to by WHERE it is installed: inside that profile's own root. The
+        // rule here is the deployed counterpart of the repo-built rule below, and exists for the same
+        // reason — a development build that fell through to the installed profile (~/.spaces) would open the
+        // installed daemon's production database and, on a schema mismatch, crash-loop it. On a device the
+        // installed profile is the only thing left to fall back to, so without this a deployed development
+        // daemon silently becomes a second daemon for the installed profile.
+        if let executablePath = executablePath ?? currentExecutablePath(currentDirectoryPath: currentDirectoryPath),
+            let profileRoot = deployedDevelopmentProfileRoot(executablePath: executablePath)
+        {
+            let identity = deployedDevelopmentProfileIdentity(profileDirectoryName: profileRoot.lastPathComponent)
+            return try makeProfile(
+                source: .deployedDevelopmentProfile, profileRoot: profileRoot,
+                databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path, environment: environment,
+                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager, branchSlug: identity?.branchSlug,
+                worktreeHash: identity?.worktreeHash)
+        }
+
         if let developmentContext = try resolveDevelopmentContext(
             currentDirectoryPath: currentDirectoryPath, executablePath: executablePath, fileManager: fileManager, gitProbe: gitProbe)
         {
@@ -175,8 +187,8 @@ public struct SpacesProfile: Sendable, Equatable {
             return try makeProfile(
                 source: .developmentWorktree, profileRoot: profileRoot,
                 databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path, environment: environment,
-                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager, developmentContext: developmentContext,
-                branchSlug: branchSlug, worktreeHash: worktreeHash)
+                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager, developmentContext: developmentContext, branchSlug: branchSlug,
+                worktreeHash: worktreeHash)
         }
 
         let productionRoot = homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true)
@@ -205,8 +217,7 @@ public struct SpacesProfile: Sendable, Equatable {
         // loudly rather than redirecting to a scratch profile: a redirect would hide the missing isolation
         // and leave the test asserting against a profile it never chose. Both checks precede every side
         // effect, so a refused resolution creates no directories.
-        let runtimeDirectory = runtimeDirectoryURL(
-            environment: environment, currentDirectoryPath: currentDirectoryPath, profileRoot: profileRoot)
+        let runtimeDirectory = runtimeDirectoryURL(environment: environment, currentDirectoryPath: currentDirectoryPath, profileRoot: profileRoot)
         if SpacesTestHost.isRunningUnderXCTest() {
             if isLiveUserProfilePath(databasePath) {
                 throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(component: .database, path: databasePath)
@@ -297,14 +308,14 @@ public struct SpacesProfile: Sendable, Equatable {
     public static let installedRouterPort = 7391
 
     /// Default local Caddy router port for this profile. The installed/production profile keeps
-    /// the well-known port; dev/worktree/explicit-db profiles derive a distinct deterministic port
+    /// the well-known port; every development profile — worktree, deployed, explicit-db — derives a distinct deterministic port
     /// so concurrent Spaces instances (multiple worktrees, or the installed app plus a dev build)
     /// don't all try to bind one port — where only the first wins and every other instance's Caddy
     /// silently fails to start, breaking its workspace-service routing.
     public var defaultRouterPort: Int {
         switch source {
         case .installedFallback: return Self.installedRouterPort
-        case .developmentWorktree, .explicitDatabasePath: return Self.derivedRouterPort(profileRoot: rootDirectory)
+        case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath: return Self.derivedRouterPort(profileRoot: rootDirectory)
         }
     }
 
@@ -439,6 +450,48 @@ public struct SpacesProfile: Sendable, Equatable {
             if parentURL.path == currentURL.path { return nil }
             currentURL = parentURL
         }
+    }
+
+    /// The development profile root a deployed executable lives inside, or `nil` when it does not live in
+    /// one. A deployed development profile is recognised purely from the executable's ancestry: the
+    /// consecutive path components `.spaces-dev/profiles/spaces/<name>`, where the path through `<name>` is
+    /// the profile root.
+    ///
+    /// The match is deliberately HOME-independent. The binary's own location is the fact worth trusting: a
+    /// deployed daemon inherits whatever `HOME` systemd or an SSH command handed it, so anchoring on a
+    /// resolved home directory would make the same executable resolve to different profiles depending on
+    /// who started it — and a test that points `HOME` at a scratch directory must not change the answer for
+    /// a given path either.
+    ///
+    /// The OUTERMOST match wins: with a nested `.spaces-dev/profiles/spaces/...` tree, the outer sequence is
+    /// the profile a deployment installed into and the inner one is content sitting inside it.
+    static func deployedDevelopmentProfileRoot(executablePath: String) -> URL? {
+        let components = URL(fileURLWithPath: canonicalPath(executablePath)).pathComponents
+        let markers = [".spaces-dev", "profiles", "spaces"]
+        // The executable is the last component and has to sit strictly inside the profile root, so the
+        // marker sequence plus `<name>` must end at least one component before it.
+        guard components.count >= markers.count + 2 else { return nil }
+        guard let markerIndex = (0...(components.count - markers.count - 2)).first(where: { Array(components[$0..<($0 + markers.count)]) == markers })
+        else { return nil }
+        var rootURL = URL(fileURLWithPath: "/", isDirectory: true)
+        for component in components[1..<(markerIndex + markers.count + 1)] { rootURL.appendPathComponent(component, isDirectory: true) }
+        return rootURL
+    }
+
+    /// The branch slug and worktree hash carried by a deployed profile's directory name, or `nil` when the
+    /// name does not have the `<branch-slug>-<12 lowercase hex>` shape a derived development profile name
+    /// has. Both halves are absent together: they are only meaningful as the pair that names the worktree
+    /// this profile mirrors, and a half-parsed name would put a bogus label in the Bonjour service name.
+    private static func deployedDevelopmentProfileIdentity(profileDirectoryName name: String) -> (branchSlug: String, worktreeHash: String)? {
+        // Taken from the producer rather than written as a literal, so the two cannot drift apart.
+        let hashLength = shortStableHash("").count
+        guard name.count > hashLength + 1 else { return nil }
+        let separatorIndex = name.index(name.endIndex, offsetBy: -(hashLength + 1))
+        guard name[separatorIndex] == "-" else { return nil }
+        let worktreeHash = name[name.index(after: separatorIndex)...]
+        let lowercaseHexDigits = Set("0123456789abcdef")
+        guard worktreeHash.allSatisfy(lowercaseHexDigits.contains) else { return nil }
+        return (branchSlug: String(name[name.startIndex..<separatorIndex]), worktreeHash: String(worktreeHash))
     }
 
     /// The runtime root this profile resolves to, WITHOUT creating it. Kept separate from creating the
