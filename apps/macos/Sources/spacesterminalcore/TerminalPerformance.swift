@@ -4,7 +4,18 @@ public enum TerminalPerformance {
     /// Whether the DEBUG perf log is recording. Callers with metric inputs that are expensive to
     /// compute (e.g. re-encoding a payload just to measure its size) should check this before
     /// paying for them, since every log function below is a no-op when it is false.
-    public static var isEnabled: Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
+    ///
+    /// Resolved once per process rather than per access. As a computed property this read the whole
+    /// process environment every time it was consulted, and it is consulted on the terminal's per-output
+    /// path: the state broadcast guard reads it after `SpacesDeviceTerminalPerformanceLogger.isEnabled()`
+    /// in an `||`, which does not short-circuit while the perf log is off — so the cheap check in front of
+    /// it would have handed straight back to a full environment materialization. The serial terminal engine
+    /// queue is saturated at roughly one core, so work on that path is charged against every session's
+    /// output and keystrokes.
+    ///
+    /// The consequence is that exporting `DEBUG` after the process has started does not take effect, which
+    /// matches how `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH` and the trace flag already behave.
+    public static let isEnabled: Bool = ProcessInfo.processInfo.environment["DEBUG"] == "1"
 
     public static func elapsedMS(since startedAt: Date) -> Int { max(Int(Date().timeIntervalSince(startedAt) * 1000), 0) }
 
