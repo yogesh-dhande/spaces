@@ -854,6 +854,13 @@ enum SpacesDaemonProfileCommandRouting {
             return
         }
 
+        // Release the terminal database now that every session has quiesced and drained, so its final WAL
+        // checkpoint runs here rather than being lost when `execv` replaces this image. The shared services
+        // that hold their own long-lived connections were already stopped before quiescing, and this is the
+        // last one left. A straggler write reopens it, which is why the release is not latched: the exec
+        // path below can fail and resume this daemon in place.
+        TerminalSessionPersistence.closeDatabaseConnection()
+
         writeStandardError("spacesd handoff_exec path=\(launchExecutablePath) generation=\(nextGeneration) sessions=\(records.count)\n")
         var execErrno = Int32(0)
         do {

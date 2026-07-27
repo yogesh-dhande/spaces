@@ -192,6 +192,9 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let fileManager = FileManager.default
         let originalPermissions = try fileManager.attributesOfItem(atPath: databasePath)[.posixPermissions] as? NSNumber
         try fileManager.setAttributes([.posixPermissions: 0o444], ofItemAtPath: databasePath)
+        // A mode change binds at open, so the process's existing connections would keep their write access
+        // straight through the fault. Release them on both sides so the injected mode is the one in force.
+        TerminalSessionPersistence.closeDatabaseConnection()
         defer { if let originalPermissions { try? fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) } }
 
         // Pre-fix behavior: the suppressed write (`try?`) would still append this session to `finalized`.
@@ -214,6 +217,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
         // Restore write access and run the sweep again: the repair now commits and the row is finalized.
         if let originalPermissions { try fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) }
+        TerminalSessionPersistence.closeDatabaseConnection()
 
         let healedResult = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in true })
 
