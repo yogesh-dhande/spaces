@@ -44,7 +44,8 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
         NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil)
-        await reconciler.stop()
+        reconciler.beginStop()
+        await reconciler.releaseStore()
 
         try await settle()
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "A reconcile triggered across the stop must not run.")
@@ -55,7 +56,8 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
     @MainActor func testNotificationsAfterStopDoNoDatabaseWork() async throws {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
-        await reconciler.stop()
+        reconciler.beginStop()
+        await reconciler.releaseStore()
 
         for _ in 0..<50 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
         try await settle()
@@ -73,7 +75,8 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
         for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
         try await Task.sleep(nanoseconds: 20_000_000)
         for _ in 0..<200 { NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil) }
-        await reconciler.stop()
+        reconciler.beginStop()
+        await reconciler.releaseStore()
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: databasePath), "The burst should have run passes before the stop.")
         // No settling first: `stop()` awaits the release, so returning from it is what establishes that the
@@ -87,8 +90,10 @@ final class TerminalForegroundAgentReconcilerTests: XCTestCase {
     @MainActor func testStopBeforeAnyPassAndRepeatedStopAreSafe() async throws {
         let reconciler = TerminalForegroundAgentReconciler(databasePath: databasePath)
         reconciler.start()
-        await reconciler.stop()
-        await reconciler.stop()
+        reconciler.beginStop()
+        await reconciler.releaseStore()
+        reconciler.beginStop()
+        await reconciler.releaseStore()
 
         try await settle()
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath))

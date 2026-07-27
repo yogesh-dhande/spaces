@@ -24,7 +24,7 @@
         private let reconcileStore: DaemonReconcileStore
         private var reconcileTask: Task<Void, Never>?
         private var pending = false
-        /// Latched by `stop()`. A reconcile task created just before the stop has not necessarily
+        /// Latched by `beginStop()`. A reconcile task created just before the stop has not necessarily
         /// begun its first pass, and `runPass` is not cancellable, so clearing the task handle alone
         /// would not stop it from submitting one.
         private var stopped = false
@@ -63,9 +63,24 @@
             }
         }
 
-        /// Quiesces the loop and releases the database connection, taking its final WAL checkpoint.
-        /// Every gate the loop consults is on the main actor along with this, so once `stopped` is
-        /// set no further pass can be submitted and the close is the last thing the store ever does.
+        /// Latching half of the stop, and deliberately synchronous. Every gate the loop consults is on
+        /// the main actor along with this, so once `stopped` is set no further pass can be submitted —
+        /// including by a reconcile task that was already committed and is still looping. `lifecycle`
+        /// latches too, so a pass already inside `ensureRunning` cannot bring Caddy back up.
+        ///
+        /// Split from `releaseStore()` so the daemon's shutdown can latch every service that produces
+        /// work before it suspends on any drain. A combined stop would leave this loop live — free to
+        /// submit another pass, and to restart Caddy — for the whole of the earlier drain it waits behind.
+        func beginStop() {
+            stopped = true
+            pending = false
+            reconcileTask = nil
+            lifecycle.stop()
+        }
+
+        /// Awaited half of the stop: releases the database connection, taking its final WAL checkpoint,
+        /// and does not return until that has happened. Call it only after `beginStop()`, which is what
+        /// makes the close the last thing this loop's store ever does.
         ///
         /// Awaiting the close is what establishes the release: returning from here means this loop's
         /// connection is gone and its final checkpoint taken, so whatever the daemon does next —
@@ -73,13 +88,7 @@
         /// rather than blocking also keeps the main actor free while the store's queue drains the pass
         /// this close is queued behind, which a pass that hops onto the terminal engine actor (and from
         /// there synchronously back to main) depends on.
-        func stop() async {
-            stopped = true
-            pending = false
-            reconcileTask = nil
-            lifecycle.stop()
-            await reconcileStore.close()
-        }
+        func releaseStore() async { await reconcileStore.close() }
     }
 
     /// Serializes Caddy process mutations so shutdown cannot race an in-flight reconcile restart.

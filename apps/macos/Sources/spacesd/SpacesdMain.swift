@@ -509,19 +509,28 @@ enum SpacesDaemonProfileCommandRouting {
     /// request-accepting socket server. Shared by `shutdown()` and the exec-in-place handoff, which
     /// stops intake here and then quiesces (rather than terminates) the session cores.
     ///
-    /// Async because stopping a reconcile loop awaits the release of its database connection instead of
-    /// blocking the main thread on it. Everything that can bring NEW work in is therefore torn down
-    /// before the first await: both request acceptors, and every notification source that could re-arm a
-    /// reconcile loop. A reconcile task already committed before the stop only submits a pass the stopped
-    /// loop's store discards, and nothing torn down after the awaits is something an already-accepted
-    /// request needs — each request builds its own orchestrator and store, and the reconcile loops' stores
-    /// are private to them.
+    /// Runs in two phases, and the split is the point. Draining a reconcile loop's database connection
+    /// suspends the main actor for as long as a pass takes, so any service still live across that
+    /// suspension can start fresh work into a daemon that is about to `exit(0)` or `execv` — a request
+    /// launching an arbitrary command, or a process-status reconcile committing an exit whose `onExit:
+    /// restart` the handoff gate then refuses, losing the restart. So: latch every producer of new work
+    /// first, and only then wait.
+    ///
+    /// `stopWorkProducers()` is not `async`, which is what enforces phase 1 rather than leaving it to the
+    /// reader — nothing in it can suspend, so nothing can slip between two latches. A service added later
+    /// belongs there by default; only a teardown that genuinely must be awaited goes in phase 2, and by
+    /// then everything is already latched.
     private func stopSharedServices() async {
-        // Intake first, and specifically before the awaits below: `shutdownInProgress` gates session
-        // CREATES only, so during a shutdown every other request kind — `.runWorkspaceCommand` can launch
-        // an arbitrary command — is admitted right up until the acceptors stop. Draining the reconcile
-        // stores can take a whole in-flight pass, and a request accepted into that window would start work
-        // the imminent `exit(0)` abandons half-done. (An exec handoff does not depend on this: it latches
+        stopWorkProducers()
+        await releaseReconcileStores()
+    }
+
+    /// Phase 1: latch everything that could introduce new work. Synchronous by contract — see
+    /// `stopSharedServices()`.
+    private func stopWorkProducers() {
+        // Intake first: `shutdownInProgress` gates session CREATES only, so during a shutdown every other
+        // request kind — `.runWorkspaceCommand` can launch an arbitrary command — is admitted right up
+        // until the acceptors stop. (An exec handoff does not depend on this: it latches
         // `handoffInProgress` before calling here, and that flag makes `handle` reject every command.)
         // This narrows the window rather than closing it: `acceptSource.cancel()` propagates
         // asynchronously, which is exactly why the create path has an admission gate as well.
@@ -549,14 +558,25 @@ enum SpacesDaemonProfileCommandRouting {
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
-        await terminalForegroundAgentReconciler?.stop()
-        terminalForegroundAgentReconciler = nil
         remoteAgentWatchService?.stop()
         remoteAgentWatchService = nil
+        terminalForegroundAgentReconciler?.beginStop()
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
-            await caddyRouterService?.stop()
+            caddyRouterService?.beginStop()
+        #endif
+    }
+
+    /// Phase 2: wait for each reconcile loop's database connection to be released and take its final WAL
+    /// checkpoint. Safe to suspend in here precisely because phase 1 has already run: nothing left alive
+    /// can submit work, and neither reconcile pass depends on a service phase 1 tore down — each builds
+    /// its own orchestrator over the store confined to its own queue.
+    private func releaseReconcileStores() async {
+        await terminalForegroundAgentReconciler?.releaseStore()
+        terminalForegroundAgentReconciler = nil
+        #if os(macOS)
+            await caddyRouterService?.releaseStore()
             caddyRouterService = nil
         #endif
     }
