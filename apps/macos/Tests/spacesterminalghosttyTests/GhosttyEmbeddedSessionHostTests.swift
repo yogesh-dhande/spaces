@@ -433,6 +433,72 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntilChildIsReaped(childPID)
     }
 
+    /// The same leader that outlives its PTY, reached through the NATURAL-exit path: it releases the slave
+    /// at startup rather than from a SIGHUP handler, so `read()` hits EOF with nobody terminating anything.
+    /// EOF says every slave descriptor is closed -- a fact about descriptors, not about the process -- so the
+    /// session is over while its leader runs on.
+    ///
+    /// The driver forked that leader, so ending and collecting it is the driver's own job: no other part of
+    /// the daemon reaps children (there is no SIGCHLD handler and no `waitpid(-1)` sweep), and a caller's
+    /// later `terminate()` cannot rescue it because the session is already closed. Without that the process
+    /// keeps running with nothing able to stop it and then sits as a zombie for the daemon's lifetime.
+    func testHostManagedPTYNaturalExitEndsALeaderThatOutlivesThePTY() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let pidPath = root.appendingPathComponent("leader.pid")
+        // Python rather than a shell script: closing exactly the three stdio descriptors and then staying
+        // alive has to be precise, and a shell may keep its own descriptor on the tty for job control, which
+        // would leave the slave open and test nothing. `exec` makes this process the PTY leader, so the pid
+        // it records is the pid the driver forked. The rename publishes the pid file atomically, so reading
+        // it can never observe a partial write.
+        let script = """
+            import os, time
+
+            pid_path = "\(pidPath.path)"
+            with open(pid_path + ".tmp", "w") as pid_file:
+                pid_file.write(str(os.getpid()))
+            os.rename(pid_path + ".tmp", pid_path)
+            for fd in (0, 1, 2):
+                os.close(fd)
+            time.sleep(300)
+            """
+        let scriptPath = root.appendingPathComponent("release-pty-at-startup.py")
+        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+        let closedBox = MutableBox<Bool>(false)
+        var driver: HostManagedPTYTerminalSessionDriver? = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "natural-exit-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "natural-exit-released",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
+                createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
+        driver?.setSessionClosedHandler { closedBox.value = true }
+
+        try driver?.startIfNeeded()
+        // The session closes as soon as the slave is released, which is also the point the pid file is
+        // guaranteed to be there: the leader writes it before closing its descriptors.
+        try await waitUntil { closedBox.value }
+        let recordedPID = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let childPID = try XCTUnwrap(Int32(recordedPID))
+        // A failing run must not leave the leader behind: it sleeps far longer than the test does, so kill
+        // and collect it here rather than leaking a live process (or a zombie) out of the test.
+        defer {
+            if Self.processLifecycle(childPID) != .reaped {
+                kill(childPID, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(childPID, &status, 0) == -1, errno == EINTR {}
+            }
+        }
+
+        // Release the driver the way a session core does the moment a session reports closed. The leader's
+        // teardown cannot depend on a caller still holding the driver.
+        driver = nil
+
+        try await waitUntilChildIsReaped(childPID)
+    }
+
     /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
     /// generously; the reap that follows it is bounded tightly because a stage only reports success once
     /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
