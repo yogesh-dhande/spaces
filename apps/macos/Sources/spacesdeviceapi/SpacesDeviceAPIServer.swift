@@ -1310,7 +1310,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            case .daemonHandoffInProgress: return .shuttingDown
+            // Only ever thrown by the handoff-only admission guard, never by a shutdown, so it always
+            // carries the handoff code. This mapping predates issue #334's broader gap (this transport's
+            // `.ping` and its agent-session killer are not teardown-aware at all); it is corrected here
+            // only because the code it referenced changed meaning, not as a #334 fix.
+            case .daemonHandoffInProgress: return .handingOff
             }
         }
         // The daemon's host is missing the Spaces CLI every hook command needs; the request was well

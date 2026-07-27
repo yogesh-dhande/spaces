@@ -31,7 +31,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     private var certificateFingerprint: String?
     /// Mirrors the main actor's `handoffInProgress` flag. Without this, the fast ping path would report
     /// the daemon live for the entire up-to-10s exec-handoff preflight window during which `handle(_:)`
-    /// is already rejecting every real request with `.shuttingDown` — a client polling liveness would
+    /// is already rejecting every real request with `.handingOff` — a client polling liveness would
     /// see "ok" and adopt a daemon that refuses everything else.
     private var handoffInProgress = false
     /// Mirrors the main actor's `shutdownInProgress` flag. `shutdown()` sets it BEFORE it stops shared
@@ -104,21 +104,42 @@ final class DaemonLivenessState: @unchecked Sendable {
         #endif
     }
 
-    /// Admission decision shared by every session-CREATING gate: the off-actor early-out in
-    /// `createSessionOffMain` and the engine-side authority in `createSession`/`startSessionCoreResponse`.
-    /// Returns the rejection response to send, or `nil` to admit. Both an in-progress exec handoff and an
-    /// in-progress shutdown refuse new sessions — they carry distinct messages but the same `.shuttingDown`
-    /// wire code (which `SpacesDeviceAPIServer` also maps `WorkspaceError.daemonHandoffInProgress` onto).
-    /// Centralized on the box that owns both flags so "may a new session be created" has one source of
+    /// Admission decision consulted by EVERY command gate in the daemon: `handle(_:)`'s first line, every
+    /// off-main handler (`runWorkspaceCommandOffMain`, `prepareWorkspaceOffMain`, `terminalSendOffMain`,
+    /// the control/state/terminate/profile-command handlers), the session-CREATING gates
+    /// (`createSessionOffMain`/`createSession`/`startSessionCoreResponse`), and the liveness `.ping`
+    /// responder (`pingResponse`). Returns the rejection response to send, or `nil` to admit.
+    ///
+    /// An in-progress exec handoff and an in-progress shutdown both mean "refuse the request" to every
+    /// command gate, so admission is folded into one predicate here rather than replicated per guard: a
+    /// future third teardown reason is added once, on this function, instead of risking one guard
+    /// remembering it and several others not (see issue #325, which is exactly that drift —
+    /// `shutdownInProgress` originally fed only the session-create gate while `handoffInProgress` reached
+    /// every command).
+    ///
+    /// The two latches carry distinct wire codes, though, because they mean different things to a
+    /// *waiting* caller: `.handingOff` tells `TerminalService.isTransitionalHandoffPing` that a successor
+    /// is about to rebind the socket, worth waiting `handoffTransitionTimeout` (15s) for; `.shuttingDown`
+    /// tells it no successor is coming, so it must fall straight through to spawning a fresh daemon
+    /// instead of stalling out that same 15s for nothing (issue #334's sibling problem, on the local
+    /// transport). Every other consumer of this response treats both codes identically ("this daemon is
+    /// going away, refuse the request") and needs no change — see `LocalDaemonReachabilityProbe`, which
+    /// treats any non-`ok` ping as "did not answer" without inspecting the code at all.
+    ///
+    /// The session-CREATE family is the one caller that also re-checks this on the terminal engine actor
+    /// after its own git-prep/off-actor early-out — see `startSessionCoreResponse`'s doc for why create
+    /// alone needs a second, later check at the true mutation boundary.
+    ///
+    /// Centralized on the box that owns both flags so "may this daemon still do work" has one source of
     /// truth, testable without standing up the (private) controller.
-    func sessionCreateRejection() -> TerminalServiceResponse? {
+    func teardownRejection() -> TerminalServiceResponse? {
         let snapshot = snapshot()
         if snapshot.shutdownInProgress {
             return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown, servicePID: getpid())
         }
         if snapshot.handoffInProgress {
             return TerminalServiceResponse(
-                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .handingOff, servicePID: getpid())
         }
         return nil
     }
@@ -127,14 +148,12 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// `TerminalServiceDaemonStatus` shape as the controller's `daemonStatus()` (version, installed
     /// version, fingerprint, and an eventually-consistent session count) so wire-compatibility
     /// negotiation works identically, but it never blocks on the main actor — the point of the fast
-    /// path. While a handoff is in progress it instead mirrors `handle(_:)`'s own rejection exactly, so
-    /// a ping never reports the daemon live while every other request is being turned away.
+    /// path. While either teardown latch is set it instead returns `teardownRejection()`'s answer
+    /// verbatim, mirroring `handle(_:)`'s own rejection exactly, so a ping never reports the daemon live
+    /// while every other request is being turned away.
     func pingResponse() -> TerminalServiceResponse {
+        if let rejection = teardownRejection() { return rejection }
         let snapshot = snapshot()
-        guard !snapshot.handoffInProgress else {
-            return TerminalServiceResponse(
-                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
-        }
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
             activeSessionCount: snapshot.sessionCount, deviceAPIAddresses: currentDeviceAPIAddresses())
@@ -583,13 +602,6 @@ enum SpacesDaemonProfileCommandRouting {
 
     @TerminalEngineActor private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
 
-    /// The response every command returns while an exec-in-place handoff is underway. Read from both the
-    /// main actor (`handle`) and the off-main handlers (via `livenessState`), it mirrors the rejection the
-    /// fast ping path emits so no request is served while the daemon is handing off.
-    private nonisolated static func handoffInProgressResponse() -> TerminalServiceResponse {
-        TerminalServiceResponse(ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
-    }
-
     /// Off-main request classifier, run on `serverQueue` (the transport thread), not the main actor.
     /// The unbounded/blocking request classes — arbitrary shell exec, git-driven workspace prep, session
     /// create's git prep, and the socket-fallback state/control/terminal-send reads — run their blocking
@@ -648,7 +660,7 @@ enum SpacesDaemonProfileCommandRouting {
         precondition(
             !SpacesDaemonProfileCommandRouting.requiresOffMainExecution(command),
             "engine-touching profile command reached the main-actor bridge; peel it off main in dispatch(_:)")
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         return Self.runOnMainActorSynchronously { [weak self] in
             guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown) }
             return self.handleProfileCommand(command)
@@ -656,10 +668,10 @@ enum SpacesDaemonProfileCommandRouting {
     }
 
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        // Socket shutdown is asynchronous, so a request accepted just before cancellation
-        // can reach the main actor after handoff starts. Reject it here, at the mutation
-        // boundary, so the session snapshot cannot gain or lose a core while quiescing.
-        guard !handoffInProgress else { return Self.handoffInProgressResponse() }
+        // Socket shutdown is asynchronous, so a request accepted just before cancellation can reach the
+        // main actor after a handoff or a final shutdown starts. Reject it here, at the mutation boundary,
+        // so the session snapshot cannot gain or lose a core while quiescing or terminating.
+        if let rejection = livenessState.teardownRejection() { return rejection }
         switch request.command {
         case .ping: return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
         case .shutdownIfIdle: return shutdownIfIdle()
@@ -1016,7 +1028,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// fast-exiting command's PTY-close job cannot interleave to strand the summary (see
     /// `startSessionCoreResponse`).
     private nonisolated func createSessionOffMain(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
-        if let rejection = livenessState.sessionCreateRejection() { return rejection }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         let launchConfiguration = request.launchConfiguration
         do {
             try prepareWorkspace(
@@ -1032,7 +1044,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// `startSessionCoreResponse`'s result, whose success response already carries the session summary from
     /// the live core's in-memory state.
     @TerminalEngineActor private func createSession(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
-        if let rejection = livenessState.sessionCreateRejection() { return rejection }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         let launchConfiguration = request.launchConfiguration
         do {
             try prepareWorkspace(
@@ -1044,7 +1056,7 @@ enum SpacesDaemonProfileCommandRouting {
 
     /// The engine-isolated tail of session create: creating the session core, starting it, and serving the
     /// post-start summary — all in one serial engine block. Re-checks the create-admission flags
-    /// (`handoffInProgress` and `shutdownInProgress`, via `livenessState.sessionCreateRejection()`) on the
+    /// (`handoffInProgress` and `shutdownInProgress`, via `livenessState.teardownRejection()`) on the
     /// engine actor so a create that raced a handoff or a shutdown cannot add a core after the
     /// quiesce/shutdown snapshot — this is the real mutation-boundary guard, serialized against both the
     /// handoff quiesce loop (`performExecHandoff`) and `shutdown()`'s terminate snapshot, which also run on
@@ -1075,7 +1087,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// local reference, so there is nothing meaningful a disk-fallback rollback could reconcile.
     @TerminalEngineActor private func startSessionCoreResponse(for launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalServiceResponse
     {
-        if let rejection = livenessState.sessionCreateRejection() { return rejection }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let sessionCore = try sessionCore(for: launchConfiguration)
             try sessionCore.startIfNeeded()
@@ -1092,13 +1104,22 @@ enum SpacesDaemonProfileCommandRouting {
     /// unbounded block — plus the git-driven workspace prep, entirely off the main actor on the transport
     /// thread. Touches no main-actor state, so there is no main hop at all.
     private nonisolated func runWorkspaceCommandOffMain(_ request: TerminalServiceRunWorkspaceCommandRequest) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         let workspaceCommand = request.workspaceCommand
         do {
             try prepareWorkspace(
                 runtimeManifest: request.runtimeManifest, worktreeRefresh: request.worktreeRefresh,
                 workingDirectory: workspaceCommand.workingDirectory)
             let logPath = try workspaceCommandLogPath(workspaceCommand.logPath)
+            // Re-check at the launch boundary: the entry check above only proves the request was admitted
+            // before `prepareWorkspace` started, but that call can spend up to 120s in git fetch/clone/merge,
+            // and a shutdown or handoff can latch at any point during that window. Without this recheck a
+            // teardown that lands mid-prep would never be observed, and `runShellCommand` below spawns an
+            // arbitrary `/bin/bash -lc` child that the daemon has no further chance to refuse. This handler
+            // runs nonisolated on the transport thread with no engine-queue serialization (unlike the
+            // create path's `startSessionCoreResponse` recheck), so this only narrows the race to the
+            // instant between this check and the spawn a few lines below — it does not close it.
+            if let rejection = livenessState.teardownRejection() { return rejection }
             let result = try runShellCommand(workspaceCommand, logPath: logPath, manifest: request.runtimeManifest)
             let message = result.exitCode == 0 ? "Workspace command completed." : "Workspace command exited with code \(result.exitCode)."
             return TerminalServiceResponse(ok: true, message: message, servicePID: getpid(), commandResult: result)
@@ -1108,7 +1129,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// RPC `.prepareWorkspace` handler. Chains git subprocesses (fetch/checkout/merge, and `git clone`
     /// with a 120s timeout) with no main-actor state, so it runs wholly off the main actor.
     private nonisolated func prepareWorkspaceOffMain(_ payload: TerminalServicePrepareWorkspaceRequest) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             try prepareWorkspace(
                 runtimeManifest: payload.runtimeManifest, worktreeRefresh: payload.worktreeRefresh,
@@ -1233,7 +1254,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// (`loadCurrentStateOffMain`); when the session is not live, the unix-socket connect+read (2s timeout)
     /// and the disk reads run off the main actor on the transport thread.
     private nonisolated func loadTerminalStateOffMain(sessionID: String) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         guard !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1380,7 +1401,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// in-process core still sends in a narrow main hop; otherwise the socket send runs on the transport
     /// thread. Mirrors `sendProfileTerminalInput` + `handleProfileCommand`'s success/failure wrapping.
     private nonisolated func terminalSendOffMain(_ payload: TerminalServiceTerminalSendPayload) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         let text: String?
         let bytes: Data?
         switch payload.input {
@@ -1403,7 +1424,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// engine→main hop is safe because the transport thread (not main) is what waits. Mirrors the
     /// `handleProfileCommand` success/failure envelope.
     private nonisolated func terminalCommandOffMain(_ payload: TerminalServiceTerminalCommandPayload) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
             let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
@@ -1416,7 +1437,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// RPC `.profileCommand(.agentSpawn)` handler. Creates a coding-agent session, so it runs off main for
     /// the same reason as `terminalCommandOffMain`.
     private nonisolated func agentSpawnOffMain(_ payload: TerminalServiceAgentSpawnPayload) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
             let profile = try spawnProfileAgentSession(payload, orchestrator: orchestrator)
@@ -1430,7 +1451,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// driven from the main actor (the one-way rule), so this runs on the transport thread where the
     /// synchronous engine hop is safe. Mirrors the `handleProfileCommand` success/failure envelope.
     private nonisolated func workspaceStartOffMain(workspaceID: String, restartIfRunning: Bool) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
@@ -1447,7 +1468,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// — so it runs on the transport thread. The subscriber "exited" notice the chokepoint enqueues sends
     /// through `submitAgentNotificationLine`, which on this off-main thread takes its direct send path.
     private nonisolated func agentKillOffMain(_ payload: TerminalServiceAgentKillPayload) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
             let profile = try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
@@ -1461,7 +1482,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// transport thread. Every subscriber notification it produces goes direct (off-main) through
     /// `submitAgentNotificationLine`. Mirrors the `handleProfileCommand` success/failure envelope.
     private nonisolated func agentSignalOffMain(_ payload: TerminalServiceProfileAgentSignalPayload) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
             let profile = try recordProfileAgentSignal(payload, orchestrator: orchestrator)
@@ -1917,7 +1938,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// (`liveControlResponse` touches Ghostty); when the session is not live, the control-socket round-trip
     /// (5s timeout) and any session-state read run off the main actor on the transport thread.
     private nonisolated func handleTerminalControlOffMain(_ request: TerminalServiceControlCommandRequest) -> TerminalServiceResponse {
-        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        if let rejection = livenessState.teardownRejection() { return rejection }
         let sessionID = request.sessionID
         let controlRequest = request.controlRequest
         let command = controlRequest.commandValue
@@ -2041,7 +2062,7 @@ enum SpacesDaemonProfileCommandRouting {
             // resource). A terminate that wins the race and runs before the snapshot is harmless — the
             // snapshot then simply excludes the core it removed. The internal handoff/shutdown/resume paths
             // call `terminateSession` directly, bypassing this RPC-only barrier.
-            guard !self.handoffInProgress else { return Self.handoffInProgressResponse() }
+            if let rejection = self.livenessState.teardownRejection() { return rejection }
             return self.terminateSession(id: payload.sessionID)
         }
     }
@@ -2445,7 +2466,10 @@ enum SpacesDaemonProfileCommandRouting {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            case .daemonHandoffInProgress: return .shuttingDown
+            // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
+            // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
+            // handoff code, not the generic teardown one.
+            case .daemonHandoffInProgress: return .handingOff
             }
         }
         if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
