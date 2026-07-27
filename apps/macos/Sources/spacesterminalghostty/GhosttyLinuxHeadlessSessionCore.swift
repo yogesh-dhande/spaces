@@ -215,7 +215,7 @@
             // fires nothing. This closure captures only the session id (a value type), so it survives the
             // core's release. A benign duplicate notification when the core stays alive is acceptable.
             let terminatedSessionID = launchConfiguration.sessionID
-            persistence.enqueueWrite { _ in
+            persistence.enqueueOrderedWork {
                 Task { @TerminalEngineActor in
                     TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
                     TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)

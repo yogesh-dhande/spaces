@@ -178,6 +178,14 @@ public struct SpacesProfile: Sendable, Equatable {
     /// Path containment compared component-wise on canonical paths. A string-prefix test would report
     /// `~/.spaces-devil/spaces.db` as living under `~/.spaces-dev`, and would be defeated by a `..` segment
     /// or a symlinked route into the root; canonicalizing first and comparing whole components is neither.
+    ///
+    /// Components compare case-SENSITIVELY, which matches Linux, where `.SPACES` genuinely is a different
+    /// directory. On a case-insensitive macOS volume that means a deliberately case-varied spelling of a
+    /// live root (`~/.SPACES/spaces.db`) opens the same database without being recognised — accepted, not
+    /// overlooked. This guard exists to catch a test that was never isolated, not to resist evasion, and
+    /// nobody writes that spelling by accident; the only reliable way to recover the on-disk case is
+    /// `URL.resourceValues(forKeys: [.canonicalPathKey])`, which requires the path to exist and so would
+    /// forfeit this check running before anything is created.
     private static func isPath(_ path: String, under root: URL) -> Bool {
         let pathComponents = URL(fileURLWithPath: canonicalPath(path)).pathComponents
         let rootComponents = URL(fileURLWithPath: canonicalPath(root.path)).pathComponents

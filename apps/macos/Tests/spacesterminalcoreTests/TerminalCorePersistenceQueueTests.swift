@@ -69,7 +69,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // Park the serial queue so all five enqueues land before any runs; the gate then supersedes the
         // first four when the barrier releases.
         let barrier = DispatchSemaphore(value: 0)
-        queue.enqueueWrite { _ in barrier.wait() }
+        queue.enqueueOrderedWork { barrier.wait() }
         for value in 1...5 { queue.enqueueCoalescedWrite(key: "k") { _ in recorder.record(value) } }
         barrier.signal()
         queue.drain()
@@ -81,7 +81,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.coalesce-keyed")
         let recorder = OrderRecorder()
         let barrier = DispatchSemaphore(value: 0)
-        queue.enqueueWrite { _ in barrier.wait() }
+        queue.enqueueOrderedWork { barrier.wait() }
         queue.enqueueCoalescedWrite(key: "a") { _ in recorder.record(1) }
         queue.enqueueCoalescedWrite(key: "b") { _ in recorder.record(10) }
         queue.enqueueCoalescedWrite(key: "a") { _ in recorder.record(2) }
@@ -96,7 +96,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     func testUncoalescedWritesRunFIFOAndDrainBlocks() {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.fifo")
         let recorder = OrderRecorder()
-        for value in 1...50 { queue.enqueueWrite { _ in recorder.record(value) } }
+        for value in 1...50 { queue.enqueueOrderedWork { recorder.record(value) } }
         queue.drain()
         XCTAssertEqual(recorder.recorded, Array(1...50))
     }
@@ -105,7 +105,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     func testDrainAsyncAwaitsQueuedWrites() async {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.drain-async")
         let recorder = OrderRecorder()
-        for value in 1...20 { queue.enqueueWrite { _ in recorder.record(value) } }
+        for value in 1...20 { queue.enqueueOrderedWork { recorder.record(value) } }
         await queue.drainAsync()
         XCTAssertEqual(recorder.recorded, Array(1...20))
     }
@@ -186,7 +186,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.enqueue-time-profile")
         // Park the serial queue so the runtime-state write is still pending when the profile moves.
         let barrier = DispatchSemaphore(value: 0)
-        queue.enqueueWrite { _ in barrier.wait() }
+        queue.enqueueOrderedWork { barrier.wait() }
         queue.enqueueRuntimeStateWrite(state, at: Date(), paths: paths, onPersisted: { _, _ in })
 
         // Stands in for a test teardown restoring the environment while the write is still queued.
@@ -202,6 +202,47 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
                 return XCTFail("Expected no row in the profile that was current at execution time, got \(error).")
             }
         }
+    }
+
+    /// A write enqueued while the profile could NOT be resolved is abandoned, never re-attributed to
+    /// whatever profile is current when the queue reaches it.
+    ///
+    /// Resolution failing is reachable, not theoretical: profile resolution refuses a live user profile in
+    /// a test process, so binding `SPACES_DB_PATH` inside one makes the enqueue-time resolution throw. If
+    /// that failure collapsed into "no explicit database", the write would resolve the profile bound
+    /// afterwards and commit there — the reassignment the enqueue-time capture exists to prevent.
+    func testQueuedWriteWhoseProfileFailedToResolveIsNotReboundToALaterProfile() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+        let refusedRoot = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/queue-\(UUID().uuidString)", isDirectory: true)
+        let laterDatabasePath = try makeProfileRoot().appendingPathComponent("spaces.db").path
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        try paths.ensureDirectories()
+        let state = makeRunningState(sessionID: "session-unresolved-profile", title: "abandoned")
+
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.unresolved-profile")
+        // Park the queue while the profile still resolves, so parking is not itself the failing step.
+        let barrier = DispatchSemaphore(value: 0)
+        queue.enqueueOrderedWork { barrier.wait() }
+
+        // Enqueue under a profile that resolution refuses.
+        setenv("SPACES_DB_PATH", refusedRoot.appendingPathComponent("spaces.db", isDirectory: false).path, 1)
+        queue.enqueueRuntimeStateWrite(state, at: Date(), paths: paths, onPersisted: { _, _ in })
+
+        // Bind a perfectly good profile afterwards — the one the abandoned write must never reach.
+        setenv("SPACES_DB_PATH", laterDatabasePath, 1)
+        barrier.signal()
+        queue.drain()
+
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths)) { error in
+            guard case TerminalSessionPersistenceError.unknownSession = error else {
+                return XCTFail("Expected the abandoned write to have committed nowhere, got \(error).")
+            }
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: refusedRoot.path), "A refused resolution must not have created the live profile directory.")
     }
 
     /// A failed NON-exited (running) runtime-state write must retry in place and eventually commit once the

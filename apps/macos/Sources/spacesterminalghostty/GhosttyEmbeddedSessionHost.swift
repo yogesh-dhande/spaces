@@ -575,7 +575,7 @@
             // to post the notifications (persistence closures return to the engine only via async Task). It
             // captures only the session id (a value type), so it survives this core's release.
             let terminatedSessionID = launchConfiguration.sessionID
-            enqueuePersistenceWrite { _ in
+            persistence.enqueueOrderedWork {
                 Task { @TerminalEngineActor in
                     TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
                     TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)
@@ -600,11 +600,11 @@
 
         /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
         /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-        private func enqueuePersistenceWrite(_ write: @escaping @Sendable (String?) -> Void) { persistence.enqueueWrite(write) }
+        private func enqueuePersistenceWrite(_ write: @escaping @Sendable (String) -> Void) { persistence.enqueueWrite(write) }
 
         /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
         /// collapses to one write of the newest value. FIFO order across keys.
-        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable (String?) -> Void) {
+        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable (String) -> Void) {
             persistence.enqueueCoalescedWrite(key: key, write)
         }
 
@@ -2295,7 +2295,7 @@
         /// work runs. Signal the semaphore to release the queue.
         func debugHoldPersistenceQueue() -> DispatchSemaphore {
             let gate = DispatchSemaphore(value: 0)
-            enqueuePersistenceWrite { _ in gate.wait() }
+            persistence.enqueueOrderedWork { gate.wait() }
             return gate
         }
         func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
