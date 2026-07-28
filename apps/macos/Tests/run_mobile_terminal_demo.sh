@@ -785,7 +785,9 @@ prepare_remote_demo_daemon() {
     SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_install_root" \
     "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
 
-  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  # This lane installs the demo host's *installed* profile (install.sh below takes no --profile), so
+  # its staging directory is keyed by that instead of a development profile name.
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile installed)"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
   [[ "$artifact_url" == file://* ]] || {

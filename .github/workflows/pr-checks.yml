@@ -235,11 +235,13 @@ jobs:
 
       - name: Build and smoke Linux spacesd artifact
         run: |
+          set -euo pipefail
+          builder_image="$(apps/macos/scripts/ensure_linux_builder_image.sh --arch ${{ matrix.arch }})"
           docker run --rm --platform ${{ matrix.docker-platform }} \
             -v "$PWD":/workspace \
             -w /workspace \
-            swift:6.2-noble \
-            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
+            "$builder_image" \
+            bash -lc 'apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
 
       # The artifact build above stages the Linux libghostty-vt into .local/ghosttyvt/lib-linux,
       # which is exactly what the unit lane needs; one architecture's run suffices for unit
