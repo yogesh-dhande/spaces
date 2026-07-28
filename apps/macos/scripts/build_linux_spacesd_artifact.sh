@@ -222,7 +222,15 @@ build_ghostty_vt() {
         # Ghostty's vendored translate_c build helper shells out to a bare
         # `zig env`, so the pinned toolchain must be first on PATH.
         export PATH="$(dirname "$zig_bin"):$PATH"
-        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
+        # -Dcpu=baseline: this is a native (non-cross) build, and a Zig target query that
+        # names neither an architecture nor a CPU resolves the *build host's* CPU and
+        # compiles for it. The artifact then only runs on CPUs at least as capable as
+        # whatever machine happened to build it -- on an AVX-512 runner, libghostty-vt gets
+        # EVEX-encoded instructions and spacesd dies with SIGILL on the first terminal page
+        # allocation on every device without AVX-512. Ghostty's Apple targets already pin a
+        # generic CPU (Config.genericMacOSTarget), so only this Linux build needs the flag.
+        # `verify_artifact_cpu_baseline` asserts the pin held in the packaged binaries.
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Dcpu=baseline -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 }
 
@@ -304,6 +312,43 @@ copy_ghostty_vt_libraries() {
     if [[ -e "$destination_bin/libghostty-vt.so.0" && ! -e "$destination_bin/libghostty-vt.so" ]]; then
         (cd "$destination_bin" && ln -s libghostty-vt.so.0 libghostty-vt.so)
     fi
+}
+
+# Fails the build when a binary we compiled carries an instruction the target baseline CPU
+# cannot execute, so a build host's CPU can never decide which devices a release runs on.
+#
+# EVEX (AVX-512 and its successors) is the class this checks, and the encoding alone is
+# proof: 0x62 leads no other instruction in 64-bit mode, and nothing we ship may use it.
+# Lower extensions cannot be judged the same way -- Highway compiles AVX2 and SSE4 kernels
+# on purpose and picks between them with a runtime CPUID check, so their presence is
+# expected and safe. The Swift runtime libraries under lib/ come prebuilt from the Swift
+# toolchain image and are not ours to constrain, so they are not scanned.
+verify_artifact_cpu_baseline() {
+    local bin_dir="$1"
+    [[ "$ARTIFACT_ARCH" == "x86_64" ]] || return 0
+    require_command objdump
+
+    local binary
+    for binary in "$bin_dir/spacesd-bin" "$bin_dir/spaces-bin" "$bin_dir"/libghostty-vt.so.*; do
+        [[ -f "$binary" && ! -L "$binary" ]] || continue
+        local disassembly decoded offenders
+        disassembly="$(objdump -d "$binary")"
+        # GNU objdump prints "<address>:\t<raw bytes>\t<mnemonic>". Requiring the mnemonic
+        # field skips the continuation lines that wrap a long instruction's remaining bytes,
+        # whose bytes could otherwise start with 62 and read as an EVEX prefix.
+        decoded="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^[0-9a-f][0-9a-f] / { n++ } END { print n + 0 }')"
+        # Other disassemblers lay the columns out differently -- llvm-objdump, for one, puts
+        # the raw bytes on the address's own field, so this parse would match nothing and
+        # report a clean binary no matter what it holds. A scan that cannot fail is worse
+        # than no scan, so an unparseable disassembly is a build failure rather than a pass.
+        [[ "$decoded" -gt 0 ]] || die "could not read instructions out of $(basename "$binary"); $(objdump --version | head -n 1) does not lay out disassembly the way this check parses it"
+        offenders="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^62 / { print }')"
+        if [[ -n "$offenders" ]]; then
+            echo "$offenders" | head -n 5 >&2
+            die "$(basename "$binary") carries AVX-512 code and would SIGILL on x86-64 devices without AVX-512 (EVEX-encoded instructions: $(echo "$offenders" | wc -l | tr -d ' '))"
+        fi
+    done
+    echo "==> Verified packaged x86_64 binaries carry no AVX-512 instructions"
 }
 
 copy_swift_runtime_libraries() {
@@ -759,6 +804,7 @@ package_artifact() {
     copy_swift_runtime_libraries "$spacesd_bin" "$staging_root/lib"
     copy_swift_runtime_libraries "$spaces_bin" "$staging_root/lib"
     copy_ghostty_vt_libraries "$staging_root/bin"
+    verify_artifact_cpu_baseline "$staging_root/bin"
     write_manifest "$staging_root" "$ghostty_sha" "$archive_name"
     (
         cd "$staging_root"
