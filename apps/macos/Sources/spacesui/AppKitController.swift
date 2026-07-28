@@ -2145,8 +2145,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
             scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
-            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
-            appearance: request.appearance)
+            scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
+            mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
+            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2557,8 +2558,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
-        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]],
-        workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus], alertsGroups: [AlertsGroup]
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
+        alertsGroups: [AlertsGroup]
     ) {
         var mergedProjects: [ProjectSummary] = []
         var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
@@ -4498,9 +4499,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the line between "already here" and "go get it" is directly testable.
     nonisolated static func canRefocusTerminalPaneWithoutReattaching(
         paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
-    ) -> Bool {
-        paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface
-    }
+    ) -> Bool { paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface }
 
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
@@ -4559,8 +4558,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             domain: "Spaces", code: 1003,
             userInfo: [
                 NSLocalizedDescriptionKey: "\(deviceName) is offline.",
-                NSLocalizedRecoverySuggestionErrorKey: isLocal
-                    ? "Restart the local daemon and try again." : "Reconnect it and try again.",
+                NSLocalizedRecoverySuggestionErrorKey: isLocal ? "Restart the local daemon and try again." : "Reconnect it and try again.",
             ])
     }
 
@@ -4763,8 +4761,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // failure backoff — it repeats every 0.75s for the whole duration of the setup,
         // and clearing backoff on every tick would redial every unrelated offline
         // device that fast, defeating the backoff entirely (see `startRemoteOverviewPull`).
-        requestSidebarReload(
-            forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
+        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;

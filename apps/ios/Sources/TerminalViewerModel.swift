@@ -778,6 +778,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func flushPendingScroll() { scrollCoalescer.flush() }
 
+    /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
+    /// discrete event whose press/release ordering the application depends on, so it flushes any
+    /// pending scroll batch first and rides the same input queue as a key send.
+    // Synchronous (no async hop) so a tap's press and release enqueue in call order: the serial
+    // input queue preserves enqueue order, but two Tasks racing to enqueue would not.
+    func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
+        guard isOwner else { return }
+        guard keepsTerminalInputSurfaceActive else { return }
+        flushPendingScroll()
+        flushBufferedInputText()
+        enqueueInputSend(kind: "send_mouse_button", detail: "\(button),\(pressed)") { [weak self, button, pressed, pointerPosition] in
+            guard let self else { return }
+            try await self.performSendMouseButtonRequest(button: button, pressed: pressed, pointerPosition: pointerPosition)
+        }
+    }
+
     func dismissLinkPreview() {
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
@@ -916,6 +932,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 sessionID: sessionID, clientID: clientID, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
                 scrollMods: scrollMods == 0 ? nil : scrollMods, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel)
+        }
+    }
+
+    private func performSendMouseButtonRequest(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) async throws {
+        let ownerEpoch = currentOwnerEpoch
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+            try await bridgeClient.mouseButton(
+                sessionID: sessionID, clientID: clientID, button: button, pressed: pressed, ownerEpoch: ownerEpoch, pointerPosition: pointerPosition,
+                timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 

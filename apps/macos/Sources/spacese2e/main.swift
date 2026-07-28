@@ -34,7 +34,8 @@ struct SpacesE2ECommand: ParsableCommand {
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
             ProfileCommand.self, ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -84,6 +85,34 @@ private struct ScrollApplicationWindowCommand: ParsableCommand {
                 executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, deltaY: deltaY, repetitions: repetitions,
                 firstScrollEventUptimeNanoseconds: timing.firstScrollEventUptimeNanoseconds,
                 lastScrollEventUptimeNanoseconds: timing.lastScrollEventUptimeNanoseconds, success: true))
+    }
+}
+
+private struct ClickApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "click-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        let timing = try postClickEvent(at: point)
+        try emitJSON(
+            ClickApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y,
+                mouseDownUptimeNanoseconds: timing.mouseDownUptimeNanoseconds, mouseUpUptimeNanoseconds: timing.mouseUpUptimeNanoseconds,
+                success: true))
     }
 }
 
@@ -1084,12 +1113,13 @@ private struct RenderUpdateTextCommand: ParsableCommand {
 
                 response = RenderUpdateTextLine(
                     ok: true, hasRenderUpdate: payload.renderUpdate != nil, appliedRenderUpdate: appliedRenderUpdate, updateKind: updateKind,
-                    text: baseline.map { GhosttyTerminalSnapshotLayout.plainText(for: $0.snapshot) }, reason: payload.reason,
-                    outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision, error: applyError)
+                    text: baseline.map { GhosttyTerminalSnapshotLayout.plainText(for: $0.snapshot) }, columns: baseline?.snapshot.columns,
+                    rows: baseline?.snapshot.rows, reason: payload.reason, outputByteCount: payload.outputByteCount,
+                    screenStateRevision: payload.screenStateRevision, error: applyError)
             } catch {
                 response = RenderUpdateTextLine(
-                    ok: false, hasRenderUpdate: nil, appliedRenderUpdate: nil, updateKind: nil, text: nil, reason: nil, outputByteCount: nil,
-                    screenStateRevision: nil, error: String(describing: error))
+                    ok: false, hasRenderUpdate: nil, appliedRenderUpdate: nil, updateKind: nil, text: nil, columns: nil, rows: nil, reason: nil,
+                    outputByteCount: nil, screenStateRevision: nil, error: String(describing: error))
             }
 
             var data = try encoder.encode(response)
@@ -1106,6 +1136,8 @@ private struct RenderUpdateTextLine: Encodable {
     let appliedRenderUpdate: Bool?
     let updateKind: String?
     let text: String?
+    let columns: Int?
+    let rows: Int?
     let reason: String?
     let outputByteCount: Int?
     let screenStateRevision: UInt64?
@@ -1352,11 +1384,31 @@ private struct DemoRecorder {
                     action: .resize, sessionID: sessionID, clientID: recorderClientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch,
                     resizeSerial: 1))
             guard resizeResponse.ok else { throw ValidationError("resize failed for \(plan.slug): \(resizeResponse.message)") }
+            // An accepted resize applies and broadcasts asynchronously; a subscription opened in that
+            // window can serve a pre-resize frame and then settle on an idle session, recording the
+            // whole capture at the wrong grid. Poll until the daemon serves the target grid so the
+            // subscription below can only ever start from a post-resize frame.
+            try waitUntilSessionServesGrid(sessionID: sessionID, columns: columns, rows: rows, slug: plan.slug)
             let payload = try collectSteadyState(sessionID: sessionID)
             _ = try? sendControl(SpacesDeviceTerminalControlRequest(action: .detach, sessionID: sessionID, clientID: recorderClientID))
             return payload
         }
         return try collectSteadyState(sessionID: sessionID)
+    }
+
+    private func waitUntilSessionServesGrid(sessionID: String, columns: Int, rows: Int, slug: String) throws {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if let state = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState,
+                let update = state.decodedRenderUpdate,
+                let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
+                applied.snapshot.columns == columns, applied.snapshot.rows == rows
+            {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw ValidationError("session \(slug) never served a \(columns)x\(rows) frame after its accepted resize")
     }
 
     private func collectSteadyState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
@@ -1441,6 +1493,9 @@ private struct DemoRecordingTransform {
     private static let strippedKeys: Set<String> = [
         "browserSessions", "resolvedBrowserSessions", "assignedPorts", "environment", "foregroundArgv", "foregroundExecutablePath",
         "foregroundExecutableName",
+        // The recorder Mac's live LAN/Tailscale addresses: machine-specific and irrelevant to a
+        // deterministic demo bundle.
+        "deviceAPIAddresses",
     ]
     private static let clearedArrayKeys: Set<String> = ["attachments"]
 
@@ -2432,6 +2487,16 @@ private struct ScrollApplicationWindowPayload: Codable {
     let success: Bool
 }
 
+private struct ClickApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let mouseDownUptimeNanoseconds: UInt64
+    let mouseUpUptimeNanoseconds: UInt64
+    let success: Bool
+}
+
 private struct TypeApplicationWindowPayload: Codable {
     let executableName: String
     let windowTitle: String?
@@ -2535,6 +2600,11 @@ private struct KeyEventTiming {
 private struct ScrollEventTiming {
     let firstScrollEventUptimeNanoseconds: UInt64
     let lastScrollEventUptimeNanoseconds: UInt64
+}
+
+private struct ClickEventTiming {
+    let mouseDownUptimeNanoseconds: UInt64
+    let mouseUpUptimeNanoseconds: UInt64
 }
 
 /// Looks up one workspace by project directory and display name, matching the GUI's
@@ -3335,6 +3405,18 @@ private func postMouseClick(at point: CGPoint) throws {
     downEvent.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.02)
     upEvent.post(tap: .cghidEventTap)
+}
+
+private func postClickEvent(at point: CGPoint) throws -> ClickEventTiming {
+    guard let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+        let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+    else { throw ValidationError("Unable to create mouse click event.") }
+    let mouseDownUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.02)
+    let mouseUpUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    upEvent.post(tap: .cghidEventTap)
+    return ClickEventTiming(mouseDownUptimeNanoseconds: mouseDownUptimeNanoseconds, mouseUpUptimeNanoseconds: mouseUpUptimeNanoseconds)
 }
 
 private func postMouseDrag(from startPoint: CGPoint, to endPoint: CGPoint, durationMS: Int, steps: Int) throws {

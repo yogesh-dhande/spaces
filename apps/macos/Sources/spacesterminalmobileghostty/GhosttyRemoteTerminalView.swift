@@ -92,6 +92,7 @@ import Foundation
         public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void
+        public let onSendMouseButton: @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
 
@@ -102,6 +103,7 @@ import Foundation
             onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
+            onSendMouseButton: @escaping @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void = { _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
@@ -118,6 +120,7 @@ import Foundation
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
+            self.onSendMouseButton = onSendMouseButton
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
         }
@@ -132,6 +135,13 @@ import Foundation
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
+            }
+            // Synchronous on purpose, unlike the Task-hopping callbacks around it: a tap sends a
+            // press immediately followed by a release, and two independent unstructured Tasks have
+            // no ordering guarantee — a reordered pair would deliver a release-before-press to the
+            // application. UIKit fires the gesture on the main thread, so assuming isolation holds.
+            hostView.onSendMouseButton = { button, pressed, pointerPosition in
+                MainActor.assumeIsolated { onSendMouseButton(button, pressed, pointerPosition) }
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
@@ -177,6 +187,7 @@ import Foundation
             case ignored
             case openedLink
             case focused
+            case sentClick
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -243,6 +254,9 @@ import Foundation
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
+        /// Stands in for the live mirror surface's mouse-capture state, which only exists once a real
+        /// surface has applied a frame.
+        var debugMouseCapturedForTesting: Bool?
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
@@ -251,6 +265,7 @@ import Foundation
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
+        public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
@@ -440,6 +455,9 @@ import Foundation
                 clearAccessoryModifiers()
                 resignFirstResponder()
             }
+            // The capture flags applied to the mirror are gated on this property, so a pane whose
+            // latest frame carries them must re-apply when it flips (e.g. the session just ended).
+            if latestRenderFrame?.snapshot.mouseReportingActive == true { applyLatestRenderFrameIfPossible() }
             reloadInputViews()
             reportInputReadinessIfNeeded(force: true)
         }
@@ -582,6 +600,12 @@ import Foundation
         }
 
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
+            if sendMouseButtonClickIfCaptured(at: location) {
+                // A tap that drives the application still needs the keyboard: without this, tapping
+                // vim's mouse=a on a phone would move the cursor while leaving nothing to type with.
+                if acceptsTerminalInput, !isFirstResponder { becomeFirstResponder() }
+                return .sentClick
+            }
             if openTerminalLink(at: location) { return .openedLink }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
@@ -827,6 +851,12 @@ import Foundation
             return ghostty_mirror_surface(mirror)
         }
 
+        private var mirrorCapturesMouse: Bool {
+            if let debugMouseCapturedForTesting { return debugMouseCapturedForTesting }
+            guard let surface = mirrorSurface() else { return false }
+            return ghostty_surface_mouse_captured(surface)
+        }
+
         private func handleActionEvent(_ event: GhosttyMobileActionEvent) {
             switch event {
             case .openURL(_, let value):
@@ -839,7 +869,6 @@ import Foundation
         private func openTerminalLink(at location: CGPoint) -> Bool {
             if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
             guard let surface = mirrorSurface() else { return false }
-            guard !ghostty_surface_mouse_captured(surface) else { return false }
             let position = Self.ghosttyMousePosition(for: location)
             let mods = Self.linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
@@ -857,6 +886,20 @@ import Foundation
 
         private static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) {
             (Double(max(location.x, 0)), Double(max(location.y, 0)))
+        }
+
+        /// Forwards a tap as a left-button press followed by a release when the session's own terminal
+        /// is tracking the mouse (`ghostty_surface_mouse_captured`), so a mouse-aware application there
+        /// receives the tap as a click instead of Spaces treating it as a link probe or a focus request.
+        private func sendMouseButtonClickIfCaptured(at location: CGPoint) -> Bool {
+            // Only an owner of a live session can deliver a click; an ended or read-only session's
+            // final frame can still carry tracking flags (a crash never disables them), and
+            // intercepting those taps would swallow them with no application left to click.
+            guard acceptsTerminalInput, mirrorCapturesMouse else { return false }
+            let pointerPosition = scrollPointerPosition(for: location)
+            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), true, pointerPosition)
+            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), false, pointerPosition)
+            return true
         }
 
         private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
@@ -952,6 +995,12 @@ import Foundation
                 cSnapshot.cursor_visible = snapshot.cursorVisible
                 cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
                 cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                // Only an interactive owner's mirror keeps the session's capture flags. An ended or
+                // read-only pane's frame can still carry them (a crash never disables tracking), and
+                // a captured mirror consumes the synthetic click a link tap probes with — links in
+                // that pane would silently stop opening.
+                cSnapshot.mouse_reporting_active = acceptsTerminalInput && snapshot.mouseReportingActive
+                cSnapshot.mouse_shift_capture = acceptsTerminalInput ? snapshot.mouseShiftCapture : 0
                 cSnapshot.cell_count = buffer.count
                 cSnapshot.cells = buffer.baseAddress
 

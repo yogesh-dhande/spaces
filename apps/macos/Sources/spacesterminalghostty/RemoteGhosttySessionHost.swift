@@ -152,10 +152,16 @@
                 pendingViewportResizeSize = nil
             }
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
+            // Viewers keep the session's real capture flags (their clicks are never forwarded, but the
+            // mirror should arbitrate like the session it shows); only an ended session strips them.
+            terminalView.sessionPermitsMouseCapture = isInteractive
             terminalView.onSendText = { [weak self] text, asPaste in self?.sendRemoteInput(text, asPaste: asPaste) }
             terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
             terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods, pointerPosition in
                 self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
+            }
+            terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
+                self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
@@ -590,8 +596,7 @@
                                 .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
                         sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteKey(_ key: String) {
@@ -623,8 +628,37 @@
                         TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
+        /// discrete event whose press/release ordering the application depends on, so it rides the same
+        /// user-initiated input queue as a key, flushing any pending scroll batch first so the
+        /// application sees the two in the order the user produced them.
+        private func sendRemoteMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
+            guard isInteractiveRuntimeStateForControl() else { return }
+            guard let client = attachedClient, attachedMode == .owner else { return }
+            scrollCoalescer.flush()
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let ownerEpoch = latestState?.renderOwnerEpoch
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .mouseButton(
+                                .init(
+                                    clientID: clientID, ownerEpoch: ownerEpoch, button: button, pressed: pressed, pointerX: pointerPosition?.x,
+                                    pointerY: pointerPosition?.y, pointerMods: pointerPosition?.mods))), sessionID: sessionID, socketPath: socketPath,
+                        requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "mouse_button") } }
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteClearScreenAndScrollback() {
@@ -646,8 +680,7 @@
                         TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
@@ -835,11 +868,10 @@
                                 .init(
                                     clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
                                     scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods, scrollPointerX: batch.pointerPosition?.x,
-                                    scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))),
-                        sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                                    scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendCurrentViewportResizeIfNeeded(force: Bool) {

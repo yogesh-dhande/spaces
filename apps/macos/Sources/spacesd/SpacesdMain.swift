@@ -185,7 +185,7 @@ enum SpacesDaemonProfileCommandRouting {
 }
 
 @MainActor private final class SpacesDaemonController {
-    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll", "mouseButton"]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
 
     private struct TerminalLinkTransferAuthorization {

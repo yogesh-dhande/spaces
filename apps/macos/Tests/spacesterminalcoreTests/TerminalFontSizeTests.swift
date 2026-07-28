@@ -5,9 +5,7 @@ import Testing
 @Suite struct TerminalFontSizeTests {
     @Test func defaultsToTen() { #expect(TerminalFontSize.default == .ten) }
 
-    @Test func allCasesAreOrderedNineToTwelve() {
-        #expect(TerminalFontSize.allCases.map(\.rawValue) == [9, 10, 11, 12])
-    }
+    @Test func allCasesAreOrderedNineToTwelve() { #expect(TerminalFontSize.allCases.map(\.rawValue) == [9, 10, 11, 12]) }
 
     @Test func missingPersistedValueResolvesToTen() { #expect(TerminalFontSize(persistedRawValue: nil) == .ten) }
 

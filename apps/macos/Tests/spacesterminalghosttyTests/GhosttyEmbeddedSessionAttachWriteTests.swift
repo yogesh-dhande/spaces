@@ -66,9 +66,7 @@ final class GhosttyEmbeddedSessionAttachWriteTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(sentinel, paths: box.paths)
     }
 
-    private func durableUpdatedAt(on box: CoreBox) throws -> String {
-        try TerminalSessionPersistence.readRuntimeState(paths: box.paths).updatedAt
-    }
+    private func durableUpdatedAt(on box: CoreBox) throws -> String { try TerminalSessionPersistence.readRuntimeState(paths: box.paths).updatedAt }
 
     private func makeClient() -> TerminalClient {
         TerminalClient(id: "window-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-26T00:00:00Z")

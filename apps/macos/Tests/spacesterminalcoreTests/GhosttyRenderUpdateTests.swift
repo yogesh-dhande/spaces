@@ -87,8 +87,8 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(scrollRectDelta.replaceCellRuns.count, 1)
         XCTAssertEqual(scrollRectDelta.changedCellCount, columns)
         XCTAssertEqual(try GhosttyRenderUpdateApplier.apply(scrollRectUpdate, to: baseline).snapshot, target)
-        XCTAssertEqual(scrollRectBytes, 1_213)
-        XCTAssertEqual(cellRunOnlyBytes, 27_095)
+        XCTAssertEqual(scrollRectBytes, 1_215)
+        XCTAssertEqual(cellRunOnlyBytes, 27_097)
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
     }
 
@@ -120,8 +120,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
             let prefix = encoded.prefix(cut)
             XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(prefix)) { error in
                 let codecError = error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError
-                XCTAssertTrue(
-                    codecError == .truncated || codecError == .invalidMagic, "cut \(cut) threw \(String(describing: codecError))")
+                XCTAssertTrue(codecError == .truncated || codecError == .invalidMagic, "cut \(cut) threw \(String(describing: codecError))")
             }
         }
     }
@@ -169,7 +168,48 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertEqual(update.fullFrame?.snapshot, target)
     }
 
-    private func makeSnapshot(lines: [String]) -> GhosttyTerminalSnapshot {
+    /// Mouse-reporting state decides whether a client's pane click belongs to the application or to
+    /// local selection, so it has to survive both frame shapes. The delta is the one that matters in
+    /// practice: an application enabling or disabling mouse tracking mid-session is an ordinary screen
+    /// change that never forces a full frame.
+    func testMouseReportingStateSurvivesFullAndDeltaFrames() throws {
+        let previous = makeSnapshot(lines: ["hello"])
+        let target = makeSnapshot(lines: ["hullo"], mouseReportingActive: true, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+
+        let full = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        XCTAssertEqual(full.fullFrame?.snapshot.mouseReportingActive, true)
+        XCTAssertEqual(full.fullFrame?.snapshot.mouseShiftCapture, GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
+
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let delta = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+        XCTAssertEqual(delta.kind, .delta)
+        XCTAssertEqual(delta.delta?.mouseReportingActive, true)
+        XCTAssertEqual(delta.delta?.mouseShiftCapture, GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)
+
+        let applied = try GhosttyRenderUpdateApplier.apply(delta, to: baseline)
+        XCTAssertEqual(applied.snapshot, target)
+        XCTAssertTrue(applied.snapshot.mouseReportingActive)
+    }
+
+    /// The application turning mouse tracking back off has to reach the client the same way, or a pane
+    /// would keep forwarding clicks to a program that stopped listening instead of selecting text.
+    func testMouseReportingStateClearsThroughADelta() throws {
+        let previous = makeSnapshot(lines: ["hello"], mouseReportingActive: true)
+        let target = makeSnapshot(lines: ["hullo"])
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let applied = try GhosttyRenderUpdateApplier.apply(update, to: baseline)
+
+        XCTAssertFalse(applied.snapshot.mouseReportingActive)
+    }
+
+    private func makeSnapshot(
+        lines: [String], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset
+    ) -> GhosttyTerminalSnapshot {
         let columns = lines.map(\.count).max() ?? 1
         let rows = max(lines.count, 1)
         let paddedLines =
@@ -179,7 +219,7 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: rows, cursorColumn: 0, cursorRow: rows - 1, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE,
-            defaultBackgroundRGB: 0x101010, cells: cells)
+            defaultBackgroundRGB: 0x101010, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
     }
 
     private func makeUniformRowSnapshot(columns: Int, rows: Int, firstScalar: UInt32) -> GhosttyTerminalSnapshot {

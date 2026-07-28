@@ -275,9 +275,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         mainThreadReleaseBag = [view]
     }
 
-    deinit {
-        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
-    }
+    deinit { MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 }) }
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }

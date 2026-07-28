@@ -164,6 +164,10 @@
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
         ) -> Bool { sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
 
+        @discardableResult public func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            sessionDriver.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+        }
+
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
@@ -974,6 +978,7 @@
             case .takeover: controlResponseForTakeoverRequest(request)
             case .resize: controlResponseForResizeRequest(request)
             case .scroll: controlResponseForScrollRequest(request)
+            case .mouseButton: controlResponseForMouseButtonRequest(request)
             case .setAppearance: controlResponseForSetAppearanceRequest(request)
             case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
@@ -1294,17 +1299,9 @@
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
             let pointerPosition: TerminalScrollPointerPosition?
-            switch (request.scrollPointerX, request.scrollPointerY, request.scrollPointerMods) {
-            case (nil, nil, nil): pointerPosition = nil
-            case (let x?, let y?, let mods):
-                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
-                guard position.isValid else {
-                    return TerminalControlResponse(ok: false, message: "Invalid terminal scroll pointer position.", errorCode: .invalidArgument)
-                }
-                pointerPosition = position
-            default:
-                return TerminalControlResponse(
-                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+            switch resolvedPointerPosition(x: request.scrollPointerX, y: request.scrollPointerY, mods: request.scrollPointerMods, command: "scroll") {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
             }
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
                 return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
@@ -1321,6 +1318,69 @@
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
             return TerminalControlResponse(ok: scrolled, message: scrolled ? "Scrolled terminal." : "Unable to scroll terminal.")
+        }
+
+        /// Resolves a control request's normalized pointer fields. Absent coordinates leave the daemon's
+        /// pointer where it is; a partial or out-of-range pair is a malformed request, not a no-op.
+        private enum PointerPositionResolution {
+            case resolved(TerminalScrollPointerPosition?)
+            case rejected(TerminalControlResponse)
+        }
+
+        private func resolvedPointerPosition(x: Double?, y: Double?, mods: UInt32?, command: String) -> PointerPositionResolution {
+            switch (x, y, mods) {
+            case (nil, nil, nil): return .resolved(nil)
+            case (let x?, let y?, let mods):
+                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
+                guard position.isValid else {
+                    return .rejected(
+                        TerminalControlResponse(ok: false, message: "Invalid terminal \(command) pointer position.", errorCode: .invalidArgument))
+                }
+                return .resolved(position)
+            default:
+                return .rejected(
+                    TerminalControlResponse(
+                        ok: false, message: "Terminal \(command) pointer coordinates must be provided together.", errorCode: .invalidArgument))
+            }
+        }
+
+        private func controlResponseForMouseButtonRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "mouseButton", startedAt: startedAt) { return rejection }
+            guard let button = request.mouseButton, let pressed = request.mousePressed else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse button.", errorCode: .invalidArgument)
+            }
+            guard button >= TerminalControlMouseButtonPayload.minimumButton, button <= TerminalControlMouseButtonPayload.maximumButton else {
+                return TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument)
+            }
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch resolvedPointerPosition(
+                x: request.mousePointerX, y: request.mousePointerY, mods: request.mousePointerMods, command: "mouse button")
+            {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
+            }
+            // A click carries its own position: unlike a scroll, which can legitimately ride whatever the
+            // pointer was last moved to, a button with no position names no cell.
+            guard let pointerPosition else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            if let ownerClient = activeOwnerClient() {
+                logMobileTakeoverPerformance(
+                    name: "owner_input_activity",
+                    attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "mouse_button"])
+            }
+            // No state broadcast, unlike scroll: a button press changes nothing on its own. Whatever the
+            // application draws in response arrives as terminal output and is broadcast with that output.
+            let delivered = rendererHostStorage.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+            TerminalPerformance.logMetric(
+                "terminal_control_mouse_button", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: delivered)
+            return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse button." : "Unable to deliver mouse button.")
         }
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {

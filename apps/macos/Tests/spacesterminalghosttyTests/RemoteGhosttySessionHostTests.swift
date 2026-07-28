@@ -342,6 +342,90 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:release:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
     }
 
+    /// A click belongs to the pane's own selection until the application on the other end takes the
+    /// mouse; only then does it also travel to the session that can deliver it.
+    @MainActor func testRemoteMirrorForwardsClicksOnlyWhileTheApplicationTracksTheMouse() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-forwarding")
+        var forwarded: [(button: UInt8, pressed: Bool, pointer: TerminalScrollPointerPosition?)] = []
+        mirrorView.view.onSendMouseButton = { button, pressed, pointer in forwarded.append((button, pressed, pointer)) }
+
+        mirrorView.view.debugMouseCapturedForTesting = false
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+        XCTAssertTrue(forwarded.isEmpty, "a click must stay local while nothing is tracking the mouse")
+
+        mirrorView.view.debugMouseCapturedForTesting = true
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+
+        XCTAssertEqual(forwarded.map(\.pressed), [true, false], "the application must see both the press and the release")
+        XCTAssertEqual(forwarded.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
+        XCTAssertNotNil(forwarded.first?.pointer, "the click must carry the cell it landed on")
+    }
+
+    /// A session that exits with tracking still enabled leaves a final frame that says the
+    /// application owns the mouse, but there is nothing left to receive a report: once the host
+    /// marks the session non-interactive, clicks stay local.
+    @MainActor func testRemoteMirrorStopsForwardingClicksOnceTheSessionEnds() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-ended")
+        var forwardedCount = 0
+        mirrorView.view.onSendMouseButton = { _, _, _ in forwardedCount += 1 }
+        mirrorView.view.debugMouseCapturedForTesting = true
+
+        mirrorView.view.sessionPermitsMouseCapture = false
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+
+        XCTAssertEqual(forwardedCount, 0, "an ended session must not receive clicks its application can no longer read")
+    }
+
+    /// Shift is the escape hatch that keeps a click local so text can still be selected out of an
+    /// application that has taken the mouse — unless that application explicitly asked for shift.
+    @MainActor func testRemoteMirrorKeepsShiftClickLocalUnlessTheTerminalRequestsShiftCapture() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-shift")
+        var forwardedCount = 0
+        mirrorView.view.onSendMouseButton = { _, _, _ in forwardedCount += 1 }
+        mirrorView.view.debugMouseCapturedForTesting = true
+        mirrorView.view.debugRenderFrameApplyHandler = { _, _ in true }
+
+        mirrorView.view.update(
+            frame: GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", mouseReportingActive: true)),
+            renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.shift]))
+        XCTAssertEqual(forwardedCount, 0, "shift-clicking must select text rather than report to the application")
+
+        mirrorView.view.update(
+            frame: GhosttyRenderFrame(
+                sessionRevision: 2, ownerEpoch: 0,
+                snapshot: snapshot(text: "alpha", mouseReportingActive: true, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)),
+            renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.shift]))
+        XCTAssertEqual(forwardedCount, 1, "a terminal that asks for shift capture must receive the shift-click")
+    }
+
+    /// Builds a mirror view in a key window with its mouse events shunted away from a real surface, which
+    /// is what the focus-only-press suppression and the forwarding decision both need.
+    @MainActor private func makeKeyWindowMirrorView(sessionID: String) throws -> (view: GhosttyMirrorTerminalView, windowNumber: Int) {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil, createdAt: "2026-07-26T00:00:00Z",
+            workspaceID: "workspace-1", kind: .shell)
+        let view = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let window = ActivatingTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(view)
+        view.frame = container.bounds
+        view.acceptsTerminalInput = true
+        view.debugMouseEventHandler = { _ in true }
+        addTeardownBlock { MainActor.assumeIsolated { window.close() } }
+        // The first press only makes the window key; the pane's own handling starts after that.
+        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: window.windowNumber))
+        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: window.windowNumber))
+        XCTAssertTrue(window.isKeyWindow)
+        return (view, window.windowNumber)
+    }
+
     @MainActor func testRemoteMirrorDoesNotReapplyIdenticalRevisionedRenderFrame() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-idempotent-frame", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
@@ -765,17 +849,17 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // surface that no longer exists, so the attach re-sends rather than trusting it.
         XCTAssertFalse(
             RemoteGhosttySessionHost.shouldSendViewportResize(
-                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil,
-                force: false))
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil, force: false
+            ))
         XCTAssertTrue(
             RemoteGhosttySessionHost.shouldSendViewportResize(
-                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil,
-                force: true))
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil, force: true)
+        )
         // A first owner attach has requested no size yet, so it sends without needing the force.
         XCTAssertTrue(
             RemoteGhosttySessionHost.shouldSendViewportResize(
-                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: nil, runtimeSize: (columns: 120, rows: 40),
-                force: false))
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: nil, runtimeSize: (columns: 120, rows: 40), force: false
+            ))
     }
 
     @MainActor func testStateStreamClientPreservesOutputBeforeInputOutputResync() throws {
@@ -2357,7 +2441,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
     }
 
-    private func snapshot(text: String) -> GhosttyTerminalSnapshot {
+    private func snapshot(text: String, mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset)
+        -> GhosttyTerminalSnapshot
+    {
         let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let columns = rows.map(\.count).max() ?? 0
         let paddedRows = rows.map { row in row.padding(toLength: columns, withPad: " ", startingAt: 0) }
@@ -2368,7 +2454,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x000000, cells: cells)
+            defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
     }
 
     private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
@@ -2427,10 +2513,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: keyCode))
     }
 
-    @MainActor private func mouseEvent(type: NSEvent.EventType, windowNumber: Int) -> NSEvent {
+    @MainActor private func mouseEvent(type: NSEvent.EventType, windowNumber: Int, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
         try! XCTUnwrap(
             NSEvent.mouseEvent(
-                with: type, location: NSPoint(x: 20, y: 30), modifierFlags: [], timestamp: 0, windowNumber: windowNumber, context: nil,
+                with: type, location: NSPoint(x: 20, y: 30), modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
                 eventNumber: 1, clickCount: 1, pressure: 1))
     }
 }
