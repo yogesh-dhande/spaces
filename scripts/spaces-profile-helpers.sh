@@ -15,11 +15,23 @@ spaces_profile_e2e_cli() {
   printf '%s\n' "$cli_dir/spacese2e"
 }
 
-spaces_profile_eval_shell_env() {
+# Prints one field of the resolved profile — `profileRoot`, `databasePath`, `runtimeDirectory`,
+# `ipcObject`, `source` — for a script that needs a concrete path (sqlite inspection, log and socket
+# locations). This is where scripts read paths from: a path is a fact to look up from the binary that
+# resolved it, not a binding to put in the environment and have children inherit.
+spaces_profile_field() {
   local cli="$1"
+  local field="$2"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  eval "$("$e2e_cli" profile-show --shell)"
+  "$e2e_cli" profile-show --json | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+value = payload.get(sys.argv[1])
+if not value:
+    raise SystemExit(f"profile-show --json has no {sys.argv[1]}")
+print(value)
+' "$field"
 }
 
 spaces_profile_app_owner_pid() {

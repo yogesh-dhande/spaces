@@ -27,9 +27,19 @@ public struct SpacesProfile: Sendable, Equatable {
     public static let databasePathEnvironmentVariable = "SPACES_DB_PATH"
     public static let runtimeDirectoryEnvironmentVariable = "SPACES_RUNTIME_DIR"
 
+    /// How this profile was DISCOVERED. Provenance only — diagnostics and error text. Nothing decides what
+    /// a profile *is* from this, because the same profile is reachable through several routes: the installed
+    /// profile is normally reached by falling through to `~/.spaces`, but an explicit `SPACES_DB_PATH` or a
+    /// deployed binary can name the very same root. `isInstalledProfile` answers identity instead.
     public let source: SpacesProfileSource
     public let databasePath: String
     public let rootDirectory: String
+    /// Whether this profile IS the installed one, decided by where it resolved (`<home>/.spaces`) rather
+    /// than by which branch of `resolve` produced it. Every rule that treats the installed profile
+    /// differently — its canonical Device API port, its router port, its daemon binaries, its systemd unit —
+    /// keys off this, so a profile reached by an unusual route still gets the installed profile's behavior
+    /// instead of being mistaken for a development one.
+    public let isInstalledProfile: Bool
     public let runtimeDirectory: String
     public let ipcNotificationObject: String
     public let developmentContext: SpacesDevelopmentContext?
@@ -37,12 +47,13 @@ public struct SpacesProfile: Sendable, Equatable {
     public let worktreeHash: String?
 
     public init(
-        source: SpacesProfileSource, databasePath: String, rootDirectory: String, runtimeDirectory: String, ipcNotificationObject: String,
-        developmentContext: SpacesDevelopmentContext?, branchSlug: String?, worktreeHash: String?
+        source: SpacesProfileSource, databasePath: String, rootDirectory: String, isInstalledProfile: Bool, runtimeDirectory: String,
+        ipcNotificationObject: String, developmentContext: SpacesDevelopmentContext?, branchSlug: String?, worktreeHash: String?
     ) {
         self.source = source
         self.databasePath = databasePath
         self.rootDirectory = rootDirectory
+        self.isInstalledProfile = isInstalledProfile
         self.runtimeDirectory = runtimeDirectory
         self.ipcNotificationObject = ipcNotificationObject
         self.developmentContext = developmentContext
@@ -111,10 +122,12 @@ public struct SpacesProfile: Sendable, Equatable {
     /// caller that needs it rather than re-implemented per call site. Generic over the wrapped result so
     /// both `currentOrNilIfUnresolved()` and tests can drive it directly without needing a whole resolved
     /// `SpacesProfile`.
+    /// Written as "everything except the one genuine failure" rather than as a list of refusals, so a
+    /// refusal added later is loud by default instead of silently joining the `nil` branch.
     static func nilUnlessRefused<T>(_ body: () throws -> T) throws -> T? {
         do { return try body() } catch let error as SpacesProfileResolutionError {
-            if case .testHostRefusedLiveUserProfile = error { throw error }
-            return nil
+            if case .repoBuiltGitProbeFailed = error { return nil }
+            throw error
         } catch { return nil }
     }
 
@@ -155,7 +168,7 @@ public struct SpacesProfile: Sendable, Equatable {
             let databaseURL = absoluteFileURL(path: overridePath, currentDirectoryPath: currentDirectoryPath)
             return try makeProfile(
                 source: .explicitDatabasePath, profileRoot: databaseURL.deletingLastPathComponent(), databasePath: databaseURL.path,
-                environment: environment, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
+                environment: environment, homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
         }
 
         // A development build deployed onto a device has no Spaces checkout to derive a profile from, so it
@@ -172,8 +185,8 @@ public struct SpacesProfile: Sendable, Equatable {
             return try makeProfile(
                 source: .deployedDevelopmentProfile, profileRoot: profileRoot,
                 databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path, environment: environment,
-                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager, branchSlug: identity?.branchSlug,
-                worktreeHash: identity?.worktreeHash)
+                homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager,
+                branchSlug: identity?.branchSlug, worktreeHash: identity?.worktreeHash)
         }
 
         if let developmentContext = try resolveDevelopmentContext(
@@ -187,31 +200,54 @@ public struct SpacesProfile: Sendable, Equatable {
             return try makeProfile(
                 source: .developmentWorktree, profileRoot: profileRoot,
                 databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path, environment: environment,
-                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager, developmentContext: developmentContext, branchSlug: branchSlug,
-                worktreeHash: worktreeHash)
+                homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager,
+                developmentContext: developmentContext, branchSlug: branchSlug, worktreeHash: worktreeHash)
         }
 
-        let productionRoot = homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true)
+        let productionRoot = installedRootDirectory(homeDirectoryURL: homeDirectoryURL)
         return try makeProfile(
             source: .installedFallback, profileRoot: productionRoot,
             databasePath: productionRoot.appendingPathComponent("spaces.db", isDirectory: false).path, environment: environment,
-            currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
+            homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
     }
 
-    /// The single place a resolved profile becomes real: it applies the test-host refusal, creates the
-    /// profile's directories, and builds the value. Every branch of `resolve` funnels through here, so the
-    /// refusal is written once and a branch added later inherits it instead of having to remember it.
+    /// The installed profile's root for a given home directory. The single spelling of `~/.spaces`, shared by
+    /// the branch that resolves onto it and the identity test that recognises it.
+    public static func installedRootDirectory(homeDirectoryURL: URL) -> URL { homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true) }
+
+    /// The single place a resolved profile becomes real: it applies the two refusals, decides whether the
+    /// resolved root is the installed profile, creates the profile's directories, and builds the value.
+    /// Every branch of `resolve` funnels through here, so a rule is written once and a branch added later
+    /// inherits it instead of having to remember it.
     private static func makeProfile(
-        source: SpacesProfileSource, profileRoot: URL, databasePath: String, environment: [String: String], currentDirectoryPath: String,
-        fileManager: FileManager, developmentContext: SpacesDevelopmentContext? = nil, branchSlug: String? = nil, worktreeHash: String? = nil
+        source: SpacesProfileSource, profileRoot: URL, databasePath: String, environment: [String: String], homeDirectoryURL: URL,
+        currentDirectoryPath: String, fileManager: FileManager, developmentContext: SpacesDevelopmentContext? = nil, branchSlug: String? = nil,
+        worktreeHash: String? = nil
     ) throws -> SpacesProfile {
+        // `SPACES_DB_PATH` names an EPHEMERAL throwaway profile and nothing else — a test run, an E2E
+        // harness, a one-off scratch root. Both real profiles are discoverable from a binary's own location
+        // with no environment at all (the installed profile by falling through to ~/.spaces, a development
+        // profile from the checkout or the deployed root above the executable), so a variable pointing into
+        // one of those roots is never how a real profile is meant to be named — it is a leaked binding.
+        // Honouring it is what let a daemon serving ~/.spaces be classified as a development profile,
+        // assign itself a development-range Device API port, persist it, and orphan every paired client.
+        // It refuses loudly and unconditionally, before any directory is created. No product code sets the
+        // variable, so nothing a user runs can reach this.
+        if source == .explicitDatabasePath, isLiveUserProfilePath(databasePath) {
+            throw SpacesProfileResolutionError.explicitDatabasePathInsideLiveUserProfile(path: databasePath)
+        }
+
         // A test process must never resolve a profile the user's own app, daemon, or CLI is serving —
-        // installed or development, and however the path was arrived at, including an explicit
-        // SPACES_DB_PATH or SPACES_RUNTIME_DIR. Test targets create and mutate real terminal-session state
-        // through the resolved profile, so an unisolated run writes fixture sessions into a live database
-        // and puts session directories, sockets, and the daemon instance lock inside a live runtime root.
+        // installed or development, and however the path was arrived at, including an inherited
+        // SPACES_RUNTIME_DIR. Test targets create and mutate real terminal-session state through the
+        // resolved profile, so an unisolated run writes fixture sessions into a live database and puts
+        // session directories, sockets, and the daemon instance lock inside a live runtime root.
         // BOTH halves are checked because they are independent overrides: a test that binds its own
         // database but inherits a shell's runtime directory is otherwise a live profile in all but name.
+        // The database half covers the branches that reach a live root with no override at all — a
+        // repo-built test binary deriving its worktree profile, or a test host falling through to
+        // ~/.spaces — since an explicit SPACES_DB_PATH into a live root is already refused above, for
+        // every process rather than only a test one.
         // The rule is a static one about WHERE the profile is rather than whether something currently owns
         // it, so the guard cannot depend on whether the developer's app happens to be running. It refuses
         // loudly rather than redirecting to a scratch profile: a redirect would hide the missing isolation
@@ -229,13 +265,14 @@ public struct SpacesProfile: Sendable, Equatable {
         try fileManager.createDirectory(at: profileRoot, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: runtimeDirectory, withIntermediateDirectories: true)
         return SpacesProfile(
-            source: source, databasePath: databasePath, rootDirectory: profileRoot.path, runtimeDirectory: runtimeDirectory.path,
-            ipcNotificationObject: ipcObject(profileRoot: profileRoot.path), developmentContext: developmentContext, branchSlug: branchSlug,
-            worktreeHash: worktreeHash)
+            source: source, databasePath: databasePath, rootDirectory: profileRoot.path,
+            isInstalledProfile: canonicalPath(profileRoot.path) == canonicalPath(installedRootDirectory(homeDirectoryURL: homeDirectoryURL).path),
+            runtimeDirectory: runtimeDirectory.path, ipcNotificationObject: ipcObject(profileRoot: profileRoot.path),
+            developmentContext: developmentContext, branchSlug: branchSlug, worktreeHash: worktreeHash)
     }
 
     public static func installedDatabasePath(homeDirectoryURL: URL, fileManager: FileManager = .default) throws -> String {
-        let directory = homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true)
+        let directory = installedRootDirectory(homeDirectoryURL: homeDirectoryURL)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("spaces.db", isDirectory: false).path
     }
@@ -312,12 +349,7 @@ public struct SpacesProfile: Sendable, Equatable {
     /// so concurrent Spaces instances (multiple worktrees, or the installed app plus a dev build)
     /// don't all try to bind one port — where only the first wins and every other instance's Caddy
     /// silently fails to start, breaking its workspace-service routing.
-    public var defaultRouterPort: Int {
-        switch source {
-        case .installedFallback: return Self.installedRouterPort
-        case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath: return Self.derivedRouterPort(profileRoot: rootDirectory)
-        }
-    }
+    public var defaultRouterPort: Int { isInstalledProfile ? Self.installedRouterPort : Self.derivedRouterPort(profileRoot: rootDirectory) }
 
     /// Maps a profile's stable hash into a fixed high port range that avoids the default workspace
     /// service port range (20000–30000) and the OS ephemeral range (49152+).
@@ -535,9 +567,10 @@ public enum SpacesProfileComponent: Sendable {
     }
 }
 
-/// Raised while resolving `SpacesProfile` for a binary that was built inside a Spaces checkout.
-/// Such a binary must never fall back to the installed profile, so a failed git probe surfaces
-/// loudly instead of silently pointing a development build at the installed daemon's database.
+/// Raised while resolving `SpacesProfile`. Every case is loud on purpose: each one describes a process that
+/// would otherwise end up serving a profile that is not its own — a development build opening the installed
+/// daemon's database, a test writing into live user state, or an inherited environment binding pointing a
+/// daemon at another profile's root.
 public enum SpacesProfileResolutionError: Error, CustomStringConvertible, LocalizedError {
     /// The git probe for a repo-built executable threw or returned no development context. Carries the
     /// executable path, the detected repo root, and the underlying git failure (when there was one).
@@ -546,6 +579,11 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
     /// A test process resolved part of a profile inside one of this account's live Spaces profile roots.
     /// Names which half was refused, so a caller knows which override to change, and the refused path.
     case testHostRefusedLiveUserProfile(component: SpacesProfileComponent, path: String)
+
+    /// `SPACES_DB_PATH` named a database inside one of this account's live Spaces profile roots. The
+    /// variable points at an ephemeral throwaway profile; a real profile is identified by where the binary
+    /// itself lives, never by an inherited environment binding.
+    case explicitDatabasePathInsideLiveUserProfile(path: String)
 
     public var description: String {
         switch self {
@@ -562,6 +600,13 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
                 + "later. Both \(SpacesProfile.databasePathEnvironmentVariable) and "
                 + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable) have to be isolated, or neither: binding one and inheriting the "
                 + "other leaves the test half-attached to a live profile."
+        case .explicitDatabasePathInsideLiveUserProfile(let path):
+            return "\(SpacesProfile.databasePathEnvironmentVariable) names \(path), which is inside one of this account's live Spaces profile "
+                + "roots (~/.spaces and ~/.spaces-dev/profiles). That variable points at an ephemeral throwaway profile only; the installed "
+                + "and development profiles are resolved from where the running binary lives, with no environment at all. Refusing it so an "
+                + "inherited binding cannot make one profile's daemon serve another's state. Unset "
+                + "\(SpacesProfile.databasePathEnvironmentVariable) to run against the profile this binary belongs to, or point it at a path "
+                + "OUTSIDE those roots — one under the system temporary directory — for a throwaway profile."
         }
     }
 

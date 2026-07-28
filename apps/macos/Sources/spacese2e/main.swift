@@ -380,18 +380,17 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
 private struct ProfileShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "profile-show", abstract: "Show resolved Spaces profile paths for harnesses.")
 
-    @Flag(name: .long, help: "Emit shell exports for the repo-local Spaces profile.") var shell = false
     @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
 
+    /// Reports the profile this binary resolves; it never emits a binding for a caller to export. A
+    /// repo-local binary resolves its own profile from where it sits in the checkout, so a shell binding is
+    /// redundant for the binary that owns the profile and wrong for any other worktree's binary that later
+    /// runs in the same shell — and `SPACES_DB_PATH`, which names an ephemeral throwaway profile only, is
+    /// refused inside a live profile root, so a binding could not name a real profile at all. A harness that
+    /// needs the concrete database or runtime path reads it from this output.
     func run() throws {
         let profile = try SpacesProfile.current()
         let payload = ProfilePayload(profile: profile)
-        if shell {
-            print("export \(SpacesProfile.databasePathEnvironmentVariable)=\(profileShellQuoted(profile.databasePath))")
-            print("export \(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(profileShellQuoted(profile.runtimeDirectory))")
-            print("export \(SpacesDeviceAPIDefaults.portEnvironmentVariable)=0")
-            return
-        }
         if json {
             try emitJSON(payload)
             return
@@ -670,14 +669,20 @@ private func listProfilesScript() -> String {
         root="$2"
         cli="$3"
         unit="$4"
-        port="$(tr -d ' \\n' < "$root/runtime/terminal/device-api.json" 2>/dev/null | sed -n 's/.*"port":\\([0-9][0-9]*\\).*/\\1/p')"
-        [ -n "$port" ] || port='-'
-        # A development profile still recording the canonical port has never assigned itself one, so that
-        # value is not a port it would ever bind: it assigns a development-range port the next time its
-        # daemon starts. Reporting it verbatim would name the installed daemon's port for a profile that
-        # cannot use it, so it reads as unassigned instead.
-        if [ "$name" != '\(installedProfileLabel)' ] && [ "$port" = '\(SpacesDeviceAPIDefaults.port)' ]; then
-            port='-'
+        # The installed profile's port is the canonical constant computed from its identity — it records
+        # nothing — so it is reported as that rather than read from a file it does not write.
+        if [ "$name" = '\(installedProfileLabel)' ]; then
+            port='\(SpacesDeviceAPIDefaults.port)'
+        else
+            port="$(tr -d ' \\n' < "$root/runtime/terminal/device-api.json" 2>/dev/null | sed -n 's/.*"port":\\([0-9][0-9]*\\).*/\\1/p')"
+            [ -n "$port" ] || port='-'
+            # A development profile still recording the canonical port has never assigned itself one, so that
+            # value is not a port it would ever bind: it assigns a development-range port the next time its
+            # daemon starts. Reporting it verbatim would name the installed daemon's port for a profile that
+            # cannot use it, so it reads as unassigned instead.
+            if [ "$port" = '\(SpacesDeviceAPIDefaults.port)' ]; then
+                port='-'
+            fi
         fi
         daemon='down'
         sessions='-'
@@ -836,13 +841,15 @@ private func localProfileRows() throws -> [[String]] {
             at: developmentProfilesRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []).filter {
             (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-    return [[installedProfileLabel, recordedDeviceAPIPort(profileRoot: installedRoot), lastTouchedDate(profileRoot: installedRoot)]]
+    // The installed profile's port is the canonical constant, not a recorded assignment: it records nothing,
+    // so it is reported from identity the same way its daemon computes it.
+    return [[installedProfileLabel, String(SpacesDeviceAPIDefaults.port), lastTouchedDate(profileRoot: installedRoot)]]
         + developmentRoots.map { [$0.lastPathComponent, recordedDeviceAPIPort(profileRoot: $0), lastTouchedDate(profileRoot: $0)] }
 }
 
-/// The Device API port a profile has recorded for itself, or `-` when it has never recorded one (a profile
-/// whose daemon has not started yet). This is the profile's assignment, which is what a daemon started for
-/// it binds unless an environment override names another port.
+/// The Device API port a development profile has recorded for itself, or `-` when it has never recorded one
+/// (a profile whose daemon has not started yet). This is the profile's assignment, which is what a daemon
+/// started for it binds unless an environment override names another port.
 private func recordedDeviceAPIPort(profileRoot: URL) -> String {
     let settingsURL = profileRoot.appendingPathComponent("runtime/terminal/device-api.json", isDirectory: false)
     guard let data = try? Data(contentsOf: settingsURL), let settings = try? JSONDecoder().decode(SpacesDeviceAPISettings.self, from: data) else {

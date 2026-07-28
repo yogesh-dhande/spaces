@@ -2,10 +2,10 @@
 # Daemon+CLI end-to-end for the `spaces agent` orchestration surface. No app, desktop control, or
 # hotkeys: it drives the worktree-scoped profile daemon purely through the `spaces` CLI.
 #
-# The script binds to the current worktree profile (SPACES_DB_PATH / SPACES_RUNTIME_DIR from
-# `spacese2e profile-show --shell`) so it only ever talks to this checkout's daemon and never another
-# worktree's. The daemon is autolaunched on the first CLI call; the script never stops another
-# profile's daemon or app.
+# Every binary the script drives lives in this checkout and resolves the worktree profile from its own
+# location, so it only ever talks to this checkout's daemon and never another worktree's, with no profile
+# environment set anywhere. The daemon is autolaunched on the first CLI call; the script never stops
+# another profile's daemon or app.
 #
 # Part A (always runnable, no real coding agents): the orchestration lifecycle is driven with explicit
 # `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). It does
@@ -77,13 +77,15 @@ require_binaries() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required."
 }
 
-bind_worktree_profile() {
-  # Bind to this worktree's profile so the daemon this script drives is scoped to the checkout.
-  eval "$("$SPACES_E2E" profile-show --shell)"
+resolve_worktree_profile() {
+  # The binaries this script drives all live in this checkout, so each resolves the worktree profile
+  # from its own location -- there is nothing to bind. The root is looked up only because the fixture
+  # directory below lives inside it.
+  PROFILE_ROOT="$("$SPACES_E2E" profile-show --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["profileRoot"])')"
+  [[ -n "$PROFILE_ROOT" ]] || fail "profile-show did not report a profile root"
   # Pin the daemon binary to the debug build so autolaunch uses this checkout's spacesd.
   export SPACESD_EXECUTABLE="$SPACESD_BIN"
-  [[ -n "${SPACES_DB_PATH:-}" ]] || fail "profile-show did not export SPACES_DB_PATH"
-  printf '[agent-e2e] profile db=%s\n' "$SPACES_DB_PATH"
+  printf '[agent-e2e] profile root=%s\n' "$PROFILE_ROOT"
 }
 
 extract_session_id() {
@@ -147,9 +149,7 @@ json_field() {
 provision_fixture() {
   # Stable fixture directory under the profile root so re-runs reuse one project row instead of
   # accumulating (there is no project-removal CLI). register-project is idempotent for the same dir.
-  local profile_root
-  profile_root="$(dirname "$SPACES_DB_PATH")"
-  FIXTURE_DIR="$profile_root/agent-orchestration-e2e-fixture"
+  FIXTURE_DIR="$PROFILE_ROOT/agent-orchestration-e2e-fixture"
   mkdir -p "$FIXTURE_DIR"
   local register_json
   register_json="$("$SPACES_E2E" register-project --project-dir "$FIXTURE_DIR")"
@@ -368,7 +368,7 @@ part_b() {
 
 main() {
   require_binaries
-  bind_worktree_profile
+  resolve_worktree_profile
   provision_fixture
   part_a
   if [[ "$MATRIX_ENABLED" == "1" ]]; then

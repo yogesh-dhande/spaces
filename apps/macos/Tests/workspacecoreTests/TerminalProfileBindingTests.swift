@@ -4,49 +4,40 @@ import spacesterminalcore
 
 @testable import workspacecore
 
-/// A Spaces terminal is bound to the profile of the daemon that launched it, so any `spaces` binary run
-/// inside the session — a globally-configured agent hook naming one absolute build, or a command typed by
-/// hand — acts on that profile instead of resolving one from its own location on disk.
-///
-/// The resolved profile database path is injected rather than resolved, so these tests never depend on a
-/// live profile root being resolvable under XCTest.
+/// A Spaces terminal inherits its daemon's profile environment and nothing more. Both real profiles are
+/// discoverable from a binary's own location, so an unbound terminal is the correct state for both: a
+/// `spaces` binary run inside one resolves the profile it belongs to. Only an ephemeral throwaway profile
+/// has to be named explicitly, and that is exactly the case where the daemon itself carries the variable.
 final class TerminalProfileBindingTests: XCTestCase {
 
-    func testTerminalLaunchEnvironmentExportsResolvedProfileDatabasePath() throws {
-        let profileDatabasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore(), profileDatabasePath: { profileDatabasePath })
-
-        let env = try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true)
-
-        XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], profileDatabasePath)
-    }
-
-    /// The daemon that serves the installed profile runs under launchd with no `SPACES_*` in its own
-    /// environment. Binding must come from the resolved profile, not from forwarding what the daemon
-    /// happens to carry, or installed-profile terminals stay unbound.
-    func testTerminalLaunchEnvironmentBindsSessionWhenDaemonCarriesNoProfileEnvironment() throws {
-        let profileDatabasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore(), profileDatabasePath: { profileDatabasePath })
+    /// The daemon serving the installed profile runs under launchd with no `SPACES_*` set, and a repo-built
+    /// daemon derives its worktree profile from its own path. Neither may hand a `SPACES_DB_PATH` to the
+    /// terminals it launches: it leaked into every process started inside — agent hooks fire on every tool
+    /// call — and a `spaces` invocation that autostarts a daemon passes the whole parent environment on,
+    /// which is how a daemon serving `~/.spaces` came to be classified as a development profile and took a
+    /// development-range Device API port.
+    func testTerminalLaunchEnvironmentLeavesTheSessionUnboundWhenTheDaemonCarriesNoDatabasePath() throws {
+        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
 
         let env = try withEnvironmentValues([
             SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil,
-        ]) { try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true) }
+        ]) { orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true) }
 
-        XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], profileDatabasePath)
+        XCTAssertNil(env[SpacesProfile.databasePathEnvironmentVariable])
+        XCTAssertNil(env[SpacesProfile.runtimeDirectoryEnvironmentVariable])
     }
 
-    /// Naming the database alone binds the whole profile: the runtime directory derives from the directory
-    /// holding it. Exporting it too would let a terminal be bound to one profile's database and another
-    /// profile's sockets and locks.
-    func testTerminalLaunchEnvironmentLeavesRuntimeDirectoryToDerivation() throws {
-        let profileDatabasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore(), profileDatabasePath: { profileDatabasePath })
+    /// A daemon started on an ephemeral throwaway profile — the E2E harnesses and test runs, the one profile
+    /// kind a binary's location cannot describe — forwards its own binding so its terminals stay on it.
+    func testTerminalLaunchEnvironmentForwardsAnEphemeralDatabasePathTheDaemonCarries() throws {
+        let databasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
+        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
 
-        let env = try withEnvironmentValues([SpacesProfile.runtimeDirectoryEnvironmentVariable: nil]) {
-            try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true)
+        let env = try withEnvironmentValues([SpacesProfile.databasePathEnvironmentVariable: databasePath]) {
+            orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true)
         }
 
-        XCTAssertNil(env[SpacesProfile.runtimeDirectoryEnvironmentVariable])
+        XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], databasePath)
     }
 
     /// E2E harnesses start a daemon whose runtime root is deliberately not the default one beside its
@@ -54,23 +45,25 @@ final class TerminalProfileBindingTests: XCTestCase {
     /// itself uses.
     func testTerminalLaunchEnvironmentForwardsAnExplicitDaemonRuntimeDirectory() throws {
         let profileRoot = try makeTempDirectory()
-        let profileDatabasePath = profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path
+        let databasePath = profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path
         let runtimeDirectory = profileRoot.appendingPathComponent("split-runtime", isDirectory: true).path
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore(), profileDatabasePath: { profileDatabasePath })
+        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
 
-        let env = try withEnvironmentValues([SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDirectory]) {
-            try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true)
-        }
+        let env = try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDirectory,
+        ]) { orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true) }
 
         XCTAssertEqual(env[SpacesProfile.runtimeDirectoryEnvironmentVariable], runtimeDirectory)
-        XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], profileDatabasePath)
+        XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], databasePath)
     }
 
     func testTerminalLaunchEnvironmentWithoutProfileEnvironmentExportsNoDatabasePath() throws {
-        let profileDatabasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore(), profileDatabasePath: { profileDatabasePath })
+        let databasePath = try makeTempDirectory().appendingPathComponent("spaces.db", isDirectory: false).path
+        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
 
-        let env = try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: false)
+        let env = try withEnvironmentValues([SpacesProfile.databasePathEnvironmentVariable: databasePath]) {
+            orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: false)
+        }
 
         XCTAssertNil(env[SpacesProfile.databasePathEnvironmentVariable])
     }

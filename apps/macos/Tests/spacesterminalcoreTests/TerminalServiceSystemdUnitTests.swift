@@ -34,23 +34,34 @@ import Testing
             #expect(TerminalService.systemdUnitName(for: first) != TerminalService.systemdUnitName(for: second))
         }
 
+        /// The unit follows what the profile IS, not the branch that resolved it. A daemon that reached the
+        /// installed root through an explicit database path is still the installed profile's daemon, so it
+        /// starts the installed unit rather than being treated as a development profile with no unit at all.
+        @Test func profileAtTheInstalledRootIsInstalledWhateverRouteResolvedIt() {
+            let viaExplicitPath = makeProfile(source: .explicitDatabasePath, rootDirectory: "/home/dev/.spaces")
+
+            #expect(TerminalService.systemdUnitName(for: viaExplicitPath) == "spacesd.service")
+        }
+
         /// A repo-built worktree profile and an explicit database path have no unit on the device, so there
         /// is nothing to ask systemd to start and a missing daemon stays the caller's own error. Naming a
         /// unit for either would only ask systemd for something no install ever wrote.
         @Test func profilesWithoutAnInstalledUnitResolveToNoUnit() {
-            let worktree = makeProfile(
-                source: .developmentWorktree, rootDirectory: "/home/dev/.spaces-dev/profiles/spaces/feature-x-0123456789ab")
+            let worktree = makeProfile(source: .developmentWorktree, rootDirectory: "/home/dev/.spaces-dev/profiles/spaces/feature-x-0123456789ab")
             let explicitDatabase = makeProfile(source: .explicitDatabasePath, rootDirectory: "/tmp/scratch-profile")
 
             #expect(TerminalService.systemdUnitName(for: worktree) == nil)
             #expect(TerminalService.systemdUnitName(for: explicitDatabase) == nil)
         }
 
-        private func makeProfile(source: SpacesProfileSource, rootDirectory: String) -> SpacesProfile {
+        /// Mirrors production: installed-ness is derived from the resolved ROOT against the device's home,
+        /// not from the source, so a profile that reached `~/.spaces` by an unusual route is still the
+        /// installed profile here.
+        private func makeProfile(source: SpacesProfileSource, rootDirectory: String, homeDirectory: String = "/home/dev") -> SpacesProfile {
             SpacesProfile(
                 source: source, databasePath: "\(rootDirectory)/spaces.db", rootDirectory: rootDirectory,
-                runtimeDirectory: "\(rootDirectory)/runtime", ipcNotificationObject: "spaces.profile.systemd-unit-tests", developmentContext: nil,
-                branchSlug: nil, worktreeHash: nil)
+                isInstalledProfile: rootDirectory == "\(homeDirectory)/.spaces", runtimeDirectory: "\(rootDirectory)/runtime",
+                ipcNotificationObject: "spaces.profile.systemd-unit-tests", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
         }
     }
 #endif
