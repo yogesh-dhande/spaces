@@ -1843,6 +1843,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
+        // Re-showing the pane the user is already focused in and owns is a foreground-and-focus, so it also
+        // skips resolving the request: resolution only exists to install or re-target a pane.
+        if reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "mode=\(mode.rawValue) reused=1 route=pane refocus=1\(requestDetail)")
+            return true
+        }
         let resolved: DeviceTerminalOpenRequest?
         if let resolvedRequest { resolved = resolvedRequest } else { resolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) }
         guard let request = resolved else {
@@ -4480,6 +4488,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// "focus, don't open" line is directly testable.
     nonisolated static func canOpenOrFocusTerminalPane(hasExistingPane: Bool, deviceAcceptsDaemonActions: Bool) -> Bool {
         hasExistingPane || deviceAcceptsDaemonActions
+    }
+
+    /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
+    /// running the open path's state fetch, attach, and ownership reclaim. All three conditions are load
+    /// bearing: the pane must be the focused one in the panel's selected tab (anything else has to move
+    /// focus, which re-activates the content), and it must already hold the owner attachment on a live
+    /// surface — when another client owns the session, reclaiming ownership is the whole request. Pure so
+    /// the line between "already here" and "go get it" is directly testable.
+    nonisolated static func canRefocusTerminalPaneWithoutReattaching(
+        paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
+    ) -> Bool {
+        paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface
     }
 
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail

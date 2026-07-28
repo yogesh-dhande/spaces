@@ -11,6 +11,7 @@ import workspacecore
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
     private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
     private let onRestartRequested: (@Sendable () -> Void)?
+    private let liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider?
 
     private var server: SpacesDeviceAPIServer?
     private var advertiser: (any SpacesDeviceAPIBonjourAdvertising)?
@@ -24,7 +25,8 @@ import workspacecore
         environment: [String: String] = ProcessInfo.processInfo.environment, restartInterval: TimeInterval = 5,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        liveTerminalSessionStateProvider: SpacesDeviceAPIServer.LiveTerminalSessionStateProvider? = nil
     ) {
         self.settingsStore = settingsStore
         self.environment = environment
@@ -33,6 +35,7 @@ import workspacecore
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
+        self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
     }
 
     public func start() {
@@ -118,7 +121,8 @@ import workspacecore
         let createdServer = SpacesDeviceAPIServer(
             host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-            agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
+            agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested,
+            liveTerminalSessionStateProvider: liveTerminalSessionStateProvider)
         do {
             try createdServer.start()
             return createdServer

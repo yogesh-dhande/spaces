@@ -351,10 +351,15 @@ public enum TerminalControlCommand: Sendable, Equatable {
         }
     }
 
+    /// The controls that change who is attached echo the resulting session state on the response. A client
+    /// applies that state directly instead of following the control with a separate `.state` request, which
+    /// costs a second round trip and a second full-frame export for a fact the daemon just computed. The
+    /// input and view controls do not echo state: their effect reaches clients on the subscription's next
+    /// broadcast.
     public var includesSessionStateOnSuccess: Bool {
         switch self {
-        case .takeover: true
-        case .attach, .detach, .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .setAppearance, .unsupported: false
+        case .attach, .detach, .takeover: true
+        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .setAppearance, .unsupported: false
         }
     }
 

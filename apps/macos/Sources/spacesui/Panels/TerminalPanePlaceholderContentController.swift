@@ -40,6 +40,10 @@ import spacesterminalui
     func handleCommandKeyEquivalent(_: NSEvent) -> Bool { false }
     func applyAppearance(_: ThemeAppearance) {}
     func requestOwnershipIfNeeded() { requestsOwnershipWhenReady = true }
+
+    /// A placeholder has no session attachment at all — its pane is still resolving — so a re-show of it
+    /// must run the full open path.
+    var holdsOwnerAttachedSurface: Bool { false }
     func find(_: Any?) {}
     func findNext(_: Any?) {}
     func findPrevious(_: Any?) {}

@@ -747,6 +747,37 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 runtimeSize: (columns: 60, rows: 20), force: true))
     }
 
+    /// Re-attaching as owner is not itself a reason to resize. An attach that finds the same surface at the
+    /// size the session already runs at sends nothing — every refocus of an open pane re-attaches, and the
+    /// daemon answers such a resize by early-outing as a no-op after a control hop onto the queue that
+    /// carries every session's keystrokes. The attach's force, which it sets when the mirror surface was
+    /// rebuilt, cannot revive a request the session's own size proves is a no-op; what it does is override
+    /// the two skips that assume the last requested size still describes a live surface.
+    func testOwnerAttachResendsTheViewportOnlyForARebuiltSurface() {
+        // Same size, already attached, and the session runs at that size: nothing to say, rebuilt or not.
+        for force in [false, true] {
+            XCTAssertFalse(
+                RemoteGhosttySessionHost.shouldSendViewportResize(
+                    requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil,
+                    runtimeSize: (columns: 120, rows: 40), force: force))
+        }
+        // A rebuilt surface with no observed session size: the last requested size was measured against a
+        // surface that no longer exists, so the attach re-sends rather than trusting it.
+        XCTAssertFalse(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil,
+                force: false))
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil,
+                force: true))
+        // A first owner attach has requested no size yet, so it sends without needing the force.
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: nil, runtimeSize: (columns: 120, rows: 40),
+                force: false))
+    }
+
     @MainActor func testStateStreamClientPreservesOutputBeforeInputOutputResync() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -45,6 +45,24 @@ import workspacecore
         #expect(resolvedHost is RemoteGhosttySessionHost)
     }
 
+    /// Re-showing the pane the user is already in must cost nothing beyond foregrounding it: no state
+    /// fetch, no re-attach, no ownership reclaim. Every other shape of the request keeps the full path,
+    /// most importantly the one where another client owns the session — reclaiming that is the request.
+    @Test func reShowingTheFocusedOwnerAttachedPaneSkipsTheAttachPath() {
+        #expect(
+            AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: true, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: true))
+        #expect(
+            !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: false, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: true))
+        #expect(
+            !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: true, paneIsInSelectedTab: false, paneHoldsOwnerAttachedSurface: true))
+        #expect(
+            !AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: true, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: false))
+    }
+
     @Test func activeSpaceSummonAddsMoveToActiveSpaceBehavior() {
         let behavior = NSWindow.CollectionBehavior.fullScreenAuxiliary
 
