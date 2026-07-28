@@ -227,6 +227,7 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessKeyEncodingTests.swift",
                 "GhosttyLinuxHeadlessMouseEncodingTests.swift",
                 "GhosttyLinuxHeadlessSessionHandoffTests.swift",
+                "GhosttyLinuxHeadlessSessionMetadataTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
                 "GhosttyLinuxHeadlessSubmitOrderingTests.swift",

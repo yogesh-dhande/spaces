@@ -1899,6 +1899,42 @@ bool spaces_ghostty_vt_session_mode_is_set(SpacesGhosttyVtSession *session, uint
     return true;
 }
 
+// Copies one of the terminal's escape-sequence-set string values into a caller-owned buffer.
+// libghostty-vt hands back a BORROWED pointer into terminal storage that is invalidated by the next
+// `ghostty_terminal_vt_write` or reset, so the bytes must be copied here rather than handed across
+// the C/Swift boundary. An unset value is reported by the library as an empty string, so "absent"
+// and "explicitly cleared" are indistinguishable and both return false.
+static bool spaces_ghostty_vt_session_copy_string_data(
+    SpacesGhosttyVtSession *session,
+    GhosttyTerminalData data,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyString value = {NULL, 0};
+    if (session->symbols.terminal_get(session->terminal, data, &value) != GHOSTTY_SUCCESS) return false;
+    if (value.ptr == NULL || value.len == 0) return false;
+
+    char *copy = malloc(value.len);
+    if (copy == NULL) return false;
+    memcpy(copy, value.ptr, value.len);
+    *out_ptr = copy;
+    *out_len = value.len;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_title(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    return spaces_ghostty_vt_session_copy_string_data(session, GHOSTTY_TERMINAL_DATA_TITLE, out_ptr, out_len);
+}
+
+bool spaces_ghostty_vt_session_pwd(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    return spaces_ghostty_vt_session_copy_string_data(session, GHOSTTY_TERMINAL_DATA_PWD, out_ptr, out_len);
+}
+
 bool spaces_ghostty_vt_session_kitty_keyboard_flags(SpacesGhosttyVtSession *session, uint8_t *out_flags) {
     if (session == NULL || session->terminal == NULL || out_flags == NULL) return false;
     uint8_t flags = 0;

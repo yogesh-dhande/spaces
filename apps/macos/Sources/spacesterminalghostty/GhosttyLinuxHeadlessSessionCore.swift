@@ -116,6 +116,23 @@
         /// DB-reading consumers (the overview) observe a change only once it is durable.
         private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
         private var lastKnownChildPID: Int32?
+        /// The title the running program last set with OSC 0/2, and the working directory it last
+        /// reported with OSC 7, refreshed from the vt session as output arrives. Nil until the program
+        /// sets one (or after it clears one), which is when the runtime state falls back to the
+        /// launch configuration's values. Cached on the core rather than read from the vt session at
+        /// every echo site because the cache must outlive the vt session itself: a handoff rebuilds
+        /// the session and replays the transcript, and a trimmed transcript's state preamble
+        /// deliberately does not restore titles.
+        private var currentTitle: String?
+        private var currentWorkingDirectory: String?
+        /// Whether THIS vt session has ever reported a title / working directory. The VT layer
+        /// reports "never set" and "explicitly cleared" identically (as absent), so the cache is
+        /// cleared only once the current vt session has reported the value as present: a rebuilt
+        /// session replaying a trimmed transcript reports absent for values the program never
+        /// re-emitted, and that absence must not erase a cache that deliberately outlived the
+        /// rebuild. Reset whenever a replacement vt session is swapped in.
+        private var vtSessionHasReportedTitle = false
+        private var vtSessionHasReportedWorkingDirectory = false
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
         // The Spaces theme appearance the vt session is currently themed for. The headless daemon
         // cannot read the client's OS appearance, so it defaults to dark and adopts the attaching
@@ -402,6 +419,9 @@
                 do {
                     _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
                 } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8)) }
+                // The replayed suffix is output this still-live vt session never saw, so it may carry a
+                // title or pwd newer than the cache.
+                refreshSessionMetadata()
             }
             do { try openOutputHandlePreservingTranscript() } catch {
                 FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8))
@@ -447,6 +467,15 @@
             installOutputHandler()
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
 
+            // Seed the title/cwd cache from the row the pre-exec image wrote: this core is a fresh
+            // object, and the replay below cannot always recover them (a trimmed transcript's state
+            // preamble deliberately restores no title). The replay's own refresh overwrites these when
+            // it sees newer escape sequences.
+            if let persisted = try? TerminalSessionPersistence.readRuntimeState(paths: paths) {
+                currentTitle = persisted.title
+                currentWorkingDirectory = persisted.workingDirectory
+            }
+
             // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
             // synchronously into a replacement VT session, then swaps it in and arms the
             // full-frame flag.
@@ -490,8 +519,13 @@
                 attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
             _ = appendTranscript(data)
             writeVTRenderer(data)
+            let metadataChanged = refreshSessionMetadata()
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
+            // After the output broadcast: that payload carries the screen frame, this one carries no
+            // screen state at all, so the frame keeps the delta chain and the metadata reason only
+            // drives the client's title refresh.
+            if metadataChanged { postSessionMetadataDidChange() }
             scheduleInputOutputResyncIfNeeded()
         }
 
@@ -1018,6 +1052,90 @@
             screenStateRevision &+= 1
         }
 
+        /// Folds the vt session's escape-sequence-set title (OSC 0/2) and working directory (OSC 7)
+        /// into the cached metadata every runtime state and state payload echoes, and reports whether
+        /// either changed. Called right after the bytes reach the vt session so the runtime state the
+        /// caller then writes and broadcasts already carries the new values.
+        ///
+        /// An absent value clears the cache (falling back to the launch configuration — that is how
+        /// a program resets its title with an empty OSC 2 payload) only after THIS vt session has
+        /// reported the value as present, because the VT layer cannot distinguish "cleared" from
+        /// "never set": a session rebuilt from a trimmed transcript reports absent for values the
+        /// replay never re-emitted, and those must keep the cache the rebuild deliberately preserved.
+        /// A stored OSC 7 payload that fails the decode (foreign host, unknown scheme, not a URI) is
+        /// ignored outright and the previously accepted directory stands, matching the surface path,
+        /// where a rejected OSC 7 never reaches the app.
+        ///
+        /// This polls final VT state once per output turn rather than observing per-escape-sequence
+        /// events (libghostty-vt exposes no metadata event stream), and the misses that follow from
+        /// that are accepted: a valid report followed in the SAME delivery by a rejected one is never
+        /// seen, and an explicit clear reaching a rebuilt vt session that has not re-reported the
+        /// value first — whether replayed from a handoff window or arriving live — reads back
+        /// identically to never-set and is refused. All of these self-heal on the program's next
+        /// report, and the action-event half of #338 is the structural fix.
+        @discardableResult private func refreshSessionMetadata() -> Bool {
+            guard let vtSession else { return false }
+            var changed = false
+
+            let rawTitle = Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) }
+            if rawTitle != nil { vtSessionHasReportedTitle = true }
+            if let title = rawTitle.flatMap({ Self.normalizedSessionMetadataValue($0) }) {
+                if currentTitle != title {
+                    currentTitle = title
+                    changed = true
+                }
+            } else if vtSessionHasReportedTitle, currentTitle != nil {
+                // Reached both for an observed present→absent transition and for a stored title that
+                // normalizes to blank — the macOS host also treats a whitespace-only title as cleared.
+                currentTitle = nil
+                changed = true
+            }
+
+            let rawWorkingDirectory = Self.copyShimString { spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }
+            if rawWorkingDirectory != nil { vtSessionHasReportedWorkingDirectory = true }
+            if let rawWorkingDirectory {
+                if let workingDirectory = Self.normalizedSessionMetadataValue(TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory)),
+                    currentWorkingDirectory != workingDirectory
+                {
+                    currentWorkingDirectory = workingDirectory
+                    changed = true
+                }
+            } else if vtSessionHasReportedWorkingDirectory, currentWorkingDirectory != nil {
+                currentWorkingDirectory = nil
+                changed = true
+            }
+            return changed
+        }
+
+        /// Announces a title/working-directory change under its own reason. `TerminalRemoteSessionStateNotificationRouting`
+        /// routes the screen-content reasons (`output` and friends) to an output-shaped refresh that never
+        /// re-derives pane and tab titles, so a metadata change carried only by the output broadcast would
+        /// reach a mirroring client's cache without ever being displayed. Platform parity with the macOS
+        /// host's `postSessionMetadataDidChange`.
+        private func postSessionMetadataDidChange() {
+            TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+        }
+
+        /// Reads one of the shim's malloc'd string getters into a Swift `String`. The shim reports an
+        /// unset value as `false`, which surfaces here as nil.
+        private static func copyShimString(_ read: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>, UnsafeMutablePointer<Int>) -> Bool) -> String?
+        {
+            var pointer: UnsafeMutablePointer<CChar>?
+            var length = 0
+            guard read(&pointer, &length), let pointer, length > 0 else { return nil }
+            defer { spaces_ghostty_vt_free_buffer(pointer) }
+            return pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
+                String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+            }
+        }
+
+        private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
         /// Rebuilds the VT renderer from the append-only transcript without ever
         /// materializing the whole file in memory. Replay happens into a replacement
         /// session first, so a read or VT-write failure leaves the current renderer
@@ -1038,6 +1156,11 @@
                 }
                 if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
                 vtSession = replacementSession
+                vtSessionHasReportedTitle = false
+                vtSessionHasReportedWorkingDirectory = false
+                // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
+                // keep the cached values when the replay never re-emits the escape sequences.
+                refreshSessionMetadata()
                 renderUpdateBaseline = nil
                 forceNextBroadcastFullRenderUpdate = true
                 if replayedOutput { screenStateRevision &+= 1 }
@@ -1104,9 +1227,9 @@
             return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
-                exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
-                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows,
-                foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle ?? launchConfiguration.title,
+                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
+                rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
@@ -1222,7 +1345,8 @@
             return GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: nowISO8601(), sessionStateRevision: nil, sessionStateFlags: nil,
                 screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
-                title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
+                title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
                 outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate)
         }
 
@@ -1274,8 +1398,9 @@
         private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
-                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
-                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows)
+                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(),
+                title: currentTitle ?? launchConfiguration.title, workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory,
+                columns: terminalSize.columns, rows: terminalSize.rows)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
