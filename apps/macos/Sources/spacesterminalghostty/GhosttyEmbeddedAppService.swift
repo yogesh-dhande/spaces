@@ -103,7 +103,12 @@ import Foundation
         nonisolated static func requestTick() {
             guard tickWork.requestShouldSpawnTask() else { return }
             Task { @TerminalEngineActor in
-                while tickWork.claimPendingRequest() { GhosttyEmbeddedAppService.shared.tick() }
+                while tickWork.claimPendingRequest() {
+                    GhosttyEmbeddedAppService.shared.tick()
+                    // Suspend between passes so a sustained request stream cannot hold the
+                    // engine actor: queued input, resize, and termination work interleave here.
+                    await Task.yield()
+                }
             }
         }
 

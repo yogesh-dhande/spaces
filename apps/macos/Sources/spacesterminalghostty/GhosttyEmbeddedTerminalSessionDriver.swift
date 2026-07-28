@@ -597,6 +597,9 @@
                 while engineCatchUp.claimPendingRequest() {
                     GhosttyEmbeddedAppService.shared.tick()
                     self?.deliverSessionStateChange()
+                    // Suspend between passes so a sustained request stream cannot hold the
+                    // engine actor: queued input, resize, and termination work interleave here.
+                    await Task.yield()
                 }
             }
         }
