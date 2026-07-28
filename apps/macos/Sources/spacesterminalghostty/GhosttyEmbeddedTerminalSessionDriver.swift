@@ -86,7 +86,9 @@
         private var hasLiveResources = false
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastDeliveredSessionStateRevision: UInt64 = 0
-        private var sessionStateDeliveryScheduled = false
+        /// Coalesces the engine-actor catch-up that PTY deliveries and Ghostty's session-state
+        /// callback both ask for. See `requestEngineCatchUp`.
+        private let engineCatchUp = CoalescedEngineWork()
         private var debugRefreshRequestCountValue = 0
         private var debugLastScrollModsValue: Int32 = 0
         /// A headless session has no screen to read a backing scale from, so it fixes one. This is the
@@ -237,11 +239,10 @@
                 GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.onActionEvent?(event) }
             }
             hostPTY.setOutputHandler { [weak self, outputPipe] data in
+                // The bytes are parsed synchronously here, on the PTY reader thread. Only the
+                // follow-up bookkeeping is handed to the engine actor.
                 outputPipe.process(data)
-                Task { @TerminalEngineActor [weak self] in
-                    GhosttyEmbeddedAppService.shared.tick()
-                    self?.deliverSessionStateChange()
-                }
+                self?.requestEngineCatchUp()
             }
             hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
             return (createdSession, hostPTY)
@@ -389,7 +390,6 @@
             hasLiveResources = false
             surfaceUserData = nil
             lastDeliveredSessionStateRevision = 0
-            sessionStateDeliveryScheduled = false
             currentHostPTY?.terminate()
             if let currentSession { ghostty_session_free(currentSession) }
             lastKnownSurfaceSize = nil
@@ -581,13 +581,23 @@
             onSurfaceClosed()
         }
 
-        private func scheduleSessionStateDelivery() {
-            guard !sessionStateDeliveryScheduled else { return }
-            sessionStateDeliveryScheduled = true
-            Task { @TerminalEngineActor [weak self] in
-                guard let self else { return }
-                self.sessionStateDeliveryScheduled = false
-                self.deliverSessionStateChange()
+        /// Asks the engine actor to drain Ghostty's app mailbox and publish any resulting session
+        /// state change, coalescing repeat requests onto one task.
+        ///
+        /// Both callers want exactly this and nothing more: a PTY delivery has already been parsed by
+        /// the time it calls, and Ghostty's session-state callback only reports that a revision moved.
+        /// Under a flood these arrive per PTY read, so one task each made task allocation a
+        /// measurable share of IO-thread time. The work reads current state, so running it once after
+        /// a run of requests is the same as running it once per request.
+        private nonisolated func requestEngineCatchUp() {
+            guard engineCatchUp.requestShouldSpawnTask() else { return }
+            // The coalescer is captured strongly so the loop still releases the in-flight slot if the
+            // driver is torn down while this task is running.
+            Task { @TerminalEngineActor [weak self, engineCatchUp] in
+                while engineCatchUp.claimPendingRequest() {
+                    GhosttyEmbeddedAppService.shared.tick()
+                    self?.deliverSessionStateChange()
+                }
             }
         }
 
@@ -616,7 +626,7 @@
         private nonisolated static let sessionStateCallback: ghostty_session_state_cb = { userdata, _ in
             guard let userdata else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
-            Task { @TerminalEngineActor in runtime.scheduleSessionStateDelivery() }
+            runtime.requestEngineCatchUp()
         }
 
         private nonisolated static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, bytes, len in
