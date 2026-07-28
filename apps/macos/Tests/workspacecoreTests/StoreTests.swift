@@ -232,41 +232,59 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
+    /// A profile database several schema versions behind this build, carrying one row the upgrade must
+    /// preserve.
+    private static let legacyProfileSchemaSQL = """
+        CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+        INSERT INTO migration_state(current_version) VALUES (4);
+        CREATE TABLE agent_pending_notifications (
+          id TEXT PRIMARY KEY,
+          subscriber_terminal_session_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO agent_pending_notifications(
+          id, subscriber_terminal_session_id, agent_session_id, message, created_at
+        ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
+        CREATE TABLE agent_sessions (
+          id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+          status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+          claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE agent_subscriptions (
+          subscriber_terminal_session_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+          FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+        );
+        """
+
+    /// An instance-lock record naming a schema target other than this build's. Produced directly
+    /// because `TerminalServiceInstanceLock.acquire` declares this build's target by construction,
+    /// while an older daemon declares its own — or, from before the declaration existed, none.
+    private struct ForeignSchemaInstanceLockRecord: Codable {
+        let pid: Int32
+        let token: String
+        let schemaTarget: Int?
+    }
+
+    private func writeInstanceLock(pid: Int32, schemaTarget: Int?, path: String) throws {
+        let record = ForeignSchemaInstanceLockRecord(pid: pid, token: UUID().uuidString, schemaTarget: schemaTarget)
+        try JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path))
+    }
+
     // A newer direct helper must not move the profile schema out from under the daemon that owns the
-    // live terminal sessions. Once that daemon hands off in place, the owning process may migrate and
-    // the existing data must carry forward.
+    // live terminal sessions: an owner whose lock record declares no schema this build can open is that
+    // older daemon, and the helper refuses immediately rather than waiting for work that is not coming.
+    // Once that daemon hands off in place, the owning process may migrate and the existing data must
+    // carry forward.
     func testRunningDaemonExclusivelyOwnsProfileMigration() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
         let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (4);
-                CREATE TABLE agent_pending_notifications (
-                  id TEXT PRIMARY KEY,
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-                INSERT INTO agent_pending_notifications(
-                  id, subscriber_terminal_session_id, agent_session_id, message, created_at
-                ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
-                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_subscriptions (
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
-                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
-                );
-                """)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
 
         try withEnvironmentValues([
             SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
@@ -300,16 +318,31 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(link(competingLockCandidate.path, lockPath), 0, "The migration lock must be released after the schema work finishes.")
             try FileManager.default.removeItem(atPath: lockPath)
 
-            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: DatabaseSchema.currentVersion - 1, path: lockPath)
+            let refusalStarted = Date()
             XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
                 XCTAssertTrue(error.localizedDescription.contains("while spacesd (pid \(externalDaemon.processIdentifier)) owns this profile"))
+                XCTAssertTrue(error.localizedDescription.contains("maintains schema version \(DatabaseSchema.currentVersion - 1)"))
+                XCTAssertTrue(error.localizedDescription.contains("this build needs schema version \(DatabaseSchema.currentVersion)"))
+                XCTAssertTrue(error.localizedDescription.contains("spaces daemon apply-update"))
+            }
+            XCTAssertLessThan(
+                Date().timeIntervalSince(refusalStarted), 1,
+                "The owner's lock record already names the boundary, so the refusal must not wait on schema work that is not coming.")
+
+            // A daemon from before the declaration existed names no schema at all, which is the same
+            // refusal: it is older than any build that reads the declaration.
+            try FileManager.default.removeItem(atPath: lockPath)
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: nil, path: lockPath)
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("maintains an earlier schema"))
                 XCTAssertTrue(error.localizedDescription.contains("spaces daemon apply-update"))
             }
             XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
             XCTAssertEqual(
                 try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
 
-            externalLock.release()
+            try FileManager.default.removeItem(atPath: lockPath)
             let daemonLock = try TerminalServiceInstanceLock.acquire(path: lockPath)
             _ = try SQLiteStore(path: dbURL.path)
             withExtendedLifetime(daemonLock) {}
@@ -320,35 +353,220 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // A daemon that has just taken the instance lock is doing the schema work it took that lock to do,
+    // and its lock record declares the schema version it will record. A helper opening the profile
+    // database in that window sees the same behind-schema database an older daemon would present, so
+    // that declaration is what tells it to wait for the owner's result rather than report a version
+    // boundary that does not exist.
+    func testHelperWaitsForBootingDaemonToRecordProfileSchema() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            // Stands in for the owning daemon's own schema work: it holds the instance lock, so it
+            // migrates directly rather than through the guard.
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let ownerMigrationError = LockedBox<Error?>(nil)
+            let ownerFinished = DispatchSemaphore(value: 0)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.2)
+                do { _ = try SpacesSQLiteDatabase(path: dbURL.path) } catch { ownerMigrationError.set(error) }
+                ownerFinished.signal()
+            }
+            owner.start()
+
+            let started = Date()
+            helperEnteredGuard.signal()
+            _ = try SQLiteStore(path: dbURL.path)
+            let waited = Date().timeIntervalSince(started)
+
+            XCTAssertEqual(ownerFinished.wait(timeout: .now() + 5), .success)
+            XCTAssertNil(ownerMigrationError.get())
+            XCTAssertGreaterThanOrEqual(waited, 0.15, "The helper must wait for the owner's schema work instead of refusing it.")
+            XCTAssertEqual(
+                try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath), externalDaemon.processIdentifier,
+                "The waiting helper must leave profile ownership with the daemon.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+        }
+    }
+
+    // The wait is bounded by the owner staying alive, not by a duration: an owner that exits before
+    // recording its schema version leaves the profile to whoever takes the lock next, and the waiting
+    // helper is exactly that process.
+    func testHelperTakesOverProfileMigrationWhenOwningDaemonExitsBeforeRecordingSchema() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.2)
+                externalDaemon.terminate()
+                externalDaemon.waitUntilExit()
+            }
+            owner.start()
+
+            helperEnteredGuard.signal()
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertNil(
+                try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath),
+                "The helper must take the abandoned profile, do the schema work, and release the lock again.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+        }
+    }
+
+    // A live owner that declares this build's schema but never records it is wedged, not a version
+    // boundary. The ceiling exists so that helper stops eventually, and what it reports must send the
+    // caller back to the daemon already doing the work rather than to the update remedy.
+    func testHelperReportsOwningDaemonStillPreparingSchemaWhenWaitCeilingExpires() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            var migrationRan = false
+            XCTAssertThrowsError(
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: dbURL.path, ownerWaitCeiling: 0.2) { migrationRan = true }
+            ) { error in
+                XCTAssertTrue(
+                    error.localizedDescription.contains("still being prepared by spacesd (pid \(externalDaemon.processIdentifier))"),
+                    error.localizedDescription)
+                XCTAssertTrue(error.localizedDescription.contains("retry once it finishes"), error.localizedDescription)
+                XCTAssertFalse(
+                    error.localizedDescription.contains("apply-update"),
+                    "The daemon being waited on is already the one that should do this work, so the update remedy would be wrong.")
+            }
+            XCTAssertFalse(migrationRan)
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
+        }
+    }
+
+    // A newer owner commits each step of its upgrade in its own transaction, so this build's schema
+    // version appears in the profile while that daemon is still rewriting past it. The helper must wait
+    // for the version the owner declared rather than the first version it could open, or it reads a
+    // database mid-migration and never reaches the rejection a newer schema is owed.
+    func testHelperWaitsPastItsOwnSchemaVersionForNewerOwnersDeclaredTarget() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+        let ownerTarget = DatabaseSchema.currentVersion + 1
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: ownerTarget, path: lockPath)
+            defer { try? FileManager.default.removeItem(atPath: lockPath) }
+
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let ownerError = LockedBox<Error?>(nil)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.15)
+                do {
+                    // The step of the owner's upgrade that lands on this build's version, committed on
+                    // the way to the owner's own.
+                    try self.runSQLiteExec(dbURL: dbURL, sql: "UPDATE migration_state SET current_version = \(DatabaseSchema.currentVersion);")
+                    Thread.sleep(forTimeInterval: 0.25)
+                    try self.runSQLiteExec(dbURL: dbURL, sql: "UPDATE migration_state SET current_version = \(ownerTarget);")
+                } catch { ownerError.set(error) }
+            }
+            owner.start()
+
+            let started = Date()
+            helperEnteredGuard.signal()
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Unsupported database schema version \(ownerTarget)"), error.localizedDescription)
+            }
+            let waited = Date().timeIntervalSince(started)
+
+            XCTAssertNil(ownerError.get())
+            XCTAssertGreaterThanOrEqual(
+                waited, 0.3, "The helper must not stop at its own version while the owner is still upgrading the database past it.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), ownerTarget)
+        }
+    }
+
     func testConcurrentHelperThreadsShareOneProfileMigration() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
         let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (4);
-                CREATE TABLE agent_pending_notifications (
-                  id TEXT PRIMARY KEY,
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
-                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_subscriptions (
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
-                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
-                );
-                """)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
 
         try withEnvironmentValues([
             SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
