@@ -38,6 +38,13 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
+  # The scroll's endpoint recovery relaunches spacesd on a fresh port, and SERVICE_PID still names
+  # the daemon the scenario stopped, so stop whichever daemon serves the profile now that the
+  # session is terminated and the app is gone. The pid kill below covers failure paths where the
+  # daemon still hosts the session and refuses the idle-only stop.
+  if [[ -x "$SPACES_CLI" ]]; then
+    SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_terminal_service_if_idle "$SPACES_CLI" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
     kill "$SERVICE_PID" >/dev/null 2>&1 || true
     wait "$SERVICE_PID" >/dev/null 2>&1 || true
@@ -110,12 +117,10 @@ wait_for_session_exited() {
   fail "Timed out waiting for terminal session to exit (last state: '${state:-<none>}')"
 }
 
-# With only the ended session on the profile, the hosting daemon idle-shuts-down on its own once the
-# child exits. Poll its process (the session's recorded service_pid) until it is gone so the rest of the
-# run exercises the real endpoint recovery: `spaces terminal show` then restarts the daemon on a new
-# ephemeral port while the app's model still points at the dead one. If the daemon does not exit on its
-# own within the deadline, fail loudly rather than forcing it down — the scroll path's transcript-fetch
-# recovery is only exercised when the daemon genuinely idle-shut-down.
+# Confirmation that the hosting daemon really left after the explicit idle-only stop below: spacesd is
+# the profile's resident Device API server and never exits on its own when the last session ends, so the
+# stop is what produces the dead-endpoint condition. Poll the session's recorded service_pid until it is
+# gone before continuing, so the scroll below runs against a genuinely dead endpoint.
 wait_for_daemon_exited() {
   local deadline=$((SECONDS + 30))
   while (( SECONDS < deadline )); do
@@ -253,11 +258,14 @@ SERVICE_PID="$(terminal_service_pid "$session_id")"
 # pane is showing its final render behind the "Session ended" banner.
 wait_for_session_exited
 
-# The run deliberately lets the daemon idle-shut-down under the open ended pane: with no other
-# session pinning it, spacesd exits once the child does. Waiting for that exit is what makes the
-# scroll below exercise the transcript path's own endpoint recovery — the app's model is left
-# pointing at the dead Device API port, and only the fetch-side recovery can reach the daemon that
-# `spaces terminal show` restarts on a fresh ephemeral port.
+# The run deliberately takes the daemon down under the open ended pane. spacesd is the profile's
+# resident Device API server and stays up with zero sessions, so the test stops it explicitly with the
+# same idle-only stop the dev relaunch uses; the ended session's core is already out of the daemon, so
+# the daemon reports itself idle and exits. Killing it here is what makes the scroll below exercise the
+# transcript path's own endpoint recovery — the app's model is left pointing at the dead Device API
+# port, and only the fetch-side recovery can reach the daemon that `spaces terminal show` restarts on a
+# fresh ephemeral port. How the daemon went down does not affect the recovery under test.
+SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_terminal_service_if_idle "$SPACES_CLI"
 wait_for_daemon_exited
 
 focus_ended_pane
