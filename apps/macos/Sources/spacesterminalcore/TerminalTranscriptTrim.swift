@@ -222,9 +222,18 @@ enum TerminalTranscriptTrim {
                 let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
                 defer { try? readHandle.close() }
                 try readHandle.seek(toOffset: staged.snapshotEndOffset)
-                let delta = try readHandle.read(upToCount: Int(deltaByteCount)) ?? Data()
-                try staged.handle.write(contentsOf: delta)
-                committedByteCount += UInt64(delta.count)
+                // read(upToCount:) may legally short-read, and a partial delta must never be renamed in:
+                // the missing bytes would exist only on the unlinked old inode. Loop until the full delta
+                // is copied and treat premature EOF as a failed commit.
+                var remaining = deltaByteCount
+                while remaining > 0 {
+                    guard let chunk = try readHandle.read(upToCount: Int(remaining)), !chunk.isEmpty else {
+                        throw TrimError.transcriptShrankDuringStaging
+                    }
+                    try staged.handle.write(contentsOf: chunk)
+                    committedByteCount += UInt64(chunk.count)
+                    remaining -= UInt64(chunk.count)
+                }
             }
             // fsync before the rename guarantees the data is durable before the directory entry flips, so
             // a crash can never surface a renamed-but-truncated file.
