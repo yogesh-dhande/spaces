@@ -9,6 +9,12 @@ source "$script_dir/terminal_harness_lock.sh"
 source "$script_dir/e2e_fixture_repos.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 source "$repo_root/scripts/ios-simulator-lifecycle.sh"
+# Drop any binding this shell was started with, before anything resolves a profile or runs a demo child.
+# A `user` run must stay unbound so every repo-local binary resolves the worktree profile it belongs to; an
+# `isolated` run names its own ephemeral root afterwards through `demo_profile_env`, which is the one thing
+# that mode exists to do. Neither wants whatever the invoking shell happened to carry. See
+# spaces_profile_clear_inherited_binding.
+spaces_profile_clear_inherited_binding
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"

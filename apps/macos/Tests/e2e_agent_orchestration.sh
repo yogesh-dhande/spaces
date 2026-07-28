@@ -35,6 +35,7 @@ BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_CLI="$BUILD_DIR/spaces"
 SPACES_E2E="$BUILD_DIR/spacese2e"
 SPACESD_BIN="$BUILD_DIR/spacesd"
+source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 
 MATRIX_ENABLED="${SPACES_E2E_AGENT_MATRIX:-0}"
 # Providers probed by Part B: <SupportedCodingAgentHook display> maps to the PATH executable name.
@@ -79,8 +80,11 @@ require_binaries() {
 
 resolve_worktree_profile() {
   # The binaries this script drives all live in this checkout, so each resolves the worktree profile
-  # from its own location -- there is nothing to bind. The root is looked up only because the fixture
-  # directory below lives inside it.
+  # from its own location -- there is nothing to bind, and a binding this shell was started with would
+  # either abort the run or point it at another profile entirely. This is the first thing main() does,
+  # so everything below runs unbound. See spaces_profile_clear_inherited_binding.
+  spaces_profile_clear_inherited_binding
+  # The root is looked up only because the fixture directory below lives inside it.
   PROFILE_ROOT="$("$SPACES_E2E" profile-show --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["profileRoot"])')"
   [[ -n "$PROFILE_ROOT" ]] || fail "profile-show did not report a profile root"
   # Pin the daemon binary to the debug build so autolaunch uses this checkout's spacesd.

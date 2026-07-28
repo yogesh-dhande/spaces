@@ -4,12 +4,17 @@
 # run_verify_steps() in verify.sh or from a CI job that then runs coverage.sh in the same shell.
 #
 # The `cd "$root"` below changes the CALLING shell's working directory, which coverage.sh runs
-# afterward in that same shell and depends on. A child script's working directory and environment
-# changes never propagate back to its parent process, so running this file as its own
-# `verify-prep.sh` process would silently drop that.
+# afterward in that same shell and depends on, and the profile-binding clear below unsets two
+# variables in that same shell. A child script's working directory and environment changes never
+# propagate back to its parent process, so running this file as its own `verify-prep.sh` process
+# would silently drop both.
 #
 # Nothing here binds the shell to a profile. The steps below run this checkout's own
-# `.build/debug/spaces`, which resolves the worktree profile from its own location.
+# `.build/debug/spaces`, which resolves the worktree profile from its own location. The clear is
+# applied to the CALLING shell rather than only around the helper invocations on purpose: a
+# verification gate's job is to hand every step that follows a known environment, and coverage.sh
+# runs afterward in this same shell. Clearing only locally would leave that step exposed to the very
+# binding this removes, which is the one thing a gate must not do.
 #
 # Resolve our own location rather than requiring the caller to pre-set these, so a CI job can
 # source this file directly from the repo root the same way verify.sh sources it from apps/macos.
@@ -20,6 +25,7 @@ repo_root="$(cd "$root/../.." && pwd)"
 cd "$root"
 
 source "$repo_root/scripts/spaces-profile-helpers.sh"
+spaces_profile_clear_inherited_binding
 
 # Stops the profile's Spaces app and spacesd daemon before the SwiftPM coverage build reuses the
 # profile, so tests do not race a stale already-running instance. Set

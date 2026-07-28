@@ -198,10 +198,16 @@ if [[ -n "$dev_codesign_identity" ]]; then
   codesign --force --preserve-metadata=entitlements --sign "$dev_codesign_identity" "$APP"
 fi
 
+# Drop any binding this shell was started with, before anything resolves a profile. See
+# spaces_profile_clear_inherited_binding.
+spaces_profile_clear_inherited_binding
+
 # SPACES_DEV_DB_PATH launches this build against a one-off throwaway profile instead of the worktree's
-# own. It must name a database outside ~/.spaces and ~/.spaces-dev/profiles; profile resolution refuses
-# a live profile root, which is never something this variable should be pointing at. Naming the database
-# binds the whole profile, so the runtime root derives from it and is deliberately not set here too.
+# own, and is applied AFTER the clear so a deliberate request still works while an inherited one cannot.
+# It must name a database outside ~/.spaces and ~/.spaces-dev/profiles; profile resolution refuses a live
+# profile root, which is never something this variable should be pointing at. Naming the database binds
+# the whole profile, so the runtime root derives from it and is deliberately not set here too. It is set
+# before the lookups below so those report the profile this run actually uses.
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"
 fi
