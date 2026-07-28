@@ -155,7 +155,7 @@ PY
 }
 
 echo "== deploying the isolated remote E2E daemon =="
-artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$REMOTE_E2E_PROFILE_NAME")"
 eval "$artifact_assignments"
 [[ "${artifact_url:-}" == file://* ]] || fail "Remote artifact URL must be file://, got: ${artifact_url:-<unset>}"
 archive_path="${artifact_url#file://}"

@@ -55,14 +55,11 @@ stop_current_profile_runtime_for_tests() {
 # installed manifest already matches the pin and self-heals from the cache otherwise.
 "$root/scripts/setup_ghostty.sh"
 "$root/scripts/lint.sh"
-# Build once, with the same flags coverage.sh's own build step passes
-# (--build-tests --enable-code-coverage). Toggling --enable-code-coverage between
-# builds invalidates SwiftPM's incremental state (it recompiles the whole package),
-# so a plain build here followed by coverage.sh's instrumented build compiled
-# everything twice. Building with the coverage flags here makes coverage.sh's
-# build an incremental no-op while still producing plain .build/debug/spaces,
-# SpacesApp, and spacesd binaries for release_bundle_signing.sh below.
-"$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage
+# Build the product binaries the steps below use: release_bundle_signing.sh signs them, and the
+# profile helpers and E2E lanes run .build/debug/spaces. This build is deliberately plain --
+# coverage.sh builds the instrumented test tree in its own scratch path, so nothing ever
+# instruments these executables and neither build invalidates the other's incremental state.
+"$root/scripts/swiftpm.sh" build
 "$root/Tests/release_bundle_signing.sh"
 spaces_profile_eval_shell_env "$root/.build/debug/spaces"
 stop_current_profile_runtime_for_tests

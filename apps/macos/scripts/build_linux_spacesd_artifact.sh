@@ -18,7 +18,11 @@ GHOSTTYVT_ROOT="$APP_ROOT/.local/ghosttyvt"
 GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
 GHOSTTYVT_LINUX_LIB_ROOT="$GHOSTTYVT_ROOT/lib-linux"
 
-ZIG_VERSION="0.16.0"
+# The pinned Zig version, and the packages this build needs, are baked into the builder image
+# this script runs inside (see ensure_linux_builder_image.sh). Sourcing the same file both
+# provisions the image and checks it here, so the two cannot drift.
+source "$SCRIPT_DIR/linux-builder-versions.sh"
+ZIG_VERSION="$SPACES_LINUX_ZIG_VERSION"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
 host_arch="$(uname -m)"
 case "$host_arch" in
@@ -173,33 +177,15 @@ ghostty_app_version() {
     echo "$app_version"
 }
 
-ensure_zig() {
-    local zig_arch
-    case "$ARTIFACT_ARCH" in
-        x86_64) zig_arch="x86_64" ;;
-        arm64) zig_arch="aarch64" ;;
-        *) die "unsupported Linux spacesd artifact architecture: $ARTIFACT_ARCH" ;;
-    esac
-    local archive_name="zig-$zig_arch-linux-$ZIG_VERSION"
-    local toolchain_root="$APP_ROOT/.local/linux-toolchain"
-    local zig_install_root="$toolchain_root/$archive_name"
-    local zig_bin="$zig_install_root/zig"
-
-    if [[ ! -x "$zig_bin" ]]; then
-        require_command curl
-        require_command tar
-        echo "==> Downloading Zig $ZIG_VERSION for Linux spacesd artifacts" >&2
-        local tmp_dir
-        tmp_dir="$(mktemp -d)"
-        local archive="$archive_name.tar.xz"
-        curl -fL "https://ziglang.org/download/$ZIG_VERSION/$archive" -o "$tmp_dir/$archive"
-        mkdir -p "$toolchain_root"
-        tar -xJf "$tmp_dir/$archive" -C "$toolchain_root"
-        rm -rf "$tmp_dir"
-    else
-        echo "==> Zig $ZIG_VERSION already present at $zig_bin" >&2
-    fi
-
+# Zig comes from the builder image this script runs inside, never from a download into the
+# workspace. Asserting the pinned version here is what makes running in the wrong image a loud
+# failure rather than a libghostty-vt built by an unpinned compiler.
+resolve_zig() {
+    local zig_bin installed_version
+    zig_bin="$(command -v zig || true)"
+    [[ -n "$zig_bin" ]] || die "zig is not on PATH; run this build inside the image apps/macos/scripts/ensure_linux_builder_image.sh provisions"
+    installed_version="$("$zig_bin" version)"
+    [[ "$installed_version" == "$ZIG_VERSION" ]] || die "zig $installed_version is on PATH but Linux spacesd artifacts pin zig $ZIG_VERSION; rebuild the builder image with apps/macos/scripts/ensure_linux_builder_image.sh"
     echo "$zig_bin"
 }
 
@@ -212,7 +198,7 @@ build_ghostty_vt() {
     fi
 
     local zig_bin
-    zig_bin="$(ensure_zig)"
+    zig_bin="$(resolve_zig)"
     local app_version
     app_version="$(ghostty_app_version)"
 

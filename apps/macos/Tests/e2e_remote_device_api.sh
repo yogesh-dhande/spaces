@@ -111,7 +111,7 @@ prepare_remote_daemon() {
   SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
     SPACES_E2E_REMOTE_INSTALL_ROOT="$REMOTE_E2E_ROOT" \
     "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
-  artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$REMOTE_E2E_PROFILE_NAME")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
   [[ "$artifact_url" == file://* ]] || fail "Remote artifact URL must be file://, got: $artifact_url"

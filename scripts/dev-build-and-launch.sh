@@ -110,7 +110,22 @@ deploy_remote_linux_spacesd_if_configured() (
   echo "Preparing remote Linux spacesd from current checkout at $ssh_destination..."
   local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
   local remote_profile_name remote_profile_root quoted_profile_name quoted_profile_root remote_device_api_port
-  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  # The remote development profile is named after this worktree's local profile, so one worktree owns
+  # exactly one remote daemon and the app's own remote pairing derives the same profile without being
+  # handed a path. The installer needs the name and nothing else: no database, runtime, host, or port
+  # environment reaches it, because a profile-rooted binary resolves all of that from its own path.
+  remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")"
+  # On the device the name is both a path component under ~/.spaces-dev/profiles/spaces/ and the
+  # systemd instance name in spacesd@<name>.service, so the installer accepts only characters that
+  # are literal in both. A branch name with a non-ASCII letter slugifies into a profile name that is
+  # not, and the deploy would otherwise fail deep in the installer after a full artifact build and
+  # upload. Fail here, before any remote work, naming what produced the name.
+  if [[ ! "$remote_profile_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Branch '$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)' resolves to development profile '$remote_profile_name', which a Linux device cannot host." >&2
+    echo "Profile names may use letters A-Z/a-z, digits, '.', '_', and '-' only. Rename the branch to deploy from this worktree, or launch with --local." >&2
+    exit 1
+  fi
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$remote_profile_name")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
   [[ "$artifact_url" == file://* ]] || {
@@ -119,14 +134,11 @@ deploy_remote_linux_spacesd_if_configured() (
   }
 
   archive_path="${artifact_url#file://}"
+  # The staging tree sits beside the uploaded archive, which the deploy helper keyed by profile, so
+  # a concurrent deploy of another profile cannot clear this one mid-install.
   install_root="$(dirname "$archive_path")/dev-launch-install"
   quoted_archive="$(remote_shell_quote "$archive_path")"
   quoted_install="$(remote_shell_quote "$install_root")"
-  # The remote development profile is named after this worktree's local profile, so one worktree owns
-  # exactly one remote daemon and the app's own remote pairing derives the same profile without being
-  # handed a path. The installer needs the name and nothing else: no database, runtime, host, or port
-  # environment reaches it, because a profile-rooted binary resolves all of that from its own path.
-  remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")"
   remote_profile_root="$(remote_expand_path "~/.spaces-dev/profiles/spaces/$remote_profile_name")"
   quoted_profile_name="$(remote_shell_quote "$remote_profile_name")"
   quoted_profile_root="$(remote_shell_quote "$remote_profile_root")"
