@@ -250,6 +250,26 @@ bool spaces_ghostty_vt_session_mode_is_set(
     bool *out_set
 );
 
+// Copies the terminal title the session's escape sequences last set (OSC 0/2) into a malloc'd
+// buffer that must be freed with `spaces_ghostty_vt_free_buffer`. Returns false (and leaves
+// `*out_ptr` NULL) when no title is set — the VT layer reports an unset and an explicitly cleared
+// title identically, as an empty string.
+bool spaces_ghostty_vt_session_title(
+    SpacesGhosttyVtSession *session,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Copies the working directory the session's escape sequences last reported (OSC 7) into a malloc'd
+// buffer that must be freed with `spaces_ghostty_vt_free_buffer`. The value is the RAW OSC 7
+// payload (e.g. `file://host/path`); the VT layer stores it without parsing, so the caller decodes
+// and host-validates the URI. Returns false (and leaves `*out_ptr` NULL) when none is set.
+bool spaces_ghostty_vt_session_pwd(
+    SpacesGhosttyVtSession *session,
+    char **out_ptr,
+    size_t *out_len
+);
+
 // Test-support: reports the session's current Kitty keyboard protocol flags. Returns false if the
 // underlying query fails (e.g. the library predates the getter).
 bool spaces_ghostty_vt_session_kitty_keyboard_flags(
