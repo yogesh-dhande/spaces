@@ -414,14 +414,28 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
 
 
 def request_terminal_window(session_id: str) -> None:
-    run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
-    wait_for_state(
-        session_id,
-        lambda state: state.get("found") and renderer_is_ghostty(state),
-        10,
-        "focused",
-    )
-    time.sleep(0.3)
+    # The focus IPC is one-shot and the app refuses it outright when its sidebar has not yet
+    # observed the workspace: the pane open resolves the workspace to a panel scope, and the
+    # sidebar is loaded from the daemon's device-API overview and refreshed only when the daemon
+    # emits databaseDidChange. This harness launches the app against an empty database and then
+    # creates the project and session, so a session started moments after the app cold-launched
+    # the daemon regularly lands inside that window and the request is dropped with
+    # `terminal_window_summon success=0 reason=pane_open_failed`. Re-issue the request while
+    # polling instead of assuming the first one is honoured; the retry stops as soon as the pane
+    # exists, so a ready app still opens on the very first request.
+    deadline = time.monotonic() + 20
+    next_request_at = 0.0
+    last_state = None
+    while time.monotonic() < deadline:
+        if time.monotonic() >= next_request_at:
+            run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
+            next_request_at = time.monotonic() + 1
+        last_state = dump_state(session_id, "focused")
+        if last_state.get("found") and renderer_is_ghostty(last_state):
+            time.sleep(0.3)
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"timed out waiting for terminal window; last={last_state}")
 
 
 def start_terminal(title: str, command: str | None) -> str:
