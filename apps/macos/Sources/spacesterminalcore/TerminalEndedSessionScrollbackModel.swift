@@ -59,6 +59,7 @@ public final class TerminalEndedSessionScrollbackModel: @unchecked Sendable {
                 columns: 0, rows: 0, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0, defaultBackgroundRGB: 0, cells: [])
         }
         defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-        return GhosttyVtSessionBridge.snapshot(from: rawSnapshot)
+        // The replay has no child process to report to, so its transcript's mouse modes are inert.
+        return GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseReportingActive: false)
     }
 }

@@ -412,6 +412,22 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
+    /// Sends one mouse button press or release, forwarded to the session's terminal when a mouse-aware
+    /// application there is tracking the mouse. The pointer is normalized the same way `scroll`'s is.
+    func mouseButton(
+        sessionID: String, clientID: String, button: UInt8, pressed: Bool, ownerEpoch: UInt64?, pointerPosition: TerminalScrollPointerPosition? = nil,
+        timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(
+                .init(
+                    action: .mouseButton, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, mouseButton: button,
+                    mousePressed: pressed, mousePointerX: pointerPosition?.x, mousePointerY: pointerPosition?.y,
+                    mousePointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
     /// Pushes the app's light/dark appearance to a live session so the daemon re-themes it mid-session.
     /// Appearance is a per-client view preference, not owner-gated, so a viewer may send it; the daemon
     /// treats a same-value request as a cheap no-op (see the session core's setAppearance handler).
@@ -597,8 +613,9 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             if error != nil { Task { await resolver.noteStreamFailed(host: host) } }
             onDisconnect(error)
         }
-        StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect)
-            .start(on: queue)
+        StreamSubscription(
+            connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
+        ).start(on: queue)
         return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
 
@@ -651,9 +668,7 @@ private final class BackgroundNotificationObserver: @unchecked Sendable {
         }
     }
 
-    deinit {
-        if let token { NotificationCenter.default.removeObserver(token) }
-    }
+    deinit { if let token { NotificationCenter.default.removeObserver(token) } }
 }
 
 /// Network request transport: owns one pinned-TLS command connection. This is the request/response

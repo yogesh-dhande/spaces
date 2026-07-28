@@ -51,7 +51,8 @@ public enum GhosttyTerminalSnapshotViewport {
             cursorRow: min(max(snapshot.cursorRow - rowOffset, 0), max(rows - 1, 0)),
             cursorVisible: snapshot.cursorVisible && snapshot.cursorColumn >= columnOffset && snapshot.cursorColumn < columnOffset + columns
                 && snapshot.cursorRow >= rowOffset && snapshot.cursorRow < rowOffset + rows, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells)
+            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells, mouseReportingActive: snapshot.mouseReportingActive,
+            mouseShiftCapture: snapshot.mouseShiftCapture)
     }
 
     public static func window(

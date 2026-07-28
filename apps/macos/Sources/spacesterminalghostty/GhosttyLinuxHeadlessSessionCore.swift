@@ -122,6 +122,9 @@
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
         private var scrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+        /// Pending precise horizontal delta for wheel reports. Only consulted while an application
+        /// tracks the mouse — the viewport itself never scrolls horizontally.
+        private var pendingPreciseHorizontalDelta: Double = 0
         private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -572,6 +575,7 @@
             case "clearScreen": response = clearScreen(request)
             case "resize": response = resize(request)
             case "scroll": response = scroll(request)
+            case "mouseButton": response = mouseButton(request)
             case "setAppearance": response = setAppearance(request)
             default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
@@ -806,6 +810,16 @@
             let vertical = request.scrollVertical ?? 0
             let scrollMods = request.scrollMods ?? 0
             let deltaRows = scrollDeltaNormalizer.terminalViewportDeltaRows(vertical: vertical, scrollMods: scrollMods)
+            // A wheel event belongs to the application once it tracks the mouse: ghostty's surface reports
+            // one button-four/five press per row of delta (six/seven per column of horizontal delta) and
+            // leaves the viewport alone, and this is the same behavior on the vt-only host.
+            if GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession) {
+                let deltaColumns = horizontalWheelReportDelta(horizontal: request.scrollHorizontal ?? 0, scrollMods: scrollMods)
+                guard deltaRows != 0 || deltaColumns != 0 else {
+                    return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
+                }
+                return reportWheel(request, deltaRows: deltaRows, deltaColumns: deltaColumns, session: vtSession)
+            }
             guard deltaRows != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
             var attributes = [
                 "action": request.command, "client_id": request.clientID ?? "nil", "delta_rows": String(deltaRows),
@@ -833,6 +847,96 @@
                 name: "scroll_broadcast_end", elapsedMS: TerminalPerformance.elapsedMS(since: broadcastStartedAt), attributes: attributes)
             return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
         }
+
+        /// Converts a horizontal scroll delta into wheel-report columns with ghostty's own x-axis
+        /// semantics, which differ from the vertical axis on purpose: a non-precise notch maps to
+        /// exactly one report (ghostty rounds the offset directly, with no discrete multiplier),
+        /// and precise deltas accumulate against the cell width. Returns ghostty's sign: positive
+        /// is rightward.
+        private func horizontalWheelReportDelta(horizontal: Double, scrollMods: Int32) -> Int {
+            guard horizontal != 0 else { return 0 }
+            guard TerminalScrollModifiers.hasPreciseDeltas(scrollMods) else { return Int(horizontal.rounded()) }
+            let pending = pendingPreciseHorizontalDelta + horizontal
+            guard abs(pending) >= Self.approximateCellWidth else {
+                pendingPreciseHorizontalDelta = pending
+                return 0
+            }
+            let delta = Int((pending / Self.approximateCellWidth).rounded(.towardZero))
+            pendingPreciseHorizontalDelta = pending - Double(delta) * Self.approximateCellWidth
+            return delta
+        }
+
+        /// A headless session has no font metrics to take a real cell width from; the vertical
+        /// axis' default cell height with a typical monospace aspect ratio stands in for one.
+        private static let approximateCellWidth: Double = TerminalScrollDeltaNormalizer.defaultCellHeight / 2
+
+        private func reportWheel(_ request: TerminalControlRequest, deltaRows: Int, deltaColumns: Int, session: OpaquePointer)
+            -> TerminalControlResponse
+        {
+            let cell = pointerCell(x: request.scrollPointerX, y: request.scrollPointerY)
+            // The vertical normalizer negates raw deltas (negative rows = scrolled up = button four);
+            // horizontal deltas keep ghostty's sign (positive = right = button six).
+            let verticalButton = deltaRows < 0 ? Self.wheelUpButton : Self.wheelDownButton
+            let horizontalButton = deltaColumns > 0 ? Self.wheelRightButton : Self.wheelLeftButton
+            for (button, magnitude) in [(verticalButton, abs(deltaRows)), (horizontalButton, abs(deltaColumns))] {
+                for _ in 0..<magnitude {
+                    guard
+                        let bytes = GhosttyLinuxMouseEncoder.encode(
+                            button: button, pressed: true, cellColumn: cell.column, cellRow: cell.row, mods: request.scrollPointerMods ?? 0,
+                            session: session)
+                    else {
+                        return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable)
+                    }
+                    if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+                }
+            }
+            return TerminalControlResponse(ok: true, message: "Reported terminal scroll.")
+        }
+
+        private func mouseButton(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+            }
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            guard let button = request.mouseButton, let pressed = request.mousePressed else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse button.", errorCode: .invalidArgument)
+            }
+            guard button >= TerminalControlMouseButtonPayload.minimumButton, button <= TerminalControlMouseButtonPayload.maximumButton else {
+                return TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument)
+            }
+            guard let pointerX = request.mousePointerX, let pointerY = request.mousePointerY else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            let position = TerminalScrollPointerPosition(x: pointerX, y: pointerY, mods: request.mousePointerMods ?? 0)
+            guard position.isValid else {
+                return TerminalControlResponse(ok: false, message: "Invalid terminal mouse button pointer position.", errorCode: .invalidArgument)
+            }
+            let cell = pointerCell(x: pointerX, y: pointerY)
+            guard
+                let bytes = GhosttyLinuxMouseEncoder.encode(
+                    button: button, pressed: pressed, cellColumn: cell.column, cellRow: cell.row, mods: position.mods, session: vtSession)
+            else { return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable) }
+            // A button the terminal's current tracking mode does not report encodes to nothing; that is a
+            // successful no-op, not a failure.
+            if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+            return TerminalControlResponse(ok: true, message: "Delivered mouse button.")
+        }
+
+        /// Resolves a client's normalized pointer against this session's own grid. Raw client pixels are
+        /// never transported because client and daemon cell geometry differ; absent coordinates resolve to
+        /// the origin, which is the only position a host with no rendered pointer can name.
+        private func pointerCell(x: Double?, y: Double?) -> (column: Int, row: Int) {
+            let columns = max(terminalSize.columns, 1)
+            let rows = max(terminalSize.rows, 1)
+            let column = Int((min(max(x ?? 0, 0), 1) * Double(columns)).rounded(.down))
+            let row = Int((min(max(y ?? 0, 0), 1) * Double(rows)).rounded(.down))
+            return (column: min(column, columns - 1), row: min(row, rows - 1))
+        }
+
+        private static let wheelUpButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_FOUR.rawValue)
+        private static let wheelDownButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_FIVE.rawValue)
+        private static let wheelRightButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_SIX.rawValue)
+        private static let wheelLeftButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_SEVEN.rawValue)
 
         private func setAppearance(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard let appearance = request.appearance else {
@@ -1155,7 +1259,8 @@
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-            let snapshot = GhosttyVtSessionBridge.snapshot(from: rawSnapshot)
+            let snapshot = GhosttyVtSessionBridge.snapshot(
+                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession))
             return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
         }
 

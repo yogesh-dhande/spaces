@@ -2137,8 +2137,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
             scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
-            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
-            appearance: request.appearance)
+            scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
+            mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
+            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

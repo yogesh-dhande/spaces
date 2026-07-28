@@ -81,7 +81,8 @@
             return GhosttyTerminalSnapshot(
                 columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column),
                 cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
-                defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
+                defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, mouseReportingActive: snapshot.mouse_reporting_active,
+                mouseShiftCapture: snapshot.mouse_shift_capture)
         }
 
         private static func makeScrollRects(from snapshot: ghostty_terminal_snapshot_s) -> [GhosttyRenderScrollRectOperation] {

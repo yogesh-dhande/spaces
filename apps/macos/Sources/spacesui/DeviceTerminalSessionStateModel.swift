@@ -709,9 +709,7 @@
                 try? await Task.sleep(for: delay)
                 guard let self else { return }
                 self.reconnectTask = nil
-                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
-                    return
-                }
+                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else { return }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
             }
@@ -797,7 +795,7 @@
         /// made off that path and keep the default deadline.
         private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
             switch TerminalControlCommand(request: request) {
-            case .send, .key, .clearScreen, .resize, .scroll: true
+            case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
             case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
             }
         }

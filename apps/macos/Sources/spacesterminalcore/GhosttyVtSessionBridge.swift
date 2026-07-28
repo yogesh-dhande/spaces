@@ -23,8 +23,9 @@ public enum GhosttyVtSessionBridge {
 
     /// Converts a libghostty-vt snapshot into the Swift render snapshot the render pipeline consumes.
     /// The raw snapshot's `cells` buffer stays owned by the caller (freed with
-    /// `spaces_ghostty_vt_snapshot_free`); this only reads it.
-    public static func snapshot(from rawSnapshot: SpacesGhosttyVtSnapshot) -> GhosttyTerminalSnapshot {
+    /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
+    /// snapshot — it is a terminal mode, queried separately — so the caller supplies it.
+    public static func snapshot(from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool) -> GhosttyTerminalSnapshot {
         let cells: [GhosttyTerminalSnapshot.Cell]
         if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
             cells = UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).map {
@@ -37,6 +38,7 @@ public enum GhosttyVtSessionBridge {
         return GhosttyTerminalSnapshot(
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
-            defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells)
+            defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
+            mouseReportingActive: mouseReportingActive)
     }
 }

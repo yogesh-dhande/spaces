@@ -53,6 +53,29 @@ enum {
     SPACES_GHOSTTY_VT_MODS_SUPER = 1 << 3,
 };
 
+// The mouse buttons `spaces_ghostty_vt_session_encode_mouse` can name, and the press/release actions
+// it accepts. Spaces-owned for the same reason as the key enum above: ghostty's ordinals are free to
+// shift across a libghostty upgrade. The values match `ghostty_input_mouse_button_e` on the macOS
+// side so one wire value describes a button for both cores.
+typedef enum {
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT = 1,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_RIGHT = 2,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_MIDDLE = 3,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_FOUR = 4,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_FIVE = 5,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_SIX = 6,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_SEVEN = 7,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_EIGHT = 8,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_NINE = 9,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_TEN = 10,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN = 11,
+} SpacesGhosttyVtMouseButton;
+
+typedef enum {
+    SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS = 0,
+    SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE = 1,
+} SpacesGhosttyVtMouseAction;
+
 typedef struct {
     uint32_t codepoint;
     uint32_t foreground_rgb;
@@ -147,6 +170,33 @@ bool spaces_ghostty_vt_session_encode_key(
     uint32_t unshifted_codepoint,
     char **out_ptr,
     size_t *out_len
+);
+
+// Encodes one mouse button press or release with ghostty's own mouse encoder, configured from this
+// session's live terminal state, so the bytes match the tracking mode and format the running program
+// asked for (X10 through any-event tracking; X10, UTF-8, SGR, urxvt, or SGR-pixels output). `action`
+// is a `SpacesGhosttyVtMouseAction`, `button` a `SpacesGhosttyVtMouseButton`, and `mods` a
+// `SPACES_GHOSTTY_VT_MODS_*` bitmask. The position is given in cells rather than pixels because a
+// headless session has no rendered geometry; SGR-pixels consequently reports cell-granular pixel
+// coordinates. The buffer is malloc'd and must be freed with `spaces_ghostty_vt_free_buffer`. An
+// event the terminal's current mode does not report succeeds with `*out_len == 0` and a NULL
+// `*out_ptr`.
+bool spaces_ghostty_vt_session_encode_mouse(
+    SpacesGhosttyVtSession *session,
+    uint8_t action,
+    uint8_t button,
+    uint16_t mods,
+    uint16_t cell_column,
+    uint16_t cell_row,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Reports whether the session's terminal currently has any mouse tracking mode enabled. Returns
+// false if the underlying query fails.
+bool spaces_ghostty_vt_session_mouse_tracking_active(
+    SpacesGhosttyVtSession *session,
+    bool *out_active
 );
 
 bool spaces_ghostty_vt_session_copy_snapshot(

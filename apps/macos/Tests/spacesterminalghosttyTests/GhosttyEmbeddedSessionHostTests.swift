@@ -2846,6 +2846,43 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A click names the cell it landed on, so an incomplete or absent pointer is a malformed request
+    /// rather than a click at wherever the pointer happened to be.
+    func testControlMouseButtonRequiresACompletePointerPosition() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-mouse-button-pointer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let owner = TerminalClient(
+                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-26T00:00:00Z")
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true, mousePointerX: 0.5)),
+                TerminalControlResponse(
+                    ok: false, message: "Terminal mouse button pointer coordinates must be provided together.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true)),
+                TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(
+                    .init(command: "mouseButton", clientID: owner.id, mouseButton: 0, mousePressed: true, mousePointerX: 0.5, mousePointerY: 0.5)),
+                TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument))
+        }
+    }
+
     func testControlKeyCommandKClearsScreenThroughHostAction() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }

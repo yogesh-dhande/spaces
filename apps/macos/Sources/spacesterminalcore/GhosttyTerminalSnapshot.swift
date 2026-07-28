@@ -23,10 +23,19 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
     public let defaultForegroundRGB: UInt32
     public let defaultBackgroundRGB: UInt32
     public let cells: [Cell]
+    /// True when the exporting terminal has a mouse tracking mode enabled. Clients arbitrate a pane
+    /// click against this: while it is set the click belongs to the application, not to selection.
+    public let mouseReportingActive: Bool
+    /// The exporting terminal's shift-capture request as 0 = unset, 1 = false, 2 = true.
+    public let mouseShiftCapture: UInt8
+
+    public static let mouseShiftCaptureUnset: UInt8 = 0
+    public static let mouseShiftCaptureDisabled: UInt8 = 1
+    public static let mouseShiftCaptureEnabled: UInt8 = 2
 
     public init(
         columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int, cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32,
-        cells: [Cell]
+        cells: [Cell], mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = 0
     ) {
         self.columns = columns
         self.rows = rows
@@ -36,6 +45,8 @@ public struct GhosttyTerminalSnapshot: Codable, Sendable, Equatable {
         self.defaultForegroundRGB = defaultForegroundRGB
         self.defaultBackgroundRGB = defaultBackgroundRGB
         self.cells = cells
+        self.mouseReportingActive = mouseReportingActive
+        self.mouseShiftCapture = mouseShiftCapture
     }
 }
 

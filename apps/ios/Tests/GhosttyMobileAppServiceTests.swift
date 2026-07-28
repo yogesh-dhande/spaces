@@ -1599,6 +1599,29 @@
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
         }
 
+        func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugTapLinkHandlerForTesting = { _ in
+                XCTFail("link probe should be skipped while the mirror captures the mouse")
+                return false
+            }
+            hostView.debugMouseCapturedForTesting = true
+            var sentButtons: [(button: UInt8, pressed: Bool)] = []
+            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .sentClick)
+
+            XCTAssertEqual(sentButtons.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
+            XCTAssertEqual(sentButtons.map(\.pressed), [true, false])
+
+            hostView.debugMouseCapturedForTesting = false
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            sentButtons.removeAll()
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+            XCTAssertTrue(sentButtons.isEmpty)
+        }
+
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []

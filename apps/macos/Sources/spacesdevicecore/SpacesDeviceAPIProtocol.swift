@@ -1123,6 +1123,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case clearScreen
     case resize
     case scroll
+    case mouseButton
     case setAppearance
 }
 
@@ -1144,6 +1145,11 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollPointerX: Double?
     public let scrollPointerY: Double?
     public let scrollPointerMods: UInt32?
+    public let mouseButton: UInt8?
+    public let mousePressed: Bool?
+    public let mousePointerX: Double?
+    public let mousePointerY: Double?
+    public let mousePointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
@@ -1156,7 +1162,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
-        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
+        mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1175,6 +1182,11 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollPointerX = scrollPointerX
         self.scrollPointerY = scrollPointerY
         self.scrollPointerMods = scrollPointerMods
+        self.mouseButton = mouseButton
+        self.mousePressed = mousePressed
+        self.mousePointerX = mousePointerX
+        self.mousePointerY = mousePointerY
+        self.mousePointerMods = mousePointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance

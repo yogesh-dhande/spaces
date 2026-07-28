@@ -225,6 +225,7 @@ let executableTargets: [Target] = [
             dependencies: ["spacesterminalghostty"],
             sources: [
                 "GhosttyLinuxHeadlessKeyEncodingTests.swift",
+                "GhosttyLinuxHeadlessMouseEncodingTests.swift",
                 "GhosttyLinuxHeadlessSessionHandoffTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",

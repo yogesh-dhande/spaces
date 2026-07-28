@@ -502,18 +502,36 @@
         ) -> Bool {
             guard let session, let surface else { return false }
             debugLastScrollModsValue = scrollMods
-            if let pointerPosition {
-                guard pointerPosition.isValid else { return false }
-                let size = ghostty_session_size(session)
-                let widthPixels = max(Double(size.width_px), 1)
-                let heightPixels = max(Double(size.height_px), 1)
-                let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
-                let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
-                ghostty_surface_mouse_pos(
-                    surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
-            }
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
             ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), scrollMods)
             requestSurfaceRefresh()
+            return true
+        }
+
+        /// Delivers one button press or release to the session's terminal. The surface encodes the
+        /// mouse report against its own live mouse mode and writes it to the child through the same
+        /// receive buffer that carries keyboard input, so nothing here has to know the reporting
+        /// format the application asked for.
+        @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            guard let session, let surface else { return false }
+            let mods = ghostty_input_mods_e(pointerPosition?.mods ?? GHOSTTY_MODS_NONE.rawValue)
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
+            _ = ghostty_surface_mouse_button(
+                surface, pressed ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE, ghostty_input_mouse_button_e(UInt32(button)), mods)
+            requestSurfaceRefresh()
+            return true
+        }
+
+        /// Converts a client's normalized pointer into this surface's own point coordinates. Raw client
+        /// pixels are never transported because client and daemon display scales differ.
+        private func movePointer(to pointerPosition: TerminalScrollPointerPosition, session: ghostty_session_t, surface: ghostty_surface_t) -> Bool {
+            guard pointerPosition.isValid else { return false }
+            let size = ghostty_session_size(session)
+            let widthPixels = max(Double(size.width_px), 1)
+            let heightPixels = max(Double(size.height_px), 1)
+            let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
+            let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
+            ghostty_surface_mouse_pos(surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
             return true
         }
 

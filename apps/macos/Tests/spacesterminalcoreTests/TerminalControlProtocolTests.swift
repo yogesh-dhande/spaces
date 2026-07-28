@@ -81,6 +81,40 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.resizeSerial, 8)
     }
 
+    func testMouseButtonRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(
+            command: .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: "owner-1", ownerEpoch: 11, button: 1, pressed: true, pointerX: 0.25, pointerY: 0.75, pointerMods: 3)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "mouseButton")
+        XCTAssertEqual(decoded.commandValue.name, "mouseButton")
+        // A click mutates the session's terminal, so it is owner-gated exactly like a keystroke.
+        XCTAssertTrue(decoded.commandValue.requiresOwnerClientID)
+        XCTAssertTrue(TerminalControlCommand.isMobileTerminalControlName("mouseButton"))
+        guard case .mouseButton(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a mouseButton command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "owner-1")
+        XCTAssertEqual(payload.ownerEpoch, 11)
+        XCTAssertEqual(payload.button, 1)
+        XCTAssertEqual(payload.pressed, true)
+        XCTAssertEqual(payload.pointerX, 0.25)
+        XCTAssertEqual(payload.pointerY, 0.75)
+        XCTAssertEqual(payload.pointerMods, 3)
+    }
+
+    func testMouseButtonWithoutButtonOrPointerReportsMissingPayload() throws {
+        let noButton = try TerminalControlCodec.decodeRequest(#"{"command":"mouseButton","clientID":"owner-1","asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(noButton.commandValue.requiredPayloadFailureMessage, "Missing mouse button.")
+
+        let noPointer = try TerminalControlCodec.decodeRequest(
+            #"{"command":"mouseButton","clientID":"owner-1","mouseButton":1,"mousePressed":true,"asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(noPointer.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
+    }
+
     func testSetAppearanceRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
 

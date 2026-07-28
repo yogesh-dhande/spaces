@@ -1398,6 +1398,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
                     scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods, scrollPointerX: payload.scrollPointerX,
                     scrollPointerY: payload.scrollPointerY, scrollPointerMods: payload.scrollPointerMods))
+        case .mouseButton:
+            .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, button: payload.mouseButton, pressed: payload.mousePressed,
+                    pointerX: payload.mousePointerX, pointerY: payload.mousePointerY, pointerMods: payload.mousePointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
         }
     }

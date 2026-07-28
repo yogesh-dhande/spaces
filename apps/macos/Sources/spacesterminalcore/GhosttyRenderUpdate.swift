@@ -47,14 +47,20 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
     public let cursorVisible: Bool
     public let defaultForegroundRGB: UInt32
     public let defaultBackgroundRGB: UInt32
+    /// Mouse-reporting state of the target frame. Deltas carry it alongside the cursor state so a
+    /// client's arbitration tracks an application enabling or disabling mouse tracking mid-stream,
+    /// which is a screen change that never forces a full frame.
+    public let mouseReportingActive: Bool
+    public let mouseShiftCapture: UInt8
     public let scrollRects: [GhosttyRenderScrollRectOperation]
     public let replaceCellRuns: [GhosttyRenderCellRun]
     public let changedCellCount: Int
 
     public init(
         baseRevision: UInt64?, targetRevision: UInt64?, ownerEpoch: UInt64, columns: Int, rows: Int, cursorColumn: Int, cursorRow: Int,
-        cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32, scrollRects: [GhosttyRenderScrollRectOperation] = [],
-        replaceCellRuns: [GhosttyRenderCellRun] = [], changedCellCount: Int
+        cursorVisible: Bool, defaultForegroundRGB: UInt32, defaultBackgroundRGB: UInt32, mouseReportingActive: Bool = false,
+        mouseShiftCapture: UInt8 = 0, scrollRects: [GhosttyRenderScrollRectOperation] = [], replaceCellRuns: [GhosttyRenderCellRun] = [],
+        changedCellCount: Int
     ) {
         self.baseRevision = baseRevision
         self.targetRevision = targetRevision
@@ -66,6 +72,8 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
         self.cursorVisible = cursorVisible
         self.defaultForegroundRGB = defaultForegroundRGB
         self.defaultBackgroundRGB = defaultBackgroundRGB
+        self.mouseReportingActive = mouseReportingActive
+        self.mouseShiftCapture = mouseShiftCapture
         self.scrollRects = scrollRects
         self.replaceCellRuns = replaceCellRuns
         self.changedCellCount = changedCellCount
@@ -73,7 +81,13 @@ public struct GhosttyRenderDeltaFrame: Codable, Sendable, Equatable {
 }
 
 public struct GhosttyRenderUpdate: Codable, Sendable, Equatable {
-    public static let currentVersion = 2
+    // Version 3 added the mouse-reporting flags to both binary bodies. The version byte is the only
+    // guard for payloads that outlive a build (persisted final frames, demo recordings), so any
+    // layout change must bump it — decoders reject other versions rather than misread offsets.
+    // There is deliberately no decoder for older versions: pre-release, a persisted final frame
+    // from an earlier build rendering as "no final frame" once is accepted over carrying a
+    // compatibility path, and live sessions re-export at the current version on the next frame.
+    public static let currentVersion = 3
     public static let binaryEncoding = "spaces.terminal.render-update.v2.binary"
 
     public let version: Int
@@ -194,7 +208,7 @@ public enum GhosttyRenderUpdateApplier {
         return GhosttyTerminalSnapshot(
             columns: delta.columns, rows: delta.rows, cursorColumn: delta.cursorColumn, cursorRow: delta.cursorRow,
             cursorVisible: delta.cursorVisible, defaultForegroundRGB: delta.defaultForegroundRGB, defaultBackgroundRGB: delta.defaultBackgroundRGB,
-            cells: cells)
+            cells: cells, mouseReportingActive: delta.mouseReportingActive, mouseShiftCapture: delta.mouseShiftCapture)
     }
 
     private static func applyScrollRect(
@@ -283,7 +297,8 @@ public enum GhosttyRenderUpdateFactory {
         return GhosttyRenderDeltaFrame(
             baseRevision: baseline.sessionRevision, targetRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch, columns: target.columns,
             rows: target.rows, cursorColumn: target.cursorColumn, cursorRow: target.cursorRow, cursorVisible: target.cursorVisible,
-            defaultForegroundRGB: target.defaultForegroundRGB, defaultBackgroundRGB: target.defaultBackgroundRGB, scrollRects: scrollRects,
+            defaultForegroundRGB: target.defaultForegroundRGB, defaultBackgroundRGB: target.defaultBackgroundRGB,
+            mouseReportingActive: target.mouseReportingActive, mouseShiftCapture: target.mouseShiftCapture, scrollRects: scrollRects,
             replaceCellRuns: runs, changedCellCount: runs.reduce(0) { $0 + $1.cells.count })
     }
 
@@ -296,7 +311,8 @@ public enum GhosttyRenderUpdateFactory {
         return GhosttyTerminalSnapshot(
             columns: snapshot.columns, rows: snapshot.rows, cursorColumn: snapshot.cursorColumn, cursorRow: snapshot.cursorRow,
             cursorVisible: snapshot.cursorVisible, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells)
+            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells, mouseReportingActive: snapshot.mouseReportingActive,
+            mouseShiftCapture: snapshot.mouseShiftCapture)
     }
 
     private static func applyScrollRectForDiff(
@@ -509,28 +525,31 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
 
         mutating func appendSnapshot(_ snapshot: GhosttyTerminalSnapshot) throws {
-            // Snapshot header is 17 bytes; each cell is 14 bytes (see appendCell).
-            data.reserveCapacity(data.count + 17 + snapshot.cells.count * 14)
+            // Snapshot header is 19 bytes; each cell is 14 bytes (see appendCell).
+            data.reserveCapacity(data.count + 19 + snapshot.cells.count * 14)
             try appendUInt16Clamped(snapshot.cursorColumn)
             try appendUInt16Clamped(snapshot.cursorRow)
             appendUInt8(snapshot.cursorVisible ? 1 : 0)
             appendUInt32(snapshot.defaultForegroundRGB)
             appendUInt32(snapshot.defaultBackgroundRGB)
+            appendUInt8(snapshot.mouseReportingActive ? 1 : 0)
+            appendUInt8(snapshot.mouseShiftCapture)
             try appendUInt32Clamped(snapshot.cells.count)
             for cell in snapshot.cells { appendCell(cell) }
         }
 
         mutating func appendDelta(_ delta: GhosttyRenderDeltaFrame) throws {
-            // Header 21 bytes, each scroll rect 16 bytes, run-count 4 bytes, each run header 6 bytes,
+            // Header 23 bytes, each scroll rect 16 bytes, run-count 4 bytes, each run header 6 bytes,
             // each cell 14 bytes (see appendCell).
             let runCells = delta.replaceCellRuns.reduce(0) { $0 + $1.cells.count }
-            data.reserveCapacity(
-                data.count + 21 + delta.scrollRects.count * 16 + 4 + delta.replaceCellRuns.count * 6 + runCells * 14)
+            data.reserveCapacity(data.count + 23 + delta.scrollRects.count * 16 + 4 + delta.replaceCellRuns.count * 6 + runCells * 14)
             try appendUInt16Clamped(delta.cursorColumn)
             try appendUInt16Clamped(delta.cursorRow)
             appendUInt8(delta.cursorVisible ? 1 : 0)
             appendUInt32(delta.defaultForegroundRGB)
             appendUInt32(delta.defaultBackgroundRGB)
+            appendUInt8(delta.mouseReportingActive ? 1 : 0)
+            appendUInt8(delta.mouseShiftCapture)
             try appendUInt32Clamped(delta.changedCellCount)
             try appendUInt32Clamped(delta.scrollRects.count)
             for scrollRect in delta.scrollRects {
@@ -599,13 +618,16 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let cursorVisible = try readUInt8() != 0
             let defaultForegroundRGB = try readUInt32()
             let defaultBackgroundRGB = try readUInt32()
+            let mouseReportingActive = try readUInt8() != 0
+            let mouseShiftCapture = try readUInt8()
             let cellCount = Int(try readUInt32())
             var cells: [GhosttyTerminalSnapshot.Cell] = []
             cells.reserveCapacity(cellCount)
             for _ in 0..<cellCount { cells.append(try readCell()) }
             return GhosttyTerminalSnapshot(
                 columns: columns, rows: rows, cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible,
-                defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells)
+                defaultForegroundRGB: defaultForegroundRGB, defaultBackgroundRGB: defaultBackgroundRGB, cells: cells,
+                mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
         }
 
         mutating func readDelta(baseRevision: UInt64?, targetRevision: UInt64?, ownerEpoch: UInt64, columns: Int, rows: Int) throws
@@ -616,6 +638,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
             let cursorVisible = try readUInt8() != 0
             let defaultForegroundRGB = try readUInt32()
             let defaultBackgroundRGB = try readUInt32()
+            let mouseReportingActive = try readUInt8() != 0
+            let mouseShiftCapture = try readUInt8()
             let changedCellCount = Int(try readUInt32())
             let scrollRectCount = Int(try readUInt32())
             var scrollRects: [GhosttyRenderScrollRectOperation] = []
@@ -641,7 +665,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
             return GhosttyRenderDeltaFrame(
                 baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
                 cursorColumn: cursorColumn, cursorRow: cursorRow, cursorVisible: cursorVisible, defaultForegroundRGB: defaultForegroundRGB,
-                defaultBackgroundRGB: defaultBackgroundRGB, scrollRects: scrollRects, replaceCellRuns: runs, changedCellCount: changedCellCount)
+                defaultBackgroundRGB: defaultBackgroundRGB, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture,
+                scrollRects: scrollRects, replaceCellRuns: runs, changedCellCount: changedCellCount)
         }
 
         private mutating func readFixedWidthInteger<T: FixedWidthInteger>() throws -> T {

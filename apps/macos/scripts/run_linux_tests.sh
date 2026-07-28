@@ -52,6 +52,7 @@ for suite in \
   TerminalServiceSystemdUnitTests \
   TerminalServiceSystemdStartDeadlineTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
+  GhosttyLinuxHeadlessMouseEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \

@@ -33,6 +33,17 @@ typedef void (*GhosttyKeyEventSetKeyFn)(GhosttyKeyEvent, GhosttyKey);
 typedef void (*GhosttyKeyEventSetModsFn)(GhosttyKeyEvent, GhosttyMods);
 typedef void (*GhosttyKeyEventSetUtf8Fn)(GhosttyKeyEvent, const char *, size_t);
 typedef void (*GhosttyKeyEventSetUnshiftedCodepointFn)(GhosttyKeyEvent, uint32_t);
+typedef GhosttyResult (*GhosttyMouseEncoderNewFn)(const GhosttyAllocator *, GhosttyMouseEncoder *);
+typedef void (*GhosttyMouseEncoderFreeFn)(GhosttyMouseEncoder);
+typedef void (*GhosttyMouseEncoderSetoptFn)(GhosttyMouseEncoder, GhosttyMouseEncoderOption, const void *);
+typedef void (*GhosttyMouseEncoderSetoptFromTerminalFn)(GhosttyMouseEncoder, GhosttyTerminal);
+typedef GhosttyResult (*GhosttyMouseEncoderEncodeFn)(GhosttyMouseEncoder, GhosttyMouseEvent, char *, size_t, size_t *);
+typedef GhosttyResult (*GhosttyMouseEventNewFn)(const GhosttyAllocator *, GhosttyMouseEvent *);
+typedef void (*GhosttyMouseEventFreeFn)(GhosttyMouseEvent);
+typedef void (*GhosttyMouseEventSetActionFn)(GhosttyMouseEvent, GhosttyMouseAction);
+typedef void (*GhosttyMouseEventSetButtonFn)(GhosttyMouseEvent, GhosttyMouseButton);
+typedef void (*GhosttyMouseEventSetModsFn)(GhosttyMouseEvent, GhosttyMods);
+typedef void (*GhosttyMouseEventSetPositionFn)(GhosttyMouseEvent, GhosttyMousePosition);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -80,6 +91,17 @@ typedef struct {
     GhosttyKeyEventSetModsFn key_event_set_mods;
     GhosttyKeyEventSetUtf8Fn key_event_set_utf8;
     GhosttyKeyEventSetUnshiftedCodepointFn key_event_set_unshifted_codepoint;
+    GhosttyMouseEncoderNewFn mouse_encoder_new;
+    GhosttyMouseEncoderFreeFn mouse_encoder_free;
+    GhosttyMouseEncoderSetoptFn mouse_encoder_setopt;
+    GhosttyMouseEncoderSetoptFromTerminalFn mouse_encoder_setopt_from_terminal;
+    GhosttyMouseEncoderEncodeFn mouse_encoder_encode;
+    GhosttyMouseEventNewFn mouse_event_new;
+    GhosttyMouseEventFreeFn mouse_event_free;
+    GhosttyMouseEventSetActionFn mouse_event_set_action;
+    GhosttyMouseEventSetButtonFn mouse_event_set_button;
+    GhosttyMouseEventSetModsFn mouse_event_set_mods;
+    GhosttyMouseEventSetPositionFn mouse_event_set_position;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -324,6 +346,18 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->key_event_set_utf8 = (GhosttyKeyEventSetUtf8Fn)dlsym(handle, "ghostty_key_event_set_utf8");
     symbols->key_event_set_unshifted_codepoint =
         (GhosttyKeyEventSetUnshiftedCodepointFn)dlsym(handle, "ghostty_key_event_set_unshifted_codepoint");
+    symbols->mouse_encoder_new = (GhosttyMouseEncoderNewFn)dlsym(handle, "ghostty_mouse_encoder_new");
+    symbols->mouse_encoder_free = (GhosttyMouseEncoderFreeFn)dlsym(handle, "ghostty_mouse_encoder_free");
+    symbols->mouse_encoder_setopt = (GhosttyMouseEncoderSetoptFn)dlsym(handle, "ghostty_mouse_encoder_setopt");
+    symbols->mouse_encoder_setopt_from_terminal =
+        (GhosttyMouseEncoderSetoptFromTerminalFn)dlsym(handle, "ghostty_mouse_encoder_setopt_from_terminal");
+    symbols->mouse_encoder_encode = (GhosttyMouseEncoderEncodeFn)dlsym(handle, "ghostty_mouse_encoder_encode");
+    symbols->mouse_event_new = (GhosttyMouseEventNewFn)dlsym(handle, "ghostty_mouse_event_new");
+    symbols->mouse_event_free = (GhosttyMouseEventFreeFn)dlsym(handle, "ghostty_mouse_event_free");
+    symbols->mouse_event_set_action = (GhosttyMouseEventSetActionFn)dlsym(handle, "ghostty_mouse_event_set_action");
+    symbols->mouse_event_set_button = (GhosttyMouseEventSetButtonFn)dlsym(handle, "ghostty_mouse_event_set_button");
+    symbols->mouse_event_set_mods = (GhosttyMouseEventSetModsFn)dlsym(handle, "ghostty_mouse_event_set_mods");
+    symbols->mouse_event_set_position = (GhosttyMouseEventSetPositionFn)dlsym(handle, "ghostty_mouse_event_set_position");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -364,6 +398,17 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->key_event_set_mods == NULL ||
         symbols->key_event_set_utf8 == NULL ||
         symbols->key_event_set_unshifted_codepoint == NULL ||
+        symbols->mouse_encoder_new == NULL ||
+        symbols->mouse_encoder_free == NULL ||
+        symbols->mouse_encoder_setopt == NULL ||
+        symbols->mouse_encoder_setopt_from_terminal == NULL ||
+        symbols->mouse_encoder_encode == NULL ||
+        symbols->mouse_event_new == NULL ||
+        symbols->mouse_event_free == NULL ||
+        symbols->mouse_event_set_action == NULL ||
+        symbols->mouse_event_set_button == NULL ||
+        symbols->mouse_event_set_mods == NULL ||
+        symbols->mouse_event_set_position == NULL ||
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
@@ -758,6 +803,120 @@ bool spaces_ghostty_vt_session_encode_key(
     result = session->symbols.key_encoder_encode(encoder, event, encoded, required, &written);
     session->symbols.key_event_free(event);
     session->symbols.key_encoder_free(encoder);
+    if (result != GHOSTTY_SUCCESS) {
+        free(encoded);
+        return false;
+    }
+
+    *out_ptr = encoded;
+    *out_len = written;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_mouse_tracking_active(SpacesGhosttyVtSession *session, bool *out_active) {
+    if (out_active == NULL) return false;
+    *out_active = false;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    bool active = false;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &active) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out_active = active;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_encode_mouse(
+    SpacesGhosttyVtSession *session,
+    uint8_t action,
+    uint8_t button,
+    uint16_t mods,
+    uint16_t cell_column,
+    uint16_t cell_row,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+    if (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN) return false;
+    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE) return false;
+
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    if (columns == 0 || rows == 0) return false;
+    if (cell_column >= columns) cell_column = columns - 1;
+    if (cell_row >= rows) cell_row = rows - 1;
+
+    GhosttyMouseEncoder encoder = NULL;
+    if (session->symbols.mouse_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return false;
+    // Reading the options off the terminal is the whole point: it is what makes the encoding follow
+    // the tracking mode and report format the running program enabled.
+    session->symbols.mouse_encoder_setopt_from_terminal(encoder, session->terminal);
+    // `setopt_from_terminal` deliberately leaves geometry alone, and a headless session has none: it
+    // is resized in cells with zero cell pixel sizes, which the encoder rejects. Give it a synthetic
+    // one-pixel-per-cell screen so the caller's cell coordinates pass straight through as
+    // surface-space pixels. The only consequence is that SGR-pixels reports cell granularity, which
+    // is the best a session with no rendered geometry can describe.
+    GhosttyMouseEncoderSize size = {
+        .size = sizeof(GhosttyMouseEncoderSize),
+        .screen_width = columns,
+        .screen_height = rows,
+        .cell_width = 1,
+        .cell_height = 1,
+    };
+    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS;
+    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
+
+    GhosttyMouseEvent event = NULL;
+    if (session->symbols.mouse_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+    session->symbols.mouse_event_set_action(
+        event,
+        action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ? GHOSTTY_MOUSE_ACTION_PRESS : GHOSTTY_MOUSE_ACTION_RELEASE
+    );
+    session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
+    session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
+    // Aim at the middle of the cell so the encoder's floor-to-cell lands on the requested one.
+    GhosttyMousePosition position = { .x = (float)cell_column + 0.5f, .y = (float)cell_row + 0.5f };
+    session->symbols.mouse_event_set_position(event, position);
+
+    size_t required = 0;
+    GhosttyResult result = session->symbols.mouse_encoder_encode(encoder, event, NULL, 0, &required);
+    if (result != GHOSTTY_OUT_OF_SPACE && result != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+    // An event the terminal's current tracking mode does not report encodes to nothing; that is
+    // success with an empty payload, not an error.
+    if (required == 0) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return true;
+    }
+
+    char *encoded = (char *)malloc(required);
+    if (encoded == NULL) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+
+    size_t written = 0;
+    result = session->symbols.mouse_encoder_encode(encoder, event, encoded, required, &written);
+    session->symbols.mouse_event_free(event);
+    session->symbols.mouse_encoder_free(encoder);
     if (result != GHOSTTY_SUCCESS) {
         free(encoded);
         return false;
