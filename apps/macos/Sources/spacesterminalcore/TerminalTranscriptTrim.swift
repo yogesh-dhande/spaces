@@ -2,9 +2,9 @@ import Foundation
 import ghosttyvtshim
 
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #elseif canImport(Glibc)
-import Glibc
+    import Glibc
 #endif
 
 /// Bounds a live session's durable `output.log` transcript so a long-running session stops growing
@@ -18,18 +18,34 @@ import Glibc
 /// bracketed paste, DECCKM, Kitty keyboard flags, cursor position). A naive head-truncation would drop
 /// those sequences and replay to the wrong terminal state.
 ///
-/// To keep from-zero replay correct after a trim, `trimIfNeeded` synthesizes a state-restoration
-/// PREAMBLE and writes it at the head of the retained tail. The preamble is derived by replaying the
-/// pre-trim head `[0..cut]` through a throwaway vt session and serializing its resulting persistent
-/// state (`spaces_ghostty_vt_session_state_preamble`): the terminal modes, Kitty keyboard flags, and
-/// cursor position, plus a repaint of the active screen's visible grid so cells the dropped head drew
-/// once (e.g. a static TUI header) that the retained tail never redraws survive the trim. This is
-/// inductively correct across successive
-/// trims: each trim's head replay `[0..cut]` itself starts from the previous trim's preamble, so the
-/// serialized state always reflects the true accumulated state at the cut. The retained tail is copied
-/// verbatim after the preamble, and its cut lands just before the window's first ESC byte — a boundary
-/// that is parser-safe from any original parser state (see `parserSafeCutOffset`) — falling back to a
-/// line boundary only in escape-free windows.
+/// To keep from-zero replay correct after a trim, a trim synthesizes a state-restoration PREAMBLE and
+/// writes it at the head of the retained tail. The preamble is derived by replaying the pre-trim head
+/// `[0..cut]` through a throwaway vt session and serializing its resulting persistent state
+/// (`spaces_ghostty_vt_session_state_preamble`): the terminal modes, Kitty keyboard flags, and cursor
+/// position, plus a repaint of the active screen's visible grid so cells the dropped head drew once
+/// (e.g. a static TUI header) that the retained tail never redraws survive the trim. This is
+/// inductively correct across successive trims: each trim's head replay `[0..cut]` itself starts from
+/// the previous trim's preamble, so the serialized state always reflects the true accumulated state at
+/// the cut. The retained tail is copied verbatim after the preamble, and its cut lands just before the
+/// window's first ESC byte — a boundary that is parser-safe from any original parser state (see
+/// `parserSafeCutOffset`) — falling back to a line boundary only in escape-free windows.
+///
+/// ## Three stages, only two of them on the engine actor
+/// The head replay dominates the cost (~150 ms for a standard-policy trim), so a trim is split so that
+/// only cheap work runs on the shared `TerminalEngineActor` that every session's PTY output, input,
+/// control requests, and state broadcasts share. `TerminalTranscriptTrimCoordinator` drives the three
+/// stages and serializes them per session:
+///  1. `plan` (engine actor): decide whether to trim and snapshot the cut offset plus the transcript's
+///     current end. Bounded reads only — the trigger check costs nothing and the parser-safe scan is
+///     capped at `maxParserSafeCutScanBytes`.
+///  2. `stage` (off the engine actor): replay the retained prefix `[0..cut]` to build the preamble and
+///     copy the retained tail `[cut..snapshotEnd]` into the temp file. Appends keep landing on the OLD
+///     inode throughout; because appends are strictly append-only, every byte below `snapshotEnd` is
+///     immutable, so the staged snapshot is correct by construction no matter how much the session
+///     writes meanwhile.
+///  3. `commit` (engine actor): copy the append delta written since the snapshot, fsync, and rename the
+///     temp file over `output.log`. Runs without suspending, so no append can interleave between
+///     reading the delta and the rename.
 ///
 /// A trim never mutates `output.log` in place. It writes preamble+tail to a sibling temp file
 /// (`output.log.trim`), fsyncs it, then atomically `rename(2)`s it over `output.log`. A daemon crash or
@@ -37,36 +53,69 @@ import Glibc
 /// fully intact (rename never ran) or the new bounded file is fully in place (rename committed). Because
 /// the rename swaps in a fresh inode, the caller's previous append handle points at the unlinked old
 /// inode and must be replaced. Rather than reopening the replaced file (a fallible call after the swap
-/// has already committed), `trimIfNeeded` keeps the temp file's write handle OPEN across the rename —
+/// has already committed), `commit` keeps the temp file's write handle OPEN across the rename —
 /// POSIX `rename(2)` does not disturb open descriptors, so that handle keeps referencing the same inode,
 /// now reachable as `output.log`, already positioned at the end of the written data — and returns it for
 /// the caller to adopt. There is thus no fallible step after the swap commits.
-public enum TerminalTranscriptTrim {
+enum TerminalTranscriptTrim {
     /// A `nil`/empty vt library, or a failure to build the preamble, aborts the trim (throws) rather
     /// than truncating without a preamble: an un-preambled from-zero replay would render the wrong
     /// state, and a vt install that cannot build a preamble cannot render the session anyway. The
-    /// callers' `catch { return false }` simply skips this round; the next append retries.
+    /// coordinator simply skips this round; the next append past the trigger re-evaluates.
     enum TrimError: Error {
         case vtSessionUnavailable
         case vtReplayFailed
         case preambleFailed
+        /// The transcript is shorter at commit time than the end offset the staging stage snapshotted.
+        /// The split relies on `output.log` being strictly append-only between `plan` and `commit`, so
+        /// this is an invariant violation, not a race to tolerate: the staged tail would be stitched to
+        /// bytes that no longer follow it. Thrown before the rename, so the original file survives.
+        case transcriptShrankDuringStaging
         /// The atomic same-volume `rename(2)` of the fully-written temp file over `output.log` failed
         /// (carries `errno`). Thrown after the temp file is written but before the original is replaced,
         /// so the original transcript and the caller's append handle are untouched.
         case atomicReplaceFailed(errno: Int32)
     }
 
-    /// The outcome of a (possibly no-op) trim: the transcript's new end offset and the write handle the
-    /// caller must use for subsequent appends.
+    /// What a trim will retain, decided on the engine actor from a single point-in-time view of the
+    /// transcript. Both offsets are into the PRE-trim `output.log`.
+    struct TrimPlan: Sendable {
+        /// First retained byte: a parser-safe boundary (see `parserSafeCutOffset`).
+        let cutOffset: UInt64
+        /// The transcript's end when the plan was taken. Everything below it is immutable (appends are
+        /// append-only), which is what makes the staging stage safe to run while appends continue.
+        let snapshotEndOffset: UInt64
+    }
+
+    /// Preamble+tail written and fsynced into the sibling temp file, with its write handle still open at
+    /// the end of that data, awaiting the delta copy and the rename on the engine actor.
     ///
-    /// A trim replaces `output.log` with a fresh inode (see `trimIfNeeded`), so the caller's previous
-    /// handle points at the now-unlinked old inode and must be discarded. `writeHandle` is the temp file's
-    /// handle, kept open across the rename and positioned at the new end. When no trim is performed it is
-    /// the caller's original handle, returned unchanged (identity-comparable with `===`), and `endOffset`
-    /// is the unchanged end offset.
-    public struct TrimResult {
-        public let endOffset: UInt64
-        public let writeHandle: FileHandle
+    /// `@unchecked Sendable` because of the `FileHandle`: ownership moves from the staging task straight
+    /// to the engine actor's commit and is never shared, so the handle has exactly one user at a time.
+    struct StagedTrim: @unchecked Sendable {
+        let tempPath: String
+        let handle: FileHandle
+        /// Bytes of preamble+tail already written to the temp file.
+        let byteCount: UInt64
+        let snapshotEndOffset: UInt64
+
+        /// Drops an uncommitted staged trim: closes the temp handle and unlinks the temp file. The
+        /// original `output.log` was never touched, so this restores the pre-trim world exactly.
+        func discard() {
+            try? handle.close()
+            try? FileManager.default.removeItem(atPath: tempPath)
+        }
+    }
+
+    /// The outcome of a committed trim: the transcript's new end offset and the write handle the caller
+    /// must use for subsequent appends.
+    ///
+    /// A trim replaces `output.log` with a fresh inode, so the caller's previous handle points at the
+    /// now-unlinked old inode and must be discarded. `writeHandle` is the temp file's handle, kept open
+    /// across the rename and positioned at the new end.
+    struct TrimResult {
+        let endOffset: UInt64
+        let writeHandle: FileHandle
     }
 
     /// Upper bound on the forward scan used to find a parser-safe cut. The scan prefers the offset just
@@ -82,45 +131,12 @@ public enum TerminalTranscriptTrim {
     private static let replayChunkBytes = 256 * 1024
     private static let newlineScanBlockBytes = 64 * 1024
 
-    /// Bounds `output.log` when it exceeds `TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes`,
-    /// keeping the newest `TerminalScrollbackBudget.liveTranscriptRetainedBytes` behind a state preamble.
-    /// Returns the transcript's new end offset and the write handle to append through from now on (see
-    /// `TrimResult`). When no trim was needed both are the caller's unchanged offset and handle.
-    /// `columns`/`rows` are the session's current terminal size, used to build the preamble at the same
-    /// grid the session replays at.
-    @discardableResult
-    public static func trimIfNeeded(outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int) throws
-        -> TrimResult
-    {
-        try trimIfNeeded(
-            outputPath: outputPath, writeHandle: writeHandle, currentEndOffset: currentEndOffset, columns: columns, rows: rows,
-            triggerBytes: UInt64(TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes),
-            retainedBytes: UInt64(TerminalScrollbackBudget.liveTranscriptRetainedBytes))
-    }
-
-    /// Testable core with explicit bounds. `retainedBytes` must be `< triggerBytes`.
-    ///
-    /// The trim is failure-safe with no post-commit failure path: it either throws with `output.log` and
-    /// the caller's `writeHandle` untouched, or returns the adopted handle with the swap fully committed.
-    /// It never mutates the live `output.log` in place. Transient read handles read the pre-trim head (to
-    /// build the preamble) and the retained tail; preamble+tail is then written to a sibling temp file,
-    /// fsynced, and atomically `rename(2)`d over `output.log`, replacing it with a fresh inode. On ANY
-    /// error before the rename — a failed temp write (disk full), a preamble failure, a rename failure, or
-    /// a crash — the original file and the caller's `writeHandle` are untouched, so the caller's
-    /// catch-and-continue simply retries on the next append. The passed `writeHandle` is never seeked or
-    /// written by this function, so the caller's append position stays valid on failure.
-    ///
-    /// On success the rename unlinks the old inode the caller's previous handle points at. The temp file's
-    /// write handle is kept OPEN across the rename, so it now references the renamed inode (`output.log`)
-    /// with its offset already at the end of preamble+tail; the returned `endOffset` is COMPUTED from
-    /// those sizes, not queried, so nothing fallible runs once the swap commits. The caller MUST adopt the
-    /// returned `TrimResult.writeHandle` and discard its old one. When no trim is performed the caller's
-    /// original handle is returned unchanged.
-    @discardableResult
-    static func trimIfNeeded(
-        outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int, triggerBytes: UInt64, retainedBytes: UInt64
-    ) throws -> TrimResult {
-        guard currentEndOffset > triggerBytes else { return TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle) }
+    /// Stage 1, on the engine actor. Returns the plan for a trim of `output.log`, or `nil` when there is
+    /// nothing to do: the transcript is still under `triggerBytes`, or the forward scan found no
+    /// parser-safe cut and the trim must DEFER to a later append. `retainedBytes` must be `<
+    /// triggerBytes`. Reads nothing beyond the bounded scan window and never touches the transcript.
+    static func plan(outputPath: String, currentEndOffset: UInt64, triggerBytes: UInt64, retainedBytes: UInt64) throws -> TrimPlan? {
+        guard currentEndOffset > triggerBytes else { return nil }
         let nominalStart = currentEndOffset - retainedBytes
 
         let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
@@ -130,60 +146,129 @@ public enum TerminalTranscriptTrim {
         // mid-sequence/mid-codepoint and the preamble (terminal *state*, not parser state) cannot rescue
         // it. Defer the trim to a later append — the nominal cut slides forward as the file grows, so the
         // trim lands once the oversized run's terminator ESC or the next newline enters the window (see
-        // `parserSafeCutOffset`). The no-op result matches the below-trigger case: unchanged handle
-        // and offset, nothing staged on disk.
-        guard let cutOffset = try parserSafeCutOffset(readHandle: readHandle, nominalStart: nominalStart, endOffset: currentEndOffset)
-        else {
-            return TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle)
+        // `parserSafeCutOffset`).
+        guard let cutOffset = try parserSafeCutOffset(readHandle: readHandle, nominalStart: nominalStart, endOffset: currentEndOffset) else {
+            return nil
         }
-        let preamble = try statePreamble(outputPath: outputPath, cutOffset: cutOffset, columns: columns, rows: rows)
+        return TrimPlan(cutOffset: cutOffset, snapshotEndOffset: currentEndOffset)
+    }
 
-        try readHandle.seek(toOffset: cutOffset)
-        let tail = try readHandle.read(upToCount: Int(currentEndOffset - cutOffset)) ?? Data()
+    /// Stage 2, OFF the engine actor. Builds the state preamble from the pre-trim head and stages
+    /// preamble+tail into the sibling temp file, fsynced and left open at its end.
+    ///
+    /// Reads only bytes below `plan.snapshotEndOffset`, which the session can no longer change: appends
+    /// are strictly append-only, so the snapshotted prefix is immutable and this stage is safe to run
+    /// concurrently with them. It also never touches `output.log` itself, so a failure here — or an
+    /// abandoned staging whose `StagedTrim` is `discard`ed — leaves the transcript and the session's
+    /// append handle exactly as they were.
+    static func stage(outputPath: String, plan: TrimPlan, columns: Int, rows: Int) throws -> StagedTrim {
+        let preamble = try statePreamble(outputPath: outputPath, cutOffset: plan.cutOffset, columns: columns, rows: rows)
 
-        // Stage preamble+tail into a sibling temp file, then atomically rename it over output.log. The
-        // temp path is a fixed sibling (not a unique name), created/truncated fresh each time so a stale
-        // leftover from a crashed earlier attempt is simply overwritten; no leftover-scan recovery is
-        // needed. It sits in the SAME directory as output.log so the rename is a same-volume operation
-        // (atomic on APFS and ext4). fsync before the rename guarantees the data is durable before the
-        // directory entry flips, so a crash can never surface a renamed-but-empty file.
+        let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
+        defer { try? readHandle.close() }
+        try readHandle.seek(toOffset: plan.cutOffset)
+        let tail = try readHandle.read(upToCount: Int(plan.snapshotEndOffset - plan.cutOffset)) ?? Data()
+
+        // Stage preamble+tail into a sibling temp file. The temp path is a fixed sibling (not a unique
+        // name), created/truncated fresh each time so a stale leftover from a crashed earlier attempt is
+        // simply overwritten; no leftover-scan recovery is needed. A fixed name is unambiguous because
+        // the coordinator allows only one trim in flight per session. It sits in the SAME directory as
+        // output.log so the eventual rename is a same-volume operation (atomic on APFS and ext4).
         let tempPath = outputPath + ".trim"
         _ = FileManager.default.createFile(atPath: tempPath, contents: nil)
-        let tempHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
-        // Write preamble+tail and fsync, but do NOT close: the handle stays open across the rename so it
-        // can be adopted as the caller's new append handle without a fallible reopen afterwards. Its write
-        // offset ends at preamble.count + tail.count, which is exactly the post-trim end.
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
+        // Write preamble+tail and fsync, but do NOT close: the handle stays open through the commit's
+        // rename so it can be adopted as the caller's new append handle without a fallible reopen
+        // afterwards. Fsyncing the bulk here keeps the engine-actor commit's own fsync down to the
+        // (small) append delta.
         do {
-            try tempHandle.write(contentsOf: preamble)
-            try tempHandle.write(contentsOf: tail)
-            try tempHandle.synchronize()
+            try handle.write(contentsOf: preamble)
+            try handle.write(contentsOf: tail)
+            try handle.synchronize()
         } catch {
-            // Pre-rename write/fsync failure: discard the temp file. output.log and the caller's handle are
-            // untouched, so the caller's catch-and-continue retries on the next append.
-            try? tempHandle.close()
+            // Pre-rename write/fsync failure: discard the temp file. output.log and the session's handle
+            // are untouched, so the next append past the trigger simply retries.
+            try? handle.close()
             try? FileManager.default.removeItem(atPath: tempPath)
+            throw error
+        }
+        return StagedTrim(
+            tempPath: tempPath, handle: handle, byteCount: UInt64(preamble.count + tail.count), snapshotEndOffset: plan.snapshotEndOffset)
+    }
+
+    /// Stage 3, back on the engine actor. Copies the bytes appended since the staging snapshot onto the
+    /// staged tail, fsyncs, and atomically renames the temp file over `output.log`.
+    ///
+    /// The delta copy belongs on the engine actor precisely because the engine is the only place where
+    /// "the transcript ends at `currentEndOffset`" can be read and acted on without an append slipping in
+    /// between: this runs to completion without suspending, so the rename publishes a file that ends
+    /// exactly where the caller believes it does.
+    ///
+    /// Failure-safe with no post-commit failure path: it either throws with `output.log` and the caller's
+    /// append handle untouched (the temp file discarded), or returns with the swap fully committed. On
+    /// success the rename unlinks the old inode the caller's previous handle points at; the returned
+    /// `endOffset` is COMPUTED from the bytes written, not queried, so nothing fallible runs once the swap
+    /// commits. The caller MUST adopt `TrimResult.writeHandle` and discard its old one.
+    ///
+    /// The delta copy's duration scales with the delta, which is ACCEPTED: the transcript is fed only by
+    /// the session's own PTY capture (single-digit MB/s), so the bytes appendable during one staging pass
+    /// are physically small, and even a seconds-long staging stall yields a delta whose on-engine copy
+    /// costs about what ONE legacy inline trim cost every time. Copying it off-actor instead would need a
+    /// multi-round catch-up (or an abandon-and-replan cycle that can livelock under sustained overload)
+    /// for a case that only materializes when the machine is already degenerate.
+    static func commit(_ staged: StagedTrim, outputPath: String, currentEndOffset: UInt64) throws -> TrimResult {
+        guard currentEndOffset >= staged.snapshotEndOffset else {
+            staged.discard()
+            throw TrimError.transcriptShrankDuringStaging
+        }
+
+        var committedByteCount = staged.byteCount
+        do {
+            let deltaByteCount = currentEndOffset - staged.snapshotEndOffset
+            if deltaByteCount > 0 {
+                let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
+                defer { try? readHandle.close() }
+                try readHandle.seek(toOffset: staged.snapshotEndOffset)
+                // read(upToCount:) may legally short-read, and a partial delta must never be renamed in:
+                // the missing bytes would exist only on the unlinked old inode. Loop until the full delta
+                // is copied and treat premature EOF as a failed commit. Chunked, so a large delta never
+                // materializes as one allocation on the engine actor.
+                var remaining = deltaByteCount
+                while remaining > 0 {
+                    let toRead = Int(min(remaining, UInt64(replayChunkBytes)))
+                    guard let chunk = try readHandle.read(upToCount: toRead), !chunk.isEmpty else {
+                        throw TrimError.transcriptShrankDuringStaging
+                    }
+                    try staged.handle.write(contentsOf: chunk)
+                    committedByteCount += UInt64(chunk.count)
+                    remaining -= UInt64(chunk.count)
+                }
+            }
+            // fsync before the rename guarantees the data is durable before the directory entry flips, so
+            // a crash can never surface a renamed-but-truncated file.
+            try staged.handle.synchronize()
+        } catch {
+            staged.discard()
             throw error
         }
 
         // Atomic same-volume rename. POSIX rename(2) atomically replaces the destination; readers see
         // either the old or the new file, never a partial one. Chosen over FileManager.replaceItemAt
         // because it is the simplest call that is truly atomic on both APFS (macOS) and ext4 (Linux) and
-        // is identical on both platforms via Darwin/Glibc. The still-open tempHandle survives the rename
+        // is identical on both platforms via Darwin/Glibc. The still-open handle survives the rename
         // untouched: rename moves the directory entry, not the open descriptor.
-        let renamed = tempPath.withCString { tempC in outputPath.withCString { outC in rename(tempC, outC) } }
+        let renamed = staged.tempPath.withCString { tempC in outputPath.withCString { outC in rename(tempC, outC) } }
         guard renamed == 0 else {
             // The swap never happened. Close and remove the temp file; the caller's old handle still points
             // at the intact output.log, so its append position stays valid and semantics are unchanged.
             let renameErrno = errno
-            try? tempHandle.close()
-            try? FileManager.default.removeItem(atPath: tempPath)
+            staged.discard()
             throw TrimError.atomicReplaceFailed(errno: renameErrno)
         }
 
-        // The rename committed: tempHandle now references the renamed inode (output.log), its offset at the
-        // end of preamble+tail. Return that handle and a COMPUTED end offset — no seekToEnd(), no reopen —
-        // so there is no fallible call after the swap commits.
-        return TrimResult(endOffset: UInt64(preamble.count + tail.count), writeHandle: tempHandle)
+        // The rename committed: the staged handle now references the renamed inode (output.log), its
+        // offset at the end of preamble+tail+delta.
+        return TrimResult(endOffset: committedByteCount, writeHandle: staged.handle)
     }
 
     /// Scans forward from `nominalStart` for a parser-safe cut and returns it, or `nil` to signal the
@@ -243,9 +328,7 @@ public enum TerminalTranscriptTrim {
             let toRead = Int(min(UInt64(newlineScanBlockBytes), scanLimit - scanned))
             let chunk = try readHandle.read(upToCount: toRead) ?? Data()
             if chunk.isEmpty { break }
-            if let escIndex = chunk.firstIndex(of: 0x1B) {
-                return scanned + UInt64(chunk.distance(from: chunk.startIndex, to: escIndex))
-            }
+            if let escIndex = chunk.firstIndex(of: 0x1B) { return scanned + UInt64(chunk.distance(from: chunk.startIndex, to: escIndex)) }
             if firstNewlineOffset == nil, let newlineIndex = chunk.firstIndex(of: 0x0A) {
                 firstNewlineOffset = scanned + UInt64(chunk.distance(from: chunk.startIndex, to: newlineIndex)) + 1
             }
@@ -256,7 +339,9 @@ public enum TerminalTranscriptTrim {
 
     /// Builds the state preamble by streaming `[0..cutOffset]` through a throwaway vt session (created
     /// at the session's grid with flat scrollback, since scrollback content is irrelevant to the state
-    /// queries) and serializing its persistent terminal state.
+    /// queries) and serializing its persistent terminal state. This is the expensive part of a trim and
+    /// is why staging runs off the engine actor; the throwaway session owns its own dlopen'd symbols and
+    /// terminal, sharing nothing with the live session's renderer.
     private static func statePreamble(outputPath: String, cutOffset: UInt64, columns: Int, rows: Int) throws -> Data {
         guard let session = spaces_ghostty_vt_session_new(UInt16(clamping: max(columns, 1)), UInt16(clamping: max(rows, 1)), 0, nil) else {
             throw TrimError.vtSessionUnavailable

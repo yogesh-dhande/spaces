@@ -87,6 +87,23 @@
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
         private var outputByteCount = 0
+        /// Bounds `output.log` for this session, running the expensive preamble replay off the engine so a
+        /// trim cannot stall other sessions' terminal I/O. See `TerminalTranscriptTrimCoordinator`.
+        private lazy var transcriptTrim = TerminalTranscriptTrimCoordinator(
+            outputPath: paths.outputPath,
+            liveTranscriptEndOffset: { [weak self] in
+                guard let self, outputHandle != nil else { return nil }
+                return UInt64(outputByteCount)
+            },
+            adoptTrimmedTranscript: { [weak self] handle, endOffset in
+                guard let self else { return }
+                // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
+                // one so the stored property always holds a valid handle even if the close fails.
+                let previousHandle = outputHandle
+                outputHandle = handle
+                outputByteCount = Int(endOffset)
+                try? previousHandle?.close()
+            })
         private nonisolated(unsafe) var vtSession: OpaquePointer?
         private var started = false
         private var terminating = false
@@ -474,28 +491,12 @@
             do { try outputHandle.write(contentsOf: data) } catch { return false }
             outputByteCount += data.count
             // Head-truncate the durable transcript once it grows past the live-transcript bound so a
-            // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
-            // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
-            do {
-                let trim = try TerminalTranscriptTrim.trimIfNeeded(
-                    outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount), columns: terminalSize.columns,
-                    rows: terminalSize.rows)
-                if trim.writeHandle !== outputHandle {
-                    // A trim replaced output.log with a fresh inode; adopt its handle before closing the
-                    // old one so the stored property always holds a valid handle even if the close fails.
-                    self.outputHandle = trim.writeHandle
-                    try? outputHandle.close()
-                }
-                outputByteCount = Int(trim.endOffset)
-            } catch {
-                // A trim failure AFTER the write already committed must not fail the append. The
-                // just-appended bytes are already durable in output.log — TerminalTranscriptTrim
-                // guarantees no post-commit failure path: on any throw the original file and this write
-                // handle are untouched, so `outputByteCount` (already advanced by the write) stays
-                // correct and the skipped trim simply retries on the next append. Returning false here
-                // would make callers drop the mutation from the live renderer while it stays in the
-                // transcript, diverging live state from a future replay.
-            }
+            // long-running session stops accumulating disk without bound. This only snapshots offsets on
+            // the engine; the trim's expensive work runs off it and commits on a later engine turn, which
+            // is also when `outputByteCount` picks up the reduced end offset. The append's success is
+            // independent of it — the bytes are already durable in output.log, and a trim never touches
+            // that file until its atomic swap.
+            transcriptTrim.trimIfNeeded(currentEndOffset: UInt64(outputByteCount), columns: terminalSize.columns, rows: terminalSize.rows)
             return true
         }
 
