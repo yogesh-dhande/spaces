@@ -157,6 +157,36 @@ final class TerminalTranscriptTrimCoordinatorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url).count, Int(state.endOffset))
     }
 
+    /// A burst can append more than the trigger/retained gap while a trim stages; the commit then adopts
+    /// a file already past the trigger, and — because every trigger during staging was dropped — if the
+    /// burst stops there, no later append would re-evaluate. The coordinator re-checks with the adopted
+    /// end, so the transcript converges back under the bound instead of staying oversized indefinitely.
+    func testOversizedRacingAppendTriggersAFollowUpTrim() async throws {
+        let (url, owner, coordinator, _, _) = try await makeTrimmableTranscript()
+
+        var burst = Data()
+        var index = 0
+        while burst.count < 5000 {
+            burst.append(Data("BURST \(String(format: "%06d", index))\n".utf8))
+            index += 1
+        }
+        try await TerminalEngineActor.run {
+            coordinator.trimIfNeeded(currentEndOffset: owner.endOffset, columns: 80, rows: 24)
+            try owner.append(burst)
+        }
+        // The first await returns once the initial trim commits (adopting a still-oversized file); the
+        // follow-up it schedules is the latest trim by then, so the second await covers it.
+        await coordinator.awaitLatestTrim()
+        await coordinator.awaitLatestTrim()
+
+        let state = await ownerState(owner)
+        XCTAssertEqual(state.adoptionCount, 2, "An adopted end still past the trigger must start a follow-up trim.")
+        XCTAssertLessThanOrEqual(state.endOffset, Self.triggerBytes, "The follow-up trim must bring the transcript back under the trigger.")
+        let onDisk = try Data(contentsOf: url)
+        XCTAssertEqual(onDisk.count, Int(state.endOffset))
+        XCTAssertEqual(onDisk.suffix(20), burst.suffix(20), "The newest burst bytes must survive both trims.")
+    }
+
     // MARK: - Crash safety
 
     /// A staging failure must leave `output.log` byte-identical and the session's own append handle valid

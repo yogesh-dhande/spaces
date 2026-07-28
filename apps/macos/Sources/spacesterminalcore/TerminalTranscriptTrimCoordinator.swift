@@ -79,7 +79,7 @@ import Foundation
         // Detached, so the staging never inherits (and therefore never runs on) the engine actor.
         latestTrim = Task.detached(priority: .utility) { [self] in
             let staged = try? TerminalTranscriptTrim.stage(outputPath: outputPath, plan: plan, columns: columns, rows: rows)
-            await commit(staged)
+            await commit(staged, columns: columns, rows: rows)
         }
     }
 
@@ -89,7 +89,7 @@ import Foundation
     /// Engine-actor tail of a trim. Runs without suspending from the moment it reads the transcript's end
     /// offset, so the delta it copies is exactly the bytes appended during staging and no append can land
     /// between that read and the rename.
-    private func commit(_ staged: TerminalTranscriptTrim.StagedTrim?) {
+    private func commit(_ staged: TerminalTranscriptTrim.StagedTrim?, columns: Int, rows: Int) {
         isTrimInFlight = false
         guard let staged else { return }
         guard let currentEndOffset = liveTranscriptEndOffset() else {
@@ -98,5 +98,10 @@ import Foundation
         }
         guard let result = try? TerminalTranscriptTrim.commit(staged, outputPath: outputPath, currentEndOffset: currentEndOffset) else { return }
         adoptTrimmedTranscript(result.writeHandle, result.endOffset)
+        // A burst can append more than the trigger/retained gap while staging runs, in which case the
+        // adopted file is already past the trigger again — and if the burst then stops, no further append
+        // would re-evaluate. Re-check with the adopted end (the trigger guard makes this free when the
+        // file is bounded), reusing the grid this trim was planned at.
+        trimIfNeeded(currentEndOffset: result.endOffset, columns: columns, rows: rows)
     }
 }

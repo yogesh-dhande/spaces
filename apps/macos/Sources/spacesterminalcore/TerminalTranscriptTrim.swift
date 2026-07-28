@@ -209,6 +209,13 @@ enum TerminalTranscriptTrim {
     /// success the rename unlinks the old inode the caller's previous handle points at; the returned
     /// `endOffset` is COMPUTED from the bytes written, not queried, so nothing fallible runs once the swap
     /// commits. The caller MUST adopt `TrimResult.writeHandle` and discard its old one.
+    ///
+    /// The delta copy's duration scales with the delta, which is ACCEPTED: the transcript is fed only by
+    /// the session's own PTY capture (single-digit MB/s), so the bytes appendable during one staging pass
+    /// are physically small, and even a seconds-long staging stall yields a delta whose on-engine copy
+    /// costs about what ONE legacy inline trim cost every time. Copying it off-actor instead would need a
+    /// multi-round catch-up (or an abandon-and-replan cycle that can livelock under sustained overload)
+    /// for a case that only materializes when the machine is already degenerate.
     static func commit(_ staged: StagedTrim, outputPath: String, currentEndOffset: UInt64) throws -> TrimResult {
         guard currentEndOffset >= staged.snapshotEndOffset else {
             staged.discard()
@@ -224,10 +231,12 @@ enum TerminalTranscriptTrim {
                 try readHandle.seek(toOffset: staged.snapshotEndOffset)
                 // read(upToCount:) may legally short-read, and a partial delta must never be renamed in:
                 // the missing bytes would exist only on the unlinked old inode. Loop until the full delta
-                // is copied and treat premature EOF as a failed commit.
+                // is copied and treat premature EOF as a failed commit. Chunked, so a large delta never
+                // materializes as one allocation on the engine actor.
                 var remaining = deltaByteCount
                 while remaining > 0 {
-                    guard let chunk = try readHandle.read(upToCount: Int(remaining)), !chunk.isEmpty else {
+                    let toRead = Int(min(remaining, UInt64(replayChunkBytes)))
+                    guard let chunk = try readHandle.read(upToCount: toRead), !chunk.isEmpty else {
                         throw TrimError.transcriptShrankDuringStaging
                     }
                     try staged.handle.write(contentsOf: chunk)
