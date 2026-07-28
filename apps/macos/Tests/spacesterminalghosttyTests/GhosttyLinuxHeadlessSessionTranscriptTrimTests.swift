@@ -6,21 +6,21 @@
 
     @testable import spacesterminalghostty
 
-    /// Guards the split error domains of the Linux headless core's `appendTranscript`: a durable write
-    /// that succeeds must report success even when the follow-on head-truncation (`TerminalTranscriptTrim`)
-    /// throws. The trim is failure-safe with no post-commit failure path — on any throw the just-appended
-    /// bytes are already durable in `output.log` and the append handle is untouched — so a trim failure
-    /// must not be surfaced as an append failure. `clearScreen` keys the live-renderer application (and its
-    /// ok/failure response) off the append's return value, so a conflated failure would durably persist the
+    /// Guards the split error domains of the Linux headless core's `appendTranscript`: a durable write that
+    /// succeeds must report success no matter what happens to the follow-on head-truncation. The trim runs
+    /// off the engine actor and never touches `output.log` until its atomic swap
+    /// (`TerminalTranscriptTrimCoordinator`), so a trim that cannot run leaves the just-appended bytes
+    /// durable and the append handle valid. `clearScreen` keys the live-renderer application (and its
+    /// ok/failure response) off the append's return value, so conflating the two would durably persist the
     /// clear bytes while skipping the live clear, diverging live state from a future replay.
     ///
     /// The trim only fires once the transcript exceeds `liveTranscriptTrimTriggerBytes`, so these tests
     /// pre-fill `output.log` past that trigger and resume the core through the real handoff path (which
     /// preserves the existing bytes and seeds the byte count from the file size). The trim is then made to
     /// fail without disturbing the append by pre-creating a DIRECTORY at the sibling `output.log.trim` temp
-    /// path: `TerminalTranscriptTrim` opens that path for writing to stage preamble+tail, which fails with
-    /// `EISDIR` (a directory can never be opened for writing, even by root — so this is robust in the
-    /// root-owned Linux CI container, unlike a permission-bit block that `DAC_OVERRIDE` bypasses), while the
+    /// path: the staging stage opens that path for writing to hold preamble+tail, which fails with `EISDIR`
+    /// (a directory can never be opened for writing, even by root — so this is robust in the root-owned
+    /// Linux CI container, unlike a permission-bit block that `DAC_OVERRIDE` bypasses), while the
     /// already-open `output.log` append fd is untouched.
     ///
     /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops onto
@@ -172,11 +172,11 @@
 
         // MARK: - Tests
 
-        /// A trim failure AFTER a successful clear-mutation write must not fail the append: `clearScreen`
+        /// A trim that cannot run must not fail the clear-mutation append that triggered it: `clearScreen`
         /// must still report success, apply the clear to the live renderer, and leave the durable mutation
-        /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch) the trim throw returned false,
-        /// so `clearScreen` returned ok:false and never touched the live renderer even though the clear bytes
-        /// were already durable — diverging live state from a future replay.
+        /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch around the inline trim) the
+        /// trim throw returned false, so `clearScreen` returned ok:false and never touched the live renderer
+        /// even though the clear bytes were already durable — diverging live state from a future replay.
         @Test func clearScreenSucceedsWhenTrimFailsAfterDurableWrite() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
@@ -216,12 +216,10 @@
             try FileManager.default.createDirectory(atPath: trimBlockerPath, withIntermediateDirectories: false)
             defer { try? FileManager.default.removeItem(atPath: trimBlockerPath) }
 
-            let response = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
-            }
+            let response = TerminalEngineActor.runSynchronously { core.handleControlRequest(TerminalControlRequest(command: "clearScreen")) }
 
-            // The append succeeded (bytes durable) even though the trim threw, so clearScreen reports success
-            // and applied the clear to the live renderer.
+            // The append succeeded (bytes durable) even though the trim could not stage, so clearScreen
+            // reports success and applied the clear to the live renderer.
             #expect(response.ok, "clearScreen must report success when only the post-write trim failed: \(response.message)")
             let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) })
             #expect(!screen.contains(marker), "the live renderer must apply the clear, dropping the marker from the visible screen")
