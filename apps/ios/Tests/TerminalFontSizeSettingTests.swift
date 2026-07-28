@@ -28,14 +28,14 @@
             XCTAssertEqual(TerminalFontSize(persistedRawValue: UserDefaults.standard.object(forKey: key) as? Int), .nine)
         }
 
-        func testAbsentKeyResolvesToEleven() {
+        func testAbsentKeyResolvesToTen() {
             XCTAssertNil(UserDefaults.standard.object(forKey: key))
-            XCTAssertEqual(TerminalFontSize(persistedRawValue: UserDefaults.standard.object(forKey: key) as? Int), .eleven)
+            XCTAssertEqual(TerminalFontSize(persistedRawValue: UserDefaults.standard.object(forKey: key) as? Int), .ten)
         }
 
-        func testOutOfRangeStoredValueResolvesToEleven() {
+        func testOutOfRangeStoredValueResolvesToTen() {
             UserDefaults.standard.set(20, forKey: key)
-            XCTAssertEqual(TerminalFontSize(persistedRawValue: UserDefaults.standard.object(forKey: key) as? Int), .eleven)
+            XCTAssertEqual(TerminalFontSize(persistedRawValue: UserDefaults.standard.object(forKey: key) as? Int), .ten)
         }
     }
 #endif
