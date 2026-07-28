@@ -12,6 +12,14 @@ import Foundation
     @TerminalEngineActor public final class GhosttyEmbeddedAppService {
         public static let shared = GhosttyEmbeddedAppService()
 
+        /// Ghostty's wakeup callback fires from its IO threads on every loop wake — under an output
+        /// flood, once per PTY read per session. Every one of them asks for the same thing: drain the
+        /// app mailbox. Coalescing keeps that to one task in flight instead of one per wake.
+        ///
+        /// Static because the callback is a C function pointer with no isolation, and this service is
+        /// a singleton on the engine actor.
+        private nonisolated static let tickWork = CoalescedEngineWork()
+
         public private(set) var app: ghostty_app_t?
         private var config: ghostty_config_t?
         private var surfaceActionHandlers: [UInt: @TerminalEngineActor (GhosttyActionEvent) -> Void] = [:]
@@ -36,7 +44,7 @@ import Foundation
             var runtimeConfig = ghostty_runtime_config_s()
             runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
             runtimeConfig.supports_selection_clipboard = true
-            runtimeConfig.wakeup_cb = { _ in Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.tick() } }
+            runtimeConfig.wakeup_cb = { _ in GhosttyEmbeddedAppService.requestTick() }
             runtimeConfig.action_cb = { _, target, action in
                 guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
                 guard let event = GhosttyActionEventParser.parse(action) else { return true }
@@ -89,6 +97,19 @@ import Foundation
         public func tick() {
             guard let app else { return }
             ghostty_app_tick(app)
+        }
+
+        /// Drain the app mailbox soon, from any thread, without spawning a task per request.
+        nonisolated static func requestTick() {
+            guard tickWork.requestShouldSpawnTask() else { return }
+            Task { @TerminalEngineActor in
+                while tickWork.claimPendingRequest() {
+                    GhosttyEmbeddedAppService.shared.tick()
+                    // Suspend between passes so a sustained request stream cannot hold the
+                    // engine actor: queued input, resize, and termination work interleave here.
+                    await Task.yield()
+                }
+            }
         }
 
         public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @TerminalEngineActor (GhosttyActionEvent) -> Void) {
