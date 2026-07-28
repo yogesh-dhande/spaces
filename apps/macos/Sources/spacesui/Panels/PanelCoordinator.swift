@@ -197,6 +197,30 @@ import spacesterminalcore
         return openSessionInNewTab(request)
     }
 
+    /// Re-shows a session whose pane is already the focused, owner-attached pane the user is looking at:
+    /// brings its panel forward and puts the caret back, and nothing else. Answers false — leaving the
+    /// caller on the full open path — for every other case, so a pane that is not focused, is on an
+    /// unselected tab, or whose session another client owns still gets its state refresh, attach, and
+    /// ownership reclaim.
+    ///
+    /// Skipping the rest is safe only because this pane already holds the owner attachment: the state
+    /// fetch, attach, and reclaim the open path would run are exactly the work that established that, and
+    /// re-running them against an unchanged attachment is what made every warm terminal switch pay two
+    /// no-op viewport resizes and a full render-frame export.
+    func refocusFocusedTerminalPane(forSessionID sessionID: String) -> Bool {
+        guard let placement = placement(forSessionID: sessionID), let content = contentControllers[sessionID] else { return false }
+        let layout = layout(for: placement.scope)
+        guard
+            AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: layout.focusedPaneID == placement.paneID, paneIsInSelectedTab: layout.selectedTabID == placement.tabID,
+                paneHoldsOwnerAttachedSurface: content.holdsOwnerAttachedSurface)
+        else { return false }
+        host.showPanelScope(placement.scope)
+        host.noteWindowNavigationTerminalFocus(sessionID: sessionID)
+        content.makeContentFirstResponder()
+        return true
+    }
+
     /// Whether the layout may act on `request`, refusing — with the reason, naming the device — a
     /// request that would have to install a pane for a daemon that cannot be attached to. Every door a
     /// user action can install a pane through asks this first: opening it as a tab, moving it into its

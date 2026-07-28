@@ -394,6 +394,74 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
     }
 
+    /// Re-showing the pane the user is already focused in and owns costs nothing on the wire: the
+    /// refocus path moves keyboard focus and stops there, so repeat visits issue no state fetch and no
+    /// re-attach however many times they happen. The full show path — what every pane that is not already
+    /// owner-attached still runs — pays both.
+    @MainActor func testRefocusingAnOwnerAttachedPaneIssuesNoStateFetchOrAttach() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-refocus", backend: .ghosttyEmbedded, title: "refocus", workingDirectory: "/tmp/refocus", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "session-refocus", backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-07-26T00:00:01Z",
+            title: "refocus", workingDirectory: "/tmp/refocus", columns: 80, rows: 24)
+        let provider = FakeTerminalSessionStateProvider(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-refocus", paths: .init(rootDirectory: root.path), stateProvider: provider, preferredAttachmentMode: .owner,
+            performInitialRefresh: false, attachClientAction: { _, _ in }, detachClientAction: { _ in }, sessionHostProvider: { _, _ in host })
+
+        controller.showEmbedded(focus: true)
+        XCTAssertTrue(controller.holdsOwnerAttachedSurface)
+
+        let refreshStateCallCount = provider.refreshStateCallCount
+        let attachCount = host.attachCount
+        for _ in 0..<5 { controller.focusEmbeddedTerminalInput() }
+
+        XCTAssertEqual(provider.refreshStateCallCount, refreshStateCallCount)
+        XCTAssertEqual(host.attachCount, attachCount)
+
+        controller.showEmbedded(focus: true)
+
+        XCTAssertGreaterThan(provider.refreshStateCallCount, refreshStateCallCount)
+        XCTAssertGreaterThan(host.attachCount, attachCount)
+    }
+
+    /// A pane whose session another client has taken over does not hold the owner attachment, so a
+    /// re-show of it must not be short-circuited: reclaiming ownership is the point of the request.
+    @MainActor func testPaneWhoseSessionAnotherClientOwnsDoesNotHoldTheOwnerSurface() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-owner-moved", backend: .ghosttyEmbedded, title: "moved", workingDirectory: "/tmp/moved", shell: "/bin/zsh",
+            command: nil, createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "session-owner-moved", backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running,
+            updatedAt: "2026-07-26T00:00:01Z", title: "moved", workingDirectory: "/tmp/moved", columns: 80, rows: 24)
+        let provider = FakeTerminalSessionStateProvider(
+            launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-owner-moved", paths: .init(rootDirectory: root.path), stateProvider: provider, preferredAttachmentMode: .owner,
+            performInitialRefresh: false, attachClientAction: { _, _ in }, detachClientAction: { _ in }, sessionHostProvider: { _, _ in host })
+
+        controller.showEmbedded(focus: true)
+        XCTAssertTrue(controller.holdsOwnerAttachedSurface)
+
+        host.activeOwnerClientIDValue = "iphone-client"
+
+        XCTAssertFalse(controller.holdsOwnerAttachedSurface)
+    }
+
     @MainActor func testCloseForSessionTerminationSkipsDetachAndSurfaceRelease() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -249,6 +249,14 @@
             makeStatePayload(reason: reason, exportMode: .selfContained)
         }
 
+        /// The payload a one-shot state read is answered with, matching what this session's own subscription
+        /// socket exports for a fresh subscriber. Serving a Device API `.state` from here lets the daemon skip
+        /// dialing its own session's unix socket to ask itself a question it can answer directly. Platform
+        /// parity with the macOS `GhosttyEmbeddedSessionCore.currentOneShotStatePayload()`.
+        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
+            makeStatePayload(reason: TerminalRemoteSessionStateReason.initial, exportMode: .selfContained, markNextBroadcastFull: false)
+        }
+
         /// The session summary built entirely from this core's in-memory launch configuration and
         /// `lastRuntimeState` — with no DB read. Serves the create path's post-start summary so a create
         /// reports the running session the moment `startIfNeeded()` returns (which advances `lastRuntimeState`

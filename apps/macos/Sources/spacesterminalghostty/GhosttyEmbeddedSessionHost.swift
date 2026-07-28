@@ -1037,13 +1037,18 @@
                 leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
-                if currentAttachment?.mode != mode {
+                let attachmentChanged = currentAttachment?.mode != mode
+                if attachmentChanged {
                     try TerminalSessionPersistence.attachClient(
                         sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
                     if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
                     postAttachmentStateDidChange()
                 }
-                refreshRuntimeState(force: true)
+                // Only an attach that actually moved this session's attachments can have changed anything
+                // the runtime state carries. Re-attaching the same client in the same mode — what every
+                // refocus of an already-open pane does — leaves the unforced refresh, which persists only
+                // when the state's own signature moved.
+                refreshRuntimeState(force: attachmentChanged)
                 // Set after the attachment broadcast above so the recolored screen (delivered by the
                 // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
                 // frame rather than a color-only delta from a stale baseline. There is no host-side
@@ -2075,6 +2080,17 @@
 
         public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
+        }
+
+        /// The payload a one-shot state read is answered with, byte-for-byte what this session's own
+        /// subscription socket would have exported for a fresh subscriber: a self-contained frame that also
+        /// arms the next broadcast to carry a full render update when this export could not produce one, so
+        /// a reader left without a baseline still converges. Serving a Device API `.state` from here lets the
+        /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
+        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
+            currentRemoteSessionState(
+                reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
+                markNextBroadcastFullWhenMissingRenderUpdate: true)
         }
 
         private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {

@@ -67,6 +67,9 @@
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
         private var lastRequestedViewportSize: (columns: Int, rows: Int)?
+        /// The mirror surface generation the last owner attach measured its viewport against. An attach
+        /// that finds a different generation is looking at a rebuilt surface and re-sends the viewport.
+        private var lastAttachedSurfaceGeneration: UInt64?
         private var pendingViewportResizeSize: (columns: Int, rows: Int)?
         private var pendingViewportResizeTask: Task<Void, Never>?
         private var resizeSerial: UInt64 = 0
@@ -147,7 +150,6 @@
                 pendingViewportResizeTask?.cancel()
                 pendingViewportResizeTask = nil
                 pendingViewportResizeSize = nil
-                lastRequestedViewportSize = nil
             }
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
             terminalView.onSendText = { [weak self] text, asPaste in self?.sendRemoteInput(text, asPaste: asPaste) }
@@ -181,7 +183,7 @@
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
-            if isInteractive && mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
+            if isInteractive && mode == .owner { sendViewportResizeForOwnerAttach() }
         }
 
         public func releaseRendererSurface() { terminalView.releaseSurface() }
@@ -843,6 +845,25 @@
         private func sendCurrentViewportResizeIfNeeded(force: Bool) {
             guard isInteractiveRuntimeStateForControl(), attachedMode == .owner, let size = terminalView.surfaceCellSize() else { return }
             handleViewportSizeChange(columns: size.columns, rows: size.rows, force: force)
+        }
+
+        /// The owner attach's viewport send. It forces the request past the dedup's stale-state skips only
+        /// when the mirror surface was rebuilt since the last attach — a rebuilt surface negotiated its own
+        /// grid, so the size the daemon last heard was measured against a surface that no longer exists.
+        /// Re-attaching to the same live surface sends nothing: the daemon would answer that resize by
+        /// early-outing as a no-op, after a control hop onto the queue that carries every session's
+        /// keystrokes, and every refocus of an already-open pane re-attaches. The force cannot revive a
+        /// request the session's own reported size proves is a no-op; `shouldSendViewportResize` drops that
+        /// one either way.
+        private func sendViewportResizeForOwnerAttach() {
+            guard isInteractiveRuntimeStateForControl(), attachedMode == .owner else { return }
+            // Reading the cell size builds the mirror when the pane is displayed, so the generation is read
+            // after any rebuild this attach itself triggered.
+            guard let size = terminalView.surfaceCellSize() else { return }
+            let surfaceGeneration = terminalView.surfaceGeneration
+            let surfaceWasRebuilt = surfaceGeneration != lastAttachedSurfaceGeneration
+            lastAttachedSurfaceGeneration = surfaceGeneration
+            handleViewportSizeChange(columns: size.columns, rows: size.rows, force: surfaceWasRebuilt)
         }
 
         private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {

@@ -69,6 +69,9 @@ extension SpacesDeviceAPICommand {
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
     typealias AgentHookInstallHandler = @Sendable ([SupportedCodingAgentHook]) throws -> AgentHookInstallOutcome
+    /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
+    /// that session id (the reader then falls through to the persisted/socket read).
+    public typealias LiveTerminalSessionStateProvider = @Sendable (String) -> GhosttyRemoteSessionStatePayload?
 
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
@@ -783,6 +786,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
+    /// Exports a session's current state straight from the live in-process core, or nil when this daemon
+    /// hosts no live core for that id. Injected because the cores belong to the daemon, not to this server.
+    /// Without it every state read — including the one behind each pane attach — makes the daemon connect to
+    /// its own session's subscription socket and export a full frame back over that unix round trip.
+    private let liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
@@ -852,6 +860,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
+        liveTerminalSessionStateProvider = nil
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
@@ -872,6 +881,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -887,6 +897,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
+        self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
@@ -3015,6 +3026,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+        // A session this daemon hosts is in this process, so read its state from the live core instead of
+        // connecting to that core's own subscription socket and having it export the same frame back.
+        if let livePayload = liveTerminalSessionStateProvider?(sessionID) { return livePayload }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
             if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }
