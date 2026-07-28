@@ -175,4 +175,22 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))
     }
 
+    /// Every control that changes who is attached answers with the resulting session state, so a client
+    /// never has to follow one with a separate `.state` request to see the new ownership. Both daemons read
+    /// this one property to decide what to load, so it is the whole contract.
+    func testAttachmentChangingControlsCarrySessionState() {
+        for command in [
+            TerminalControlCommand.attach(.init(client: nil, attachmentMode: .owner, appearance: nil)), .detach(.init(clientID: "client-1")),
+            .takeover(.init(clientID: "client-1")),
+        ] { XCTAssertTrue(command.includesSessionStateOnSuccess, "\(command.name) changes attachments and must echo session state") }
+        for command in [
+            TerminalControlCommand.send(.init(text: "ls", bytes: nil, clientID: "client-1", ownerEpoch: nil, appendNewline: true, asPaste: false)),
+            .key(.init(key: "enter", clientID: "client-1", ownerEpoch: nil)),
+            .resize(.init(clientID: "client-1", columns: 80, rows: 24, ownerEpoch: nil, resizeSerial: nil)), .heartbeat(.init(clientID: "client-1")),
+            .setAppearance(.init(clientID: "client-1", appearance: .dark)),
+        ] {
+            XCTAssertFalse(
+                command.includesSessionStateOnSuccess, "\(command.name) changes no attachment; its effect reaches clients on the next broadcast")
+        }
+    }
 }

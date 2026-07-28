@@ -1843,6 +1843,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
+        // Re-showing the pane the user is already focused in and owns is a foreground-and-focus, so it also
+        // skips resolving the request: resolution only exists to install or re-target a pane.
+        if reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "mode=\(mode.rawValue) reused=1 route=pane refocus=1\(requestDetail)")
+            return true
+        }
         let resolved: DeviceTerminalOpenRequest?
         if let resolvedRequest { resolved = resolvedRequest } else { resolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) }
         guard let request = resolved else {
@@ -2550,8 +2558,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
-        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]],
-        workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus], alertsGroups: [AlertsGroup]
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
+        alertsGroups: [AlertsGroup]
     ) {
         var mergedProjects: [ProjectSummary] = []
         var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
@@ -4483,6 +4491,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hasExistingPane || deviceAcceptsDaemonActions
     }
 
+    /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
+    /// running the open path's state fetch, attach, and ownership reclaim. All three conditions are load
+    /// bearing: the pane must be the focused one in the panel's selected tab (anything else has to move
+    /// focus, which re-activates the content), and it must already hold the owner attachment on a live
+    /// surface — when another client owns the session, reclaiming ownership is the whole request. Pure so
+    /// the line between "already here" and "go get it" is directly testable.
+    nonisolated static func canRefocusTerminalPaneWithoutReattaching(
+        paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
+    ) -> Bool { paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface }
+
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
     /// detail is being built, so a retained pane keeps whatever it was built with: a device that goes
@@ -4540,8 +4558,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             domain: "Spaces", code: 1003,
             userInfo: [
                 NSLocalizedDescriptionKey: "\(deviceName) is offline.",
-                NSLocalizedRecoverySuggestionErrorKey: isLocal
-                    ? "Restart the local daemon and try again." : "Reconnect it and try again.",
+                NSLocalizedRecoverySuggestionErrorKey: isLocal ? "Restart the local daemon and try again." : "Reconnect it and try again.",
             ])
     }
 
@@ -4744,8 +4761,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // failure backoff — it repeats every 0.75s for the whole duration of the setup,
         // and clearing backoff on every tick would redial every unrelated offline
         // device that fast, defeating the backoff entirely (see `startRemoteOverviewPull`).
-        requestSidebarReload(
-            forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
+        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;

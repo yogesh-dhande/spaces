@@ -109,6 +109,10 @@
         var onSendScroll: SendScrollHandler?
         var onSendMouseButton: SendMouseButtonHandler?
         var onViewportSizeChanged: ViewportSizeHandler?
+        /// Counts mirror surfaces built for this pane. A surface negotiates its own grid when it is
+        /// created, so a consumer that told the daemon a viewport size against an earlier surface can tell
+        /// from this whether that size still describes a surface that exists.
+        private(set) var surfaceGeneration: UInt64 = 0
 
         init(launchConfiguration: TerminalSessionLaunchConfiguration) {
             self.launchConfiguration = launchConfiguration
@@ -650,6 +654,7 @@
                 config.parked_host = host
                 mirror = ghostty_mirror_new(app, &host, &config)
                 guard mirror != nil else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_mirror_new failed") }
+                surfaceGeneration &+= 1
                 lastGeometry = nil
                 lastAppliedRenderFrameIdentity = nil
                 updateSurfaceGeometry()

@@ -922,9 +922,9 @@ import workspacecore
     }
 
     @Test func attachControlRefreshesSessionStateWhenResponseOmitsIt() throws {
-        // The Device API does not echo session state for attach/detach controls, so the
-        // control helper must fetch the post-control state and apply the new ownership
-        // immediately instead of waiting for the live subscription to redeliver it.
+        // A daemon that could not load the post-attach state answers without it, so the control
+        // helper falls back to fetching that state and applying the new ownership immediately
+        // instead of waiting for the live subscription to redeliver it.
         let refreshedSnapshot = attachmentSnapshot(ownerID: "mac-window")
         let refreshedState = sessionStatePayload(attachmentSnapshot: refreshedSnapshot)
         let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
@@ -941,6 +941,28 @@ import workspacecore
         #expect(response.ok)
         #expect(recorder.issuedStateFetch)
         #expect(applied.payload?.attachmentSnapshot == refreshedSnapshot)
+    }
+
+    @Test func attachControlAppliesCarriedStateWithoutASecondRoundTrip() throws {
+        // Attach responses carry the session state the attach produced, so the helper applies it
+        // directly. Fetching it again would spend a second round trip — and a second full-frame
+        // export — on every attach, including the one behind each terminal pane open.
+        let carriedSnapshot = attachmentSnapshot(ownerID: "mac-window")
+        let carriedState = sessionStatePayload(attachmentSnapshot: carriedSnapshot)
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: nil, controlResponseSnapshot: carriedState)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1",
+            request: TerminalControlRequest(
+                command: "attach",
+                client: TerminalClient(
+                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(!recorder.issuedStateFetch)
+        #expect(applied.payload?.attachmentSnapshot == carriedSnapshot)
     }
 
     @Test func sendControlDoesNotFetchStateWhenRefreshNotRequested() throws {
@@ -993,16 +1015,21 @@ import workspacecore
 
     private final class ControlRequestRecorder: @unchecked Sendable {
         private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
+        /// The state the control response itself carries, as an attach/detach/takeover response does.
+        private let controlResponseSnapshot: GhosttyRemoteSessionStatePayload?
         private(set) var issuedStateFetch = false
 
-        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?) { self.stateResponseSnapshot = stateResponseSnapshot }
+        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?, controlResponseSnapshot: GhosttyRemoteSessionStatePayload? = nil) {
+            self.stateResponseSnapshot = stateResponseSnapshot
+            self.controlResponseSnapshot = controlResponseSnapshot
+        }
 
         var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
             { [self] request in
                 switch request.command {
                 case .control:
                     return TerminalServiceResponse(
-                        ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+                        ok: true, message: "", sessionState: controlResponseSnapshot, controlResponse: TerminalControlResponse(ok: true, message: ""))
                 case .state:
                     issuedStateFetch = true
                     return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)

@@ -287,6 +287,25 @@
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
+        /// Bounds `output.log` for this session, running the expensive preamble replay off the engine so a
+        /// trim cannot stall other sessions' terminal I/O. See `TerminalTranscriptTrimCoordinator`.
+        private lazy var transcriptTrim = TerminalTranscriptTrimCoordinator(
+            outputPath: paths.outputPath,
+            liveTranscriptEndOffset: { [weak self] in
+                guard let self, let outputHandle else { return nil }
+                return try? outputHandle.seekToEnd()
+            },
+            // The committed end offset is discarded: this core re-derives the transcript's end from the
+            // handle on every append (`seekToEnd`) rather than tracking a byte count, so the adopted
+            // handle's position is the only state that has to change.
+            adoptTrimmedTranscript: { [weak self] handle, _ in
+                guard let self else { return }
+                // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
+                // one so the stored property always holds a valid handle even if the close fails.
+                let previousHandle = outputHandle
+                outputHandle = handle
+                try? previousHandle?.close()
+            })
         private var started = false
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
@@ -1042,13 +1061,18 @@
                 leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
-                if currentAttachment?.mode != mode {
+                let attachmentChanged = currentAttachment?.mode != mode
+                if attachmentChanged {
                     try TerminalSessionPersistence.attachClient(
                         sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
                     if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
                     postAttachmentStateDidChange()
                 }
-                refreshRuntimeState(force: true)
+                // Only an attach that actually moved this session's attachments can have changed anything
+                // the runtime state carries. Re-attaching the same client in the same mode — what every
+                // refocus of an already-open pane does — leaves the unforced refresh, which persists only
+                // when the state's own signature moved.
+                refreshRuntimeState(force: attachmentChanged)
                 // Set after the attachment broadcast above so the recolored screen (delivered by the
                 // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
                 // frame rather than a color-only delta from a stale baseline. There is no host-side
@@ -1676,27 +1700,19 @@
             do {
                 let outputHandle = try ensureOutputHandle()
                 try outputHandle.write(contentsOf: data)
-                // The preamble grid only affects cursor placement (mode capture is size-independent), so
-                // an unobserved surface size falls back to the universal 80x24 default rather than
-                // skipping the trim and letting the transcript grow unbounded.
+                let endOffset = try outputHandle.seekToEnd()
+                // Head-truncate the durable transcript once it grows past the live-transcript bound so a
+                // long-running session stops accumulating disk without bound. This only snapshots offsets
+                // on the engine; the trim's expensive work runs off it and swaps in the bounded file on a
+                // later engine turn. The preamble grid only affects cursor placement (mode capture is
+                // size-independent), so an unobserved surface size falls back to the universal 80x24
+                // default rather than skipping the trim and letting the transcript grow unbounded.
                 let terminalSize = observedSurfaceSize() ?? (columns: 80, rows: 24)
-                var outputEndByteOffset: Int?
-                if let trim = try? Self.appendedTranscriptEndOffset(
-                    outputHandle: outputHandle, outputPath: paths.outputPath, columns: terminalSize.columns, rows: terminalSize.rows)
-                {
-                    if trim.writeHandle !== outputHandle {
-                        // A trim replaced output.log with a fresh inode; adopt its handle before closing
-                        // the old one so the stored handle is always valid. A failed trim throws (caught
-                        // here as nil), leaving the original handle at the just-appended end — still valid.
-                        self.outputHandle = trim.writeHandle
-                        try? outputHandle.close()
-                    }
-                    outputEndByteOffset = Self.clampedInt(trim.endOffset)
-                }
+                transcriptTrim.trimIfNeeded(currentEndOffset: endOffset, columns: terminalSize.columns, rows: terminalSize.rows)
                 requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 postOutputDidChange(
-                    data: data, outputEndByteOffset: outputEndByteOffset, interactiveResync: interactiveResync,
+                    data: data, outputEndByteOffset: Self.clampedInt(endOffset), interactiveResync: interactiveResync,
                     shouldBroadcastState: shouldBroadcastState)
                 TerminalPerformance.logMetric(
                     "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
@@ -1927,20 +1943,6 @@
             return Int(value)
         }
 
-        /// Positions `outputHandle` at the transcript's end and returns that offset plus the write handle
-        /// to append through, head-truncating the durable `output.log` first when it has grown past the
-        /// live-transcript bound so a long-running session stops accumulating disk without bound. A trim
-        /// atomically replaces `output.log` and returns a fresh handle the caller must adopt (the passed
-        /// `outputHandle` then points at the unlinked old inode); with no trim the same handle is returned.
-        /// See `TerminalTranscriptTrim`.
-        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String, columns: Int, rows: Int) throws
-            -> TerminalTranscriptTrim.TrimResult
-        {
-            let endOffset = try outputHandle.seekToEnd()
-            return try TerminalTranscriptTrim.trimIfNeeded(
-                outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset, columns: columns, rows: rows)
-        }
-
         private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
             guard let value else { return nil }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2135,6 +2137,17 @@
 
         public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
             currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
+        }
+
+        /// The payload a one-shot state read is answered with, byte-for-byte what this session's own
+        /// subscription socket would have exported for a fresh subscriber: a self-contained frame that also
+        /// arms the next broadcast to carry a full render update when this export could not produce one, so
+        /// a reader left without a baseline still converges. Serving a Device API `.state` from here lets the
+        /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
+        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
+            currentRemoteSessionState(
+                reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
+                markNextBroadcastFullWhenMissingRenderUpdate: true)
         }
 
         private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {

@@ -317,7 +317,13 @@ enum SpacesDaemonProfileCommandRouting {
             guard !self.handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
             let orchestrator = try self.makeProfileOrchestrator()
             return try orchestrator.killAgentSession(terminalSessionID: sessionID)
-        }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
+        }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
+        // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
+        // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
+        // be answered from the live core instead of dialing that core's own subscription socket.
+        liveTerminalSessionStateProvider: { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.liveCoreOneShotStatePayload(sessionID: sessionID) }
+        })
     /// `nonisolated` so the off-main request handlers can drive git subprocesses from the transport
     /// thread. `RemoteWorkspaceGitClient` is `Sendable` (immutable, subprocess-per-call), so sharing the
     /// one instance across threads is safe.
@@ -2168,6 +2174,13 @@ enum SpacesDaemonProfileCommandRouting {
         return liveCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.stateChange)
     }
 
+    /// The live core's answer to a Device API `.state` read: the same payload a fresh subscriber's initial
+    /// frame carries, so bypassing the subscription socket changes nothing the reader observes. Nil when no
+    /// live core hosts the session, which sends the reader down the persisted/socket read.
+    @TerminalEngineActor private func liveCoreOneShotStatePayload(sessionID: String) -> GhosttyRemoteSessionStatePayload? {
+        sessionCores[sessionID]?.currentOneShotStatePayload()
+    }
+
     /// The non-live state read: persisted final/ended state, or a live unix-socket connect+read against the
     /// session's subscription socket (2s timeout). No main-actor state, so it is `nonisolated` and runs on
     /// the transport thread for the off-main `.state`/`.control` handlers.
@@ -2512,12 +2525,14 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        liveTerminalSessionStateProvider: (@Sendable (String) -> GhosttyRemoteSessionStatePayload?)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
+                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested,
+                liveTerminalSessionStateProvider: liveTerminalSessionStateProvider)
         #endif
     }
 

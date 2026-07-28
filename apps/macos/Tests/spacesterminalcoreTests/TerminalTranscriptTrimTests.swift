@@ -7,6 +7,22 @@ import ghosttyvtshim
 final class TerminalTranscriptTrimTests: XCTestCase {
     // MARK: - Fixtures
 
+    /// Runs a whole trim — plan, staging, commit — as one synchronous call. In production those three
+    /// stages straddle the engine actor (`TerminalTranscriptTrimCoordinator`), but the retained content,
+    /// the preamble, and the atomic-replace contract are the same wherever each stage ran, so the content
+    /// suite drives them directly. `currentEndOffset` is unchanged between plan and commit here, i.e. no
+    /// append raced the trim; the coordinator suite covers the racing case.
+    @discardableResult private func performTrim(
+        outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int, triggerBytes: UInt64, retainedBytes: UInt64
+    ) throws -> TerminalTranscriptTrim.TrimResult {
+        guard
+            let plan = try TerminalTranscriptTrim.plan(
+                outputPath: outputPath, currentEndOffset: currentEndOffset, triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        else { return TerminalTranscriptTrim.TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle) }
+        let staged = try TerminalTranscriptTrim.stage(outputPath: outputPath, plan: plan, columns: columns, rows: rows)
+        return try TerminalTranscriptTrim.commit(staged, outputPath: outputPath, currentEndOffset: currentEndOffset)
+    }
+
     private func makeTranscriptFile() throws -> (url: URL, handle: FileHandle) {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         FileManager.default.createFile(atPath: url.path, contents: nil)
@@ -62,8 +78,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// of its own (line filler has no escapes; the counter-update filler uses only CUP), so a backwards
     /// search lands on the preamble's closing reset.
     private func splitPreambleAndTail(_ trimmed: Data) throws -> (preamble: Data, tail: Data) {
-        let resetRange = try XCTUnwrap(
-            trimmed.range(of: Self.sgrReset, options: .backwards), "trimmed transcript must contain a preamble SGR reset")
+        let resetRange = try XCTUnwrap(trimmed.range(of: Self.sgrReset, options: .backwards), "trimmed transcript must contain a preamble SGR reset")
         return (Data(trimmed[..<resetRange.upperBound]), Data(trimmed[resetRange.upperBound...]))
     }
 
@@ -84,7 +99,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let payload = Data(repeating: 0x61, count: 500)
         try handle.write(contentsOf: payload)
 
-        let result = try TerminalTranscriptTrim.trimIfNeeded(
+        let result = try performTrim(
             outputPath: url.path, writeHandle: handle, currentEndOffset: 500, columns: 80, rows: 24, triggerBytes: 1000, retainedBytes: 400)
 
         XCTAssertEqual(result.endOffset, 500)
@@ -97,9 +112,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        let result = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        let result = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
         addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
 
         let onDisk = try Data(contentsOf: url)
@@ -116,9 +131,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        let result = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        let result = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
         XCTAssertFalse(result.writeHandle === handle, "A trim must return a fresh handle on the replaced file, not the caller's old one.")
         addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
         // Appends must go through the RETURNED handle (the old one points at the unlinked pre-trim inode),
@@ -137,9 +152,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
 
         let tail = try TerminalOutputTail.tail(path: url.path, lineCount: 3)
         XCTAssertTrue(tail.contains("SEQ \(String(format: "%06d", filler.lastIndex))"), "Newest line must survive the trim: \(tail)")
@@ -147,8 +162,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
 
     func testConfiguredBoundKeepsFullScrollbackBudget() {
         XCTAssertGreaterThan(TerminalScrollbackBudget.liveTranscriptRetainedBytes, TerminalScrollbackBudget.defaultMaxBytes)
-        XCTAssertGreaterThan(
-            TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes, TerminalScrollbackBudget.liveTranscriptRetainedBytes)
+        XCTAssertGreaterThan(TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes, TerminalScrollbackBudget.liveTranscriptRetainedBytes)
     }
 
     // MARK: - State preservation (the P1a fix)
@@ -160,9 +174,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         payload.append(lineFiller(prefix: "filler", minBytes: 6000).data)
         try handle.write(contentsOf: payload)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
 
         let trimmed = try Data(contentsOf: url)
 
@@ -192,9 +206,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         payload.append(lineFiller(prefix: "filler", minBytes: 6000).data)
         try handle.write(contentsOf: payload)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
 
         let restored = try replaySession(try Data(contentsOf: url))
         defer { spaces_ghostty_vt_session_free(restored) }
@@ -208,9 +222,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try handle.write(contentsOf: payload)
         let original = payload
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
         let trimmed = try Data(contentsOf: url)
 
         let originalFrame = try renderPlain(original)
@@ -250,9 +264,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try handle.write(contentsOf: payload)
         let original = payload
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
         let trimmed = try Data(contentsOf: url)
 
         // The header lives only in the dropped head; the retained tail must not carry it (it is the grid
@@ -270,8 +284,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let originalFrame = try renderPlain(original)
         XCTAssertFalse(trimmedFrame.isEmpty)
         XCTAssertEqual(
-            trimmedFrame, originalFrame,
-            "From-zero replay of the trimmed transcript must yield the same visible frame as the untrimmed original.")
+            trimmedFrame, originalFrame, "From-zero replay of the trimmed transcript must yield the same visible frame as the untrimmed original.")
     }
 
     // MARK: - Newline alignment
@@ -285,9 +298,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try handle.write(contentsOf: filler.data)
         let retainedBytes: UInt64 = 2000
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: retainedBytes)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: retainedBytes)
 
         let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
         XCTAssertTrue(String(decoding: tail, as: UTF8.self).hasPrefix("SEQ "), "Retained tail must start at a line boundary.")
@@ -317,9 +330,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
         try handle.write(contentsOf: payload)
 
-        let result = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        let result = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: triggerBytes,
+            retainedBytes: retainedBytes)
 
         XCTAssertTrue(result.writeHandle === handle, "A deferred trim must return the caller's own handle unchanged.")
         XCTAssertEqual(result.endOffset, UInt64(payload.count), "A deferred trim must leave the end offset unchanged.")
@@ -340,9 +353,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try handle.write(contentsOf: payload)
 
         // First trim: the scan window is entirely inside the run, so the trim defers (no-op, same handle).
-        let deferred = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        let deferred = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: triggerBytes,
+            retainedBytes: retainedBytes)
         XCTAssertTrue(deferred.writeHandle === handle, "The first trim must defer while the scan window is inside the run.")
         XCTAssertEqual(deferred.endOffset, UInt64(payload.count))
 
@@ -352,7 +365,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try deferred.writeHandle.write(contentsOf: tailLines)
         let newEndOffset = deferred.endOffset + UInt64(tailLines.count)
 
-        let trimmed = try TerminalTranscriptTrim.trimIfNeeded(
+        let trimmed = try performTrim(
             outputPath: url.path, writeHandle: deferred.writeHandle, currentEndOffset: newEndOffset, columns: 80, rows: 24,
             triggerBytes: triggerBytes, retainedBytes: retainedBytes)
         addTeardownBlock { [writeHandle = trimmed.writeHandle] in try? writeHandle.close() }
@@ -397,9 +410,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
         try handle.write(contentsOf: payload)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: triggerBytes,
+            retainedBytes: retainedBytes)
 
         let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
         XCTAssertEqual(tail.first, 0x1B, "With an ESC in the scan window, the cut must land just before the first ESC, not mid-sequence.")
@@ -452,17 +465,16 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let triggerBytes = retainedBytes + 2000
         XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        _ = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: triggerBytes,
+            retainedBytes: retainedBytes)
         let trimmed = try Data(contentsOf: url)
 
         let (_, tail) = try splitPreambleAndTail(trimmed)
         XCTAssertEqual(
             tail.first, 0x1B,
             "The cut must skip the LFs inside the OSC payload and land just before the ST's ESC, so the tail starts on a clean parser boundary.")
-        XCTAssertFalse(
-            String(decoding: tail, as: UTF8.self).hasPrefix("OSCPAYLOAD"), "The retained tail must not begin mid-OSC-payload.")
+        XCTAssertFalse(String(decoding: tail, as: UTF8.self).hasPrefix("OSCPAYLOAD"), "The retained tail must not begin mid-OSC-payload.")
 
         // From-zero replay must not surface the OSC payload as visible text, and must still show the newest
         // content that follows the terminated OSC.
@@ -479,9 +491,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         payload.append(lineFiller(prefix: "FIRST", minBytes: 8000).data)
         try handle.write(contentsOf: payload)
 
-        var trim = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        var trim = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
 
         // Append more filler to cross the trigger again, then trim a second time. The second trim's
         // head replay [0..cut] starts from the FIRST trim's preamble, so state must remain correct. All
@@ -489,7 +501,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let more = lineFiller(prefix: "SECOND", minBytes: 4000).data
         try trim.writeHandle.write(contentsOf: more)
         let endOffsetBeforeSecondTrim = trim.endOffset + UInt64(more.count)
-        trim = try TerminalTranscriptTrim.trimIfNeeded(
+        trim = try performTrim(
             outputPath: url.path, writeHandle: trim.writeHandle, currentEndOffset: endOffsetBeforeSecondTrim, columns: 80, rows: 24,
             triggerBytes: 4000, retainedBytes: 2000)
         addTeardownBlock { [writeHandle = trim.writeHandle] in try? writeHandle.close() }
@@ -538,10 +550,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
 
         XCTAssertThrowsError(
-            try TerminalTranscriptTrim.trimIfNeeded(
-                outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-                triggerBytes: 4000, retainedBytes: 2000),
-            "A trim that cannot stage its temp file must throw, not rewrite output.log in place.")
+            try performTrim(
+                outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+                retainedBytes: 2000), "A trim that cannot stage its temp file must throw, not rewrite output.log in place.")
 
         // The original transcript is byte-identical: the trim never touched it.
         XCTAssertEqual(try Data(contentsOf: url), before, "A failed trim must leave output.log byte-identical.")
@@ -565,9 +576,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        let result = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
-            triggerBytes: 4000, retainedBytes: 2000)
+        let result = try performTrim(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24, triggerBytes: 4000,
+            retainedBytes: 2000)
         addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
 
         let trimmed = try Data(contentsOf: url)
@@ -578,12 +589,32 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertEqual(UInt64(trimmed.count), result.endOffset, "The computed end offset must equal the on-disk file size after the trim.")
         XCTAssertEqual(try result.writeHandle.offset(), result.endOffset, "The adopted handle must sit at the computed end offset, ready to append.")
         let (preamble, tail) = try splitPreambleAndTail(trimmed)
-        XCTAssertEqual(
-            trimmed, preamble + tail, "The replaced file must be exactly preamble+tail with no stale bytes from the pre-trim transcript.")
+        XCTAssertEqual(trimmed, preamble + tail, "The replaced file must be exactly preamble+tail with no stale bytes from the pre-trim transcript.")
 
         let appended = Data("NEXT\n".utf8)
         try result.writeHandle.write(contentsOf: appended)
         let afterAppend = try Data(contentsOf: url)
         XCTAssertEqual(afterAppend, trimmed + appended, "An append through the returned handle must land exactly at the new end.")
+    }
+
+    /// The staged-then-committed split rests on `output.log` being strictly append-only while a trim
+    /// stages — that is what makes the snapshotted prefix immutable and the delta copy complete. A
+    /// transcript that is SHORTER at commit time violates that invariant, so the commit must refuse
+    /// (leaving the original intact and the temp file discarded) rather than stitch the staged tail onto
+    /// bytes that no longer follow it.
+    func testCommitRefusesATranscriptThatShrankDuringStaging() throws {
+        let (url, handle) = try makeTranscriptFile()
+        let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
+        try handle.write(contentsOf: filler.data)
+
+        let plan = try XCTUnwrap(
+            TerminalTranscriptTrim.plan(outputPath: url.path, currentEndOffset: UInt64(filler.data.count), triggerBytes: 4000, retainedBytes: 2000))
+        let staged = try TerminalTranscriptTrim.stage(outputPath: url.path, plan: plan, columns: 80, rows: 24)
+
+        XCTAssertThrowsError(
+            try TerminalTranscriptTrim.commit(staged, outputPath: url.path, currentEndOffset: plan.snapshotEndOffset - 1),
+            "A commit against a shrunken transcript must refuse rather than publish a stitched file.")
+        XCTAssertEqual(try Data(contentsOf: url), filler.data, "A refused commit must leave output.log byte-identical.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".trim"), "A refused commit must discard its temp file.")
     }
 }

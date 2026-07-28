@@ -275,9 +275,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         mainThreadReleaseBag = [view]
     }
 
-    deinit {
-        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
-    }
+    deinit { MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 }) }
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }
@@ -446,12 +444,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
     }
 
-    func hasAttachedGhosttyOwnerSurface() -> Bool {
+    /// Whether this pane holds the session's owner attachment on a live surface right now: it asked for
+    /// owner mode, it is showing the owner renderer, that surface has content, and the session's active
+    /// owner is this pane's client. False whenever the owner is another client (or is not yet known), which
+    /// is what keeps a re-show of the pane from skipping the ownership reclaim that is the point of the
+    /// request.
+    public var holdsOwnerAttachedSurface: Bool {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttyRendererHost,
             host.hasRenderableSurface()
         else { return false }
-        if let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
-        return true
+        guard let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID else { return false }
+        return ownerClientID == client.id
     }
 
     func logFocusMetric(_ metric: String, startedAt: Date, requestID: String?, detail: String) {
