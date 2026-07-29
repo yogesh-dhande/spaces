@@ -15,8 +15,10 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 fail() {
     echo "setup_ghostty cache restore test failed: $*" >&2
-    for log in seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out foreign-arch-reuse.out \
-        coexist-current-seed.out coexist-bumped-seed.out coexist-current-restore.out coexist-bumped-restore.out; do
+    for log in release-package.out seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out \
+        foreign-arch-reuse.out coexist-current-seed.out coexist-bumped-seed.out coexist-current-restore.out \
+        coexist-bumped-restore.out poisoned-cache.out poisoned-cache-restore.out poisoned-local.out \
+        built-reuse.out schema-local.out schema-release.out; do
         if [[ -f "$TMP_ROOT/$log" ]]; then
             echo "--- $log ---" >&2
             cat "$TMP_ROOT/$log" >&2
@@ -188,77 +190,6 @@ place_fake_zig() {
     chmod +x "$zig_bin"
 }
 
-# Build a release fixture whose Xcode build version matches the stub so the
-# download path installs cleanly (no Xcode-mismatch auto-build).
-RELEASE_BUILD_ROOT="$TMP_ROOT/release-build"
-mkdir -p \
-    "$RELEASE_BUILD_ROOT/kit/GhosttyKit.xcframework" \
-    "$RELEASE_BUILD_ROOT/resources/ghostty/shell-integration" \
-    "$RELEASE_BUILD_ROOT/resources/terminfo" \
-    "$RELEASE_BUILD_ROOT/vt/include/ghostty" \
-    "$RELEASE_BUILD_ROOT/vt/lib"
-: > "$RELEASE_BUILD_ROOT/vt/include/ghostty/vt.h"
-: > "$RELEASE_BUILD_ROOT/vt/lib/libghostty-vt.a"
-cp "$FAKE_VT_LIB" "$RELEASE_BUILD_ROOT/vt/lib/$FAKE_VT_LIB_NAME"
-
-tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.gz" "GhosttyKit.xcframework"
-tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
-tar -C "$RELEASE_BUILD_ROOT/vt" -czf "$RELEASE_DIR/libghostty-vt.tar.gz" "include" "lib"
-
-# The fixture's build_script_version comes from the script under test: it is part of the artifact
-# key, so a hardcoded copy would go stale on the next bump and stop the release fixture from
-# validating at all.
-BUILD_SCRIPT_VERSION="$(sed -n 's/^BUILD_SCRIPT_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
-[[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
-
-# host_arch is the real host architecture for the same reason: it is part of the artifact key, so a
-# placeholder would make this release fail validation on every run instead of installing cleanly.
-python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" "$BUILD_SCRIPT_VERSION" "$ARCH" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-release_dir = pathlib.Path(sys.argv[1])
-ghostty_sha = sys.argv[2]
-build_script_version = int(sys.argv[3])
-host_arch = sys.argv[4]
-assets = [
-    "GhosttyKit.xcframework.tar.gz",
-    "GhosttyKit-resources.tar.gz",
-    "libghostty-vt.tar.gz",
-]
-checksums = {
-    asset: hashlib.sha256((release_dir / asset).read_bytes()).hexdigest()
-    for asset in assets
-}
-manifest = {
-    "schema_version": 1,
-    "ghostty_sha": ghostty_sha,
-    "source_url": "https://example.invalid/ghostty.git",
-    "zig_version": "0.16.0",
-    "build_script_version": build_script_version,
-    "xcode_version": "17.0",
-    "xcode_build_version": "17C52",
-    "swift_version": "Swift release fixture",
-    "host_arch": host_arch,
-    "build_optimize": "ReleaseFast",
-    "dirty": False,
-    "mode": "build",
-    "artifact_checksums": checksums,
-}
-(release_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-
-(
-    cd "$RELEASE_DIR"
-    shasum -a 256 \
-        "GhosttyKit.xcframework.tar.gz" \
-        "GhosttyKit-resources.tar.gz" \
-        "libghostty-vt.tar.gz" \
-        "manifest.json" > "SHA256SUMS"
-)
-
 SETUP_ENV=(
     "PATH=$STUB_BIN:$PATH"
     "SPACES_GHOSTTY_SETUP_SKIP_API_VERIFY=1"
@@ -273,15 +204,36 @@ SETUP_ENV=(
 
 # The cache entry directory carries the whole validity key, so two checkouts that disagree on any
 # of it occupy different entries instead of evicting each other (scenario 10). The version fields
-# come from the script under test for the same reason the release fixture reads them: a hardcoded
-# copy would go stale on the next bump.
+# come from the script under test: a hardcoded copy would go stale on the next bump.
 MANIFEST_SCHEMA_VERSION="$(sed -n 's/^MANIFEST_SCHEMA_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
 [[ -n "$MANIFEST_SCHEMA_VERSION" ]] || fail "could not read MANIFEST_SCHEMA_VERSION from setup_ghostty.sh"
 ZIG_VERSION="$(sed -n 's/^ZIG_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
 [[ -n "$ZIG_VERSION" ]] || fail "could not read ZIG_VERSION from setup_ghostty.sh"
+BUILD_SCRIPT_VERSION="$(sed -n 's/^BUILD_SCRIPT_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
+[[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
 
 CACHE_KEY_LEAF="schema=$MANIFEST_SCHEMA_VERSION-script=$BUILD_SCRIPT_VERSION-zig=$ZIG_VERSION-xcode=17C52-opt=ReleaseFast-arch=$ARCH"
 CACHE_ENTRY="$CACHE_DIR/$GHOSTTY_SHA/$CACHE_KEY_LEAF"
+
+# --- 0. The release fixture is produced by the script under test (--build --package). ---
+# A hand-assembled release cannot carry a usable manifest: the manifest records a content digest of
+# the artifact trees, and consumers recompute it over what they extracted before trusting it. The
+# stubbed Xcode build version matches what the stub reports, so the download path installs cleanly
+# instead of taking the Xcode-mismatch auto-build.
+place_fake_zig
+RELEASE_PACKAGE_CACHE="$TMP_ROOT/cache-release-package"
+mkdir -p "$RELEASE_PACKAGE_CACHE"
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$RELEASE_PACKAGE_CACHE" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --build --package "$RELEASE_DIR" \
+    > "$TMP_ROOT/release-package.out" 2>&1; then
+    fail "could not package the release fixture with --build --package"
+fi
+
+# Leave the fixture the way the scenarios below expect it: no installed artifacts, and a clean
+# Ghostty source tree (the stub build writes its outputs into the submodule).
+rm -rf "$TEMP_APP_ROOT/.local"
+git -C "$TEMP_GHOSTTY_ROOT" clean -fdx >/dev/null 2>&1
+: > "$BUILD_LOG"
 
 # --- 1. Seed: a download installs artifacts and populates the shared cache. ---
 : > "$GH_LOG"
@@ -732,5 +684,146 @@ RESTORED_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1
     "$BUMPED_CHECKOUT/apps/macos/.local/ghostty-artifacts/manifest.json")"
 [[ "$RESTORED_VERSION" == "$BUMPED_BUILD_SCRIPT_VERSION" ]] \
     || fail "bumped-version checkout restored artifacts built by script version $RESTORED_VERSION"
+
+# --- 11. A cache entry whose manifest still validates but whose artifacts were mutated is
+#         rejected and repaired. ---
+# This is the failure the manifest alone cannot see: the manifest records build inputs, so an
+# artifact set whose CONTENT is wrong (a compiled/header ABI skew, a truncated copy) keys and
+# validates exactly like a good one. The restore must reject it on the recorded content digest,
+# fall through to the download, and the trailing save must replace the entry -- otherwise the
+# poisoned entry survives its own rejection and costs every later reader the same wasted restore.
+git -C "$TEMP_GHOSTTY_ROOT" clean -fdx >/dev/null 2>&1
+rm -rf "$TEMP_APP_ROOT/.local"
+POISONED_ARTIFACT="$CACHE_ENTRY/ghosttyvt/lib/libghostty-vt.a"
+[[ -f "$POISONED_ARTIFACT" ]] || fail "cache entry is missing the artifact this scenario mutates"
+printf 'poisoned' >> "$POISONED_ARTIFACT"
+
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/poisoned-cache.out" 2>&1; then
+    fail "poisoned-cache setup failed"
+fi
+
+grep -q "Cached Ghostty artifacts do not match the content digest" "$TMP_ROOT/poisoned-cache.out" \
+    || fail "poisoned cache entry was restored despite mutated artifacts"
+[[ -s "$GH_LOG" ]] || fail "poisoned cache entry did not fall through to a download"
+[[ -d "$TEMP_APP_ROOT/.local/ghosttykit/GhosttyKit.xcframework" ]] \
+    || fail "poisoned-cache run did not install good artifacts"
+grep -q "Replacing Ghostty cache entry whose artifacts do not match its recorded content digest" \
+    "$TMP_ROOT/poisoned-cache.out" || fail "poisoned cache entry was not replaced"
+if grep -q "poisoned" "$POISONED_ARTIFACT"; then
+    fail "replaced cache entry still carries the mutated artifact"
+fi
+
+# The repaired entry is usable again: with the network stubbed to fail, only a cache restore can
+# make this run succeed.
+rm -rf "$TEMP_APP_ROOT/.local"
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/poisoned-cache-restore.out" 2>&1; then
+    fail "repaired cache entry did not restore"
+fi
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/poisoned-cache-restore.out" \
+    || fail "repaired cache entry did not report a cache restore"
+
+# --- 12. Installed artifacts that were mutated are not reused either. ---
+# Same failure one level closer in: the fast path trusts .local on its manifest alone, so a
+# mutated install has to be caught by the digest and fall through to the cache.
+printf 'poisoned' >> "$TEMP_APP_ROOT/.local/ghosttyvt/lib/libghostty-vt.a"
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/poisoned-local.out" 2>&1; then
+    fail "poisoned-local setup failed (should have restored from cache)"
+fi
+grep -q "Local Ghostty artifacts do not match the content digest" "$TMP_ROOT/poisoned-local.out" \
+    || fail "mutated local artifacts were reused"
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/poisoned-local.out" \
+    || fail "poisoned-local run did not restore from cache"
+if grep -q "poisoned" "$TEMP_APP_ROOT/.local/ghosttyvt/lib/libghostty-vt.a"; then
+    fail "poisoned-local run did not replace the mutated artifact"
+fi
+
+# --- 13. A local source build produces artifacts the fast path accepts on the next run. ---
+# The digest a build records has to describe the tree it installed, or every subsequent setup would
+# reject its own build and rebuild forever.
+git -C "$TEMP_GHOSTTY_ROOT" clean -fdx >/dev/null 2>&1
+BUILT_CACHE_DIR="$TMP_ROOT/cache-built-reuse"
+rm -rf "$TEMP_APP_ROOT/.local"
+mkdir -p "$BUILT_CACHE_DIR"
+place_fake_zig
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$BUILT_CACHE_DIR" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --build > "$TMP_ROOT/built.out" 2>&1; then
+    fail "local build setup failed"
+fi
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$BUILT_CACHE_DIR" "SPACES_TEST_GH_FAIL=1" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/built-reuse.out" 2>&1; then
+    fail "setup did not reuse the artifacts it had just built"
+fi
+grep -q "Reusing local Ghostty artifacts" "$TMP_ROOT/built-reuse.out" \
+    || fail "a freshly built install was not reused on the next run"
+
+# --- 14. Artifacts written under the previous manifest schema are not trusted anywhere. ---
+# The schema is bumped when the manifest itself changes meaning, so an older manifest carries no
+# usable guarantee about the artifacts beside it -- there is no grandfathering path.
+python3 - "$TEMP_APP_ROOT/.local/ghostty-artifacts/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["schema_version"] = 1
+del manifest["artifact_content_digest"]
+path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+: > "$GH_LOG"
+set +e
+env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$TMP_ROOT/cache-schema-empty" "SPACES_TEST_GH_FAIL=1" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/schema-local.out" 2>&1
+SCHEMA_LOCAL_STATUS=$?
+set -e
+[[ "$SCHEMA_LOCAL_STATUS" -ne 0 ]] || fail "setup reused installed artifacts carrying an older manifest schema"
+grep -q "Local Ghostty artifact manifest does not match current Ghostty setup inputs" \
+    "$TMP_ROOT/schema-local.out" || fail "an older manifest schema was not rejected on the local reuse path"
+
+# A published release at the older schema is rejected the same way, with no install.
+SCHEMA_RELEASE_DIR="$TMP_ROOT/release-old-schema"
+mkdir -p "$SCHEMA_RELEASE_DIR"
+cp "$RELEASE_DIR"/*.tar.gz "$SCHEMA_RELEASE_DIR"/
+python3 - "$RELEASE_DIR/manifest.json" "$SCHEMA_RELEASE_DIR/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+source, dest = sys.argv[1:3]
+manifest = json.loads(pathlib.Path(source).read_text(encoding="utf-8"))
+manifest["schema_version"] = 1
+del manifest["artifact_content_digest"]
+pathlib.Path(dest).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+(
+    cd "$SCHEMA_RELEASE_DIR"
+    shasum -a 256 \
+        "GhosttyKit.xcframework.tar.gz" \
+        "GhosttyKit-resources.tar.gz" \
+        "libghostty-vt.tar.gz" \
+        "manifest.json" > "SHA256SUMS"
+)
+
+rm -rf "$TEMP_APP_ROOT/.local"
+: > "$GH_LOG"
+set +e
+env "${SETUP_ENV[@]}" \
+    "SPACES_TEST_RELEASE_DIR=$SCHEMA_RELEASE_DIR" \
+    "SPACES_GHOSTTY_CACHE_DIR=$TMP_ROOT/cache-schema-empty" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --download-only > "$TMP_ROOT/schema-release.out" 2>&1
+SCHEMA_RELEASE_STATUS=$?
+set -e
+[[ "$SCHEMA_RELEASE_STATUS" -ne 0 ]] || fail "setup installed a release carrying an older manifest schema"
+grep -q "does not match expected schema" "$TMP_ROOT/schema-release.out" \
+    || fail "an older release manifest schema was not reported"
+[[ ! -d "$TEMP_APP_ROOT/.local/ghosttykit/GhosttyKit.xcframework" ]] \
+    || fail "a release at the older manifest schema was installed anyway"
 
 echo "setup_ghostty cache restore test passed"

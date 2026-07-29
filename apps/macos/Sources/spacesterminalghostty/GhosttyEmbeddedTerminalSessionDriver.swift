@@ -98,6 +98,15 @@
         /// is unaffected by the session having no view.
         private static let contentScale = 2.0
 
+        /// A null session is all `ghostty_session_new_headless` can report across the C boundary: the
+        /// reason stays inside libghostty's log, and one cause — GhosttyKit artifacts whose compiled
+        /// code disagrees with the headers they ship — produces exactly this null while passing every
+        /// artifact check, so the message names both the log switch and the rebuild that repairs it.
+        private static let headlessSessionCreationFailure = """
+            ghostty_session_new_headless failed. Set GHOSTTY_LOG=stderr to see the reason libghostty rejected the session; \
+            if the installed GhosttyKit artifacts may be ABI-skewed, rebuild them with apps/macos/scripts/setup_ghostty.sh --build.
+            """
+
         var onActionEvent: (@TerminalEngineActor (GhosttyActionEvent) -> Void)?
         var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
         var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
@@ -226,7 +235,7 @@
                 sessionConfig.surface.working_directory = cwd
                 return ghostty_session_new_headless(app, &sessionConfig)
             }
-            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_session_new_headless failed") }
+            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 
             session = createdSession
             self.hostPTY = hostPTY

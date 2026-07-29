@@ -59,8 +59,10 @@ script_constant() {
 
 BUILD_SCRIPT_VERSION="$(script_constant BUILD_SCRIPT_VERSION)"
 ZIG_VERSION="$(script_constant ZIG_VERSION)"
+MANIFEST_SCHEMA_VERSION="$(script_constant MANIFEST_SCHEMA_VERSION)"
 [[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
 [[ -n "$ZIG_VERSION" ]] || fail "could not read ZIG_VERSION from setup_ghostty.sh"
+[[ -n "$MANIFEST_SCHEMA_VERSION" ]] || fail "could not read MANIFEST_SCHEMA_VERSION from setup_ghostty.sh"
 STALE_BUILD_SCRIPT_VERSION="$((BUILD_SCRIPT_VERSION - 1))"
 
 # Ghostty fixture: a committed repo whose build outputs are ignored, so repeated stub builds keep
@@ -246,6 +248,7 @@ chmod +x "$FAKE_ZIG_BIN"
 seed_release() {
     local manifest_build_script_version="$1"
     local manifest_xcode_build="$2"
+    local manifest_schema_version="$3"
     local build_root="$TMP_ROOT/seed"
 
     rm -rf "$build_root" "$RELEASE_STORE"
@@ -263,24 +266,27 @@ seed_release() {
     tar -C "$build_root/resources" -czf "$RELEASE_STORE/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
     tar -C "$build_root/vt" -czf "$RELEASE_STORE/libghostty-vt.tar.gz" "include" "lib"
 
-    # host_arch is the real host architecture: it is part of the artifact key, so a placeholder
-    # would make every seeded release fail on the architecture axis instead of exercising the
-    # build-script-version and Xcode drift this test is about.
-    python3 - "$RELEASE_STORE" "$GHOSTTY_SHA" "$manifest_build_script_version" "$ZIG_VERSION" "$manifest_xcode_build" "$(uname -m)" <<'PY'
+    # host_arch is the real host architecture, and the schema version comes from the script under
+    # test: both are part of the artifact key, so a placeholder would make every seeded release fail
+    # on that axis instead of exercising the build-script-version and Xcode drift this test is
+    # about. The content digest is a placeholder because a seeded release is always rejected on its
+    # key before anything is extracted, which is the only point at which a digest is compared.
+    python3 - "$RELEASE_STORE" "$GHOSTTY_SHA" "$manifest_build_script_version" "$ZIG_VERSION" \
+        "$manifest_xcode_build" "$(uname -m)" "$manifest_schema_version" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
 release_dir = pathlib.Path(sys.argv[1])
-ghostty_sha, build_script_version, zig_version, xcode_build, host_arch = sys.argv[2:7]
+ghostty_sha, build_script_version, zig_version, xcode_build, host_arch, schema_version = sys.argv[2:8]
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
     "libghostty-vt.tar.gz",
 ]
 manifest = {
-    "schema_version": 1,
+    "schema_version": int(schema_version),
     "ghostty_sha": ghostty_sha,
     "source_url": "https://example.invalid/ghostty.git",
     "zig_version": zig_version,
@@ -292,6 +298,7 @@ manifest = {
     "build_optimize": "ReleaseFast",
     "dirty": False,
     "mode": "build",
+    "artifact_content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "artifact_checksums": {
         asset: hashlib.sha256((release_dir / asset).read_bytes()).hexdigest()
         for asset in assets
@@ -355,7 +362,7 @@ uploaded_assets() {
 }
 
 # 1. A published release built by an older setup script must be refreshed, not accepted.
-seed_release "$STALE_BUILD_SCRIPT_VERSION" "17C529"
+seed_release "$STALE_BUILD_SCRIPT_VERSION" "17C529" "$MANIFEST_SCHEMA_VERSION"
 run_ensure "stale-build-script" "17C529"
 grep -q "is invalid or incomplete; rebuilding for repair" "$CURRENT_OUT" \
     || fail "stale build_script_version was not classified as a release needing repair"
@@ -385,5 +392,26 @@ built_locally || fail "stale xcode_build_version did not trigger a rebuild"
 uploaded_assets || fail "stale xcode_build_version did not republish the release"
 [[ "$(published_manifest_field xcode_build_version)" == "17D100" ]] \
     || fail "republished manifest did not carry the new Xcode build version"
+
+# 4. A release published under an older manifest schema is stranded the same way. The schema moves
+#    when the manifest itself changes meaning (a field consumers now require), so the release has to
+#    be rebuilt and republished rather than accepted or reported as complete.
+seed_release "$BUILD_SCRIPT_VERSION" "17D100" "$((MANIFEST_SCHEMA_VERSION - 1))"
+run_ensure "stale-schema" "17D100"
+grep -q "is invalid or incomplete; rebuilding for repair" "$CURRENT_OUT" \
+    || fail "an older manifest schema was not classified as a release needing repair"
+built_locally || fail "an older manifest schema did not trigger a rebuild"
+uploaded_assets || fail "an older manifest schema did not republish the release"
+[[ "$(published_manifest_field schema_version)" == "$MANIFEST_SCHEMA_VERSION" ]] \
+    || fail "republished manifest did not carry the current manifest schema"
+
+# The republished release is usable: the next run downloads and installs it, which only succeeds
+# when the artifacts it ships still hash to the digest its manifest records.
+run_ensure "republished-schema" "17D100"
+grep -q "Installing downloaded Ghostty artifacts" "$CURRENT_OUT" \
+    || fail "the republished release was not installed from the download"
+if built_locally; then
+    fail "the republished release still triggered a rebuild"
+fi
 
 echo "ensure_ghostty_artifacts key drift test passed"
