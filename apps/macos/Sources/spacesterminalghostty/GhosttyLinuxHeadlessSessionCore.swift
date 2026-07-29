@@ -374,6 +374,14 @@
             // every registered persistence task completed without relying on timing.
             await outputDeliveryFence.waitUntilDrained()
 
+            // Second write-queue drain, after the output fence: a handleOutput turn that finished
+            // between the first drain and the fence may have enqueued query replies. Its query bytes
+            // land before the boundary recorded below — the resume replay treats them as already
+            // answered — so the replies must reach the PTY before execv destroys the queue, or they
+            // are lost on both sides. No enqueue can race this drain: the control server is stopped,
+            // the sequencer is drained, and the fence proved every output handler completed.
+            await ptyDriver.drainPendingWrites()
+
             if let outputHandle {
                 do {
                     try outputHandle.synchronize()
