@@ -327,9 +327,59 @@
 
             #expect(outcome.newer.ok, "the newest resize must be applied: \(outcome.newer.message)")
             #expect(!outcome.stale.ok, "a resize older than the one already applied must be rejected")
+            let staleSnapshot = try #require(outcome.snapshot)
+            #expect(staleSnapshot.columns == 100, "a superseded resize pinned the session to a grid its client had already left")
+            #expect(staleSnapshot.rows == 30, "a superseded resize pinned the session to a grid its client had already left")
+        }
+
+        /// Carries a reconnecting owner's resize observations out of the one engine hop they are sent in.
+        private struct ReattachedResizeOutcome: Sendable {
+            let reattach: TerminalControlResponse
+            let restarted: TerminalControlResponse
+            let snapshot: GhosttyTerminalSnapshot?
+        }
+
+        /// A client that reconnects to a session it already owns keeps its client id — the app reattaches
+        /// as the same owner after a relaunch — while the host behind it is new and counts resize serials
+        /// from zero again. Nothing else retires the previous attachment's serials on that path: the owner
+        /// did not change, so the epoch does not advance. The attach itself has to start a fresh serial
+        /// incarnation, or every resize the reconnected client sends is rejected as stale and its pane
+        /// stays pinned to the grid it had before.
+        @Test func resizeSerialsRestartedByAReattachingOwnerAreAccepted() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let marker = "REATTACH_MARKER"
+            let configuration = makeConfiguration(
+                sessionID: "resize-reattach-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                Self.attachRemoteOwner(to: core, id: "remote-owner")
+                return Box(core)
+            }
+            let core = coreBox.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+
+            let settled = TerminalEngineActor.runSynchronously { Self.resize(core, clientID: "remote-owner", columns: 100, rows: 30, serial: 5) }
+            #expect(settled.ok, "the first attachment's resize must be applied: \(settled.message)")
+
+            let outcome = TerminalEngineActor.runSynchronously { () -> ReattachedResizeOutcome in
+                // The same client attaches again as owner: no ownership change, so no epoch advance.
+                let client = TerminalClient(
+                    id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+                    connectedAt: "2026-07-29T00:00:00Z")
+                let reattach = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
+                let restarted = Self.resize(core, clientID: "remote-owner", columns: 70, rows: 20, serial: 1)
+                return ReattachedResizeOutcome(reattach: reattach, restarted: restarted, snapshot: Self.renderedSnapshot(of: core))
+            }
+
+            #expect(outcome.reattach.ok, "the owner must be able to attach again: \(outcome.reattach.message)")
+            #expect(outcome.restarted.ok, "a reconnected owner's restarted resize serial was rejected as stale: \(outcome.restarted.message)")
             let snapshot = try #require(outcome.snapshot)
-            #expect(snapshot.columns == 100, "a superseded resize pinned the session to a grid its client had already left")
-            #expect(snapshot.rows == 30, "a superseded resize pinned the session to a grid its client had already left")
+            #expect(snapshot.columns == 70, "the reconnected owner's resize did not reach the terminal")
+            #expect(snapshot.rows == 20, "the reconnected owner's resize did not reach the terminal")
         }
     }
 #endif

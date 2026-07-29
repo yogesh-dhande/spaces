@@ -2993,6 +2993,40 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A client that reconnects to a session it already owns keeps its client id — the app reattaches as
+    /// the same owner after a relaunch — while the host behind it is new and counts resize serials from
+    /// zero again. That attach neither moves the attachment nor advances the owner epoch, so nothing else
+    /// retires the previous attachment's serials: without the attach itself starting a fresh serial
+    /// incarnation, every resize the reconnected client sends is rejected as stale and its pane stays
+    /// pinned to the grid it had before.
+    func testControlAcceptsResizeSerialsRestartedByAReattachingOwner() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-reattach-resize", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-07-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
+            let owner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-29T00:00:00Z")
+
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 5)).ok)
+
+            // The same client attaches again in the same mode: no ownership change, no epoch advance.
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            let restarted = host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 1))
+
+            XCTAssertTrue(restarted.ok, "a reconnected owner's restarted resize serial was rejected as stale: \(restarted.message)")
+        }
+    }
+
     func testControlAttachUsesServerTimeForRemoteLease() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

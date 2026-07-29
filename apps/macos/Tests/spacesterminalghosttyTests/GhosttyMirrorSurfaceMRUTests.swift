@@ -406,6 +406,40 @@ import spacesterminalcore
         XCTAssertLessThan(settledGrid.rows, startingGrid.rows, "the session was resized to the intermediate grid rather than the settled one")
     }
 
+    /// A pending resize waits one turn, and the pane re-measures its viewport on every state payload the
+    /// session sends — which, under steady output, is continuous. Restarting the wait on each of those
+    /// unchanged measurements would hold the resize back for as long as the session keeps talking, so a
+    /// measurement of the size already waiting has to leave that wait alone.
+    func testReReportingTheSizeAlreadyWaitingDoesNotRestartItsWait() throws {
+        let session = try makeOwnerSession(sessionID: "mru-settle-not-restarted")
+        defer { session.cleanUp() }
+        let host = session.host
+        let recorder = session.recorder
+
+        window?.contentView?.addSubview(session.container)
+        try host.attach(client: session.client, mode: .owner, into: session.container)
+        waitForCondition("owner pane paints") { host.hasRenderableSurface() }
+        waitForCondition("displayed pane resizes its session") { recorder.resizeCount > 0 }
+        waitForQuiescentResizes(recorder)
+
+        // A real size change starts a wait.
+        session.container.frame = NSRect(x: 0, y: 0, width: 240, height: 150)
+        session.container.layoutSubtreeIfNeeded()
+        let waitsAfterTheSizeChanged = host.debugViewportSettleScheduleCount
+        let resizesBeforeTheSizeChanged = recorder.resizeCount
+
+        // Re-measurements of that same viewport, the way arriving state payloads produce them.
+        for _ in 0..<5 { XCTAssertTrue(host.synchronizeSurfaceGeometry()) }
+
+        XCTAssertEqual(host.debugViewportSettleScheduleCount, waitsAfterTheSizeChanged, "an unchanged viewport re-measurement restarted the wait")
+
+        // The wait still ends in the resize it was holding.
+        settle()
+        waitForCondition("the pending resize reaches the session") { recorder.resizeCount > resizesBeforeTheSizeChanged }
+        waitForQuiescentResizes(recorder)
+        XCTAssertEqual(recorder.resizeCount, resizesBeforeTheSizeChanged + 1, "the held resize was sent more than once")
+    }
+
     // MARK: - Harness
 
     /// Waits until the pane and its session agree on a grid — the initial exchange resizes the session

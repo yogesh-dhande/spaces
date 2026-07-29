@@ -73,9 +73,13 @@
         private var pendingViewportResizeSize: (columns: Int, rows: Int)?
         private var pendingViewportResizeTask: Task<Void, Never>?
         /// The one-turn deferral every measured viewport size waits out before it is sent (see
-        /// `handleViewportSizeChange`). Cancel-and-replace: a newer measurement discards the pending
-        /// one, so only the size the layout settled on is ever sent.
+        /// `handleViewportSizeChange`). A measurement of a *different* size replaces the pending one, so
+        /// only the size the layout settled on is ever sent; a measurement of the same size leaves it
+        /// alone, so a busy state stream cannot keep postponing it.
         private var pendingViewportSettleTask: Task<Void, Never>?
+        /// The size `pendingViewportSettleTask` is waiting to send. Non-nil exactly while that task is
+        /// pending — both are cleared together when it fires or is abandoned.
+        private var pendingViewportSettleSize: (columns: Int, rows: Int)?
         /// Whether any measurement folded into the pending settle turn asked to be announced even when
         /// it matches the size the daemon last accepted. Sticky across replacement: a forced
         /// measurement superseded by a later one still forces the send of that later size.
@@ -155,6 +159,7 @@
             // ownership and epoch; the attach below re-announces the current one.
             pendingViewportSettleTask?.cancel()
             pendingViewportSettleTask = nil
+            pendingViewportSettleSize = nil
             pendingViewportSettleForce = false
             pendingViewportResizeTask?.cancel()
             pendingViewportResizeTask = nil
@@ -314,6 +319,12 @@
         /// — including one discarded by a `cancelAll()` triggered mid-chain — has settled, instead of
         /// guessing how long that takes.
         func drainInputQueueForTesting() async { await inputQueue.drain() }
+
+        /// How many settle turns have been started (see `handleViewportSizeChange`). A re-measurement of
+        /// the size already waiting must not start another one, and that is otherwise invisible: both
+        /// behaviors send the same size on a quiet stream, and the difference only shows as a resize held
+        /// back across a busy one.
+        private(set) var debugViewportSettleScheduleCount = 0
 
         /// Awaits the pending viewport resize, if any — first the settle turn a measured size waits out
         /// (`handleViewportSizeChange`), then the send task it starts. Resize runs off `inputQueue` in its
@@ -929,12 +940,20 @@
         /// A user dragging the window resizes across many turns and keeps flowing: each turn's final size
         /// is sent on the next one.
         private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {
-            pendingViewportSettleTask?.cancel()
             pendingViewportSettleForce = pendingViewportSettleForce || force
+            // A measurement identical to the one already waiting keeps that wait rather than restarting
+            // it. Every state payload re-measures the viewport, and a session under steady output
+            // delivers them continuously: restarting the turn on each one would hold a genuinely pending
+            // resize back for as long as the stream stays busy.
+            if pendingViewportSettleSize?.columns == columns, pendingViewportSettleSize?.rows == rows { return }
+            pendingViewportSettleTask?.cancel()
+            pendingViewportSettleSize = (columns, rows)
+            debugViewportSettleScheduleCount &+= 1
             pendingViewportSettleTask = Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self, !Task.isCancelled else { return }
                 self.pendingViewportSettleTask = nil
+                self.pendingViewportSettleSize = nil
                 let force = self.pendingViewportSettleForce
                 self.pendingViewportSettleForce = false
                 self.sendViewportResize(columns: columns, rows: rows, force: force)

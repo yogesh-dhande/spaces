@@ -682,6 +682,13 @@
                 // The attach wrote this client's lease and revived its durable row, so any coalescing record
                 // from an earlier attachment of the same client id is void.
                 leaseTouchCoalescer.forget(clientID: client.id)
+                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner,
+                // which leaves the owner unchanged and so does not advance the epoch — while its host
+                // counts serials from zero again. Carrying the previous attachment's high-water mark across
+                // that would reject every serial the reconnected client sends and pin the session to the
+                // grid it had before.
+                lastResizeSerialByClientID.removeValue(forKey: client.id)
                 if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
