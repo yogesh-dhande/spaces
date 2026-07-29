@@ -57,7 +57,10 @@ jobs:
             # so each iteration is bounded: on timeout the docker CLI dies but the container survives
             # holding the shared build volumes, hence the named container and the rm -f, and the
             # partial log is kept as a failed iteration instead of wedging the whole loop.
-            timeout 900 docker run --rm --init --platform linux/amd64 \
+            # --sig-proxy=false: on timeout, SIGTERM must kill only the docker CLI, not be forwarded
+            # into the container — a forwarded signal ends the wedged process and --rm deletes the
+            # container before the live capture below can inspect it.
+            timeout 900 docker run --rm --init --platform linux/amd64 --sig-proxy=false \
               --name "lane-iteration-$i" \
               -v "$PWD":/workspace \
               -v spaces-linux-src:/root/src \
