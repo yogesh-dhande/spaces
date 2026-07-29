@@ -105,6 +105,10 @@ extension TerminalSessionPaneViewController {
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
     func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
+    /// Suspends until every attach/detach control send issued so far has run, so a test can assert on
+    /// what reached the daemon without polling. Attach and detach are deliberately off-main sends;
+    /// their ordering guarantee is exactly this queue, so awaiting it is how a test observes both.
+    func debugAwaitPendingClientControl() async { await clientControlQueue.drain() }
     public var clientID: String { client.id }
     var debugTakeoverPending: Bool { takeoverTask != nil }
     func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }

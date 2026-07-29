@@ -64,11 +64,11 @@ extension TerminalSessionPaneViewController {
             isClientAttached = false
             lastRequestedAttachmentMode = nil
         } else {
-            // Run the close hook off the detach's completion (not synchronously here): the async
-            // detach only lands after a daemon round-trip, so the owner's ad hoc cleanup must wait
-            // for it to read a snapshot that reflects this client leaving. A session-terminating
-            // close skips it — the daemon is already stopping the session.
-            detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose, onDetached: onCloseClientDetached)
+            // Run the close hook off the detach's completion (not synchronously here): the detach
+            // only lands after a daemon round-trip, so the owner's ad hoc cleanup must wait for it to
+            // read a snapshot that reflects this client leaving. A session-terminating close skips
+            // it — the daemon is already stopping the session.
+            detachLocalClientIfNeeded(onDetached: onCloseClientDetached)
         }
         onWindowClose?(sessionID, clientID, sessionIsTerminating)
     }
