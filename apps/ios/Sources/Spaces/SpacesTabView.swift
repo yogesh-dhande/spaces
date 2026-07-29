@@ -393,7 +393,7 @@ struct SpacesTabView: View {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
             BandRow(
-                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.workingDirectory
+                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""
             ) { RowChevron() }
         }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
             "terminal.row.\(session.id)")

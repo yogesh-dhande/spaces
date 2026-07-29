@@ -494,7 +494,11 @@
             // Seed the title/cwd cache from the row the pre-exec image wrote: this core is a fresh
             // object, and the replay below cannot always recover them (a trimmed transcript's state
             // preamble deliberately restores no title). The replay's own refresh overwrites these when
-            // it sees newer escape sequences.
+            // it sees newer escape sequences. Accepted (user-approved): a row written by a pre-change
+            // binary stored the launch-title fallback here, so an untitled session surviving that one
+            // upgrade seeds its own name as a reported title and shows it duplicated until the program
+            // titles itself or the session restarts. Normalizing it away would permanently drop a title
+            // that legitimately equals the session's name — compat shims are deliberately not kept.
             if let persisted = try? TerminalSessionPersistence.readRuntimeState(paths: paths) {
                 currentTitle = persisted.title
                 currentWorkingDirectory = persisted.workingDirectory
@@ -1423,7 +1427,9 @@
             return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
-                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle ?? launchConfiguration.title,
+                // The raw reported title, not a launch-title fallback: the runtime state records what the
+                // program said, and a reader that needs a name applies its own fallback.
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
                 workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
                 rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
@@ -1594,9 +1600,9 @@
         private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
-                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(),
-                title: currentTitle ?? launchConfiguration.title, workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory,
-                columns: terminalSize.columns, rows: terminalSize.rows, bellAt: currentBellAt)
+                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
+                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
+                rows: terminalSize.rows, bellAt: currentBellAt)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {

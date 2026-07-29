@@ -830,8 +830,8 @@
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
-            #expect(payload.title == Self.launchTitle)
-            #expect(payload.runtimeState?.title == Self.launchTitle)
+            #expect(payload.title == Self.launchTitle, "the payload falls back to the launch title")
+            #expect(payload.runtimeState?.title == nil, "the rebuilt session has been told no title, so it reports none")
         }
     }
 

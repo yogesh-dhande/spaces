@@ -181,6 +181,36 @@
             XCTAssertEqual(events.first?.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:10:00Z"))
         }
 
+        /// A bell row reads exactly as the session's own row does — its name, then what its program is
+        /// doing — because its presence under Alerts is what says the bell rang. A state change the row
+        /// cannot otherwise show still says so ("Exited").
+        func testBellEventIsNamedAndDescribedLikeItsSessionRow() {
+            let overview = makeOverview(sessions: [
+                makeSession(
+                    id: "session-bell", title: "build box", liveTitle: "vim main.swift", state: .running, updatedAt: "2026-01-01T00:00:00Z",
+                    bellAt: "2026-01-01T00:10:00Z"),
+                makeSession(id: "session-quiet", title: "shell-1", state: .exited, updatedAt: "2026-01-01T00:00:00Z"),
+            ])
+
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+
+            let bell = events.first { $0.kind == .bell }
+            XCTAssertEqual(bell?.title, "build box")
+            XCTAssertEqual(bell?.detail, "vim main.swift")
+            XCTAssertEqual(events.first { $0.kind == .exited }?.detail, "Exited")
+        }
+
+        /// A shell that has reported no title spends no words on the bell itself.
+        func testBellEventForASilentShellCarriesNoDetail() {
+            let overview = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "shell-1", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
+            ])
+
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+
+            XCTAssertEqual(events.first?.detail, "")
+        }
+
         func testSessionWithoutBellYieldsNoBellEvent() {
             let overview = makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]
             )
@@ -566,15 +596,15 @@
                 runState: runState, canOpenTerminal: runState == .running)
         }
 
-        private func makeSession(id: String, title: String, state: TerminalSessionState, updatedAt: String, bellAt: String? = nil)
-            -> SpacesDeviceTerminalSessionSummary
-        {
+        private func makeSession(
+            id: String, title: String, liveTitle: String? = nil, state: TerminalSessionState, updatedAt: String, bellAt: String? = nil
+        ) -> SpacesDeviceTerminalSessionSummary {
             SpacesDeviceTerminalSessionSummary(
-                id: id, title: title, workingDirectory: "/repo/workspace-feature", shell: "/bin/zsh", command: nil, state: state,
-                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: "workspace-feature",
-                workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z", updatedAt: updatedAt,
-                isControlAvailable: state == .running, isSubscriptionAvailable: state == .running,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), bellAt: bellAt)
+                id: id, title: title, liveTitle: liveTitle, workingDirectory: "/repo/workspace-feature", shell: "/bin/zsh", command: nil,
+                state: state, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil,
+                workspaceID: "workspace-feature", workspaceTitle: "feature", projectID: "project-1", projectName: "Project",
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: updatedAt, isControlAvailable: state == .running,
+                isSubscriptionAvailable: state == .running, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), bellAt: bellAt)
         }
     }
 #endif

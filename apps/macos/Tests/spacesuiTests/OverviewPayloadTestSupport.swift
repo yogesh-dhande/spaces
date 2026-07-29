@@ -8,8 +8,8 @@ extension TerminalServiceDaemonStatus {
 extension SpacesDeviceOverviewPayload {
     /// Test convenience: overview fixtures under test never exercise the inline daemon status.
     init(
-        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary],
-        sessions: [SpacesDeviceTerminalSessionSummary], retainedTerminalSessionIDs: [String] = []
+        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
+        retainedTerminalSessionIDs: [String] = []
     ) {
         self.init(
             projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: retainedTerminalSessionIDs,

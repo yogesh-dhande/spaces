@@ -1161,6 +1161,42 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// The durable runtime-state row records what the program reported and nothing else. A shell that has
+    /// set no title stores none, so a reader asking what the session is doing
+    /// (`TerminalSessionCatalogEntry.liveTitle`, the sidebar's secondary text) gets nothing instead of the
+    /// session's own name echoed back beside it. `effectiveTitle` — what a pane displays — still falls back
+    /// to the launch title, which is why the two must not share one stored value.
+    func testPersistedRuntimeStateCarriesOnlyTheReportedTitle() async throws {
+        try useIsolatedSpacesProfile()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        try await TerminalEngineActor.run {
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "runtime-title-session", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.debugSetLastKnownChildPID(4242)
+
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "nothing has been reported yet")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
+
+            host.applyActionEvent(.setTitle("vim main.swift"))
+            host.debugPersistRuntimeState()
+            XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "vim main.swift")
+
+            host.applyActionEvent(.setTitle("   "))
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "a cleared title reports nothing again")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
+        }
+    }
+
     func testBlankActionValuesResetToLaunchConfigurationFallbacks() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

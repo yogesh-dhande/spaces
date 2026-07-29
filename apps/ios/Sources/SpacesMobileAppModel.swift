@@ -318,12 +318,23 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
+    /// The row's secondary text, matching the Mac sidebar: a configured row shows what it runs, an ad
+    /// hoc shell shows the title its program reported (nothing until it reports one).
     var detail: String {
+        switch source {
+        case .process, .codingAgent: command
+        case .terminal(let row): row.liveTitle ?? ""
+        case .browserSession(let row): row.detail
+        }
+    }
+
+    /// What launching this row runs. Only configured processes and coding agents are launched from a
+    /// row — an ad hoc shell already exists and a browser session opens a URL — so the rest have none.
+    var command: String {
         switch source {
         case .process(let row): row.command
         case .codingAgent(let row): row.command
-        case .terminal(let row): row.workingDirectory
-        case .browserSession(let row): row.detail
+        case .terminal, .browserSession: ""
         }
     }
 
@@ -1585,9 +1596,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
     /// rule the Mac sidebar's rename follows.
+    ///
+    /// Submitting an empty name clears an ad hoc terminal's rename, restoring the generated name it was
+    /// launched under. A config entry must keep a name, so an empty submission there is discarded.
     func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title != row.title, let target = renameTarget(for: row) else { return }
+        guard title != row.title, let target = renameTarget(for: row) else { return }
+        if title.isEmpty, case .workspaceConfig = target { return }
         await performWorkspaceMutation {
             switch target {
             case .terminalSession(let sessionID):
@@ -1711,7 +1726,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard session.rowKind == .liveSession else { return false }
         guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
         guard !query.isEmpty else { return true }
-        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title].compactMap(\.self).contains {
+        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title, session.liveTitle].compactMap(\.self).contains {
             $0.localizedStandardContains(query)
         }
     }
@@ -1743,7 +1758,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
-            id: sessionID, title: row.title, workingDirectory: row.workingDirectory, shell: "", command: nil,
+            id: sessionID, title: row.title, liveTitle: row.liveTitle, workingDirectory: row.workingDirectory, shell: "", command: nil,
             state: terminalSessionState(for: row.runState), backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
             workspaceID: row.workspaceID, workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
             projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: row.runState == .running,

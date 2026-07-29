@@ -641,6 +641,35 @@ import spacesterminalcore
         }
     }
 
+    /// Re-titles every materialized global panel window after an overview update.
+    ///
+    /// A rename (and its clearing) reaches this client only through the overview — nothing emits a
+    /// pane or metadata event for it — and only the visible workspace panel is re-titled on an
+    /// overview tick. A global panel window would otherwise keep the name it last derived until some
+    /// unrelated pane event happened to re-title it. One shared title pass covers every scope, so the
+    /// runtime-target lookup is built once per workspace rather than once per panel; a client with no
+    /// global panel open — the common case, and this runs on every sidebar rebuild — opens no pass at
+    /// all.
+    func refreshGlobalPanelTitles() {
+        let panelWindowIDs = Self.globalPanelWindowIDsNeedingOverviewTitleRefresh(panels.keys)
+        guard !panelWindowIDs.isEmpty else { return }
+        withRuntimeTargetTitlePass { for panelWindowID in panelWindowIDs { refreshTabTitles(scope: .globalWindow(panelWindowID: panelWindowID)) } }
+    }
+
+    /// Which of the coordinator's panel scopes an overview update has to re-title: the global panel
+    /// windows, in id order.
+    ///
+    /// Workspace scopes are deliberately excluded — the workspace-detail path already re-titles the
+    /// visible one in place on every overview tick, and one that is not visible is re-rendered (and so
+    /// re-titled) when it becomes visible. A global panel window has neither: it stands in its own
+    /// window that no overview update re-renders.
+    nonisolated static func globalPanelWindowIDsNeedingOverviewTitleRefresh(_ scopes: some Collection<PanelScope>) -> [String] {
+        scopes.compactMap { scope in
+            guard case .globalWindow(let panelWindowID) = scope else { return nil }
+            return panelWindowID
+        }.sorted()
+    }
+
     private func refreshTabTitles(forSessionID sessionID: String?) {
         withRuntimeTargetTitlePass {
             guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
@@ -690,18 +719,22 @@ import spacesterminalcore
         return true
     }
 
-    /// A tab is titled after its user-chosen name when set, else its first pane's
-    /// content.
+    /// A tab is titled after its user-chosen name when set, else after its selected pane —
+    /// the one the user is looking at, which in a split is the pane that last held focus
+    /// here. A tab's title therefore follows the user across a split instead of being
+    /// pinned to whichever pane happens to sit first in the tree.
     private func tabTitle(forTabID tabID: String, in layout: PanelLayout) -> String {
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return "Terminal" }
         if let custom = tab.title { return custom }
-        guard let first = PanelLayoutEngine.panes(in: tab).first, let sessionID = first.content.terminalSessionID else { return "Terminal" }
+        guard let sessionID = PanelLayoutEngine.selectedPane(in: tab)?.content.terminalSessionID else { return "Terminal" }
         return contentTitle(forSessionID: sessionID)
     }
 
     /// A pane's display title: the runtime target's name (what the sidebar row shows —
-    /// e.g. "codex", "npm:dev") when the session backs one, else the terminal's own
-    /// title.
+    /// e.g. "codex", "npm:dev", "shell-1") when the session backs one. What the program inside prints
+    /// never renames the pane; it reads as the row's secondary text in the sidebar instead. A session
+    /// no target claims — one whose workspace rows the overview no longer lists — has no name but the
+    /// terminal's own.
     private func contentTitle(forSessionID sessionID: String) -> String {
         guard let content = contentControllers[sessionID] else { return "Terminal" }
         return runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle

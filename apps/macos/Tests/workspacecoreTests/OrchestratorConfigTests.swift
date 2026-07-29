@@ -93,7 +93,10 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.kind, .shell)
         XCTAssertEqual(runtimeState.sessionID, reservation.sessionID)
         XCTAssertEqual(runtimeState.state, .starting)
-        XCTAssertEqual(runtimeState.title, reservation.title)
+        // A reserved session has run nothing, so it has reported no title. Its name lives in the launch
+        // configuration; a title stamped here would read back as a live title the shell never set.
+        XCTAssertNil(runtimeState.title)
+        XCTAssertEqual(launchConfiguration.title, reservation.title)
         XCTAssertGreaterThan(runtimeState.servicePID, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.outputPath)).count, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
@@ -947,9 +950,6 @@ extension OrchestratorTests {
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
                     state: .running, updatedAt: "now", title: "vim main.swift", workingDirectory: workspace.dir), paths: paths)
 
-            XCTAssertThrowsError(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  ")) {
-                error in XCTAssertTrue(error.localizedDescription.contains("title"))
-            }
             XCTAssertFalse(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: otherWorkspace.id, sessionID: sessionID, title: "x"))
             XCTAssertTrue(
                 try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  build watcher  "))
@@ -966,7 +966,47 @@ extension OrchestratorTests {
                     state: .running, updatedAt: "later", title: "nvim other.swift", workingDirectory: workspace.dir), paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
-            XCTAssertEqual(entry.effectiveTitle, "build watcher")
+            XCTAssertEqual(entry.name, "build watcher")
+        }
+    }
+
+    /// Clearing the name restores the generated one the session was launched under, on the session and
+    /// on the window record — which names the row only once the session is gone.
+    func testClearingAnAdHocBuiltInTerminalSessionRenameRestoresItsGeneratedName() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-clear-rename-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell-1", workingDirectory: workspace.dir,
+                    shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "now", title: "vim main.swift", workingDirectory: workspace.dir), paths: paths)
+
+            XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "build watcher"))
+            XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "   "))
+
+            XCTAssertNil(try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).userTitle)
+            let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
+            XCTAssertEqual(entry.name, "shell-1")
+            XCTAssertEqual(entry.liveTitle, "vim main.swift", "the program's title keeps describing the session; it never names it")
+            let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == "terminal-window" })
+            XCTAssertEqual(window.name, "shell-1")
         }
     }
 

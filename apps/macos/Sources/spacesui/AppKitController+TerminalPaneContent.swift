@@ -379,15 +379,10 @@ extension AppKitController {
                     status = .process(process.status)
                 case .window:
                     guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                    let window = windows[windowListIndex]
-                    if window.roleValue == .terminal {
-                        let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-                        label = fallback.label
-                        detailText = fallback.detail
-                    } else {
-                        label = window.name?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Window"
-                        detailText = window.detail?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty
-                    }
+                    let rowText = terminalFallbackRowText(
+                        name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
+                    label = rowText.label
+                    detailText = rowText.detail
                     status = .none
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { continue }

@@ -100,9 +100,11 @@ extension WorkspaceOrchestrator {
     /// terminal-session record and updates the `name` of the session's runtime-target rows so
     /// both the workspace terminal row and the session summary reflect the rename. Returns
     /// false when no ad-hoc session in the workspace matches.
+    ///
+    /// An empty (or whitespace-only) title clears the rename instead of setting one, restoring the
+    /// generated name the session was launched under — the only way back from a rename.
     @discardableResult public func renameAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String, title: String) throws -> Bool {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { throw WorkspaceError.invalidArgument(message: "Terminal session title must not be empty.") }
         // The lifecycle lock keeps the rename from re-upserting a window row that a concurrent
         // stop just deleted.
         return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
@@ -119,14 +121,20 @@ extension WorkspaceOrchestrator {
             let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
                 $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
             }
-            for window in matchingWindows {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role, orderIndex: window.orderIndex,
-                        lastSeenAt: nowISO8601()))
+            let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+            // The window record names its row only once the session is gone, so a rename writes it to
+            // outlive the session and clearing one puts back the launch-generated name the record was
+            // created with. With no session record left there is no name to restore, so it stands.
+            if let windowName = title.isEmpty ? launchConfiguration?.title : title {
+                for window in matchingWindows {
+                    try store.upsert(
+                        window: WindowRecord(
+                            id: window.id, workspaceID: window.workspaceID, app: window.app, name: windowName, detail: window.detail,
+                            targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role,
+                            orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                }
             }
-            if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
+            if launchConfiguration != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try TerminalSessionPersistence.writeUserTitle(title, sessionID: sessionID, paths: paths)
             }

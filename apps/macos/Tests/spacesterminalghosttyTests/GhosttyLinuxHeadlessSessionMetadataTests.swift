@@ -168,6 +168,24 @@
             #expect(metadataChanges.count >= 1, "a live title change must be announced as a session-metadata change")
         }
 
+        /// A shell that never sets a title reports none: the durable row and the payload's embedded runtime
+        /// state stay empty, while the payload's own title falls back to the launch name. The two must stay
+        /// distinguishable — a client showing what the session is doing beside its name would otherwise print
+        /// that name twice for every ordinary shell.
+        @Test func aSessionThatSetsNoTitleReportsNone() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let core = try await startCore(makeConfiguration(named: "metadata-untitled", script: "printf 'SETTLED\\n'"), paths: paths).value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
+            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
+            #expect(payload.title == Self.launchTitle)
+            #expect(payload.runtimeState?.title == nil)
+            #expect((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.title == nil)
+        }
+
         /// OSC 7 carries a URI, and libghostty-vt stores it unparsed, so the reported working directory
         /// must be the decoded absolute path — not the raw `file://…` payload.
         @Test func workingDirectoryFromOSC7DecodesToAnAbsolutePath() async throws {
@@ -187,7 +205,9 @@
         }
 
         /// Clearing the title returns the session to its launch-configuration title rather than
-        /// leaving the stale one in place. Both clear spellings are pinned because they surface
+        /// leaving the stale one in place — in the payload, which falls back to it. The durable row goes
+        /// back to reporting nothing at all (see `aSessionThatSetsNoTitleReportsNone`).
+        /// Both clear spellings are pinned because they surface
         /// differently at the VT layer: a whitespace-only payload reads back as a present title that
         /// normalizes to blank, while an empty payload reads back as absent — indistinguishable from a
         /// never-set title except for the change event that accompanies it. The macOS host treats both
@@ -333,8 +353,8 @@
             try await waitAsync { Self.payload(of: core)?.title == "temporary" }
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
-            #expect(payload.title == Self.launchTitle)
-            #expect(payload.runtimeState?.title == Self.launchTitle)
+            #expect(payload.title == Self.launchTitle, "the payload falls back to the launch title")
+            #expect(payload.runtimeState?.title == nil, "the runtime state reports only what the program set, and it set nothing")
         }
 
         /// A rejected OSC 7 never clears or replaces the directory an earlier accepted report
@@ -401,7 +421,7 @@
             #expect(liveBytes.withUnsafeBufferPointer { write(pty.slave, $0.baseAddress, $0.count) } == liveBytes.count)
             try await waitAsync { Self.payload(of: resumedCore)?.title == Self.launchTitle }
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
-            #expect(payload.runtimeState?.title == Self.launchTitle)
+            #expect(payload.runtimeState?.title == nil, "cleared means the program reports no title, not that it reports its launch name")
         }
 
         /// The rebuild replays the whole transcript, so every title the session ever set is re-emitted.

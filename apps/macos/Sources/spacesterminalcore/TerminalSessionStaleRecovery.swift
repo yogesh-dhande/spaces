@@ -127,7 +127,7 @@ public enum TerminalSessionStaleRecovery {
             // retract that alert as a side effect of a daemon crash recovery.
             let finalizedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: ownPID, childPID: runtimeState.childPID,
-                state: terminalState, updatedAt: nowString, exitedAt: nowString, title: runtimeState.title ?? launchConfiguration.title,
+                state: terminalState, updatedAt: nowString, exitedAt: nowString, title: runtimeState.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
                 rows: runtimeState.rows, bellAt: runtimeState.bellAt)
             // The repair is a durable write. If it cannot commit within the bounded in-place retry (a

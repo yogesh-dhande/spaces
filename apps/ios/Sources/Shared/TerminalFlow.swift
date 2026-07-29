@@ -35,7 +35,7 @@ struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
     init(row: SpacesMobileWorkspaceRuntimeRow, action: Action) {
         self.id = "\(action.idComponent):\(row.id)"
         title = row.title
-        detail = row.detail
+        detail = row.command
         systemImage = row.type.iconName
         self.action = action
         self.row = row

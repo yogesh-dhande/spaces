@@ -2919,7 +2919,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 items.append(
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):session:\(session.id):bell:\(bellAt)", icon: "terminal", iconTint: .terminal,
-                        label: session.title, detail: "Bell", shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true,
+                        // The row reads exactly as the session's sidebar row does — name, then what the
+                        // program is doing — because its presence under Alerts is what says the bell rang.
+                        label: session.title, detail: session.liveTitle, shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true,
                         eventDate: eventDate, focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
             }
             guard !items.isEmpty else { continue }
@@ -3225,8 +3227,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = staticISO8601Formatter.string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
-                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,
-                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.liveTitle, terminalTrackingID: row.sessionID,
+                role: "terminal", orderIndex: index, lastSeenAt: now)
         }
     }
 
@@ -6972,6 +6974,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    /// Row text for a terminal row: its stable name, described by the live title its program reported
+    /// (nothing when it reported none). Both arrive stripped of the `*`/`-` prefixes tracked window
+    /// names historically carried.
     nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
             of: #"^[*-]\s*"#, with: "", options: .regularExpression)
@@ -11477,25 +11482,18 @@ extension AppKitController {
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                        let window = windows[windowListIndex]
-                        let label: String
-                        let detail: String?
-                        if window.roleValue == .terminal {
-                            let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-                            label = fallback.label
-                            detail = fallback.detail
-                        } else {
-                            label = window.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Window"
-                            detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                        }
+                        let rowText = terminalFallbackRowText(
+                            name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: label, detail: detail, status: .none,
+                                kind: target.kind, label: rowText.label, detail: rowText.detail, status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
+                                // Recency is keyed off the row's name: which row was last focused must not
+                                // turn on what its program happens to be printing.
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
-                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
+                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: rowText.label)))
                     case .missingConfiguredProcess:
                         guard let processKey = target.processKey else { continue }
                         items.append(

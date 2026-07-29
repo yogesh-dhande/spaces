@@ -1757,7 +1757,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
-                        entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
+                        entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
                         hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
         }
@@ -2182,14 +2182,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
-        guard let title = normalizedString(request.title) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Provide a terminal session title.", errorCode: .invalidArgument)
-        }
-        guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title) else {
+        // An empty title clears the rename, restoring the generated name (see
+        // `SpacesDeviceTerminalSessionRenameRequest.title`).
+        let title = normalizedString(request.title)
+        guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title ?? "") else {
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.", errorCode: .invalidArgument)
         }
-        return try refreshedMutationResponse(context: context, message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
+        return try refreshedMutationResponse(
+            context: context, message: title == nil ? "Cleared terminal session name." : "Renamed terminal session.", workspaceID: workspaceID,
+            sessionID: sessionID)
     }
 
     private func handleRunWorkspaceProcessRequest(_ request: SpacesDeviceRunWorkspaceProcessRequest, context: RequestContext) throws

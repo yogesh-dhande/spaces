@@ -55,13 +55,13 @@ struct AppKitControllerAlertsBuilderTests {
         return AlertsController.FocusedBellWatch(sessionID: sessionID, since: since)
     }
 
-    private func session(id: String, workspaceID: String = "ws", title: String = "shell-1", bellAt: String? = nil)
+    private func session(id: String, workspaceID: String = "ws", title: String = "shell-1", liveTitle: String? = nil, bellAt: String? = nil)
         -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(
-            id: id, title: title, workingDirectory: "/device/ws", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil, projectID: nil,
-            projectName: nil, createdAt: "2026-06-28T09:00:00Z", updatedAt: "2026-06-28T09:00:00Z", isControlAvailable: true,
+            id: id, title: title, liveTitle: liveTitle, workingDirectory: "/device/ws", shell: "/bin/zsh", command: nil, state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil,
+            projectID: nil, projectName: nil, createdAt: "2026-06-28T09:00:00Z", updatedAt: "2026-06-28T09:00:00Z", isControlAvailable: true,
             isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession, bellAt: bellAt)
     }
 
@@ -172,6 +172,7 @@ struct AppKitControllerAlertsBuilderTests {
         #expect(item.icon == "terminal")
         #expect(item.iconTint == .terminal)
         #expect(item.label == "shell-1")
+        #expect(item.detail == nil, "a shell that has reported no title has nothing to say beside its name")
         #expect(item.attentionID == "alert:local:session:s1:bell:2026-06-28T09:00:00Z")
         if case .terminalSession(let workspaceID, let sessionID)? = item.focusRequest {
             #expect(workspaceID == "ws")
@@ -179,6 +180,19 @@ struct AppKitControllerAlertsBuilderTests {
         } else {
             Issue.record("expected a terminalSession focus request")
         }
+    }
+
+    /// A bell row reads exactly as the session's sidebar row does — its name, then what its program is
+    /// doing. Its presence under Alerts is what says the bell rang, so it never spends the row on
+    /// saying so.
+    @Test func bellAlertRowIsNamedAndDescribedLikeItsSessionRow() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", isRunning: false)],
+                sessions: [session(id: "s1", title: "build box", liveTitle: "vim main.swift", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+
+        #expect(groups[0].items[0].label == "build box")
+        #expect(groups[0].items[0].detail == "vim main.swift")
     }
 
     @Test func bellAlertIdentityIsStableAcrossBuildsAndChangesWithBellAt() {
