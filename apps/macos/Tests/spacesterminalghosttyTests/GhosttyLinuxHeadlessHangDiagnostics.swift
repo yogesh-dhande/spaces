@@ -11,6 +11,14 @@
     /// whether the terminal engine actor is still answering.
     ///
     /// Nothing here runs on the success path — a poller calls `report` only after its deadline expires.
+    ///
+    /// Known boundary, accepted: a wait whose condition itself hops onto a wedged engine actor blocks
+    /// inside the condition and never reaches its deadline, so this report does not print in that one
+    /// scenario. Restructuring every suite's poller into an independent watchdog is not worth it for a
+    /// stall that has never been observed here — from outside, the suite invocation stops producing
+    /// output, the lane's per-suite duration stamps and failure-time process dump still describe it,
+    /// and the loop workflow bounds each iteration so a wedged invocation is recorded rather than
+    /// hanging the loop.
     enum GhosttyLinuxHeadlessHangDiagnostics {
         /// The engine probe gets its own short deadline so a stalled engine actor is reported as such
         /// rather than hanging the diagnostics that exist to describe the stall.

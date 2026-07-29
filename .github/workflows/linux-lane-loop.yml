@@ -53,7 +53,12 @@ jobs:
             log="linux-lane-loop-logs/iteration-$i.log"
             started="$(date +%s)"
             status=0
-            docker run --rm --init --platform linux/amd64 \
+            # A lane invocation that never returns is one of the failure shapes this workflow hunts,
+            # so each iteration is bounded: on timeout the docker CLI dies but the container survives
+            # holding the shared build volumes, hence the named container and the rm -f, and the
+            # partial log is kept as a failed iteration instead of wedging the whole loop.
+            timeout 900 docker run --rm --init --platform linux/amd64 \
+              --name "lane-iteration-$i" \
               -v "$PWD":/workspace \
               -v spaces-linux-src:/root/src \
               -v spaces-linux-zig:/root/spaces-zig-cache \
@@ -61,10 +66,14 @@ jobs:
               -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
               swift:6.2-noble \
               bash /workspace/apps/macos/scripts/run_linux_tests.sh >"$log" 2>&1 || status=$?
+            docker rm -f "lane-iteration-$i" >/dev/null 2>&1 || true
             duration=$(( $(date +%s) - started ))
             if [ "$status" -ne 0 ]; then
               failures=$(( failures + 1 ))
               result="FAIL (exit $status)"
+              if [ "$status" -eq 124 ]; then
+                result="FAIL (timed out after ${duration}s)"
+              fi
               echo "::group::iteration $i failed — full log"
               cat "$log"
               echo "::endgroup::"
