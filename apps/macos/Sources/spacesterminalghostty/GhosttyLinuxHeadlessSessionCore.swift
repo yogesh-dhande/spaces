@@ -138,6 +138,11 @@
         // client's appearance on attach.
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
+        /// The newest resize serial accepted from each client. Resize requests travel off the client's
+        /// serialized input path, so two sizes measured in order can arrive out of order; a size older
+        /// than the one already applied would otherwise pin the session to a grid the client has left.
+        /// Cleared when the owner epoch advances, since serials are per-ownership.
+        private var lastResizeSerialByClientID: [String: UInt64] = [:]
         /// Rate-limits the durable client lease writes this core performs inline on the engine (see
         /// `touchClientLeaseIfDue`). Reset for a client on attach and detach — the only ways this core
         /// changes that client's durable row — and wholesale on termination's detach-all.
@@ -705,6 +710,19 @@
                 // The attach wrote this client's lease and revived its durable row, so any coalescing record
                 // from an earlier attachment of the same client id is void.
                 leaseTouchCoalescer.forget(clientID: client.id)
+                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner,
+                // which leaves the owner unchanged and so does not advance the epoch — while its host
+                // counts serials from zero again. Carrying the previous attachment's high-water mark across
+                // that would reject every serial the reconnected client sends and pin the session to the
+                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+                // so a resize still in flight from the PREVIOUS host of this same id could land after the
+                // reset and outrank the new host's early serials. That needs a same-process host swap with
+                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+                // stale mark and every state payload re-announces the viewport), and the alternative —
+                // carrying an attachment incarnation in every resize request — is a wire change this
+                // corner does not justify.
+                lastResizeSerialByClientID.removeValue(forKey: client.id)
                 if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -879,10 +897,18 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.", errorCode: .ownershipRejected)
             }
+            if let rejection = staleResizeSerialRejection(for: request) { return rejection }
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
             guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // Resizing to the grid the session already has is a no-op, not a reflow: reflowing would
+            // rewrite every row, bump the screen revision and push a full frame to every subscriber for
+            // a screen that did not change.
+            guard terminalSize.columns != columns || terminalSize.rows != rows else {
+                recordAcceptedResizeSerial(from: request)
+                return TerminalControlResponse(ok: true, message: "Terminal already matches the requested size.")
+            }
             // Resize transforms the LIVE renderer in place (libghostty reflow), never by
             // replaying output.log at the new size: the session already holds the accumulated
             // state, and the transcript's bytes (including any trim-time state preamble) are
@@ -898,6 +924,7 @@
             forceNextBroadcastFullRenderUpdate = true
             screenStateRevision &+= 1
             terminalSize = (columns, rows)
+            recordAcceptedResizeSerial(from: request)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
@@ -1084,7 +1111,23 @@
             return snapshot.clients.first { $0.id == ownerID }
         }
 
-        private func advanceOwnerEpoch() { ownerEpoch &+= 1 }
+        private func advanceOwnerEpoch() {
+            ownerEpoch &+= 1
+            lastResizeSerialByClientID.removeAll(keepingCapacity: true)
+        }
+
+        private func staleResizeSerialRejection(for request: TerminalControlRequest) -> TerminalControlResponse? {
+            guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return nil }
+            guard let lastResizeSerial = lastResizeSerialByClientID[clientID], resizeSerial <= lastResizeSerial else { return nil }
+            return TerminalControlResponse(
+                ok: false, message: "Ignoring stale resize serial \(resizeSerial); latest accepted serial is \(lastResizeSerial).",
+                errorCode: .ownershipRejected)
+        }
+
+        private func recordAcceptedResizeSerial(from request: TerminalControlRequest) {
+            guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return }
+            lastResizeSerialByClientID[clientID] = resizeSerial
+        }
 
         private func markLocalOwnerCommandInputOutputResyncPending() {
             guard activeOwnerClient()?.kind == .localWindow else { return }

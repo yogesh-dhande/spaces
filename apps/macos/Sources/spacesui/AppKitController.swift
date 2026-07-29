@@ -6242,6 +6242,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
+        // Sized before it joins the window: a terminal pane inside rebuilds its evicted mirror surface
+        // during `addSubview` and forces a layout pass from there, which is ahead of the edge
+        // constraints below. Without a plausible frame that pass solves the panel to its fitting size
+        // and the pane measures a grid a fraction of the real one.
+        panelView.frame = detailContainer.bounds
         detailContainer.addSubview(panelView)
         NSLayoutConstraint.activate([
             panelView.topAnchor.constraint(equalTo: detailContainer.topAnchor),
