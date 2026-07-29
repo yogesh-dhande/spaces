@@ -123,6 +123,53 @@ typedef struct {
     uint32_t palette_rgb[16];
 } SpacesGhosttyVtTheme;
 
+// Upper bound on one turn's buffered OSC 52 payload. A clipboard write larger than this is dropped
+// rather than buffered, so a runaway program cannot make the session's event sink grow without bound.
+enum {
+    SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES = 1 * 1024 * 1024,
+};
+
+// What the terminal's effect callbacks observed since the last drain. libghostty-vt invokes those
+// callbacks synchronously inside `ghostty_terminal_vt_write`, so they only record here; the caller
+// drains once per write turn and acts on the engine.
+typedef struct {
+    // TITLE_CHANGED fired this turn; the value is read back via `spaces_ghostty_vt_session_title`.
+    // The flag is what distinguishes an explicit clear (the getter reports absent BECAUSE the program
+    // emitted an empty OSC 2) from a value that was never set — the getter alone cannot say which.
+    bool title_changed;
+    // PWD_CHANGED fired this turn; the value is read back via `spaces_ghostty_vt_session_pwd`. Same
+    // explicit-clear semantics as `title_changed`.
+    bool pwd_changed;
+    uint32_t bell_count;
+    // The last standard-location `text/plain` write of this turn, malloc'd, NULL when none arrived.
+    char *clipboard_text;
+    size_t clipboard_len;
+    // The program asked for the destination to be cleared (a write carrying no representations).
+    bool clipboard_cleared;
+    // A write was refused: over the byte cap, a non-standard destination, or no `text/plain`
+    // representation.
+    bool clipboard_dropped;
+    // Query responses (DSR, DECRQM, color reports, XTVERSION) concatenated in emission order, malloc'd.
+    char *pty_response;
+    size_t pty_response_len;
+} SpacesGhosttyVtSessionEvents;
+
+// Registers the terminal's effect callbacks against this session, so subsequent writes accumulate
+// events into the session's sink. Returns false when the library predates the option API.
+//
+// Opt-in on purpose. A session that replays historical bytes — transcript rendering, scrollback for an
+// ended run, trim preambles — must NEVER enable events: every bell and clipboard write the transcript
+// ever carried would fire again, alerting on output the user already saw. Only a session driving a
+// live PTY enables them, and only once its startup replay is complete.
+bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session);
+
+// Moves the accumulated events out of the session and resets its sink. The caller takes ownership of
+// the malloc'd buffers and must release them with `spaces_ghostty_vt_session_events_free`.
+void spaces_ghostty_vt_session_drain_events(SpacesGhosttyVtSession *session, SpacesGhosttyVtSessionEvents *out_events);
+
+// Releases the buffers a drained event record owns and zeroes it.
+void spaces_ghostty_vt_session_events_free(SpacesGhosttyVtSessionEvents *events);
+
 // `theme` is optional: pass NULL to keep libghostty-vt's built-in default palette.
 SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
     uint16_t columns,

@@ -125,14 +125,6 @@
         /// deliberately does not restore titles.
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
-        /// Whether THIS vt session has ever reported a title / working directory. The VT layer
-        /// reports "never set" and "explicitly cleared" identically (as absent), so the cache is
-        /// cleared only once the current vt session has reported the value as present: a rebuilt
-        /// session replaying a trimmed transcript reports absent for values the program never
-        /// re-emitted, and that absence must not erase a cache that deliberately outlived the
-        /// rebuild. Reset whenever a replacement vt session is swapped in.
-        private var vtSessionHasReportedTitle = false
-        private var vtSessionHasReportedWorkingDirectory = false
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
         // The Spaces theme appearance the vt session is currently themed for. The headless daemon
         // cannot read the client's OS appearance, so it defaults to dark and adopts the attaching
@@ -187,6 +179,9 @@
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
             self.vtSession = vtSession
+            // A fresh session replays nothing, so every event it raises from here on belongs to live
+            // output the user is watching.
+            _ = spaces_ghostty_vt_session_enable_events(vtSession)
             started = true
             terminating = false
             writeRuntimeState(state: .starting)
@@ -419,9 +414,14 @@
                 do {
                     _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
                 } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8)) }
-                // The replayed suffix is output this still-live vt session never saw, so it may carry a
-                // title or pwd newer than the cache.
-                refreshSessionMetadata()
+                // The replayed suffix is output this still-live (and still events-enabled) vt session
+                // never saw, so it may carry a title or pwd newer than the cache, and queries the
+                // program is still blocked on. Those are applied and answered. The bells and clipboard
+                // writes the same suffix raised are dropped: they are as old as the handoff window, so
+                // alerting on them would be alerting on output the user already scrolled past.
+                let events = drainSessionEvents()
+                applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+                sendQueryResponses(events.ptyResponse)
             }
             do { try openOutputHandlePreservingTranscript() } catch {
                 FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8))
@@ -519,7 +519,9 @@
                 attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
             _ = appendTranscript(data)
             writeVTRenderer(data)
-            let metadataChanged = refreshSessionMetadata()
+            let events = drainSessionEvents()
+            let metadataChanged = applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+            sendQueryResponses(events.ptyResponse)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
             // After the output broadcast: that payload carries the screen frame, this one carries no
@@ -1052,59 +1054,95 @@
             screenStateRevision &+= 1
         }
 
-        /// Folds the vt session's escape-sequence-set title (OSC 0/2) and working directory (OSC 7)
-        /// into the cached metadata every runtime state and state payload echoes, and reports whether
-        /// either changed. Called right after the bytes reach the vt session so the runtime state the
-        /// caller then writes and broadcasts already carries the new values.
+        /// One output turn's terminal events, drained from the vt session's event sink. The sink also
+        /// records bells and clipboard writes; this core does not consume those, so the drain releases
+        /// them along with the rest of the record.
+        private struct SessionEvents {
+            var titleChanged = false
+            var pwdChanged = false
+            var ptyResponse = Data()
+        }
+
+        /// Takes the events the vt session accumulated during the writes since the last drain. The C
+        /// sink hands over ownership of its buffers, which are released once copied into Swift values.
+        private func drainSessionEvents() -> SessionEvents {
+            guard let vtSession else { return SessionEvents() }
+            var raw = SpacesGhosttyVtSessionEvents()
+            spaces_ghostty_vt_session_drain_events(vtSession, &raw)
+            defer { spaces_ghostty_vt_session_events_free(&raw) }
+            var events = SessionEvents(titleChanged: raw.title_changed, pwdChanged: raw.pwd_changed)
+            if let response = raw.pty_response, raw.pty_response_len > 0 { events.ptyResponse = Data(bytes: response, count: raw.pty_response_len) }
+            return events
+        }
+
+        /// Writes the terminal's own replies to the program's queries (cursor position, mode reports,
+        /// color reports, XTVERSION) back to the PTY. These go straight to the driver rather than
+        /// through `controlInputSequencer`: that sequencer exists to order USER input against submits,
+        /// and a reply the program is synchronously blocked reading must not queue behind typing.
+        private func sendQueryResponses(_ bytes: Data) {
+            guard !bytes.isEmpty else { return }
+            ptyDriver.sendRawBytes(bytes)
+        }
+
+        /// Folds the title (OSC 0/2) and working directory (OSC 7) the just-written bytes reported into
+        /// the cached metadata every runtime state and state payload echoes, and reports whether either
+        /// changed. Called right after the bytes reach the vt session so the runtime state the caller
+        /// then writes and broadcasts already carries the new values.
         ///
-        /// An absent value clears the cache (falling back to the launch configuration — that is how
-        /// a program resets its title with an empty OSC 2 payload) only after THIS vt session has
-        /// reported the value as present, because the VT layer cannot distinguish "cleared" from
-        /// "never set": a session rebuilt from a trimmed transcript reports absent for values the
-        /// replay never re-emitted, and those must keep the cache the rebuild deliberately preserved.
-        /// A stored OSC 7 payload that fails the decode (foreign host, unknown scheme, not a URI) is
+        /// Each getter is read only when its event fired, which is what makes an absent value
+        /// unambiguous: the program emitted an empty payload, so the cache clears and the session falls
+        /// back to its launch-configuration value. Without the event, absent would equally mean "never
+        /// set", which is what a session rebuilt from a trimmed transcript reports.
+        ///
+        /// A reported OSC 7 payload that fails the decode (foreign host, unknown scheme, not a URI) is
         /// ignored outright and the previously accepted directory stands, matching the surface path,
         /// where a rejected OSC 7 never reaches the app.
         ///
-        /// This polls final VT state once per output turn rather than observing per-escape-sequence
-        /// events (libghostty-vt exposes no metadata event stream), and the misses that follow from
-        /// that are accepted: a valid report followed in the SAME delivery by a rejected one is never
-        /// seen, and an explicit clear reaching a rebuilt vt session that has not re-reported the
-        /// value first — whether replayed from a handoff window or arriving live — reads back
-        /// identically to never-set and is refused. All of these self-heal on the program's next
-        /// report, and the action-event half of #338 is the structural fix.
-        @discardableResult private func refreshSessionMetadata() -> Bool {
+        /// The event says a value was reported, not what it was — the value is read back from the vt
+        /// session — so several reports of the same kind inside one write collapse to the last one.
+        @discardableResult private func applyMetadataEvents(titleChanged: Bool, pwdChanged: Bool) -> Bool {
             guard let vtSession else { return false }
             var changed = false
 
-            let rawTitle = Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) }
-            if rawTitle != nil { vtSessionHasReportedTitle = true }
-            if let title = rawTitle.flatMap({ Self.normalizedSessionMetadataValue($0) }) {
+            if titleChanged {
+                // A whitespace-only payload normalizes to nil and clears, same as an empty one — the
+                // macOS host also treats a whitespace-only title as cleared.
+                let title = Self.normalizedSessionMetadataValue(Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) })
                 if currentTitle != title {
                     currentTitle = title
                     changed = true
                 }
-            } else if vtSessionHasReportedTitle, currentTitle != nil {
-                // Reached both for an observed present→absent transition and for a stored title that
-                // normalizes to blank — the macOS host also treats a whitespace-only title as cleared.
-                currentTitle = nil
-                changed = true
             }
 
-            let rawWorkingDirectory = Self.copyShimString { spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }
-            if rawWorkingDirectory != nil { vtSessionHasReportedWorkingDirectory = true }
-            if let rawWorkingDirectory {
-                if let workingDirectory = Self.normalizedSessionMetadataValue(TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory)),
-                    currentWorkingDirectory != workingDirectory
-                {
-                    currentWorkingDirectory = workingDirectory
+            if pwdChanged {
+                if let rawWorkingDirectory = Self.copyShimString({ spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }) {
+                    if let workingDirectory = Self.normalizedSessionMetadataValue(
+                        TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory)), currentWorkingDirectory != workingDirectory
+                    {
+                        currentWorkingDirectory = workingDirectory
+                        changed = true
+                    }
+                } else if currentWorkingDirectory != nil {
+                    currentWorkingDirectory = nil
                     changed = true
                 }
-            } else if vtSessionHasReportedWorkingDirectory, currentWorkingDirectory != nil {
-                currentWorkingDirectory = nil
-                changed = true
             }
             return changed
+        }
+
+        /// Rebuild path: adopts whatever title and working directory the replacement session's replay
+        /// re-established. Never clears — a replay that does not re-emit an escape sequence says nothing
+        /// about the value, and the cache it would erase is exactly the one the rebuild preserves.
+        private func seedMetadataFromVTSession() {
+            guard let vtSession else { return }
+            if let title = Self.normalizedSessionMetadataValue(Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) }) {
+                currentTitle = title
+            }
+            if let rawWorkingDirectory = Self.copyShimString({ spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }),
+                let workingDirectory = Self.normalizedSessionMetadataValue(TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory))
+            {
+                currentWorkingDirectory = workingDirectory
+            }
         }
 
         /// Announces a title/working-directory change under its own reason. `TerminalRemoteSessionStateNotificationRouting`
@@ -1156,11 +1194,12 @@
                 }
                 if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
                 vtSession = replacementSession
-                vtSessionHasReportedTitle = false
-                vtSessionHasReportedWorkingDirectory = false
                 // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
                 // keep the cached values when the replay never re-emits the escape sequences.
-                refreshSessionMetadata()
+                seedMetadataFromVTSession()
+                // Events are enabled only AFTER the replay above, so the historical bells and clipboard
+                // writes the transcript carries do not fire a second time.
+                _ = spaces_ghostty_vt_session_enable_events(replacementSession)
                 renderUpdateBaseline = nil
                 forceNextBroadcastFullRenderUpdate = true
                 if replayedOutput { screenStateRevision &+= 1 }
