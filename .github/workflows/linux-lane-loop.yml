@@ -4,13 +4,18 @@
 # is resolved.
 name: Linux lane loop (#371)
 
+# The push trigger is what actually runs this: GitHub only registers workflow_dispatch workflows
+# from the default branch, and this file never lands there. Each push to the diagnosis branch is a
+# loop run; once one has run, manual dispatch against the branch works too.
 on:
   workflow_dispatch:
     inputs:
       iterations:
         description: How many times to run the Linux unit-test lane
         required: false
-        default: "10"
+        default: "20"
+  push:
+    branches: [linux-lane-pty-hang-diagnostics]
 
 jobs:
   loop:
@@ -39,7 +44,8 @@ jobs:
       - name: Loop the Linux unit-test lane
         run: |
           set -uo pipefail
-          iterations='${{ inputs.iterations }}'
+          # Empty on push runs, which carry no inputs.
+          iterations='${{ inputs.iterations || '20' }}'
           mkdir -p linux-lane-loop-logs
           failures=0
           summary=""
