@@ -51,8 +51,28 @@ public enum GhosttyTerminalSnapshotViewport {
             cursorRow: min(max(snapshot.cursorRow - rowOffset, 0), max(rows - 1, 0)),
             cursorVisible: snapshot.cursorVisible && snapshot.cursorColumn >= columnOffset && snapshot.cursorColumn < columnOffset + columns
                 && snapshot.cursorRow >= rowOffset && snapshot.cursorRow < rowOffset + rows, defaultForegroundRGB: snapshot.defaultForegroundRGB,
-            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells, mouseReportingActive: snapshot.mouseReportingActive,
-            mouseShiftCapture: snapshot.mouseShiftCapture)
+            defaultBackgroundRGB: snapshot.defaultBackgroundRGB, cells: cells,
+            clusters: croppedCellText(
+                snapshot.clusters, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
+            linkURLs: croppedCellText(
+                snapshot.linkURLs, sourceColumns: snapshot.columns, columnOffset: columnOffset, rowOffset: rowOffset, columns: columns, rows: rows),
+            mouseReportingActive: snapshot.mouseReportingActive, mouseShiftCapture: snapshot.mouseShiftCapture)
+    }
+
+    /// Rebases a cell-text table into the cropped grid's coordinates, dropping entries for cells the crop
+    /// leaves out. Walking the entries rather than the cells keeps a crop of a plain-text frame free.
+    private static func croppedCellText(_ table: [Int: String], sourceColumns: Int, columnOffset: Int, rowOffset: Int, columns: Int, rows: Int)
+        -> [Int: String]
+    {
+        guard !table.isEmpty, sourceColumns > 0 else { return [:] }
+        var cropped: [Int: String] = [:]
+        for (sourceIndex, text) in table {
+            let row = sourceIndex / sourceColumns - rowOffset
+            let column = sourceIndex % sourceColumns - columnOffset
+            guard row >= 0, row < rows, column >= 0, column < columns else { continue }
+            cropped[row * columns + column] = text
+        }
+        return cropped
     }
 
     public static func window(

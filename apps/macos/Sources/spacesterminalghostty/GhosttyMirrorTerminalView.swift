@@ -869,32 +869,48 @@
             guard frame.version == GhosttyRenderFrame.currentVersion else { return false }
             let snapshot = frame.snapshot
             guard snapshot.columns > 0, snapshot.rows > 0, snapshot.columns <= Int(UInt16.max), snapshot.rows <= Int(UInt16.max) else { return false }
+            // The C cell's link fields are export-only — applying a snapshot ignores them — so they
+            // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
+            // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
+            // itself a URL renders as plain text (#373 tracks hit-testing or surface apply).
             var cells = snapshot.cells.map { cell in
                 ghostty_terminal_snapshot_cell_s(
-                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags)
+                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags,
+                    grapheme_extra_len: 0, grapheme_extras: nil, link_index: 0)
             }
-            return cells.withUnsafeMutableBufferPointer { buffer in
-                var cSnapshot = ghostty_terminal_snapshot_s()
-                cSnapshot.columns = UInt16(snapshot.columns)
-                cSnapshot.rows = UInt16(snapshot.rows)
-                cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                cSnapshot.cursor_visible = snapshot.cursorVisible
-                cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
-                cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
-                cSnapshot.cell_count = buffer.count
-                cSnapshot.cells = buffer.baseAddress
+            // The frame's clusters live in one buffer the cells point into, so they stay alive for
+            // exactly the span of the C call and no cell owns memory Ghostty would have to free.
+            var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
+            return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
+                if let base = extras.baseAddress {
+                    for placement in clusterExtras.placements {
+                        cells[placement.cellIndex].grapheme_extra_len = UInt16(placement.count)
+                        cells[placement.cellIndex].grapheme_extras = base + placement.offset
+                    }
+                }
+                return cells.withUnsafeMutableBufferPointer { buffer in
+                    var cSnapshot = ghostty_terminal_snapshot_s()
+                    cSnapshot.columns = UInt16(snapshot.columns)
+                    cSnapshot.rows = UInt16(snapshot.rows)
+                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                    cSnapshot.cursor_visible = snapshot.cursorVisible
+                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                    cSnapshot.cell_count = buffer.count
+                    cSnapshot.cells = buffer.baseAddress
 
-                var cFrame = ghostty_render_frame_s()
-                cFrame.version = UInt32(frame.version)
-                cFrame.session_revision = frame.sessionRevision ?? 0
-                cFrame.owner_epoch = frame.ownerEpoch
-                cFrame.columns = UInt16(snapshot.columns)
-                cFrame.rows = UInt16(snapshot.rows)
-                cFrame.snapshot = cSnapshot
-                return withUnsafePointer(to: &cFrame, body)
+                    var cFrame = ghostty_render_frame_s()
+                    cFrame.version = UInt32(frame.version)
+                    cFrame.session_revision = frame.sessionRevision ?? 0
+                    cFrame.owner_epoch = frame.ownerEpoch
+                    cFrame.columns = UInt16(snapshot.columns)
+                    cFrame.rows = UInt16(snapshot.rows)
+                    cFrame.snapshot = cSnapshot
+                    return withUnsafePointer(to: &cFrame, body)
+                }
             }
         }
 
@@ -1060,6 +1076,9 @@
         /// Text read back from the live mirror surface, ignoring the retained frame and text cache, so
         /// a test can tell an actually repainted surface from a remembered one. Nil with no mirror.
         var debugMirrorSurfaceText: String? { GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()) }
+        /// The snapshot the live mirror surface exports, so a test can read back the cell state the
+        /// surface actually holds rather than the frame that was handed to it. Nil with no mirror.
+        var debugMirrorSurfaceSnapshot: GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(mirrorSurface()) }
         /// Whether the live surface holds a selection. Selection lives in the surface and cannot
         /// outlive it, so a test can tell a pane that kept its surface from one whose surface was
         /// freed and rebuilt underneath it.

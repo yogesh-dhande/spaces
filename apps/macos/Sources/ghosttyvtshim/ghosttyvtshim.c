@@ -492,9 +492,19 @@ static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const
     session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
 }
 
+// Releases a cell buffer along with the per-cell grapheme clusters it owns. Every path that abandons
+// a partially filled buffer must go through this, not a bare free(), or the clusters leak.
+static void spaces_ghostty_vt_free_cells(SpacesGhosttyVtSnapshotCell *cells, size_t cell_count) {
+    if (cells == NULL) return;
+    for (size_t index = 0; index < cell_count; index++) {
+        if (cells[index].grapheme_extras != NULL) free(cells[index].grapheme_extras);
+    }
+    free(cells);
+}
+
 static void spaces_ghostty_vt_snapshot_reset(SpacesGhosttyVtSnapshot *snapshot) {
     if (snapshot == NULL) return;
-    if (snapshot->cells != NULL) free(snapshot->cells);
+    spaces_ghostty_vt_free_cells(snapshot->cells, snapshot->cell_count);
     memset(snapshot, 0, sizeof(*snapshot));
 }
 
@@ -566,12 +576,15 @@ static void spaces_ghostty_vt_fill_default_cells(
     uint32_t foreground_rgb,
     uint32_t background_rgb
 ) {
+    // Only ever called on cells the row iterator has not visited, so no cluster can be dropped here.
     if (cells == NULL || end <= start) return;
     for (size_t index = start; index < end; index++) {
         cells[index].codepoint = 0;
         cells[index].foreground_rgb = foreground_rgb;
         cells[index].background_rgb = background_rgb;
         cells[index].flags = 0;
+        cells[index].grapheme_extra_len = 0;
+        cells[index].grapheme_extras = NULL;
     }
 }
 
@@ -994,7 +1007,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     }
 
     if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
-        free(cells);
+        spaces_ghostty_vt_free_cells(cells, cell_count);
         return false;
     }
 
@@ -1007,7 +1020,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 &session->row_cells
             ) != GHOSTTY_SUCCESS
         ) {
-            free(cells);
+            spaces_ghostty_vt_free_cells(cells, cell_count);
             return false;
         }
 
@@ -1020,11 +1033,19 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             GhosttyColorRgb foreground = colors.foreground;
             GhosttyColorRgb background = colors.background;
             uint32_t codepoint = 0;
+            uint32_t grapheme_len = 0;
 
             session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw_cell);
             session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
             session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
             session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+            if (
+                session->symbols.row_cells_get(
+                    session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &grapheme_len
+                ) != GHOSTTY_SUCCESS
+            ) {
+                grapheme_len = 0;
+            }
             if (
                 session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &foreground) !=
                 GHOSTTY_SUCCESS
@@ -1036,6 +1057,31 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 GHOSTTY_SUCCESS
             ) {
                 background = colors.background;
+            }
+
+            // GRAPHEMES_BUF writes the full reported graphemes_len elements (base first, then the
+            // extras), so the buffer is sized from that exact count; the cap keeps it on the stack and
+            // keeps one cell from driving an unbounded copy. A cluster the library reports but declines
+            // to write leaves the cell at its base codepoint alone, the same degradation the preamble
+            // painter takes.
+            if (grapheme_len > 1 && grapheme_len <= SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS) {
+                uint32_t cluster[SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS];
+                if (
+                    session->symbols.row_cells_get(
+                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cluster
+                    ) == GHOSTTY_SUCCESS
+                ) {
+                    uint16_t extra_len = (uint16_t)(grapheme_len - 1);
+                    uint32_t *extras = (uint32_t *)malloc((size_t)extra_len * sizeof(uint32_t));
+                    if (extras == NULL) {
+                        spaces_ghostty_vt_free_cells(cells, cell_count);
+                        return false;
+                    }
+                    memcpy(extras, cluster + 1, (size_t)extra_len * sizeof(uint32_t));
+                    codepoint = cluster[0];
+                    cells[cell_index].grapheme_extra_len = extra_len;
+                    cells[cell_index].grapheme_extras = extras;
+                }
             }
 
             cells[cell_index].codepoint = codepoint;
