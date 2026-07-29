@@ -67,6 +67,7 @@
                 lines.append("    status: \(statusSummary(pid: pid))")
                 lines.append("    wchan: \(readTrimmed("/proc/\(pid)/wchan") ?? "(unavailable)")")
                 lines.append("    cmdline: \(cmdline(pid: pid))")
+                lines.append(contentsOf: syscallLines(pid: pid))
             }
             if !found { lines.append("  (none)") }
             return lines
@@ -84,6 +85,115 @@
         private static func cmdline(pid: Int32) -> String {
             guard let data = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline"), !data.isEmpty else { return "(empty)" }
             return String(decoding: data, as: UTF8.self).split(separator: "\0").joined(separator: " ")
+        }
+
+        // MARK: - Where the child is blocked
+
+        /// The child's userspace program counter, resolved to a mapped file. `wchan` names the kernel
+        /// function a task is parked in (`futex_do_wait` for every lock wait alike); the pc names the
+        /// *library* whose lock it is, which is what separates a glibc allocator/loader lock from a Swift
+        /// runtime or libdispatch one in the fork-without-exec shape this issue keeps hitting.
+        ///
+        /// `/proc/<pid>/syscall` is a ptrace-mode read, and Yama's default `ptrace_scope=1` grants it to
+        /// the target's parent — which the test process is for every child it reports — so no capability
+        /// or ptrace attach is needed.
+        ///
+        /// The pc lands mid-function, so the printed `path+0x<offset>` is deliberately relative to the
+        /// mapping start with the mapping's own file offset folded in: that is the file-relative virtual
+        /// address to hand to `addr2line -e <path>` / `nm` against the same build, offline.
+        private static func syscallLines(pid: Int32) -> [String] {
+            guard let contents = readProcFile("/proc/\(pid)/syscall") else {
+                return ["    syscall: (unreadable: \(String(cString: strerror(errno))))"]
+            }
+            let raw = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lines = ["    syscall: \(raw)"]
+            // Blocked in a syscall the kernel prints as "<nr> <arg1..arg6> <sp> <pc>". A task that is on
+            // a CPU prints "running", and one whose registers are unavailable prints a three-field
+            // "-1 <sp> <pc>" form; neither carries the arguments, so those stop at the raw line.
+            let fields = raw.split(separator: " ").map(String.init)
+            guard fields.count == 9, let pc = hexValue(fields[8]), let argument = hexValue(fields[1]) else {
+                return lines + ["    syscall-resolved: (no argument frame: \(fields.count == 1 ? raw : "\(fields.count)-field form"))"]
+            }
+            let mappings = memoryMappings(pid: pid)
+            // arg0 is the futex word address when the child is in a futex wait (the shape issue #371
+            // captures), which tells apart a lock inside a mapped library from one on the heap or stack.
+            var resolved =
+                lines + [
+                    "    syscall-resolved: nr=\(fields[0]) pc=\(describe(address: pc, in: mappings))"
+                        + "  arg0=\(describe(address: argument, in: mappings))"
+                ]
+            // A pc outside every mapping is either genuine (a JIT/translation region the kernel reports
+            // as anonymous) or the signature of a maps read that stopped early, which would silently
+            // drop exactly the high-address library mappings a lock is most likely to sit in. Printing
+            // the table's size and ceiling makes the difference between the two readable in the log.
+            if mapping(containing: pc, in: mappings) == nil {
+                let highest = mappings.map(\.end).max().map { "0x" + String($0, radix: 16) } ?? "(none)"
+                resolved.append("    maps: \(mappings.count) mappings parsed, highest end \(highest)")
+            }
+            return resolved
+        }
+
+        /// One `/proc/<pid>/maps` row, reduced to what address resolution needs.
+        private struct MemoryMapping {
+            let start: UInt64
+            let end: UInt64
+            let fileOffset: UInt64
+            let name: String
+        }
+
+        private static func memoryMappings(pid: Int32) -> [MemoryMapping] {
+            guard let contents = readProcFile("/proc/\(pid)/maps") else { return [] }
+            return contents.split(separator: "\n").compactMap { line in
+                // "<start>-<end> <perms> <file offset> <dev> <inode> <pathname>", the pathname column
+                // blank-padded and absent for anonymous mappings.
+                let fields = line.split(separator: " ").map(String.init)
+                guard fields.count >= 5 else { return nil }
+                let bounds = fields[0].split(separator: "-").map(String.init)
+                guard bounds.count == 2, let start = UInt64(bounds[0], radix: 16), let end = UInt64(bounds[1], radix: 16),
+                    let fileOffset = UInt64(fields[2], radix: 16)
+                else { return nil }
+                return MemoryMapping(
+                    start: start, end: end, fileOffset: fileOffset, name: fields.count > 5 ? fields[5...].joined(separator: " ") : "[anon]")
+            }
+        }
+
+        private static func describe(address: UInt64, in mappings: [MemoryMapping]) -> String {
+            let raw = "0x" + String(address, radix: 16)
+            guard let mapping = mapping(containing: address, in: mappings) else {
+                return mappings.isEmpty ? "\(raw) -> (maps unavailable)" : "\(raw) -> (unmapped)"
+            }
+            let offset = address - mapping.start
+            return "\(raw) -> \(mapping.name)+0x\(String(offset, radix: 16)) (file off 0x\(String(mapping.fileOffset + offset, radix: 16)))"
+        }
+
+        private static func mapping(containing address: UInt64, in mappings: [MemoryMapping]) -> MemoryMapping? {
+            mappings.first { address >= $0.start && address < $0.end }
+        }
+
+        private static func hexValue(_ field: String) -> UInt64? { UInt64(field.hasPrefix("0x") ? String(field.dropFirst(2)) : field, radix: 16) }
+
+        /// Reads a `/proc` file to EOF with an explicit read loop. These files are generated per read
+        /// rather than stored, and a single read returns only what the kernel produced for that call, so
+        /// a one-shot convenience read of a large one truncates. `maps` is where that bites: a forked
+        /// child inherits the test runner's whole address space (hundreds of mappings), and a short read
+        /// drops the tail — the high-address library mappings that a blocked pc is most likely to land
+        /// in — leaving the resolution silently reporting "unmapped" rather than naming the library.
+        private static func readProcFile(_ path: String) -> String? {
+            let descriptor = open(path, O_RDONLY | O_CLOEXEC)
+            guard descriptor >= 0 else { return nil }
+            defer { close(descriptor) }
+            var contents = Data()
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                let count = buffer.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
+                if count > 0 {
+                    contents.append(contentsOf: buffer[0..<count])
+                } else if count == 0 {
+                    return String(decoding: contents, as: UTF8.self)
+                } else if errno != EINTR {
+                    return nil
+                }
+            }
         }
 
         // MARK: - System state
