@@ -89,7 +89,7 @@ extension TerminalSessionPaneViewController {
             state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
             searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
-            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: takeoverTask != nil,
+            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: isTakeoverAttemptPending,
             takeoverButtonVisible: !takeoverButton.isHidden, takeoverButtonEnabled: takeoverButton.isEnabled,
             takeoverMessage: takeoverMessageLabel.stringValue)
     }
@@ -105,13 +105,13 @@ extension TerminalSessionPaneViewController {
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
     func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
-    /// Suspends until every attach/detach control send issued so far has run, so a test can assert on
-    /// what reached the daemon without polling. Attach and detach are deliberately off-main sends;
-    /// their ordering guarantee is exactly this queue, so awaiting it is how a test observes both.
+    /// Suspends until every attach, detach, and takeover control send issued so far has run, so a test
+    /// can assert on what reached the daemon without polling. All three are deliberately off-main
+    /// sends; their ordering guarantee is exactly this queue, so awaiting it is how a test observes it.
     func debugAwaitPendingClientControl() async { await clientControlQueue.drain() }
     public var clientID: String { client.id }
-    var debugTakeoverPending: Bool { takeoverTask != nil }
-    func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
+    var debugTakeoverPending: Bool { isTakeoverAttemptPending }
+    func debugSetTakeoverAttemptStartedAt(_ date: Date?) { takeoverAttemptStartedAt = date }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }
