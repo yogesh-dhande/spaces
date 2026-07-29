@@ -127,29 +127,43 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let command = Self.execCommand(for: launchConfiguration)
         #if os(macOS)
             let terminfoDirectoryPath = try Self.resolvedTerminfoDirectoryPath()
+            let environmentOverrides: [(key: String, value: String)] = [
+                ("TERM", "xterm-ghostty"), ("TERMINFO", terminfoDirectoryPath), ("COLORTERM", "truecolor"),
+            ]
+        #else
+            let environmentOverrides: [(key: String, value: String)] = [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
         #endif
+        // Everything the child needs is materialized here, in the parent: C strings for the
+        // executable, argv, the child's full environment, and the working directory, plus the
+        // fd-close bound. See the child block below for why none of it may be built after the fork.
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
         var arguments = command.arguments.map { strdup($0) } + [nil]
+        var childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides).map { strdup($0) } + [nil]
+        let workingDirectory = launchConfiguration.workingDirectory.isEmpty ? nil : strdup(launchConfiguration.workingDirectory)
+        let fileDescriptorUpperBound = Self.inheritedFileDescriptorUpperBoundForExec()
         defer {
             free(executable)
             for argument in arguments { if let argument { free(argument) } }
+            for entry in childEnvironment { if let entry { free(entry) } }
+            if let workingDirectory { free(workingDirectory) }
         }
 
         let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
+            // ASYNC-SIGNAL-SAFE ONLY, from here to `execve`. This is the child of a fork taken from a
+            // heavily multithreaded process: it inherits copies of the parent's malloc arena and environ
+            // locks, and if a fork lands while another parent thread holds one, the child owns a locked
+            // mutex whose owner does not exist in it. Anything that allocates then blocks forever —
+            // building a Swift String/Array/Set, `setenv`/`unsetenv`, Foundation, even bridging a Swift
+            // String to a C string. That is precisely the observed failure: a never-exec'd copy of the
+            // daemon parked in `futex_wait` with zero CPU time and a 0-byte transcript. The environment,
+            // argv, working directory, and fd bound are precomputed in the parent for this reason —
+            // do not move any of that work back down here.
             Self.resetSignalDispositionsForExec()
-            Self.scrubInheritedEnvironmentForExec()
-            Self.closeInheritedFileDescriptorsForExec()
-            if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
-            #if os(macOS)
-                setenv("TERM", "xterm-ghostty", 1)
-                setenv("TERMINFO", terminfoDirectoryPath, 1)
-            #else
-                setenv("TERM", "xterm-256color", 1)
-            #endif
-            setenv("COLORTERM", "truecolor", 1)
-            execv(executable, &arguments)
+            if fileDescriptorUpperBound > 3 { for fd in Int32(3)..<fileDescriptorUpperBound { _ = close(fd) } }
+            if let workingDirectory { _ = chdir(workingDirectory) }
+            execve(executable, &arguments, &childEnvironment)
             _exit(127)
         }
 
@@ -701,32 +715,49 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         #endif
     }
 
-    private static func closeInheritedFileDescriptorsForExec() {
+    /// Upper bound for the child's fd-close sweep, resolved in the parent because `sysconf` is not
+    /// async-signal-safe and so must not be called between `forkpty` and `execve`.
+    private static func inheritedFileDescriptorUpperBoundForExec() -> Int32 {
         let rawLimit = sysconf(Int32(_SC_OPEN_MAX))
-        let upperBound = rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
-        guard upperBound > 3 else { return }
-        for fd in Int32(3)..<upperBound { _ = close(fd) }
+        return rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
     }
 
-    private static func scrubInheritedEnvironmentForExec() {
-        var keysToRemove = inheritedEnvironmentKeysRemovedForExec
+    /// The complete `KEY=VALUE` environment the PTY child execs with, built in the parent (the child
+    /// cannot allocate — see `startIfNeeded`). Equivalent to unsetting `inheritedEnvironmentKeysRemovedForExec`
+    /// and then setting `overrides` with overwrite semantics: an inherited entry for an overridden key is
+    /// dropped so the override appears exactly once. Entries with no `=` are passed through untouched,
+    /// matching what an `unsetenv`/`setenv` pass would have left alone.
+    static func childEnvironmentForExec(overrides: [(key: String, value: String)]) -> [String] {
+        var entries: [String] = []
         var cursor = environ
         while let entry = cursor.pointee {
+            defer { cursor = cursor.advanced(by: 1) }
             let line = String(cString: entry)
-            if let separator = line.firstIndex(of: "=") {
-                let key = String(line[..<separator])
-                if shouldRemoveInheritedEnvironmentKey(key) { keysToRemove.insert(key) }
+            guard let separator = line.firstIndex(of: "=") else {
+                entries.append(line)
+                continue
             }
-            cursor = cursor.advanced(by: 1)
+            let key = String(line[..<separator])
+            guard !shouldRemoveInheritedEnvironmentKey(key), !overrides.contains(where: { $0.key == key }) else { continue }
+            entries.append(line)
         }
-        for key in keysToRemove { unsetenv(key) }
+        return entries + overrides.map { "\($0.key)=\($0.value)" }
     }
 
     private static func resetSignalDispositionsForExec() {
         // Remote daemons may be launched by noninteractive shells or nohup, which can
         // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
         // behave like a normal terminal without changing the daemon's handlers.
-        for signalNumber in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU] { _ = signal(signalNumber, SIG_DFL) }
+        // Unrolled rather than looped over a literal array: this runs in the forked child, where
+        // allocating the array could deadlock on an inherited malloc lock (see `startIfNeeded`).
+        _ = signal(SIGHUP, SIG_DFL)
+        _ = signal(SIGINT, SIG_DFL)
+        _ = signal(SIGQUIT, SIG_DFL)
+        _ = signal(SIGTERM, SIG_DFL)
+        _ = signal(SIGPIPE, SIG_DFL)
+        _ = signal(SIGTSTP, SIG_DFL)
+        _ = signal(SIGTTIN, SIG_DFL)
+        _ = signal(SIGTTOU, SIG_DFL)
         // A forked child also inherits the calling THREAD's signal mask, and the daemon starts sessions
         // on the terminal engine executor — a libdispatch worker thread, which blocks terminal signals so
         // they are delivered to the main thread instead. A PTY child that inherits SIGHUP/SIGTERM blocked
