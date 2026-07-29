@@ -59,15 +59,17 @@ A device whose single `spacesd.service` was pinned to a development profile by a
 
 A remote development profile is reachable only if its assigned Device API port is open on the device's network. Only the canonical `47847` is conventionally open, so a firewalled device (a cloud VM, a corporate network) needs ingress for the whole development range `47848`–`47947` — one rule covers every profile, since each assigns itself a port inside it. Pairing itself rides SSH and succeeds without that rule; what fails afterward is the pinned-TLS Device API connect, reported as the remote Device API being unreachable at the port the pairing metadata named. On a Google Cloud instance the rule is `gcloud compute firewall-rules create <name> --network <network> --direction INGRESS --action allow --rules tcp:47848-47947 --target-tags <instance-tag>`, matching the source range the device's existing `47847` rule uses.
 
-For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
+For manual worktree-local shell sessions, run this checkout's own binaries. Each resolves the worktree profile from where it sits, so no shell binding is involved and none is needed:
 
 ```bash
-eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
 apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces terminal list
+apps/macos/.build/debug/spacese2e profile-show
 ```
 
-Override `SPACES_DB_PATH` when you need a one-off isolated profile root. Override `SPACES_RUNTIME_DIR` only when the runtime files themselves also need to move with that profile.
+`spacese2e profile-show` reports the resolved profile's root, database, and runtime paths for a script or a manual `sqlite3` session. It is a lookup, not a binding: a shell that exported another worktree's paths would point this checkout's binaries at a profile that is not theirs, which is why nothing exports them.
+
+`SPACES_DB_PATH` names an ephemeral throwaway profile root and nothing else — a scratch run, an E2E harness. Resolution refuses it when it points inside `~/.spaces/` or `~/.spaces-dev/profiles/`, because a real profile is identified by where the running binary lives: the installed profile falls through to `~/.spaces`, a repo-built binary derives its worktree profile from the checkout above it, and a deployed binary derives it from the profile root it sits in. Override `SPACES_RUNTIME_DIR` alongside it only when the runtime files themselves also need to move with that throwaway profile.
 
 `spacese2e profile` is the inventory and cleanup surface for those profiles, which accumulate as worktrees come and go — and, on a shared Linux device, from several developers at once. It lives in `spacese2e` rather than the `spaces` CLI because managing development profiles is not product behavior.
 
@@ -80,7 +82,7 @@ apps/macos/.build/debug/spacese2e profile remove --remote <name>
 
 `--remote` resolves the device from the same `.env` remote keys every other remote workflow uses, so load that env first. `list --remote` reports each profile's unit state and asks only an already-active profile's own CLI for its session count, since `spaces terminal list` would otherwise resurrect every stopped daemon just to list it. `stop` stops one unit instance and leaves the profile and its unit enabled; `remove` refuses a profile whose daemon still holds sessions (or is running but not answering its CLI — use `stop` first), then disables the instance, verifies systemd reports it stopped, and deletes the profile root. Neither command reads an unanswerable user systemd as a stopped unit: an SSH session that reaches no user service manager on the device is reported as such, and `remove` deletes nothing. Both refuse `(installed)`: the installed profile is the one profile on a device that is nobody's leftover. `profile list` on a Mac has no daemon or session columns because a Mac has no per-profile unit to ask.
 
-That binding is for running the app, CLI, and E2E helpers — not tests. A test process cannot resolve a live profile at all: under XCTest, profile resolution refuses any database under `~/.spaces/` or `~/.spaces-dev/profiles/`, including one named by an explicit `SPACES_DB_PATH`, so a bound shell that runs bare `swift test` fails loudly instead of writing fixture sessions into the profile its debug app is serving. Run tests through `scripts/swiftpm.sh test` (directly or via `scripts/coverage.sh` / `scripts/impacted_tests.sh`), which rebinds the run to a throwaway profile regardless of what the shell exported.
+That binding is for running the app, CLI, and E2E helpers — not tests. A test process cannot resolve a live profile at all: under XCTest, profile resolution refuses any database under `~/.spaces/` or `~/.spaces-dev/profiles/`, however the branch that produced it arrived there, so a shell that runs bare `swift test` fails loudly instead of writing fixture sessions into the profile its debug app is serving. Run tests through `scripts/swiftpm.sh test` (directly or via `scripts/coverage.sh` / `scripts/impacted_tests.sh`), which rebinds the run to a throwaway profile regardless of what the shell exported.
 
 ### Keeping the Chrome Automation grant across rebuilds
 
@@ -374,7 +376,7 @@ apps/macos/Tests/e2e.sh terminal --scenario agent-orchestration
 apps/macos/Tests/e2e_agent_orchestration.sh
 ```
 
-`e2e_agent_orchestration.sh` is a daemon+CLI test (no app, desktop control, or hotkeys) that binds to the current worktree profile from `spacese2e profile-show --shell`, so it only ever drives this checkout's daemon and never another worktree's. Its always-runnable Part A opens two ordinary shell sessions and drives the lifecycle with explicit `spaces agent signal` events (spawn gates on installed hooks, so the core flow is exercised without real agents): it asserts that `init` produces a ready agent row, an annotation survives a later `working` signal, a `subscribe` + `blocked` injects the `[spaces] … is blocked … open: spaces://terminal/<id>` line into the subscriber's tail, a `done` for a busy subscriber is queued and then flushed when the subscriber goes idle, a cycle-closing subscribe is rejected, `kill` removes the row, and a nonexistent session id is a loud error. Part A cleans up the sessions it creates and leaves the shared daemon running.
+`e2e_agent_orchestration.sh` is a daemon+CLI test (no app, desktop control, or hotkeys) that drives this checkout's own `spaces`, `spacesd`, and `spacese2e`, each of which resolves the worktree profile from its own location, so it only ever drives this checkout's daemon and never another worktree's. Its always-runnable Part A opens two ordinary shell sessions and drives the lifecycle with explicit `spaces agent signal` events (spawn gates on installed hooks, so the core flow is exercised without real agents): it asserts that `init` produces a ready agent row, an annotation survives a later `working` signal, a `subscribe` + `blocked` injects the `[spaces] … is blocked … open: spaces://terminal/<id>` line into the subscriber's tail, a `done` for a busy subscriber is queued and then flushed when the subscriber goes idle, a cycle-closing subscribe is rejected, `kill` removes the row, and a nonexistent session id is a loud error. Part A cleans up the sessions it creates and leaves the shared daemon running.
 
 Set `SPACES_E2E_AGENT_MATRIX=1` to also run the opt-in provider matrix (Part B), which is skipped by default:
 

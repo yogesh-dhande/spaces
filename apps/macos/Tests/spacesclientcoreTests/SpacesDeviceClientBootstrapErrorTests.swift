@@ -46,11 +46,13 @@ final class SpacesDeviceClientBootstrapErrorTests: XCTestCase {
         XCTAssertTrue(
             SpacesDeviceClient.isLocalDaemonUnreachableError(
                 TerminalServiceError.daemonNotFound(
-                    profileSource: .installedFallback, profileRoot: "/installed/profile", searchedPaths: ["/installed/profile/spacesd"])))
+                    profile: makeProfile(isInstalled: true, source: .installedFallback, root: "/installed/profile"),
+                    searchedPaths: ["/installed/profile/spacesd"])))
         XCTAssertTrue(
             SpacesDeviceClient.isLocalDaemonUnreachableError(
                 TerminalServiceError.daemonNotFound(
-                    profileSource: .developmentWorktree, profileRoot: "/dev/profile", searchedPaths: ["/dev/profile/spacesd"])))
+                    profile: makeProfile(isInstalled: false, source: .developmentWorktree, root: "/dev/profile"),
+                    searchedPaths: ["/dev/profile/spacesd"])))
         // A generic terminal request failure is not a clear daemon-down signal, so it surfaces as an error.
         XCTAssertFalse(SpacesDeviceClient.isLocalDaemonUnreachableError(TerminalServiceError.requestFailed("boom")))
     }
@@ -65,5 +67,12 @@ final class SpacesDeviceClientBootstrapErrorTests: XCTestCase {
         XCTAssertFalse(
             SpacesDeviceClient.isLocalDaemonUnreachableError(
                 NSError(domain: "SQLite", code: 1, userInfo: [NSLocalizedDescriptionKey: "database is locked"])))
+    }
+
+    private func makeProfile(isInstalled: Bool, source: SpacesProfileSource, root: String) -> SpacesProfile {
+        SpacesProfile(
+            source: source, databasePath: "\(root)/spaces.db", rootDirectory: root, isInstalledProfile: isInstalled,
+            runtimeDirectory: "\(root)/runtime", ipcNotificationObject: "spaces.profile.bootstrap-error-tests", developmentContext: nil,
+            branchSlug: nil, worktreeHash: nil)
     }
 }

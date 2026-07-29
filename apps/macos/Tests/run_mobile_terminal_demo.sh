@@ -9,6 +9,12 @@ source "$script_dir/terminal_harness_lock.sh"
 source "$script_dir/e2e_fixture_repos.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 source "$repo_root/scripts/ios-simulator-lifecycle.sh"
+# Drop any binding this shell was started with, before anything resolves a profile or runs a demo child.
+# A `user` run must stay unbound so every repo-local binary resolves the worktree profile it belongs to; an
+# `isolated` run names its own ephemeral root afterwards through `demo_profile_env`, which is the one thing
+# that mode exists to do. Neither wants whatever the invoking shell happened to carry. See
+# spaces_profile_clear_inherited_binding.
+spaces_profile_clear_inherited_binding
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
@@ -67,6 +73,9 @@ device_api_pid=""
 temp_root=""
 spaces_db_path=""
 spaces_runtime_dir=""
+demo_worktree_root=""
+# Profile environment assignments for demo child processes; empty for a `user`-mode run. See run_demo_env.
+demo_profile_env=()
 spaces_client_db_path=""
 spaces_client_secret_dir=""
 project_dir=""
@@ -100,6 +109,13 @@ performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
 
+# Runs a demo child process with the demo's environment.
+#
+# The profile environment is decided HERE and nowhere else, because the two profile modes need opposite
+# answers. An isolated run's profile is an ephemeral root under the demo temp directory, which nothing
+# can derive from a binary's location, so it has to be named. A `user` run's profile is the developer's
+# own worktree profile, which every repo-local binary resolves from where it sits -- and naming it would
+# be refused outright, since SPACES_DB_PATH may not point inside a live profile root.
 run_demo_env() {
   local -a env_args=(
     -u NO_COLOR \
@@ -111,6 +127,9 @@ run_demo_env() {
     -u CODEX_MANAGED_PACKAGE_ROOT \
     -u CODEX_THREAD_ID
   )
+  if (( ${#demo_profile_env[@]} > 0 )); then
+    env_args+=("${demo_profile_env[@]}")
+  fi
   if [[ -n "$ghostty_demo_xdg_config_home" ]]; then
     env_args+=(XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home")
   fi
@@ -155,8 +174,6 @@ stop_demo_workspace_dir() {
 
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -285,19 +302,59 @@ create_demo_root() {
   temp_root="$(mktemp -d "$demo_root_parent/run.XXXXXX")"
 }
 
+# Looks up the paths of the worktree profile the repo-local binaries already resolve for themselves. The
+# demo needs them as facts -- it opens the database directly and derives socket paths from the runtime
+# root -- not as a binding to hand to child processes.
 resolve_user_profile_paths() {
-  local profile_exports
-  if ! profile_exports="$(run_demo_env "$spacese2e" profile-show --shell)"; then
-    echo "Failed to resolve Spaces profile paths with $spacese2e profile-show --shell." >&2
+  local profile_json
+  if ! profile_json="$(run_demo_env "$spacese2e" profile-show --json)"; then
+    echo "Failed to resolve Spaces profile paths with $spacese2e profile-show --json." >&2
     exit 1
   fi
-  eval "$profile_exports"
-  spaces_db_path="${SPACES_DB_PATH:-}"
-  spaces_runtime_dir="${SPACES_RUNTIME_DIR:-}"
+  spaces_db_path="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["databasePath"])')"
+  spaces_runtime_dir="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["runtimeDirectory"])')"
+  demo_worktree_root="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("worktreeRoot") or "")')"
   if [[ -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
-    echo "Failed to resolve SPACES_DB_PATH and SPACES_RUNTIME_DIR for the demo profile." >&2
+    echo "Failed to resolve the database and runtime paths for the demo profile." >&2
     exit 1
   fi
+}
+
+# A `user`-mode run drives the developer's live worktree profile, and each binary it runs resolves its own
+# profile from where that binary sits -- nothing is exported to point them anywhere. So every binary has to
+# BE a binary of this worktree, or the run silently splits across profiles: an installed `spaces` would act
+# on ~/.spaces, and `stop_existing_demo_profile_services` below would stop the user's installed daemon
+# instead of this worktree's. That is the exact harm this profile model exists to prevent, so a mismatch
+# fails the run rather than being retargeted -- retargeting would mean handing the binary a SPACES_DB_PATH
+# naming a live profile root, which resolution refuses outright.
+#
+# The four binaries are overridable (SPACES_APP, SPACES_CLI, SPACES_E2E, SPACESD_EXECUTABLE) and default to
+# this checkout's debug build, so the check only ever fires on a deliberate override. Containment in the
+# worktree root is the whole test: a repo-built binary derives its profile from the checkout above it, so
+# one inside this worktree resolves this worktree's profile and one outside it cannot.
+#
+# An isolated run needs none of this -- it names its ephemeral profile explicitly, so any binary acts on it.
+require_worktree_local_binaries() {
+  if [[ -z "$demo_worktree_root" ]]; then
+    echo "SPACES_MOBILE_DEMO_PROFILE_MODE=user needs a worktree profile, but $spacese2e resolved a profile with no worktree." >&2
+    echo "Run the demo from a Spaces checkout, or use SPACES_MOBILE_DEMO_PROFILE_MODE=isolated." >&2
+    exit 1
+  fi
+  local worktree_root
+  worktree_root="$(canonical_path "$demo_worktree_root")"
+
+  local entry label binary_path
+  for entry in "SPACES_APP:$spaces_app" "SPACES_CLI:$spaces_cli" "SPACES_E2E:$spacese2e" "SPACESD_EXECUTABLE:$terminal_service"; do
+    label="${entry%%:*}"
+    binary_path="$(canonical_path "${entry#*:}")"
+    if [[ "$binary_path" != "$worktree_root"/* ]]; then
+      echo "$label points at $binary_path, which is outside the worktree at $worktree_root." >&2
+      echo "A user-mode demo drives the worktree profile, and that binary would resolve a different profile" >&2
+      echo "of its own -- stopping or writing to a daemon this run does not own. Point $label inside this" >&2
+      echo "worktree, or use SPACES_MOBILE_DEMO_PROFILE_MODE=isolated." >&2
+      exit 1
+    fi
+  done
 }
 
 prepare_demo_profile() {
@@ -311,9 +368,17 @@ prepare_demo_profile() {
     mkdir -p "$spaces_runtime_dir" "$project_dir"
   else
     resolve_user_profile_paths
+    require_worktree_local_binaries
     mkdir -p "$spaces_runtime_dir" "$(dirname "$spaces_db_path")" "$project_dir"
   fi
   spaces_runtime_dir="$(canonical_path "$spaces_runtime_dir")"
+  # Set after canonicalization so children are told the same runtime root the socket paths below are
+  # derived from. An isolated run's profile is an ephemeral root no binary can derive from its own
+  # location, so it has to be named; a `user` run's is the worktree profile every repo-local binary
+  # already resolves, and naming it would be refused.
+  if [[ "$profile_mode" == "isolated" ]]; then
+    demo_profile_env=(SPACES_DB_PATH="$spaces_db_path" SPACES_RUNTIME_DIR="$spaces_runtime_dir")
+  fi
 
   prepare_ghostty_demo_config
 }
@@ -324,10 +389,9 @@ stop_existing_demo_profile_services() {
     return
   fi
 
+  # The repo-local CLI resolves the worktree profile itself, which is the profile being stopped.
   (
     export HOME="$demo_home"
-    export SPACES_DB_PATH="$spaces_db_path"
-    export SPACES_RUNTIME_DIR="$spaces_runtime_dir"
     spaces_profile_stop_terminal_service "$spaces_cli"
   )
 }
@@ -404,8 +468,6 @@ stop_existing_profile_app_owner() {
   local owner_json owner_pid command
   if ! owner_json="$(run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     "$spacese2e" profile-app-owner --json 2>/dev/null)"; then
     return 0
   fi
@@ -628,8 +690,6 @@ open_device_pairing_window() {
   if ! window_json="$(
     run_demo_env \
       HOME="$demo_home" \
-      SPACES_DB_PATH="$spaces_db_path" \
-      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
       SPACESD_EXECUTABLE="$terminal_service" \
       SPACES_DEVICE_API_HOST="$device_api_bind_host" \
       SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -664,8 +724,6 @@ PY
 start_device_api() {
   if ! run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -698,8 +756,6 @@ pair_remote_demo_device() {
   echo "Pairing Mac client with remote spacesd at $remote_ssh_host..."
   if ! run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     "$spacese2e" "${args[@]}" >"$remote_pairing_json"; then
     echo "Failed to pair remote demo device over SSH." >&2
     cat "$remote_pairing_json" >&2 || true
@@ -885,8 +941,6 @@ open_remote_device_pairing_window() {
   remote_pairing_window_json="$temp_root/remote-device-pairing-window.json"
   if ! run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     "$spacese2e" "${args[@]}" >"$remote_pairing_window_json"; then
     echo "Failed to open remote demo device pairing window over SSH." >&2
     cat "$remote_pairing_window_json" >&2 || true
@@ -948,8 +1002,6 @@ PY
   remote_workspace_id="$(
     run_demo_env \
       HOME="$demo_home" \
-      SPACES_DB_PATH="$spaces_db_path" \
-      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
       python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
 import json
 import subprocess
@@ -1021,8 +1073,6 @@ show_session_on_mac() {
   local owner_session_id="$1"
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1033,8 +1083,6 @@ open_demo_workspace_terminal() {
   local workspace_dir="$1"
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1372,13 +1420,19 @@ PY
 
 write_manual_shell_helper() {
   manual_shell_path="$temp_root/manual-demo-env.sh"
+  # The profile exports appear only for an isolated run. A `user` run's commands are the repo-local
+  # binaries acting on the profile they already belong to, and exporting a live profile root would make
+  # every one of them refuse to resolve.
+  local profile_exports=""
+  if (( ${#demo_profile_env[@]} > 0 )); then
+    printf -v profile_exports 'export SPACES_DB_PATH=%q\nexport SPACES_RUNTIME_DIR=%q\n' \
+      "$spaces_db_path" "$spaces_runtime_dir"
+  fi
   cat >"$manual_shell_path" <<EOF
 #!/usr/bin/env bash
 export HOME=$(printf '%q' "$demo_home")
 export XDG_CONFIG_HOME=$(printf '%q' "$ghostty_demo_xdg_config_home")
-export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
-export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
-export SPACES_CLIENT_DB_PATH=$(printf '%q' "$spaces_client_db_path")
+${profile_exports}export SPACES_CLIENT_DB_PATH=$(printf '%q' "$spaces_client_db_path")
 export SPACES_CLIENT_SECRET_DIR=$(printf '%q' "$spaces_client_secret_dir")
 export SPACESD_EXECUTABLE=$(printf '%q' "$terminal_service")
 export SPACES_DEVICE_API_HOST=$(printf '%q' "$device_api_bind_host")
@@ -1502,8 +1556,6 @@ spaces_e2e_create_lantern_fixture_repo "$fixture_template_dir" "$secondary_proje
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1516,8 +1568,6 @@ run_demo_env \
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1530,8 +1580,6 @@ run_demo_env \
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   "$spacese2e" hide-workspace --workspace-dir "$temp_root/lantern-api" >/dev/null
 
@@ -1554,21 +1602,8 @@ spaces_ios_simulator_boot_if_needed "$ipad_udid"
 spaces_ios_simulator_boot_if_needed "$iphone_udid"
 open_simulator_app
 
-env \
-  -u NO_COLOR \
-  -u CLICOLOR \
-  -u CLICOLOR_FORCE \
-  -u CI \
-  -u CODEX_CI \
-  -u CODEX_MANAGED_BY_NPM \
-  -u CODEX_MANAGED_PACKAGE_ROOT \
-  -u CODEX_THREAD_ID \
+run_demo_env \
   HOME="$demo_home" \
-  XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-  SPACES_CLIENT_DB_PATH="$spaces_client_db_path" \
-  SPACES_CLIENT_SECRET_DIR="$spaces_client_secret_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1648,8 +1683,14 @@ if [[ -n "$remote_device_id" ]]; then
 fi
 echo "iPad simulator: $ipad_name"
 echo "iPhone simulator: $iphone_name"
-printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
-  "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_db_path" "$spaces_runtime_dir" "$spaces_client_db_path" "$spaces_client_secret_dir"
+# Same rule as the helper shell: an isolated run names its ephemeral profile, a `user` run must not.
+if (( ${#demo_profile_env[@]} > 0 )); then
+  printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
+    "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_db_path" "$spaces_runtime_dir" "$spaces_client_db_path" "$spaces_client_secret_dir"
+else
+  printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
+    "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_client_db_path" "$spaces_client_secret_dir"
+fi
 echo "Manual demo env: $demo_env_prefix"
 echo "Helper shell: source $manual_shell_path"
 printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"
