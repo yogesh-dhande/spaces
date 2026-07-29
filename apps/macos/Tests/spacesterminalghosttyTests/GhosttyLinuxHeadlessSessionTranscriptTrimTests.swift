@@ -97,12 +97,23 @@
             #expect(master >= 0)
             #expect(slave >= 0)
 
+            // Spawn `/bin/sleep` itself rather than `sh -c "sleep 120"`: `tearDown` kills exactly the pid
+            // reported here, and a shell layer would fork the real `sleep` (dash does not exec it), leaving
+            // that grandchild running after the shell is killed. Redirect the child's stdio to /dev/null so
+            // it never inherits the test runner's stdout/stderr: a surviving child holding SwiftPM's output
+            // pipe blocks `swift test` on pipe EOF long after the test binary itself has exited.
             var childPID: pid_t = 0
-            let path = "/bin/sh"
-            let arguments = [path, "-c", "sleep 120"]
+            let path = "/bin/sleep"
+            let arguments = ["sleep", "120"]
             var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
             defer { for argument in argv where argument != nil { free(argument) } }
-            #expect(posix_spawn(&childPID, path, nil, nil, &argv, environ) == 0, "posix_spawn of the liveness child failed")
+            var fileActions = posix_spawn_file_actions_t()
+            #expect(posix_spawn_file_actions_init(&fileActions) == 0, "posix_spawn_file_actions_init failed")
+            defer { posix_spawn_file_actions_destroy(&fileActions) }
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0) == 0, "redirecting child stdin failed")
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0) == 0, "redirecting child stdout failed")
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0) == 0, "redirecting child stderr failed")
+            #expect(posix_spawn(&childPID, path, &fileActions, nil, &argv, environ) == 0, "posix_spawn of the liveness child failed")
 
             return AdoptablePTY(master: master, slave: slave, childPID: childPID)
         }
