@@ -168,11 +168,19 @@ struct TerminalSessionNavigationModifier: ViewModifier {
                     pendingAuthenticationMessage = message
                     selectedSession = nil
                 }, onSessionChanged: { session in selectedSession = SelectedTerminalSessionRoute(session: session) }
-            ) { selectedSession = nil }
-                .id(route.id)
+            ) { selectedSession = nil }.id(route.id)
                 // Hide the tab bar in terminal detail so the keyboard accessory row owns the bottom
                 // edge instead of overlapping the tabs.
                 .toolbar(.hidden, for: .tabBar)
+                // The watch has to end whenever this detail leaves the screen, not only when the user
+                // navigates back: switching devices re-identifies the whole tab (`.id(activeDeviceID)`),
+                // which destroys this stack outright without ever driving `selectedSession` to nil, and a
+                // watch left running would then span the entire stretch with no terminal on screen.
+                // It hangs on the detail rather than on the modifier's own content because that content is
+                // the stack's root, which SwiftUI un-appears as soon as this detail is pushed onto it.
+                // Scoped to this route's session so a teardown that lands after another session's route
+                // has taken over cannot end the new session's watch.
+                .onDisappear { model.endTerminalWatch(forSessionID: route.session.id) }
         }.navigationDestination(item: $pendingTerminalLaunch) { launch in
             TerminalLaunchPendingView(launch: launch, model: model) { session in
                 pendingTerminalLaunch = nil
@@ -189,6 +197,10 @@ struct TerminalSessionNavigationModifier: ViewModifier {
                 model.handleAuthenticationFailure(message: message)
             }
         }
+        // No `initial: true`: all three tabs install this modifier, but only one can have a detail
+        // route open at a time (the tab bar is hidden in detail), so firing on install would let an
+        // inactive tab clobber the active tab's value with nil.
+        .onChange(of: selectedSession?.session.id) { _, newValue in model.setActiveTerminalSession(newValue) }
     }
 }
 

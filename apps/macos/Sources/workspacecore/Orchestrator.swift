@@ -1404,7 +1404,7 @@ public final class WorkspaceOrchestrator {
                 foregroundExecutableName: previousRuntimeState?.foregroundExecutableName, foregroundArgv: previousRuntimeState?.foregroundArgv,
                 foregroundDetectedAgentKind: previousRuntimeState?.foregroundDetectedAgentKind,
                 foregroundDisplayLabel: previousRuntimeState?.foregroundDisplayLabel,
-                foregroundDisplayCommand: previousRuntimeState?.foregroundDisplayCommand)
+                foregroundDisplayCommand: previousRuntimeState?.foregroundDisplayCommand, bellAt: previousRuntimeState?.bellAt)
             try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
             try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)

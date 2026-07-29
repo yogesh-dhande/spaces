@@ -116,7 +116,8 @@ extension StatusDot.Kind {
 
     init(attentionKind: SpacesMobileAttentionEvent.Kind) {
         switch attentionKind {
-        case .waitingForInput: self = .waiting
+        // A bell reads the same as "waiting for input": both mean the session wants the user's attention.
+        case .waitingForInput, .bell: self = .waiting
         case .finished: self = .done
         case .exited, .failed: self = .exited
         }

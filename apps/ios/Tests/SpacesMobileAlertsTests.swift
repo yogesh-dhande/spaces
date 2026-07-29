@@ -17,7 +17,7 @@
                     makeProcessRow(id: "process-live", name: "live", runState: .running, exitedAt: nil),
                 ], sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:01:00Z")])
 
-            let events = SpacesMobileAttention.events(in: overview)
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.count, 4)
             let bySource = Dictionary(uniqueKeysWithValues: events.map { ($0.sourceID, $0) })
@@ -34,7 +34,7 @@
                 processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: nil)],
                 sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "not-a-timestamp")])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview).isEmpty)
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
         }
 
         func testAcceptsFractionalLinuxDaemonTimestamps() {
@@ -42,7 +42,7 @@
                 processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-07-12T12:34:56.123Z")],
                 sessions: [makeSession(id: "session-loose", title: "zsh", state: .failed, updatedAt: "2026-07-12T12:34:57.456Z")])
 
-            let events = SpacesMobileAttention.events(in: overview)
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(Set(events.map(\.sourceID)), ["process:process-web", "session:session-loose"])
             XCTAssertTrue(events.allSatisfy { $0.date.timeIntervalSince1970 > 0 })
@@ -54,7 +54,7 @@
                     makeProcessRow(id: "process-web", name: "web", sessionID: "session-web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
                 ], sessions: [makeSession(id: "session-web", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:30Z")])
 
-            let events = SpacesMobileAttention.events(in: overview)
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.map(\.sourceID), ["process:process-web"])
         }
@@ -66,7 +66,7 @@
                     makeTerminalRow(id: "terminal-untracked", title: "lost", sessionID: nil, runState: .exited),
                 ], sessions: [makeSession(id: "session-shell", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:07:00Z")])
 
-            let events = SpacesMobileAttention.events(in: overview)
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(events.map(\.sourceID), ["terminal:terminal-shell"])
             XCTAssertEqual(events.first?.kind, .failed)
@@ -89,7 +89,7 @@
                     makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
                 ])
 
-            XCTAssertTrue(SpacesMobileAttention.events(in: overview).isEmpty)
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
         }
 
         func testGroupsSortNewestFirstAndEventsWithinGroupNewestFirst() {
@@ -112,7 +112,7 @@
                     ]),
             ])
 
-            let groups = SpacesMobileAttention.groups(in: overview, dismissedEventIDs: [])
+            let groups = SpacesMobileAttention.groups(in: overview, dismissedEventIDs: [], focusedSessionID: nil, watchWindowsBySessionID: [:])
 
             XCTAssertEqual(groups.map(\.workspaceID), ["workspace-new", "workspace-old"])
             XCTAssertEqual(groups.first?.events.map(\.sourceID), ["agent:agent-new-late", "agent:agent-new-early"])
@@ -167,12 +167,348 @@
             XCTAssertEqual(SpacesMobileAttention.abbreviatedAge(of: now.addingTimeInterval(-2 * 86400), relativeTo: now), "2d")
         }
 
+        // MARK: - Bell events
+
+        func testSessionWithBellYieldsBellEvent() {
+            let overview = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
+            ])
+
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+
+            XCTAssertEqual(events.map(\.sourceID), ["session:session-bell"])
+            XCTAssertEqual(events.first?.kind, .bell)
+            XCTAssertEqual(events.first?.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:10:00Z"))
+        }
+
+        func testSessionWithoutBellYieldsNoBellEvent() {
+            let overview = makeOverview(sessions: [makeSession(id: "session-quiet", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z")]
+            )
+
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+        }
+
+        func testUnchangedBellAtProducesStableEventID() {
+            let overview = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
+            ])
+
+            let first = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            let second = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+
+            XCTAssertEqual(first.first?.id, second.first?.id)
+        }
+
+        func testChangedBellAtProducesNewEventID() {
+            let before = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
+            ])
+            let after = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:20:00Z")
+            ])
+
+            let beforeID = SpacesMobileAttention.events(in: before, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
+            let afterID = SpacesMobileAttention.events(in: after, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
+
+            XCTAssertNotEqual(beforeID, afterID)
+        }
+
+        func testFocusedSessionSuppressesItsBellEvent() {
+            let overview = makeOverview(sessions: [
+                makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: "2026-01-01T00:10:00Z")
+            ])
+
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: "session-bell", watchWindowsBySessionID: [:]).isEmpty)
+        }
+
+        /// Overview polling is paused while a terminal detail is open, so the bell rung while the user was
+        /// watching only arrives after they back out — by which time the session is no longer focused.
+        func testBellRungWhileWatchingIsSuppressedAfterBackingOut() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungWhileWatching)
+
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        func testBellRungAfterBackingOutStillAlerts() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: clock.advance(60))
+
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// A bell that rang before the user ever opened the session is not something they watched, so
+        /// opening and leaving the detail afterwards does not swallow its alert.
+        func testBellRungBeforeTheWatchStartedStillAlerts() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            let bellRungBeforeOpening = clock.now
+            clock.advance(60)
+            model.setActiveTerminalSession("session-bell")
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungBeforeOpening)
+
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        func testBellAfterASuppressedOneStillAlerts() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungWhileWatching)
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+
+            model.overview = bellOverview(at: clock.advance(60))
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// Switching straight from one session's detail to another ends the watch on the one left behind.
+        func testSwitchingSessionsEndsTheWatchOnTheOneLeftBehind() {
+            let model = makeModel()
+            model.setActiveTerminalSession("session-bell")
+            model.setActiveTerminalSession("session-other")
+
+            XCTAssertEqual(model.activeTerminalSessionID, "session-other")
+            XCTAssertNotNil(model.terminalWatchWindowsBySessionID["session-bell"])
+            XCTAssertNil(model.terminalWatchWindowsBySessionID["session-other"])
+        }
+
+        // MARK: - Terminal detail torn down without a route change
+
+        /// Switching devices re-identifies the tab and destroys the navigation stack, so the detail leaves
+        /// the screen without `selectedSession` ever going nil. The watch has to end there: a bell rung
+        /// afterwards, with no terminal on screen, is one the user could not have seen.
+        func testTerminalTeardownEndsTheWatchSoLaterBellsAlert() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.endTerminalWatch(forSessionID: "session-bell")
+            let bellRungWithNoTerminalOnScreen = clock.advance(60)
+            // Some later visit to another session ends its own watch; the torn-down session's window must
+            // already be closed rather than stretching to here.
+            clock.advance(60)
+            model.setActiveTerminalSession("session-other")
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungWithNoTerminalOnScreen)
+
+            XCTAssertNil(model.watchedTerminalSessionID)
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// The ordinary back-out drives both the route change and the detail's teardown, so the second one
+        /// must be a no-op — two windows would be a second, empty watch recorded after the user left.
+        func testNormalBackOutRecordsExactlyOneWatchWindow() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+            model.endTerminalWatch(forSessionID: "session-bell")
+
+            XCTAssertEqual(model.terminalWatchWindowsBySessionID["session-bell"]?.count, 1)
+        }
+
+        /// A teardown that lands after the user has already moved to another session's detail belongs to
+        /// the view that is going away, not to the one on screen.
+        func testTeardownOfAPreviousSessionLeavesTheCurrentWatchRunning() {
+            let model = makeModel()
+            model.setActiveTerminalSession("session-bell")
+            model.setActiveTerminalSession("session-other")
+
+            model.endTerminalWatch(forSessionID: "session-bell")
+
+            XCTAssertEqual(model.watchedTerminalSessionID, "session-other")
+        }
+
+        // MARK: - Bells while the app is in the background
+
+        /// Backgrounding does not close the detail route, so nothing about the route says the user stopped
+        /// watching — but they did, and a bell rung while the app was away is exactly what the Alerts tab
+        /// exists for.
+        func testBellRungWhileBackgroundedAlertsEvenThoughTheRouteStayedOpen() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.suspendTerminalWatch()
+
+            model.overview = bellOverview(at: clock.advance(60))
+
+            XCTAssertNil(model.watchedTerminalSessionID, "a backgrounded app is watching nothing")
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// The realistic sequence: overview polling is paused the whole time, so the bell only arrives on
+        /// the refresh after the user comes back and leaves the detail. The watch recorded on the way out
+        /// must not cover the stretch the app spent in the background.
+        func testBellRungWhileBackgroundedStillAlertsAfterForegroundingAndBackingOut() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.suspendTerminalWatch()
+            let bellRungWhileAway = clock.advance(60)
+            clock.advance(60)
+            model.resumeTerminalWatch()
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungWhileAway)
+
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// The whole visit, in order: the user watches the terminal and hears the bell, backgrounds the
+        /// app, comes back to the still-open detail, then leaves it — and only then does polling resume and
+        /// deliver that bell. Every watch of the session has to be remembered for it to stay suppressed;
+        /// keeping only the latest would raise an alert for a bell the user watched ring.
+        func testBellRungBeforeBackgroundingStaysSuppressedAfterForegroundingAndBackingOut() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.suspendTerminalWatch()
+            clock.advance(60)
+            model.resumeTerminalWatch()
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungWhileWatching)
+
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        /// The counterpart of the sequence above: the windows either side of the background stretch are
+        /// never merged, so a bell rung in the gap between them still alerts.
+        func testBellRungInTheGapBetweenTwoWatchesAlerts() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            clock.advance(60)
+            model.suspendTerminalWatch()
+            let bellRungInTheGap = clock.advance(60)
+            clock.advance(60)
+            model.resumeTerminalWatch()
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            model.overview = bellOverview(at: bellRungInTheGap)
+
+            XCTAssertEqual(model.terminalWatchWindowsBySessionID["session-bell"]?.count, 2)
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// A visit that backgrounds and returns many times cannot grow without bound; the windows that
+        /// survive are the newest, which are the ones an arriving bell can still fall inside.
+        func testWatchWindowsArePrunedOldestFirst() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            let bellRungInTheFirstWatch = clock.advance(1)
+            for _ in 0..<12 {
+                clock.advance(60)
+                model.suspendTerminalWatch()
+                clock.advance(60)
+                model.resumeTerminalWatch()
+            }
+            clock.advance(60)
+            model.setActiveTerminalSession(nil)
+
+            let windows = model.terminalWatchWindowsBySessionID["session-bell"] ?? []
+            XCTAssertEqual(windows.count, 8)
+            XCTAssertEqual(windows, windows.sorted { $0.endedAt < $1.endedAt }, "windows are kept oldest first")
+            // The dropped windows really are gone: a bell from the first, evicted watch no longer matches.
+            model.overview = bellOverview(at: bellRungInTheFirstWatch)
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.kind), [.bell])
+        }
+
+        /// The bell the user did watch — rung before the app went away — stays suppressed.
+        func testBellRungBeforeBackgroundingIsSuppressed() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            let bellRungWhileWatching = clock.advance(60)
+            clock.advance(60)
+            model.suspendTerminalWatch()
+
+            model.overview = bellOverview(at: bellRungWhileWatching)
+
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        /// Coming back to the foreground with the detail still open resumes the watch, so a bell rung then
+        /// is happening in front of the user and is suppressed as focused.
+        func testForegroundingWithTheRouteOpenResumesTheWatch() {
+            let clock = TestWallClock()
+            let model = makeModel(clock: clock)
+            model.setActiveTerminalSession("session-bell")
+            model.suspendTerminalWatch()
+            clock.advance(60)
+            model.resumeTerminalWatch()
+
+            model.overview = bellOverview(at: clock.advance(60))
+
+            XCTAssertEqual(model.watchedTerminalSessionID, "session-bell")
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        /// Foregrounding with no detail open starts nothing: the next session the user opens should be
+        /// watched from the moment they open it, not from the moment the app came back.
+        func testForegroundingWithNoRouteOpenWatchesNothing() {
+            let model = makeModel()
+            model.resumeTerminalWatch()
+
+            XCTAssertNil(model.watchedTerminalSessionID)
+        }
+
         // MARK: - Fixtures
 
-        private func makeModel() -> SpacesMobileAppModel {
+        /// An overview whose one session rang its bell at `date`, stamped the way a daemon stamps it.
+        private func bellOverview(at date: Date) -> SpacesDeviceOverviewPayload {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return makeOverview(sessions: [
+                makeSession(
+                    id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:00:00Z", bellAt: formatter.string(from: date))
+            ])
+        }
+
+        /// Wall clock the watch-window tests step by hand. Watch windows are compared against bell
+        /// timestamps with a couple of seconds of skew tolerance, so the real clock's sub-millisecond gaps
+        /// between two calls would put every timestamp inside every window.
+        private final class TestWallClock: @unchecked Sendable {
+            private(set) var now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+            @discardableResult func advance(_ seconds: TimeInterval) -> Date {
+                now = now.addingTimeInterval(seconds)
+                return now
+            }
+        }
+
+        private func makeModel(clock: TestWallClock? = nil) -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
-            return SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            guard let clock else { return SpacesMobileAppModel(settings: settings, bridgeClient: client) }
+            return SpacesMobileAppModel(settings: settings, bridgeClient: client, wallClock: { clock.now })
         }
 
         private func makeOverview(
@@ -230,13 +566,15 @@
                 runState: runState, canOpenTerminal: runState == .running)
         }
 
-        private func makeSession(id: String, title: String, state: TerminalSessionState, updatedAt: String) -> SpacesDeviceTerminalSessionSummary {
+        private func makeSession(id: String, title: String, state: TerminalSessionState, updatedAt: String, bellAt: String? = nil)
+            -> SpacesDeviceTerminalSessionSummary
+        {
             SpacesDeviceTerminalSessionSummary(
                 id: id, title: title, workingDirectory: "/repo/workspace-feature", shell: "/bin/zsh", command: nil, state: state,
                 backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: "workspace-feature",
                 workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z", updatedAt: updatedAt,
                 isControlAvailable: state == .running, isSubscriptionAvailable: state == .running,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), bellAt: bellAt)
         }
     }
 #endif

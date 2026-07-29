@@ -2099,12 +2099,14 @@ enum SpacesDaemonProfileCommandRouting {
                     return TerminalServiceResponse(
                         ok: false, message: "Terminal session \(sessionID) is owned by another process and was not stopped by spacesd.")
                 }
+                // `bellAt` carries forward: a session ending does not answer the bell it rang, and the
+                // client's alert (whose identity is that timestamp) must survive the exit write.
                 let exitedState = TerminalSessionRuntimeState(
                     sessionID: runtimeState.sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID,
                     childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now,
                     title: runtimeState.title ?? launchConfiguration.title,
                     workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                    rows: runtimeState.rows)
+                    rows: runtimeState.rows, bellAt: runtimeState.bellAt)
                 try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
                 try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
                 try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)

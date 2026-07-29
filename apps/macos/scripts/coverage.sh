@@ -110,13 +110,15 @@ echo "Building SwiftPM tests with coverage..."
 "$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage --scratch-path "$coverage_scratch_path"
 
 echo "Running SwiftPM coverage tests..."
-# GhosttyMirrorGraphemeClusterTests drives a REAL mirror-owned ghostty app, and only one embedded
-# ghostty app may be live per process (GhosttyProcessAppRuntime.initializeOnce). Every test class in
-# the package shares one spacesPackageTests bundle, so a parallel worker process that ran any
-# daemon-core suite first cannot host the mirror app afterwards — worker assignment is arbitrary,
-# which made the suite fail only in full runs. It is skipped here and run in its own process below.
+# The mirror-surface suites (GhosttyMirrorGraphemeClusterTests, GhosttyMirrorSurfaceMRUTests) drive
+# a REAL mirror-owned ghostty app, and only one embedded ghostty app may be live per process
+# (GhosttyProcessAppRuntime.initializeOnce). Every test class in the package shares one
+# spacesPackageTests bundle, so a parallel worker process that ran any daemon-core suite first
+# cannot host the mirror app afterwards — worker assignment is arbitrary, which makes these suites
+# crash their worker only in full runs and take innocent tests down with the redistribution. They
+# are skipped here and run together in their own process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
-    --skip GhosttyMirrorGraphemeClusterTests
+    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorSurfaceMRUTests
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
@@ -195,7 +197,7 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
 else
     echo "Running mirror-surface coverage tests in their own process..."
     run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" test --skip-build --enable-code-coverage \
-        --disable-sandbox --scratch-path "$coverage_scratch_path" --filter GhosttyMirrorGraphemeClusterTests
+        --disable-sandbox --scratch-path "$coverage_scratch_path" --filter "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorSurfaceMRUTests"
 fi
 
 generate_codecov_artifacts

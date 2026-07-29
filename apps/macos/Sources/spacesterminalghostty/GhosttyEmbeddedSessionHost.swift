@@ -310,6 +310,9 @@
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        /// When the running program last rang the bell, coalesced by `bellCoalescer`.
+        private var currentBellAt: String?
+        var bellCoalescer = TerminalBellCoalescer()
         private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
@@ -561,7 +564,7 @@
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
                 state: .exited, updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
+                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows, bellAt: currentBellAt)
             // All three terminal writes are enqueued (not written inline) so teardown never blocks the engine
             // on the DB lock; FIFO ordering on the serial persistence queue lands them after every pending
             // mirror write and in this order: exited runtime state, detach-all, terminated payload. They
@@ -851,6 +854,18 @@
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             // Preserve output.log: adoptFromHandoff replays it to rebuild the screen.
             try openOutputHandlePreservingTranscript()
+
+            // Seed the bell from the row the pre-exec image wrote, before anything in this resume writes
+            // runtime state from this core's (empty) state — the first such write would put NULL over the
+            // bell and silently retract an alert the user has not dealt with. Title and cwd are
+            // deliberately not seeded (the surface replay re-establishes them), but no replay can
+            // re-establish a bell: it is an event, not screen state, and a trimmed transcript may not even
+            // carry the BEL. The coalescing window is restored with it, so a bell moments after the
+            // handoff — including one the replayed transcript re-rings through the live action handler —
+            // is absorbed into the alert the user already has instead of minting a second one.
+            let persistedBellAt = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt
+            currentBellAt = persistedBellAt
+            bellCoalescer.seedLastAdvanced(at: persistedBellAt.flatMap(TerminalSessionTimestamp.date(from:)))
 
             // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
             // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
@@ -1502,7 +1517,7 @@
                 rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
             // Advance the in-memory authoritative state first so broadcasts show live truth immediately,
             // independent of when (or whether) the enqueued durable write lands.
             latestRuntimeState = state
@@ -1784,6 +1799,26 @@
             switch event {
             case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
+            case .ringBell:
+                // A bell changes no metadata a title is derived from, so it skips the metadata
+                // announcement below and only forces the runtime-state write the clients read the
+                // timestamp from. `ring` returning nil is the coalescing window absorbing this bell.
+                //
+                // A daemon handoff replays the transcript through this same surface, so every bell the
+                // scrollback ever carried is re-emitted here and stamps a fresh timestamp. The window
+                // collapses that whole replay into a single alert, which is the bound accepted for it:
+                // GhosttyKit delivers surface actions asynchronously, so nothing at this layer can tell
+                // a replayed bell from a live one.
+                //
+                // One timestamp per session is the alert model: a later bell REPLACES the identity, so a
+                // bell a client suppresses as watched can supersede an earlier unwatched one that never
+                // alerted (two rings over 30s apart straddling a client's watch window with no refresh
+                // between). Accepted: closing it means per-session bell history on the wire, and the
+                // user is already looking at this terminal when the superseding bell rings.
+                guard let bellAt = bellCoalescer.ring() else { return }
+                currentBellAt = TerminalSessionTimestamp.string(from: bellAt)
+                refreshRuntimeState(force: true)
+                return
             case .openURL(_, let value):
                 // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
                 // this is effectively a no-op there, but keep it correct via an async engine→main hop
@@ -2097,7 +2132,7 @@
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
         }
 
         private static func isProcessAlive(pid: Int32) -> Bool {

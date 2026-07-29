@@ -43,8 +43,8 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState, rootDirectory: String? = nil) throws
-        -> TerminalSessionPaths
+    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState, rootDirectory: String? = nil, bellAt: String? = nil)
+        throws -> TerminalSessionPaths
     {
         let paths = try rootDirectory.map { TerminalSessionPaths(rootDirectory: $0) } ?? TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
@@ -53,7 +53,8 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
                 createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
-                sessionID: sessionID, servicePID: servicePID, childPID: 4242, state: state, updatedAt: "2026-05-08T00:00:00Z"), paths: paths)
+                sessionID: sessionID, servicePID: servicePID, childPID: 4242, state: state, updatedAt: "2026-05-08T00:00:00Z", bellAt: bellAt),
+            paths: paths)
         return paths
     }
 
@@ -132,6 +133,22 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: foreignRoot.path), "The repair writes rows only and must not recreate a directory it does not own."
         )
+    }
+
+    /// The repair records how a run ended; it does not answer the bell that run rang. The timestamp is the
+    /// identity of an alert the user may still be looking at, so dropping it while rewriting the row would
+    /// make a daemon crash recovery retract the alert.
+    func testRepairCarriesAnUnansweredBellOntoTheFinalizedRow() throws {
+        let sessionID = "session-with-bell"
+        let bellAt = "2026-05-08T00:00:30Z"
+        let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, bellAt: bellAt)
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in false })
+
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.state, .failed)
+        XCTAssertEqual(runtimeState.bellAt, bellAt)
     }
 
     func testLiveForeignPidRowIsLeftRunning() throws {

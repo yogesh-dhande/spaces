@@ -537,6 +537,10 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     /// the same detection from `.terminalList`); it reports a detected kind even before the session's
     /// first hook signal, when no agent-orchestration row exists yet.
     public let foregroundDetectedAgentKind: String?
+    /// When this session's program last rang the terminal bell, as the daemon recorded it (nil until a
+    /// bell arrives). Clients derive a bell alert from it and use its value as the alert's dismissal
+    /// identity; the daemon coalesces repeats so the value only moves for a bell worth re-raising.
+    public let bellAt: String?
 
     public init(
         id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
@@ -544,7 +548,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
         rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
-        foregroundDetectedAgentKind: String? = nil
+        foregroundDetectedAgentKind: String? = nil, bellAt: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -569,6 +573,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
         self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
+        self.bellAt = bellAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -595,6 +600,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowSourceID
         case hasFinalRender
         case foregroundDetectedAgentKind
+        case bellAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -623,6 +629,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
         foregroundDetectedAgentKind = try container.decodeIfPresent(String.self, forKey: .foregroundDetectedAgentKind)
+        bellAt = try container.decodeIfPresent(String.self, forKey: .bellAt)
     }
 }
 
