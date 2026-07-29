@@ -10,14 +10,14 @@
     }
   ],
   "rebasingContract" : "All ISO8601 timestamp fields in overview.json and every payload are replaced with signed integer second-offset strings relative to referenceDate; the demo backend adds each offset to load-time now. daemonStatus.protocolVersion is patched to the client's expected wire protocol version at load.",
-  "referenceDate" : "2026-07-28T17:53:23.716Z",
+  "referenceDate" : "2026-07-29T01:09:43.622Z",
   "schemaVersion" : 1,
   "sessionIDMap" : {
-    "14B7BF54-5FEB-40A0-BA54-09E8654D5943" : "demo-harbor-backend",
-    "91E2612C-6B1A-4864-9CF8-AE398A952CB4" : "demo-harbor-agent",
-    "B66DD2BA-9C68-4F7E-9ED5-DB51F4705BF3" : "demo-lantern-backend",
-    "C7542522-0B94-4C20-8E9A-A73A45D15811" : "demo-harbor-frontend",
-    "FA7880D1-CCF0-4BFA-B8DA-6DCE6A5829FD" : "demo-lantern-frontend"
+    "05FD6CED-D8F1-48F8-AFF5-B9AAF56E1142" : "demo-harbor-frontend",
+    "07D6FC18-FC9B-40E2-9DBE-46D9A8E9FF47" : "demo-harbor-agent",
+    "7EB14BF9-B154-486C-B90D-8DE6E9D903E3" : "demo-lantern-backend",
+    "CEB17477-B18B-4777-ADA1-3DB2324E26B0" : "demo-harbor-backend",
+    "E3A2BFF5-B9AA-4878-902C-6D80409E517F" : "demo-lantern-frontend"
   },
   "sessions" : [
     {

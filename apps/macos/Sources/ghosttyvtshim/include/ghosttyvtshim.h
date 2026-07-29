@@ -76,11 +76,22 @@ typedef enum {
     SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE = 1,
 } SpacesGhosttyVtMouseAction;
 
+// The most codepoints a snapshot cell's grapheme cluster can carry, base included. A cell whose
+// cluster is longer (combining-mark spam, which no legitimate glyph needs) is exported as its base
+// codepoint alone, which bounds both the copy the snapshot makes and the payload the render wire
+// format accepts.
+#define SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS 16
+
 typedef struct {
     uint32_t codepoint;
     uint32_t foreground_rgb;
     uint32_t background_rgb;
     uint16_t flags;
+    // The cluster's codepoints beyond `codepoint` (combining marks, ZWJ members, variation selectors,
+    // regional indicators). Zero and NULL for the overwhelming majority of cells, which hold a single
+    // codepoint. Owned by the snapshot and released by `spaces_ghostty_vt_snapshot_free`.
+    uint16_t grapheme_extra_len;
+    uint32_t *grapheme_extras;
 } SpacesGhosttyVtSnapshotCell;
 
 typedef struct {
