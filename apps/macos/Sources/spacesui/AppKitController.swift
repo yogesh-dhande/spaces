@@ -6967,6 +6967,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    /// Row text for a terminal target in the command palette and the session picker. Every window
+    /// target those builders see is a terminal row (`deviceTerminalWindows`), so the row is named
+    /// after its session and described by its working directory — abbreviated and suppressed at the
+    /// workspace root, the same rule the sidebar row follows. The raw path stays as the row's search
+    /// text — including where the display suppresses it — so a query naming a directory the
+    /// abbreviation collapsed still finds the row.
+    nonisolated static func terminalTargetRowText(window: WindowRecord, workspaceDirectory: String, homeDirectory: String) -> (
+        label: String, detail: String?, searchDetail: String?
+    ) {
+        let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
+        guard let workingDirectory = fallback.detail else { return (fallback.label, nil, nil) }
+        return (
+            fallback.label,
+            TerminalWorkingDirectoryDisplay.rowDetail(
+                workingDirectory: workingDirectory, workspaceDirectory: workspaceDirectory, homeDirectory: homeDirectory), workingDirectory
+        )
+    }
+
     nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
             of: #"^[*-]\s*"#, with: "", options: .regularExpression)
@@ -10984,9 +11002,35 @@ struct CommandPaletteItem: Sendable {
     let kind: AppKitController.WorkspaceRunShortcutTarget.Kind
     let label: String
     let detail: String?
+    /// What the palette matches instead of `detail` when the row's secondary text is an abbreviation
+    /// of something longer: a terminal row shows `~/p/s/apps/web`, and a query naming a component the
+    /// abbreviation collapsed must still find it. Defaults to `detail`, which is already literal on
+    /// every other row.
+    let searchDetail: String?
     let status: Status
     let focusRequest: AppKitController.WindowFocusRequest
     let recentFocusIdentity: String
+
+    init(
+        id: String, source: Source, alertsAttentionID: String?, workspaceID: String, workspaceTitle: String, workspaceBranch: String?,
+        projectTitle: String, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, label: String, detail: String?, status: Status,
+        focusRequest: AppKitController.WindowFocusRequest, recentFocusIdentity: String, searchDetail: String? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.alertsAttentionID = alertsAttentionID
+        self.workspaceID = workspaceID
+        self.workspaceTitle = workspaceTitle
+        self.workspaceBranch = workspaceBranch
+        self.projectTitle = projectTitle
+        self.kind = kind
+        self.label = label
+        self.detail = detail
+        self.searchDetail = searchDetail ?? detail
+        self.status = status
+        self.focusRequest = focusRequest
+        self.recentFocusIdentity = recentFocusIdentity
+    }
 
     var secondaryText: String {
         guard let detail, !detail.isEmpty else { return workspaceTitle }
@@ -10994,12 +11038,12 @@ struct CommandPaletteItem: Sendable {
     }
 
     var searchCandidate: CommandPaletteFuzzySearch.Candidate<String> {
-        let combinedText = "\(workspaceTitle) \(workspaceBranch ?? "") \(label) \(detail ?? "")"
+        let combinedText = "\(workspaceTitle) \(workspaceBranch ?? "") \(label) \(searchDetail ?? "")"
         return CommandPaletteFuzzySearch.Candidate(
             id: id,
             fields: [
                 .init(text: workspaceTitle, weight: 0.92), .init(text: workspaceBranch ?? "", weight: 0.9), .init(text: label, weight: 1.0),
-                .init(text: detail ?? "", weight: 0.78), .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
+                .init(text: searchDetail ?? "", weight: 0.78), .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
                 .init(text: Self.searchInitials(for: combinedText), weight: 0.94),
             ])
     }
@@ -11016,7 +11060,19 @@ struct CommandPaletteItem: Sendable {
         }
     }
 
+    /// Visual dedup key for the empty-query palette: two rows standing for the same target must not
+    /// both be listed (an alerts row and its workspace row are one target reached by different focus
+    /// routes, and the alerts row wins). A configured row is keyed by what the user reads it as — its
+    /// name and secondary text within its workspace — because those two rows carry different focus
+    /// requests and nothing else identifies them as the same thing.
+    ///
+    /// A terminal row is keyed by the target it focuses instead. Its secondary text is an *abbreviated*
+    /// path, so two shells named alike in `~/apple/web` and `~/api/web` both read `~/a/web` and one
+    /// would silently vanish; even the raw paths collide for two shells sitting in one directory.
+    /// Nothing is lost by not deduping them visually: only the workspace-target builder ever produces a
+    /// terminal row, so a terminal has no second row to be deduped against.
     var visibleIdentity: String {
+        guard kind != .window else { return focusIdentity }
         let normalizedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         return "\(workspaceID):\(kind):\(normalizedLabel):\(normalizedDetail)"
@@ -11472,25 +11528,19 @@ extension AppKitController {
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                        let window = windows[windowListIndex]
-                        let label: String
-                        let detail: String?
-                        if window.roleValue == .terminal {
-                            let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-                            label = fallback.label
-                            detail = fallback.detail
-                        } else {
-                            label = window.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Window"
-                            detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                        }
+                        let rowText = terminalTargetRowText(
+                            window: windows[windowListIndex], workspaceDirectory: detail.dir, homeDirectory: overview.terminalPathHomeDirectory)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: label, detail: detail, status: .none,
+                                kind: target.kind, label: rowText.label, detail: rowText.detail, status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
+                                // Recency is keyed off the raw path: which row was last focused must not
+                                // turn on how its path is displayed.
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
-                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
+                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: rowText.searchDetail),
+                                searchDetail: rowText.searchDetail))
                     case .missingConfiguredProcess:
                         guard let processKey = target.processKey else { continue }
                         items.append(

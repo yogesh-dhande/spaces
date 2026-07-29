@@ -262,23 +262,24 @@ struct SpacesTabView: View {
                             maxWidth: .infinity, alignment: .leading
                         ).padding(.vertical, 9).padding(.horizontal, 20)
                     }
-                    ForEach(group.rows) { row in runtimeRow(row) }
+                    ForEach(group.rows) { row in runtimeRow(row, workspaceDirectory: group.workspace.dir) }
                 }.padding(.top, 4)
             }
         }
     }
 
-    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow, workspaceDirectory: String) -> some View {
         if renamingRowID == row.id {
-            renameRow(row)
+            renameRow(row, workspaceDirectory: workspaceDirectory)
         } else {
             let rowIdentifier = row.sessionID.map { "terminal.row.\($0)" } ?? "workspace.row.\(row.id)"
             let button = Button {
                 activateRuntimeRow(row)
             } label: {
-                BandRow(dotKind: row.statusDotKind, tile: .tile(for: row.type), title: row.title, detail: row.detail) {
-                    runtimeTrailingIndicator(for: row)
-                }
+                BandRow(
+                    dotKind: row.statusDotKind, tile: .tile(for: row.type), title: row.title,
+                    detail: row.detail(workspaceDirectory: workspaceDirectory, homeDirectory: model.deviceHomeDirectory)
+                ) { runtimeTrailingIndicator(for: row) }
             }.buttonStyle(.plain).disabled(isRuntimeRowDisabled(row)).accessibilityIdentifier(rowIdentifier)
 
             // Long-press only offers a menu when the row has something to offer. A row with neither a
@@ -291,14 +292,14 @@ struct SpacesTabView: View {
     /// The row being renamed: the title becomes a text field seeded with the current name and the rest of
     /// the row stays put. Return commits; leaving the field (tapping away, scrolling it off) reverts, so a
     /// half-typed name never reaches the daemon.
-    private func renameRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+    private func renameRow(_ row: SpacesMobileWorkspaceRuntimeRow, workspaceDirectory: String) -> some View {
         BandRow(
             dotKind: row.statusDotKind, tile: .tile(for: row.type),
             title: {
                 TextField("Name", text: $renameText).textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.done).focused(
                     $isRenameFieldFocused
                 ).onSubmit { commitRename(for: row) }
-            }, detail: row.detail
+            }, detail: row.detail(workspaceDirectory: workspaceDirectory, homeDirectory: model.deviceHomeDirectory)
         ) { EmptyView() }.accessibilityIdentifier("runtime.rename.\(row.id)").onAppear { isRenameFieldFocused = true }.onChange(
             of: isRenameFieldFocused
         ) { _, isFocused in if !isFocused { renamingRowID = nil } }
@@ -384,16 +385,20 @@ struct SpacesTabView: View {
                 Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
                     .lineLimit(1)
             }.accessibilityIdentifier("workspace.band.\(group.id)")
-            VStack(spacing: 0) { ForEach(group.sessions) { session in terminalSessionRow(session) } }.padding(.top, 4)
+            VStack(spacing: 0) { ForEach(group.sessions) { session in terminalSessionRow(session, workspaceDirectory: workspace?.dir ?? "") } }
+                .padding(.top, 4)
         }.padding(.bottom, 14)
     }
 
-    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
+    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary, workspaceDirectory: String) -> some View {
         Button {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
             BandRow(
-                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.workingDirectory
+                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title,
+                detail: TerminalWorkingDirectoryDisplay.rowDetail(
+                    workingDirectory: session.workingDirectory, workspaceDirectory: workspaceDirectory, homeDirectory: model.deviceHomeDirectory)
+                    ?? ""
             ) { RowChevron() }
         }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
             "terminal.row.\(session.id)")

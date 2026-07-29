@@ -385,12 +385,17 @@ struct SpacesDeviceOverviewBuilder {
             rows.append(
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
-                    title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
-                    sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil,
-                    canStop: runState == .running && session?.sessionID != nil))
+                    // The session's own title and working directory are what the shell is actually doing
+                    // (a rename already wins inside `effectiveTitle`), so they outrank the tracked window
+                    // record — whose name is frozen at the launch-generated `shell-N`. The window record
+                    // only names rows whose session is gone.
+                    title: session?.effectiveTitle ?? window.name ?? "Workspace Terminal",
+                    workingDirectory: session?.effectiveWorkingDirectory ?? descriptor.workspace.dir, sessionID: session?.sessionID,
+                    runState: runState, canOpenTerminal: session != nil, canStop: runState == .running && session?.sessionID != nil,
+                    userTitle: session?.launchConfiguration.userTitle))
         }
 
-        for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
+        for (sessionID, session) in sessionsByID.sorted(by: { $0.key < $1.key }) where !includedSessionIDs.contains(sessionID) {
             guard session.workspaceID == descriptor.workspace.id else { continue }
             let sessionKey = "terminal:\(sessionID)"
             guard !claimedTerminalKeys.contains(sessionKey) else { continue }
@@ -399,10 +404,14 @@ struct SpacesDeviceOverviewBuilder {
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
                     workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState, canOpenTerminal: true,
-                    canStop: runState == .running))
+                    canStop: runState == .running, userTitle: session.launchConfiguration.userTitle))
         }
 
-        return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }
+        // Build order, not title order: tracked windows keep their record order (creation), loose
+        // sessions follow sorted by id. Titles are live now — a program retitling itself must not
+        // reorder the list, both because rows jumping under the pointer is bad UX and because palette
+        // and cycling requests reference these rows by list index against a later overview.
+        return rows
     }
 
     private static func processRunState(_ process: RunningProcessRecord?) -> SpacesDeviceRunState {

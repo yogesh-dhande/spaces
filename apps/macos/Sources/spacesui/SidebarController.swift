@@ -907,6 +907,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// including the ones that are not loaded: an unreachable device keeps its rows listed for the whole
     /// outage, and id-based lookups resolve through this merged data, so excluding it would both erase
     /// its subtree and make every workspace under it unresolvable.
+    ///
+    /// Every path that installs a device overview funnels through here — the local snapshot, the remote
+    /// pull/subscription, and a mutation response — so this is also where surfaces that read those
+    /// overviews but are re-derived by nothing else get refreshed. Global panel windows are the one such
+    /// surface: a rename reaches this client only in an overview, and no overview update re-renders a
+    /// global panel window (see `PanelCoordinator.refreshGlobalPanelTitles`).
     func rebuildFlatSidebarData() {
         let merged = AppKitController.mergedSidebarData(sections: host.deviceSections)
         host.projects = merged.projects
@@ -916,6 +922,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
         // is typing in gets consumed — before anything reads the groups for the badge or the list.
         host.consumeFocusedSessionBellAlerts()
+        host.panelCoordinator.refreshGlobalPanelTitles()
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
@@ -1587,6 +1594,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
+
+            // Ad hoc shells trail their working directory as dimmed secondary text. It compresses
+            // before the name does, so a deep path never squeezes out what the row is.
+            if let detail = item.detail {
+                let detailLabel = NSTextField(labelWithString: detail)
+                detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                detailLabel.textColor = sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
+                detailLabel.lineBreakMode = .byTruncatingHead
+                detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+                detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                row.addArrangedSubview(detailLabel)
+            }
         }
 
         row.addArrangedSubview(NSView())

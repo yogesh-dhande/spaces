@@ -93,6 +93,14 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - a coding-agent terminal hosting a configured or detected coding agent
 - an ad hoc terminal the user opens directly (for example through `New terminal`), rooted at the workspace directory
 
+#### Session names
+- A process or coding-agent terminal is named after its configured row on every surface, so a row keeps the identity the user gave it whatever the program inside prints.
+- An ad hoc terminal names itself after what it is running: it starts as a generic shell name and follows the title the shell reports (for example `vim main.swift`), across the sidebar, terminal tabs, panel window titles, and the iOS session list.
+- Renaming an ad hoc terminal pins its name. A pinned name ignores later title changes from the shell. Renaming it to an empty name clears the pin, and the terminal follows its live title again. Configured rows rename their settings entry instead, which must keep a name, so an empty rename there is discarded.
+- An ad hoc terminal also shows its working directory as secondary text beside its name, abbreviated the way fish shortens a prompt path (`~/p/spaces` for `~/projects/spaces`). A terminal sitting at the workspace directory shows none, since its workspace already says where it is. Process and coding-agent terminals never show a working directory.
+- A terminal tab is named after its selected pane, and a panel window after its selected tab, so splitting a tab and moving focus renames the tab and the window with it.
+- The command palette matches a target's name first and its secondary text second, so typing a name outranks typing a path.
+
 ## Startup
 - On launch, the main window should immediately show a neutral loading state while Spaces loads workspace data, so startup never presents a blank window.
 - Launch runs a setup flow before the main workspace UI, showing only the steps that are pending. A launch with nothing pending goes straight to the workspace UI and the flow is never seen. The steps are the Chrome Automation permission, then coding-agent hooks.

@@ -1,4 +1,5 @@
 import Testing
+import spacesdevicecore
 import workspacecore
 
 @testable import spacesui
@@ -154,6 +155,40 @@ import workspacecore
         let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "session-15")
 
         #expect(visible.first?.id == "picker:15")
+    }
+
+    /// Two ad hoc shells running the same program in sibling directories read identically once their
+    /// paths are abbreviated (`~/apple/web` and `~/api/web` both render `~/a/web`), and two shells in
+    /// one directory read identically outright. They are still different sessions, so the empty-query
+    /// palette must list both — visual dedup exists to collapse one target reached twice, not two
+    /// targets that happen to look alike.
+    @Test func emptyQueryKeepsDistinctShellsThatAbbreviateToTheSameRowText() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [
+                SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/Users/ada/project", isGitRepo: true, defaultBranch: "main")
+            ],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/Users/ada/project", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 2,
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-apple", workspaceID: "workspace-1", title: "zsh", workingDirectory: "/Users/ada/project/apple/web",
+                            sessionID: "session-apple", runState: .running, canOpenTerminal: true, canStop: true),
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-api", workspaceID: "workspace-1", title: "zsh", workingDirectory: "/Users/ada/project/api/web",
+                            sessionID: "session-api", runState: .running, canOpenTerminal: true, canStop: true),
+                    ])
+            ], sessions: [], daemonHomeDirectory: "/Users/ada")
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+        #expect(items.map { $0.detail } == ["~/p/a/web", "~/p/a/web"], "the two rows really do render the same text")
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: items, query: "", currentWorkspaceID: "workspace-1", recentFocusIdentities: [])
+
+        #expect(visible.count == 2)
+        #expect(Set(visible.map { $0.focusIdentity }).count == 2, "each row still focuses its own session")
     }
 
     @Test func searchQueryUsesAllWorkspaceItems() {

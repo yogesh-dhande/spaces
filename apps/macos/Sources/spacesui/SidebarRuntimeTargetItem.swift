@@ -13,6 +13,10 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// (e.g. `process:<id>`, `terminal:<sessionID>`, `browser:<url>`).
     let key: String
     let title: String
+    /// Dimmed secondary text trailing the title. Only ad hoc shells carry one — their abbreviated
+    /// working directory — because only they wander away from the workspace root; a configured
+    /// process or agent is identified by its name alone.
+    let detail: String?
     let kind: AppKitController.WorkspaceRunShortcutTarget.Kind
     /// `nil` for browser targets: whether a browser session is "open" is a Chrome-side
     /// question the sidebar row does not answer.
@@ -35,18 +39,22 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
 
 extension AppKitController {
     /// Builds the sidebar's runtime-target rows for a workspace from its overview detail.
-    nonisolated static func sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession])
-        -> [SidebarRuntimeTargetItem]
-    {
+    /// `daemonHomeDirectory` is the owning device's home (`SpacesDeviceOverviewPayload.terminalPathHomeDirectory`),
+    /// which shell rows abbreviate their working directory against.
+    nonisolated static func sidebarRuntimeTargetItems(
+        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], daemonHomeDirectory: String
+    ) -> [SidebarRuntimeTargetItem] {
         let targets = workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
         return targets.enumerated().compactMap { offset, target in
             sidebarRuntimeTargetItem(
-                target: target, shortcutIndex: offset + 1 <= 10 ? offset + 1 : nil, detail: detail, browserSessions: browserSessions)
+                target: target, shortcutIndex: offset + 1 <= 10 ? offset + 1 : nil, detail: detail, browserSessions: browserSessions,
+                daemonHomeDirectory: daemonHomeDirectory)
         }
     }
 
     nonisolated private static func sidebarRuntimeTargetItem(
-        target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession]
+        target: WorkspaceRunShortcutTarget, shortcutIndex: Int?, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession],
+        daemonHomeDirectory: String
     ) -> SidebarRuntimeTargetItem? {
         let key = cycleCursorKey(for: target, detail: detail)
         let title = focusableWindowName(for: target, detail: detail, browserSessions: browserSessions)
@@ -54,45 +62,48 @@ extension AppKitController {
         case .browser:
             guard let targetURL = target.targetURL, !targetURL.isEmpty else { return nil }
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? targetURL, kind: .browser, runState: nil, shortcutIndex: shortcutIndex, sessionID: nil, canRun: false,
-                canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil, launcherName: nil,
-                launcherID: nil, browserTargetURL: targetURL)
+                key: key, title: title ?? targetURL, detail: nil, kind: .browser, runState: nil, shortcutIndex: shortcutIndex, sessionID: nil,
+                canRun: false, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil,
+                launcherName: nil, launcherID: nil, browserTargetURL: targetURL)
         case .process:
             guard let processID = target.processID, let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }) else {
                 return nil
             }
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? row.name, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex, sessionID: row.sessionID,
-                canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID, processKey: row.name,
-                processTemplateID: row.templateID, agentID: nil, launcherName: nil, launcherID: nil, browserTargetURL: nil)
+                key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
+                sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
+                processKey: row.name, processTemplateID: row.templateID, agentID: nil, launcherName: nil, launcherID: nil, browserTargetURL: nil)
         case .window:
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             let row = detail.terminalRows[index]
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? row.title, kind: .window, runState: row.runState, shortcutIndex: shortcutIndex, sessionID: row.sessionID,
-                canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil,
-                launcherName: nil, launcherID: nil, browserTargetURL: nil)
+                key: key, title: title ?? row.title,
+                detail: TerminalWorkingDirectoryDisplay.rowDetail(
+                    workingDirectory: row.workingDirectory, workspaceDirectory: detail.dir, homeDirectory: daemonHomeDirectory), kind: .window,
+                runState: row.runState, shortcutIndex: shortcutIndex, sessionID: row.sessionID, canRun: false, canStop: row.canStop,
+                canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil, launcherName: nil, launcherID: nil,
+                browserTargetURL: nil)
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? row.name, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex, sessionID: row.sessionID,
-                canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: nil, processKey: nil, processTemplateID: nil,
-                agentID: agentWindow.id, launcherName: row.name, launcherID: row.launcherID, browserTargetURL: nil)
+                key: key, title: title ?? row.name, detail: nil, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
+                sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: nil, processKey: nil,
+                processTemplateID: nil, agentID: agentWindow.id, launcherName: row.name, launcherID: row.launcherID, browserTargetURL: nil)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? processKey, kind: .missingConfiguredProcess, runState: .notStarted, shortcutIndex: shortcutIndex,
-                sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: processKey,
+                key: key, title: title ?? processKey, detail: nil, kind: .missingConfiguredProcess, runState: .notStarted,
+                shortcutIndex: shortcutIndex, sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: processKey,
                 processTemplateID: templateID, agentID: nil, launcherName: nil, launcherID: nil, browserTargetURL: nil)
         case .agentLauncher:
             guard let launcherName = target.launcherName else { return nil }
             let launcherID = detail.config.agentLaunchers.first { normalizedRunRowName($0.name) == normalizedRunRowName(launcherName) }?.id
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? launcherName, kind: .agentLauncher, runState: .notStarted, shortcutIndex: shortcutIndex, sessionID: nil,
-                canRun: true, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil,
-                launcherName: launcherName, launcherID: launcherID, browserTargetURL: nil)
+                key: key, title: title ?? launcherName, detail: nil, kind: .agentLauncher, runState: .notStarted, shortcutIndex: shortcutIndex,
+                sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil,
+                agentID: nil, launcherName: launcherName, launcherID: launcherID, browserTargetURL: nil)
         }
     }
 }
@@ -101,22 +112,33 @@ extension AppKitController {
     /// The sidebar's runtime-target rows for a workspace, from the owning device's overview.
     func sidebarRuntimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
-        return Self.sidebarRuntimeTargetItems(detail: context.detail, browserSessions: context.browserSessions)
+        return Self.sidebarRuntimeTargetItems(
+            detail: context.detail, browserSessions: context.browserSessions, daemonHomeDirectory: context.overview.terminalPathHomeDirectory)
     }
 
-    /// The runtime targets' display names (what the sidebar rows show) for a workspace's
-    /// terminal sessions, so pane and tab titles match the target list instead of the
-    /// terminal's own window title. Returned as a map because a caller titling a panel
-    /// needs a name per open session, and one target-list build answers all of them.
-    /// When two targets claim the same session, the first in target order wins — the
-    /// order the sidebar rows and numbered shortcuts use.
-    func runtimeTargetTitlesBySessionID(workspaceID: String) -> [String: String] {
-        var titles: [String: String] = [:]
-        for item in sidebarRuntimeTargetItems(workspaceID: workspaceID) {
-            guard let sessionID = item.sessionID, titles[sessionID] == nil else { continue }
-            titles[sessionID] = item.title
+    /// What the runtime targets contribute to naming a workspace's open terminal panes, so pane and
+    /// tab titles match the target list instead of the terminal's own window title. Returned as a map
+    /// because a caller titling a panel needs a name per open session, and one target-list build
+    /// answers all of them. When two targets claim the same session, the first in target order wins —
+    /// the order the sidebar rows and numbered shortcuts use.
+    func runtimeTargetPaneNamesBySessionID(workspaceID: String) -> [String: RuntimeTargetPaneName] {
+        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [:] }
+        // Only terminal rows carry a rename; a session claimed by a configured target never appears
+        // among them, so this lookup answers exactly the ad hoc shells.
+        var pinnedTitlesBySessionID: [String: String] = [:]
+        for row in context.detail.terminalRows {
+            guard let sessionID = row.sessionID, let userTitle = row.userTitle else { continue }
+            pinnedTitlesBySessionID[sessionID] = userTitle
         }
-        return titles
+        var names: [String: RuntimeTargetPaneName] = [:]
+        for item in Self.sidebarRuntimeTargetItems(
+            detail: context.detail, browserSessions: context.browserSessions, daemonHomeDirectory: context.overview.terminalPathHomeDirectory)
+        {
+            guard let sessionID = item.sessionID, names[sessionID] == nil else { continue }
+            names[sessionID] = RuntimeTargetPaneName(
+                title: item.title, pinnedTitle: pinnedTitlesBySessionID[sessionID], namesByIdentity: item.kind != .window)
+        }
+        return names
     }
 
     /// Opens or focuses a sidebar runtime target through the same resolution pipeline the
@@ -217,9 +239,13 @@ extension AppKitController {
     /// dedicated Device API command; configured processes, agent launchers, and browser
     /// sessions rename their workspace-config entry (so a running process picks the new
     /// name up on restart, matching how config edits behave elsewhere).
+    ///
+    /// Submitting an empty name clears an ad hoc terminal's rename, handing the row back to its live
+    /// title. Every other kind renames a config entry, which must keep a name, so an empty submission
+    /// there is discarded.
     func commitSidebarRuntimeTargetRename(workspaceID: String, item: SidebarRuntimeTargetItem, newTitle: String) {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title != item.title else { return }
+        guard title != item.title, !title.isEmpty || item.kind == .window else { return }
         switch item.kind {
         case .window:
             guard let sessionID = item.sessionID else { return }

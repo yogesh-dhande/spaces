@@ -53,9 +53,7 @@
         func openSessionStream(
             request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
             onDisconnect: @escaping @MainActor (Error?) -> Void
-        ) async throws -> SpacesDeviceAPIStreamHandle {
-            throw SpacesDeviceAPIClientError.invalidEndpoint
-        }
+        ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
         func currentResolvedHost() async -> String? { resolvedHost }
     }
@@ -71,8 +69,16 @@
     private final class TestClock: @unchecked Sendable {
         private let lock = NSLock()
         private var instant = ContinuousClock.now
-        var now: ContinuousClock.Instant { lock.lock(); defer { lock.unlock() }; return instant }
-        func advance(by duration: Duration) { lock.lock(); defer { lock.unlock() }; instant = instant.advanced(by: duration) }
+        var now: ContinuousClock.Instant {
+            lock.lock()
+            defer { lock.unlock() }
+            return instant
+        }
+        func advance(by duration: Duration) {
+            lock.lock()
+            defer { lock.unlock() }
+            instant = instant.advanced(by: duration)
+        }
     }
 
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
@@ -128,12 +134,27 @@
 
             XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
             XCTAssertEqual(browserRow?.title, "Dashboard")
-            XCTAssertEqual(browserRow?.detail, "localhost:3000/dashboard")
+            XCTAssertEqual(browserRow?.detail(workspaceDirectory: "/repo/feature", homeDirectory: "/repo"), "localhost:3000/dashboard")
             XCTAssertEqual(browserRow?.type, .browserSessions)
             XCTAssertNil(browserRow?.sessionID)
             XCTAssertEqual(browserRow?.canRun, false)
             XCTAssertEqual(browserRow?.canStop, false)
             XCTAssertEqual(browserRow?.canRestart, false)
+        }
+
+        /// The displayed detail abbreviates ancestor path components, so search must still match the
+        /// shell's raw working directory: a query naming an abbreviated ancestor finds the row.
+        func testSearchMatchesRawWorkingDirectoryBehindTheAbbreviatedDetail() {
+            let model = makeModel()
+            model.overview = makeOverview(featureTerminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature/backend/api",
+                    sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+            ])
+
+            model.searchText = "backend"
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertEqual(rows.map(\.title), ["shell"], "an abbreviated-away ancestor component must still match")
         }
 
         /// Runtime rows group by family in the Mac sidebar's order: browser sessions, configured processes,
@@ -296,6 +317,52 @@
             XCTAssertEqual(payload.workspaceID, "workspace-docs")
             XCTAssertEqual(payload.sessionID, "session-shell")
             XCTAssertFalse(model.isMutating)
+        }
+
+        /// A shell row says where the shell is only once that adds something: at the workspace root the
+        /// row's workspace already answers it. A configured row always says what it runs.
+        func testRuntimeRowSecondaryTextShowsAShellsAbbreviatedDirectoryAwayFromTheWorkspaceRoot() {
+            func terminalRow(workingDirectory: String) -> SpacesMobileWorkspaceRuntimeRow {
+                SpacesMobileWorkspaceRuntimeRow(
+                    source: .terminal(
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-docs", title: "vim main.swift", workingDirectory: workingDirectory,
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)))
+            }
+
+            XCTAssertEqual(terminalRow(workingDirectory: "/repo/docs").detail(workspaceDirectory: "/repo/docs", homeDirectory: "/repo"), "")
+            XCTAssertEqual(
+                terminalRow(workingDirectory: "/repo/docs/apps/web").detail(workspaceDirectory: "/repo/docs", homeDirectory: ""), "/r/d/a/web")
+
+            let processRow = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "template-api", workspaceID: "workspace-docs", name: "api", command: "npm run dev", templateID: "template-api",
+                        processID: nil, sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false)))
+            XCTAssertEqual(processRow.detail(workspaceDirectory: "/repo/docs", homeDirectory: ""), "npm run dev")
+        }
+
+        /// Paths abbreviate against the home the DEVICE's daemon reports, never this app's — an iOS app's
+        /// home is its own sandbox container, so a Mac path would otherwise render `/U/a/p/spaces` instead
+        /// of `~/p/spaces`. A daemon that reports no home leaves the home segment uncollapsed.
+        func testRuntimeRowDirectoryAbbreviatesAgainstTheDevicesHomeNotTheApps() {
+            let terminalRow = SpacesDeviceWorkspaceTerminalRow(
+                id: "terminal-shell", workspaceID: "workspace-feature", title: "vim main.swift",
+                workingDirectory: "/Users/ada/projects/spaces/apps/web", sessionID: "session-shell", runState: .running, canOpenTerminal: true,
+                canStop: true)
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .terminal(terminalRow))
+
+            XCTAssertNotEqual(NSHomeDirectory(), "/Users/ada", "the app's own home must not be what makes this pass")
+            XCTAssertEqual(row.detail(workspaceDirectory: "/Users/ada/projects/spaces", homeDirectory: "/Users/ada"), "~/p/s/a/web")
+            XCTAssertEqual(row.detail(workspaceDirectory: "/Users/ada/projects/spaces", homeDirectory: ""), "/U/a/p/s/a/web")
+
+            let model = makeModel()
+            XCTAssertEqual(model.deviceHomeDirectory, "", "no overview yet means no reported home")
+            model.overview = makeOverview(
+                daemonStatus: TerminalServiceDaemonStatus(
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    protocolVersion: SpacesWireProtocol.version, homeDirectory: "/Users/ada"))
+            XCTAssertEqual(model.deviceHomeDirectory, "/Users/ada")
         }
 
         func testRunRowWithExistingSessionSendsRunMutation() async {
@@ -812,9 +879,8 @@
             model.activeDeviceID = deviceID
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
-                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port,
-                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
-                    updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
             ]
 
             await model.refresh()
@@ -848,9 +914,8 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
             let unchangedRecord = SpacesMobilePairedDeviceRecord(
-                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
-                certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
-                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
             model.pairedDevices = [unchangedRecord]
 
             await model.refresh()
@@ -880,8 +945,8 @@
         func testFailuresThatPersistPastTheDelaySurfaceConnectionError() async {
             let clock = TestClock()
             let model = makeModel(
-                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
-                refreshFailureAlertDelay: .milliseconds(50), clock: clock)
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
 
             await model.refresh()
             XCTAssertNil(model.errorMessage, "the alert must not appear while the failures could still be a blip")
@@ -946,8 +1011,8 @@
         func testFailureRunEndsWhenConnectionMonitoringPauses() async {
             let clock = TestClock()
             let model = makeModel(
-                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
-                refreshFailureAlertDelay: .milliseconds(50), clock: clock)
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
 
             await model.refresh()
             clock.advance(by: .milliseconds(60))
@@ -994,9 +1059,7 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
-                guard request.commandName == "runWorkspaceProcess" else {
-                    throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
-                }
+                guard request.commandName == "runWorkspaceProcess" else { throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
             let clock = TestClock()
@@ -1023,9 +1086,7 @@
             // refresh fail on the spot (`invalidEndpoint`) instead of dialing anything.
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = []
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
             let clock = TestClock()
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50), now: { clock.now })
@@ -1490,6 +1551,27 @@
             XCTAssertNil(model.errorMessage)
         }
 
+        /// Submitting an empty name clears an ad hoc terminal's rename — the only way back to the live title
+        /// once a row has been named — so the empty title travels to the daemon instead of being discarded.
+        func testEmptyRenameOnAnAdHocTerminalRowClearsItsName() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(featureTerminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-shell", workspaceID: "workspace-feature", title: "build log", workingDirectory: "/repo/feature",
+                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, userTitle: "build log")
+                ]))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "build log" })
+
+            await model.rename(row: row, to: "   ")
+
+            guard case .renameTerminalSession(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected a renameTerminalSession command.")
+            }
+            XCTAssertEqual(request.sessionID, "session-shell")
+            XCTAssertEqual(request.title, "")
+            XCTAssertNil(model.errorMessage)
+        }
+
         /// A configured process is named by its workspace config, not by its session, so the rename edits the
         /// config entry — echoing every other configured field back unchanged.
         func testRenameConfiguredProcessRowEditsItsConfigEntry() async throws {
@@ -1585,6 +1667,8 @@
             XCTAssertEqual(commandNames, [])
         }
 
+        /// A configured row renames its config entry, which must keep a name, so an empty submission there
+        /// is discarded rather than clearing anything.
         func testRenameIgnoresEmptyAndUnchangedTitles() async throws {
             let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
@@ -1701,9 +1785,9 @@
 
         /// A model whose device is unreachable: every request — the overview fetch and the frozen-core
         /// handshake it falls back to — throws.
-        private func makeModel(
-            refreshFailure: any Error, refreshFailureAlertDelay: Duration = .seconds(5), clock: TestClock? = nil
-        ) -> SpacesMobileAppModel {
+        private func makeModel(refreshFailure: any Error, refreshFailureAlertDelay: Duration = .seconds(5), clock: TestClock? = nil)
+            -> SpacesMobileAppModel
+        {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in throw refreshFailure }
             if let clock {

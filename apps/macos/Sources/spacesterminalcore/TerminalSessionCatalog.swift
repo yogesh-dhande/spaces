@@ -29,9 +29,11 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     public var sessionID: String { launchConfiguration.sessionID }
     public var workspaceID: String { launchConfiguration.workspaceID }
     public var kind: TerminalSessionKind { launchConfiguration.kind }
-    /// A manual rename (userTitle) wins over the runtime title, which Ghostty set_title events
-    /// keep rewriting; the launch-time title is the fallback before either exists.
-    public var effectiveTitle: String { launchConfiguration.userTitle ?? runtimeState.title ?? launchConfiguration.title }
+    /// The session's name, resolved by the shared `TerminalSessionTitle` rule.
+    public var effectiveTitle: String {
+        TerminalSessionTitle.effective(
+            userTitle: launchConfiguration.userTitle, runtimeTitle: runtimeState.title, launchTitle: launchConfiguration.title)
+    }
     public var effectiveWorkingDirectory: String { runtimeState.workingDirectory ?? launchConfiguration.workingDirectory }
 }
 

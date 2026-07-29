@@ -50,9 +50,13 @@ struct BandRow<Title: View, Trailing: View>: View {
             tile
             VStack(alignment: .leading, spacing: 1) {
                 title().font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
-                    Theme.mutedSecondary
-                ).lineLimit(1).truncationMode(.middle)
+                // An empty detail takes no line at all, so a shell sitting at its workspace root reads as
+                // a single-line row instead of leaving a blank second line under its name.
+                if !detail.isEmpty {
+                    Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
+                        Theme.mutedSecondary
+                    ).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer(minLength: 0)
             trailing()

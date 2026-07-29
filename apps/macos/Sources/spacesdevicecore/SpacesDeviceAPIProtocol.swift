@@ -350,6 +350,11 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
     public let id: String
     public let workspaceID: String
     public let title: String
+    /// The user's explicit rename, when one pins the row's name. `title` already resolves it, but a
+    /// client that holds a live title of its own — an open terminal pane, whose title changes the
+    /// instant the shell retitles rather than on the overview's poll cadence — needs the pin
+    /// separately to tell a pinned name apart from a stale snapshot of the live one.
+    public let userTitle: String?
     public let workingDirectory: String
     public let sessionID: String?
     public let runState: SpacesDeviceRunState
@@ -358,11 +363,12 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
 
     public init(
         id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesDeviceRunState,
-        canOpenTerminal: Bool, canStop: Bool = false
+        canOpenTerminal: Bool, canStop: Bool = false, userTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.title = title
+        self.userTitle = userTitle
         self.workingDirectory = workingDirectory
         self.sessionID = sessionID
         self.runState = runState
@@ -374,6 +380,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         case id
         case workspaceID
         case title
+        case userTitle
         case workingDirectory
         case sessionID
         case runState
@@ -386,6 +393,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         id = try container.decode(String.self, forKey: .id)
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
         title = try container.decode(String.self, forKey: .title)
+        userTitle = try container.decodeIfPresent(String.self, forKey: .userTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         runState = try container.decode(SpacesDeviceRunState.self, forKey: .runState)
@@ -662,6 +670,14 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         self.retainedTerminalSessionIDs = retainedTerminalSessionIDs
         self.daemonStatus = daemonStatus
     }
+
+    /// The home directory this device's paths abbreviate against, for
+    /// `TerminalWorkingDirectoryDisplay`. It is the owning daemon's home, never the reading client's:
+    /// an iPhone's home is its app container and a Mac reading a Linux daemon has a different one, so
+    /// abbreviating against the client's would rewrite every path of a device it does not run on.
+    /// Empty when the daemon reported none, which leaves the home segment uncollapsed rather than
+    /// collapsing it against a home that is not the device's.
+    public var terminalPathHomeDirectory: String { daemonStatus.homeDirectory ?? "" }
 }
 
 public struct SpacesDeviceWorkspaceCreateOptions: Codable, Sendable, Equatable {
@@ -986,6 +1002,9 @@ public struct SpacesDeviceWorkspaceTerminalRequest: Codable, Sendable, Equatable
 public struct SpacesDeviceTerminalSessionRenameRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let sessionID: String
+    /// The session's new name. An empty (or whitespace-only) title clears the rename rather than
+    /// setting one, handing the session back to its live title — the only way back from a rename,
+    /// and the reason this command never rejects an empty title.
     public let title: String
 
     public init(workspaceID: String, sessionID: String, title: String) {

@@ -338,6 +338,41 @@ import workspacecore
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
     }
 
+    /// Palette rows for ad hoc shells describe them the way the sidebar does: a shell at the
+    /// workspace root shows no path, and a wandered one shows a path abbreviated against the OWNING
+    /// DEVICE's home (here `/Users/ada`, which is not the test process's) — while the search text keeps
+    /// the raw path so typing a collapsed component still finds the row.
+    @Test func commandPaletteTerminalRowsAbbreviateTheirPathButMatchTheRawOne() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/Users/ada/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: nil,
+                    sessionCount: 2, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    config: SpacesDeviceWorkspaceConfig(),
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-root", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/Users/ada/project-feature",
+                            sessionID: "session-root", runState: .running, canOpenTerminal: true, canStop: true),
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-wandered", workspaceID: "workspace-1", title: "vim main.swift",
+                            workingDirectory: "/Users/ada/project-feature/apps/web", sessionID: "session-wandered", runState: .running,
+                            canOpenTerminal: true, canStop: true),
+                    ])
+            ], sessions: [], daemonHomeDirectory: "/Users/ada")
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        let rootRow = try #require(items.first { $0.label == "shell-1" })
+        #expect(rootRow.detail == nil, "the workspace already says where a shell at its root is")
+        #expect(rootRow.searchDetail == "/Users/ada/project-feature", "suppressed from display, still matchable by path")
+
+        let wanderedRow = try #require(items.first { $0.label == "vim main.swift" })
+        #expect(wanderedRow.detail == "~/p/a/web", "collapsed against the daemon's home, not the client's")
+        #expect(wanderedRow.searchDetail == "/Users/ada/project-feature/apps/web")
+    }
+
     @Test func deviceTerminalRowsRenderThroughWorkspaceRuntimeRows() {
         let terminalRows = [
             SpacesDeviceWorkspaceTerminalRow(
