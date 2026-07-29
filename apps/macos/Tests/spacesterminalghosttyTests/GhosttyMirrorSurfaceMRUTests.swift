@@ -255,42 +255,19 @@ import spacesterminalcore
     }
 
     func testFreedPaneDoesNotResizeItsSessionWhileHidden() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try paths.ensureDirectories()
+        let session = try makeOwnerSession(sessionID: "mru-hidden-resize")
+        defer { session.cleanUp() }
+        let host = session.host
+        let recorder = session.recorder
 
-        let sessionID = "mru-hidden-resize"
-        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z")
-        let recorder = ControlRequestRecorder(
-            payload: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: "initial", emittedAt: "2026-07-24T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-                screenStateRevision: 1,
-                runtimeState: TerminalSessionRuntimeState(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-24T00:00:00Z",
-                    title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 5),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(
-                    clients: [client],
-                    attachments: [TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: "2026-07-24T00:00:00Z")]),
-                title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
-                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(
-                    .full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: Self.snapshot(text: "alpha"))))))
-        let host = RemoteGhosttySessionHost(
-            launchConfiguration: TerminalSessionLaunchConfiguration(
-                sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-07-24T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths,
-            terminalServiceRequestSender: recorder.send)
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
-        window?.contentView?.addSubview(container)
-        try host.attach(client: client, mode: .owner, into: container)
+        window?.contentView?.addSubview(session.container)
+        try host.attach(client: session.client, mode: .owner, into: session.container)
         waitForCondition("owner pane paints") { host.hasRenderableSurface() }
         // A displayed owner pane does report its grid: the session is resized to the surface Ghostty
         // actually rendered. Waiting for it also keeps that resize out of the count taken below.
         waitForCondition("displayed pane resizes its session") { recorder.resizeCount > 0 }
 
-        container.removeFromSuperview()
+        session.container.removeFromSuperview()
         for index in 1...GhosttyMirrorSurfaceMRU.warmSurfaceLimit {
             let filler = makePane(index: index)
             show(filler)
@@ -309,16 +286,208 @@ import spacesterminalcore
         XCTAssertEqual(recorder.resizeCount, resizesBeforeRefresh, "a hidden pane resized its session after its surface was freed")
     }
 
+    /// Switching back to a workspace joins the pane to the window before the panel's edge constraints
+    /// settle it, so the pane is momentarily laid out at a fraction of its real size and reports that
+    /// grid — with its evicted surface rebuilt from inside that same pass. Sending it would cost the
+    /// shell two SIGWINCHes (whose prompt redraw eats a line of scrollback) and a remote session a full
+    /// reflow to the tiny grid, every single switch. Coming back to a pane the user left at the same
+    /// size must not resize its session at all.
+    func testSwitchingBackToAPaneAtUnchangedSizeDoesNotResizeItsSession() throws {
+        let session = try makeOwnerSession(sessionID: "mru-switch-back-resize")
+        defer { session.cleanUp() }
+        let host = session.host
+        let recorder = session.recorder
+        let settledFrame = session.container.frame
+
+        window?.contentView?.addSubview(session.container)
+        try host.attach(client: session.client, mode: .owner, into: session.container)
+        waitForCondition("owner pane paints") { host.hasRenderableSurface() }
+        waitForCondition("displayed pane resizes its session") { recorder.resizeCount > 0 }
+        waitForQuiescentResizes(recorder)
+
+        // Switch away: the pane leaves the screen and later panes take its warm surface slot.
+        session.container.removeFromSuperview()
+        for index in 1...GhosttyMirrorSurfaceMRU.warmSurfaceLimit {
+            let filler = makePane(index: index)
+            show(filler)
+            hide(filler)
+        }
+
+        // Switch back, the way the workspace detail does it: the pane joins the window before its real
+        // frame is applied, rebuilding its surface against the unsettled size, and the settled frame
+        // lands later in the same pass.
+        let resizesBeforeSwitchBack = recorder.resizeCount
+        session.container.frame = NSRect(x: 0, y: 0, width: 48, height: 32)
+        window?.contentView?.addSubview(session.container)
+        session.container.frame = settledFrame
+        session.container.layoutSubtreeIfNeeded()
+        settle()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        XCTAssertEqual(recorder.resizeCount, resizesBeforeSwitchBack, "switching back to a pane at its unchanged size resized the session anyway")
+    }
+
+    /// A size measured while the pane still had a surface must not be sent once that surface is gone.
+    /// The surface sweep frees a pane's mirror on the view itself, so the session host is never told;
+    /// with the send a turn behind the measurement, the two can interleave. The sequence below is the
+    /// order that interleaves them: the pane leaves the screen (queueing the sweep), its frame settles
+    /// while its mirror is still warm (queueing the send behind the sweep), and the sweep then frees the
+    /// surface the queued size was measured on.
+    func testSizeMeasuredBeforeAPaneLosesItsSurfaceIsNotSentAfterwards() throws {
+        let session = try makeOwnerSession(sessionID: "mru-freed-before-send")
+        defer { session.cleanUp() }
+        let host = session.host
+        let recorder = session.recorder
+
+        window?.contentView?.addSubview(session.container)
+        try host.attach(client: session.client, mode: .owner, into: session.container)
+        waitForCondition("owner pane paints") { host.hasRenderableSurface() }
+        waitForCondition("displayed pane resizes its session") { recorder.resizeCount > 0 }
+        waitForQuiescentResizes(recorder)
+
+        // Another pane holds the only warm slot, so this one is evictable the moment it goes hidden.
+        // It stays on screen for the rest of the test, so it also has to give its surface back by hand:
+        // an on-screen pane is exactly the one the registry never evicts.
+        let occupant = makePane(index: 1)
+        defer { occupant.view.releaseSurface() }
+        show(occupant)
+        let resizesBeforeHiding = recorder.resizeCount
+
+        // Off the screen first, which queues the surface sweep; then the frame settles while the mirror
+        // is still warm, queueing the send behind that sweep. Draining the main queue runs them in that
+        // order: the surface is freed, and the size measured off it comes up for sending afterwards.
+        session.container.removeFromSuperview()
+        session.container.frame = NSRect(x: 0, y: 0, width: 220, height: 130)
+        session.container.layoutSubtreeIfNeeded()
+        settle()
+
+        // Show the pane again at a size of its own. That resize is issued after the one above and must
+        // land, so waiting for it — rather than for a stretch of wall clock — is what proves the earlier
+        // send either happened or never will.
+        session.container.frame = NSRect(x: 0, y: 0, width: 240, height: 150)
+        window?.contentView?.addSubview(session.container)
+        settle()
+        waitForCondition("the re-shown pane resizes its session") { recorder.resizeCount > resizesBeforeHiding }
+        waitForQuiescentResizes(recorder)
+
+        XCTAssertEqual(recorder.resizeCount, resizesBeforeHiding + 1, "a pane resized its session to a grid measured on a surface it no longer holds")
+    }
+
+    /// The other half of the same rule: a size the pane genuinely settles at is still sent. A window
+    /// drag or a divider move passes through intermediate sizes exactly like the switch above does, so
+    /// suppressing them must not cost the session the size it ended on.
+    func testPaneResizedThroughAnIntermediateSizeResizesItsSessionOnlyToTheSettledGrid() throws {
+        let session = try makeOwnerSession(sessionID: "mru-settled-resize")
+        defer { session.cleanUp() }
+        let host = session.host
+        let recorder = session.recorder
+
+        window?.contentView?.addSubview(session.container)
+        try host.attach(client: session.client, mode: .owner, into: session.container)
+        waitForCondition("owner pane paints") { host.hasRenderableSurface() }
+        waitForCondition("displayed pane resizes its session") { recorder.resizeCount > 0 }
+        waitForQuiescentResizes(recorder)
+        let startingGrid = try XCTUnwrap(recorder.lastResizeSize)
+        let resizesBeforeDrag = recorder.resizeCount
+
+        // Grow well past the starting size, then settle smaller than it — so the grid the session is
+        // told about says on its own which of the two the pane sent.
+        session.container.frame = NSRect(x: 0, y: 0, width: 620, height: 360)
+        session.container.layoutSubtreeIfNeeded()
+        session.container.frame = NSRect(x: 0, y: 0, width: 200, height: 120)
+        session.container.layoutSubtreeIfNeeded()
+        settle()
+        waitForCondition("the settled size reaches the session") { recorder.resizeCount > resizesBeforeDrag }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        XCTAssertEqual(recorder.resizeCount, resizesBeforeDrag + 1, "a resize passing through an intermediate size sent more than the settled grid")
+        let settledGrid = try XCTUnwrap(recorder.lastResizeSize)
+        XCTAssertLessThan(settledGrid.columns, startingGrid.columns, "the session was resized to the intermediate grid rather than the settled one")
+        XCTAssertLessThan(settledGrid.rows, startingGrid.rows, "the session was resized to the intermediate grid rather than the settled one")
+    }
+
     // MARK: - Harness
 
-    /// Serves one terminal state payload and counts the control requests the host sends back.
+    /// Waits until the pane and its session agree on a grid — the initial exchange resizes the session
+    /// to the surface Ghostty rendered and then reads that size back — so a later count is a count of
+    /// resizes this test caused.
+    private func waitForQuiescentResizes(_ recorder: ControlRequestRecorder) {
+        var previousCount = -1
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            let count = recorder.resizeCount
+            if count > 0, count == previousCount { return }
+            previousCount = count
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTFail("Timed out waiting for the pane and its session to agree on a grid")
+    }
+
+    /// An owner pane wired to a stand-in daemon, with the session's own directories on disk.
+    private struct OwnerSession {
+        let host: RemoteGhosttySessionHost
+        let recorder: ControlRequestRecorder
+        let container: NSView
+        let client: TerminalClient
+        /// Tears the pane's surface down and removes its session directory. The suite's `tearDown`
+        /// clears the surface registry without freeing anything, so a pane still holding a live mirror
+        /// when its test ends keeps those IOSurface buffers for the life of the test process — this
+        /// gives the pane the same teardown the app performs when it releases a renderer.
+        let cleanUp: @MainActor () -> Void
+    }
+
+    private func makeOwnerSession(sessionID: String) throws -> OwnerSession {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:00Z")
+        let renderUpdate = try GhosttyRenderUpdateBinaryCodec.encode(
+            .full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: Self.snapshot(text: "alpha"))))
+        let recorder = ControlRequestRecorder { columns, rows in
+            Self.statePayload(sessionID: sessionID, client: client, renderUpdate: renderUpdate, columns: columns, rows: rows)
+        }
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-07-24T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths,
+            terminalServiceRequestSender: recorder.send)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        return OwnerSession(
+            host: host, recorder: recorder, container: container, client: client,
+            cleanUp: {
+                host.releaseRendererSurface()
+                container.removeFromSuperview()
+                try? FileManager.default.removeItem(at: root)
+            })
+    }
+
+    private nonisolated static func statePayload(sessionID: String, client: TerminalClient, renderUpdate: Data, columns: Int, rows: Int)
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: "initial", emittedAt: "2026-07-24T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-24T00:00:00Z",
+                title: "live", workingDirectory: "/tmp/live", columns: columns, rows: rows),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                clients: [client],
+                attachments: [TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: "2026-07-24T00:00:00Z")]),
+            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: renderUpdate)
+    }
+
+    /// Stands in for the session's daemon: it counts the control requests the host sends and, like a
+    /// real session, adopts the grid it is resized to and reports it back as its runtime size.
     private final class ControlRequestRecorder: @unchecked Sendable {
         private let lock = NSLock()
-        private let payload: GhosttyRemoteSessionStatePayload
+        private let payloadForSize: @Sendable (Int, Int) -> GhosttyRemoteSessionStatePayload
         private var states = 0
         private var resizes = 0
+        private var size = (columns: 8, rows: 5)
 
-        init(payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
+        init(payloadForSize: @escaping @Sendable (Int, Int) -> GhosttyRemoteSessionStatePayload) { self.payloadForSize = payloadForSize }
 
         var stateCount: Int {
             lock.lock()
@@ -332,17 +501,26 @@ import spacesterminalcore
             return resizes
         }
 
+        /// The grid the session was last resized to; nil until the first resize lands.
+        var lastResizeSize: (columns: Int, rows: Int)? {
+            lock.lock()
+            defer { lock.unlock() }
+            return resizes > 0 ? size : nil
+        }
+
         func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
             switch request.command {
             case .state:
                 lock.lock()
                 states += 1
+                let payload = payloadForSize(size.columns, size.rows)
                 lock.unlock()
                 return TerminalServiceResponse(ok: true, message: "state", sessionState: payload)
             case .control(let control):
                 if control.controlRequest.command == "resize" {
                     lock.lock()
                     resizes += 1
+                    if let columns = control.controlRequest.columns, let rows = control.controlRequest.rows { size = (columns, rows) }
                     lock.unlock()
                 }
                 return TerminalServiceResponse(ok: true, message: "ok", controlResponse: TerminalControlResponse(ok: true, message: "ok"))

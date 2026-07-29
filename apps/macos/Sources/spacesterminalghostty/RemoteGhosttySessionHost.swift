@@ -72,6 +72,14 @@
         private var lastAttachedSurfaceGeneration: UInt64?
         private var pendingViewportResizeSize: (columns: Int, rows: Int)?
         private var pendingViewportResizeTask: Task<Void, Never>?
+        /// The one-turn deferral every measured viewport size waits out before it is sent (see
+        /// `handleViewportSizeChange`). Cancel-and-replace: a newer measurement discards the pending
+        /// one, so only the size the layout settled on is ever sent.
+        private var pendingViewportSettleTask: Task<Void, Never>?
+        /// Whether any measurement folded into the pending settle turn asked to be announced even when
+        /// it matches the size the daemon last accepted. Sticky across replacement: a forced
+        /// measurement superseded by a later one still forces the send of that later size.
+        private var pendingViewportSettleForce = false
         private var resizeSerial: UInt64 = 0
         private let inputQueue = TerminalInputSerialQueue()
         /// Lazy state for scrolling an ended pane's scrollback: `idle` until the first scroll, `loading`
@@ -132,6 +140,7 @@
             MainActor.assumeIsolated {
                 stateStreamClient?.stop()
                 directStateStreamClient?.stop()
+                pendingViewportSettleTask?.cancel()
                 pendingViewportResizeTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
@@ -142,15 +151,14 @@
             attachedClient = client
             let isInteractive = isInteractiveRuntimeStateForControl()
             attachedMode = isInteractive ? mode : .viewer
-            if mode != .owner {
-                pendingViewportResizeTask?.cancel()
-                pendingViewportResizeTask = nil
-                pendingViewportResizeSize = nil
-            } else {
-                pendingViewportResizeTask?.cancel()
-                pendingViewportResizeTask = nil
-                pendingViewportResizeSize = nil
-            }
+            // Any viewport size measured before this attach belongs to the previous attachment's
+            // ownership and epoch; the attach below re-announces the current one.
+            pendingViewportSettleTask?.cancel()
+            pendingViewportSettleTask = nil
+            pendingViewportSettleForce = false
+            pendingViewportResizeTask?.cancel()
+            pendingViewportResizeTask = nil
+            pendingViewportResizeSize = nil
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
             // Viewers keep the session's real capture flags (their clicks are never forwarded, but the
             // mirror should arbitrate like the session it shows); only an ended session strips them.
@@ -307,10 +315,14 @@
         /// guessing how long that takes.
         func drainInputQueueForTesting() async { await inputQueue.drain() }
 
-        /// Awaits the in-flight viewport resize task, if any — resize runs off `inputQueue` in its own
-        /// detached task, so a test needs this rather than `drainInputQueueForTesting` to observe its
+        /// Awaits the pending viewport resize, if any — first the settle turn a measured size waits out
+        /// (`handleViewportSizeChange`), then the send task it starts. Resize runs off `inputQueue` in its
+        /// own detached task, so a test needs this rather than `drainInputQueueForTesting` to observe its
         /// outcome (including its `reportInputFailure` call) instead of guessing how long it takes.
-        func drainPendingResizeForTesting() async { await pendingViewportResizeTask?.value }
+        func drainPendingResizeForTesting() async {
+            await pendingViewportSettleTask?.value
+            await pendingViewportResizeTask?.value
+        }
 
         public var effectiveTitle: String {
             ensureStateStreamStartedIfNeeded()
@@ -882,6 +894,8 @@
         /// The owner attach's viewport send. It forces the request past the dedup's stale-state skips only
         /// when the mirror surface was rebuilt since the last attach — a rebuilt surface negotiated its own
         /// grid, so the size the daemon last heard was measured against a surface that no longer exists.
+        /// The force is about the dedup, not the timing: like every other measurement it is announced only
+        /// once the layout settles, so the attach cannot publish a pre-layout grid.
         /// Re-attaching to the same live surface sends nothing: the daemon would answer that resize by
         /// early-outing as a no-op, after a control hop onto the queue that carries every session's
         /// keystrokes, and every refocus of an already-open pane re-attaches. The force cannot revive a
@@ -898,8 +912,44 @@
             handleViewportSizeChange(columns: size.columns, rows: size.rows, force: surfaceWasRebuilt)
         }
 
+        /// The single point where a measured viewport size leaves for the daemon, and the point that
+        /// holds it for one main-actor turn before it does.
+        ///
+        /// A pane reports its grid from the middle of layout, not only once layout is done. Re-showing a
+        /// workspace adds the panel to the detail container before the panel's edge constraints are
+        /// active, and rebuilding an evicted mirror surface inside that `addSubview` forces a window-level
+        /// layout pass — so the pane momentarily solves to its fitting size and reports that tiny grid,
+        /// then reports the real one microseconds later when the constraints activate. Both land while the
+        /// main actor is still inside the same synchronous switch, so deferring by a turn lets the second
+        /// replace the first and only the settled size is ever sent. The daemon is spared a resize pair
+        /// that costs the shell two SIGWINCHes (whose prompt redraw destroys a line of scrollback per
+        /// switch) and a remote session a full reflowed frame at the tiny grid; a switch back to unchanged
+        /// bounds sends nothing at all, because `shouldSendViewportResize` drops the unchanged size.
+        ///
+        /// A user dragging the window resizes across many turns and keeps flowing: each turn's final size
+        /// is sent on the next one.
         private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {
+            pendingViewportSettleTask?.cancel()
+            pendingViewportSettleForce = pendingViewportSettleForce || force
+            pendingViewportSettleTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !Task.isCancelled else { return }
+                self.pendingViewportSettleTask = nil
+                let force = self.pendingViewportSettleForce
+                self.pendingViewportSettleForce = false
+                self.sendViewportResize(columns: columns, rows: rows, force: force)
+            }
+        }
+
+        private func sendViewportResize(columns: Int, rows: Int, force: Bool) {
             guard isInteractiveRuntimeStateForControl(), attachedMode == .owner, let client = attachedClient else { return }
+            // The size was measured a turn ago, and in that turn the pane can have left the screen and had
+            // its surface freed by `GhosttyMirrorSurfaceMRU` — which frees it on the view itself, with
+            // nothing that tells this host. A pane that can no longer measure a viewport must not resize
+            // its session to one it took off a surface that is gone: the same rule that keeps an
+            // off-screen pane from reporting the `cellMetrics()` estimate. The real grid comes back with
+            // the surface rebuilt when the pane is displayed again.
+            guard terminalView.surfaceCellSize() != nil else { return }
             let requestedSize: (columns: Int, rows: Int) = (columns, rows)
             let runtimeSize = latestState?.runtimeState.map { runtimeState in (columns: runtimeState.columns ?? 0, rows: runtimeState.rows ?? 0) }
             guard
