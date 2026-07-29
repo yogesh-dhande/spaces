@@ -29,11 +29,11 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     public var sessionID: String { launchConfiguration.sessionID }
     public var workspaceID: String { launchConfiguration.workspaceID }
     public var kind: TerminalSessionKind { launchConfiguration.kind }
-    /// The session's name, resolved by the shared `TerminalSessionTitle` rule.
-    public var effectiveTitle: String {
-        TerminalSessionTitle.effective(
-            userTitle: launchConfiguration.userTitle, runtimeTitle: runtimeState.title, launchTitle: launchConfiguration.title)
-    }
+    /// The session's stable name: the user's rename when set, else the launch-generated name. What the
+    /// program inside prints never replaces it; that travels beside it as `liveTitle`.
+    public var name: String { TerminalSessionTitle.name(userTitle: launchConfiguration.userTitle, launchTitle: launchConfiguration.title) }
+    /// What the program running in this session last reported as its title, nil when it reported none.
+    public var liveTitle: String? { TerminalSessionTitle.liveTitle(runtimeState.title) }
     public var effectiveWorkingDirectory: String { runtimeState.workingDirectory ?? launchConfiguration.workingDirectory }
 }
 

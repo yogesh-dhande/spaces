@@ -101,8 +101,8 @@ extension WorkspaceOrchestrator {
     /// both the workspace terminal row and the session summary reflect the rename. Returns
     /// false when no ad-hoc session in the workspace matches.
     ///
-    /// An empty (or whitespace-only) title clears the rename instead of setting one: the session
-    /// un-pins and follows its live title again, which is the only way back from a rename.
+    /// An empty (or whitespace-only) title clears the rename instead of setting one, restoring the
+    /// generated name the session was launched under — the only way back from a rename.
     @discardableResult public func renameAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String, title: String) throws -> Bool {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         // The lifecycle lock keeps the rename from re-upserting a window row that a concurrent

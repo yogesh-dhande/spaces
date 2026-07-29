@@ -318,26 +318,14 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
-    /// The row's secondary text. A configured row shows what it runs; an ad hoc shell shows where it
-    /// is, abbreviated, and shows nothing while it sits at the workspace root. `homeDirectory` is the
-    /// owning DEVICE's home (`SpacesMobileAppModel.deviceHomeDirectory`), never this app's — an iOS
-    /// app's home is its own container, so abbreviating against it would rewrite every path the Mac
-    /// reported.
-    func detail(workspaceDirectory: String, homeDirectory: String) -> String {
+    /// The row's secondary text, matching the Mac sidebar: a configured row shows what it runs, an ad
+    /// hoc shell shows the title its program reported (nothing until it reports one).
+    var detail: String {
         switch source {
         case .process, .codingAgent: command
-        case .terminal(let row):
-            TerminalWorkingDirectoryDisplay.rowDetail(
-                workingDirectory: row.workingDirectory, workspaceDirectory: workspaceDirectory, homeDirectory: homeDirectory) ?? ""
+        case .terminal(let row): row.liveTitle ?? ""
         case .browserSession(let row): row.detail
         }
-    }
-
-    /// The shell's raw working directory, for search: the displayed detail abbreviates ancestor
-    /// components (`/r/d/a/web`), which would stop a query like "apps" from matching the row.
-    var rawWorkingDirectory: String? {
-        if case .terminal(let row) = source { return row.workingDirectory }
-        return nil
     }
 
     /// What launching this row runs. Only configured processes and coding agents are launched from a
@@ -462,12 +450,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
     private(set) var isDemoModeEnabled: Bool
     var overview: SpacesDeviceOverviewPayload?
-    /// The active device's home directory, which every path this app renders for that device is
-    /// abbreviated against. Reported by that device's daemon: this app's own home is its sandbox
-    /// container, so using it would render every Mac path as `/U/a/p/spaces` instead of `~/p/spaces`.
-    /// Empty until an overview arrives, or when the daemon reports none, which leaves the home
-    /// segment uncollapsed.
-    var deviceHomeDirectory: String { overview?.terminalPathHomeDirectory ?? "" }
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
     var daemonStatus: TerminalServiceDaemonStatus?
@@ -1615,8 +1597,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
     /// rule the Mac sidebar's rename follows.
     ///
-    /// Submitting an empty name clears an ad hoc terminal's rename, handing the row back to its live title.
-    /// A config entry must keep a name, so an empty submission there is discarded.
+    /// Submitting an empty name clears an ad hoc terminal's rename, restoring the generated name it was
+    /// launched under. A config entry must keep a name, so an empty submission there is discarded.
     func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title != row.title, let target = renameTarget(for: row) else { return }
@@ -1730,11 +1712,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // the run-state filter only applies to rows that actually have one.
         if !row.isBrowserSession { guard visibleRunStates.contains(row.runState) else { return false } }
         guard !query.isEmpty else { return true }
-        return
-            ([
-                workspace.projectName, workspace.displayName, workspace.dir, row.title,
-                row.detail(workspaceDirectory: workspace.dir, homeDirectory: deviceHomeDirectory),
-            ] + [row.rawWorkingDirectory].compactMap(\.self)).contains { value in value.localizedStandardContains(query) }
+        return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
+            value.localizedStandardContains(query)
+        }
     }
 
     private func workspaceMatchesSearch(_ workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
@@ -1746,7 +1726,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard session.rowKind == .liveSession else { return false }
         guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
         guard !query.isEmpty else { return true }
-        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title].compactMap(\.self).contains {
+        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title, session.liveTitle].compactMap(\.self).contains {
             $0.localizedStandardContains(query)
         }
     }
@@ -1778,7 +1758,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
-            id: sessionID, title: row.title, workingDirectory: row.workingDirectory, shell: "", command: nil,
+            id: sessionID, title: row.title, liveTitle: row.liveTitle, workingDirectory: row.workingDirectory, shell: "", command: nil,
             state: terminalSessionState(for: row.runState), backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
             workspaceID: row.workspaceID, workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
             projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: row.runState == .running,

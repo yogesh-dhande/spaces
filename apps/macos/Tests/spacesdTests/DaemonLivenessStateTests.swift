@@ -59,14 +59,6 @@ import XCTest
             XCTAssertEqual(state.pingResponse().daemonStatus?.deviceAPIAddresses, ["192.168.1.50"])
         }
 
-        /// Clients abbreviate this device's paths against the home the daemon reports, so a status the
-        /// daemon builds must carry its own home rather than leaving the reader to substitute one.
-        func testPingReportsTheDaemonsOwnHomeDirectory() {
-            let state = DaemonLivenessState()
-
-            XCTAssertEqual(state.pingResponse().daemonStatus?.homeDirectory, NSHomeDirectory())
-        }
-
         func testPingRejectsWhileHandoffInProgress() {
             let state = DaemonLivenessState()
 

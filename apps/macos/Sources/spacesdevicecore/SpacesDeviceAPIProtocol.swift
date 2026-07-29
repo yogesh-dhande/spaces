@@ -349,12 +349,13 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
 public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let workspaceID: String
+    /// The row's stable name: what the user renamed the terminal to, else the name it was launched
+    /// under (`shell-1`). It changes only when the user changes it.
     public let title: String
-    /// The user's explicit rename, when one pins the row's name. `title` already resolves it, but a
-    /// client that holds a live title of its own — an open terminal pane, whose title changes the
-    /// instant the shell retitles rather than on the overview's poll cadence — needs the pin
-    /// separately to tell a pinned name apart from a stale snapshot of the live one.
-    public let userTitle: String?
+    /// The title the program running in this terminal last reported (OSC 0/2), nil when it has reported
+    /// none. Clients show it as the row's secondary text beside `title`, which it never replaces: the
+    /// name says which terminal this is, the live title says what it is doing.
+    public let liveTitle: String?
     public let workingDirectory: String
     public let sessionID: String?
     public let runState: SpacesDeviceRunState
@@ -363,12 +364,12 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
 
     public init(
         id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesDeviceRunState,
-        canOpenTerminal: Bool, canStop: Bool = false, userTitle: String? = nil
+        canOpenTerminal: Bool, canStop: Bool = false, liveTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.title = title
-        self.userTitle = userTitle
+        self.liveTitle = liveTitle
         self.workingDirectory = workingDirectory
         self.sessionID = sessionID
         self.runState = runState
@@ -380,7 +381,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         case id
         case workspaceID
         case title
-        case userTitle
+        case liveTitle
         case workingDirectory
         case sessionID
         case runState
@@ -393,7 +394,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         id = try container.decode(String.self, forKey: .id)
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
         title = try container.decode(String.self, forKey: .title)
-        userTitle = try container.decodeIfPresent(String.self, forKey: .userTitle)
+        liveTitle = try container.decodeIfPresent(String.self, forKey: .liveTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         runState = try container.decode(SpacesDeviceRunState.self, forKey: .runState)
@@ -515,7 +516,13 @@ public enum SpacesDeviceTerminalSessionRowKind: String, Codable, Sendable, Equat
 
 public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
+    /// The session's stable name: the user's rename when set, else the name it was launched under. A
+    /// session that backs a configured process or coding agent is named by that config entry.
     public let title: String
+    /// The title the program in this session last reported (OSC 0/2), nil when it reported none — and
+    /// always nil for a configured process or coding-agent session, which is described by the entry that
+    /// configured it rather than by what the program prints.
+    public let liveTitle: String?
     public let workingDirectory: String
     /// Shell and launch command from the session's persisted launch configuration, so a
     /// device-backed window shows the same shell/command the daemon launched with rather
@@ -551,7 +558,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let bellAt: String?
 
     public init(
-        id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
+        id: String, title: String, liveTitle: String? = nil, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
         backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String,
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
@@ -560,6 +567,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     ) {
         self.id = id
         self.title = title
+        self.liveTitle = liveTitle
         self.workingDirectory = workingDirectory
         self.shell = shell
         self.command = command
@@ -587,6 +595,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     private enum CodingKeys: String, CodingKey {
         case id
         case title
+        case liveTitle
         case workingDirectory
         case shell
         case command
@@ -615,6 +624,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         title = try container.decode(String.self, forKey: .title)
+        liveTitle = try container.decodeIfPresent(String.self, forKey: .liveTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
         command = try container.decodeIfPresent(String.self, forKey: .command)
@@ -670,14 +680,6 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         self.retainedTerminalSessionIDs = retainedTerminalSessionIDs
         self.daemonStatus = daemonStatus
     }
-
-    /// The home directory this device's paths abbreviate against, for
-    /// `TerminalWorkingDirectoryDisplay`. It is the owning daemon's home, never the reading client's:
-    /// an iPhone's home is its app container and a Mac reading a Linux daemon has a different one, so
-    /// abbreviating against the client's would rewrite every path of a device it does not run on.
-    /// Empty when the daemon reported none, which leaves the home segment uncollapsed rather than
-    /// collapsing it against a home that is not the device's.
-    public var terminalPathHomeDirectory: String { daemonStatus.homeDirectory ?? "" }
 }
 
 public struct SpacesDeviceWorkspaceCreateOptions: Codable, Sendable, Equatable {
@@ -1003,8 +1005,8 @@ public struct SpacesDeviceTerminalSessionRenameRequest: Codable, Sendable, Equat
     public let workspaceID: String
     public let sessionID: String
     /// The session's new name. An empty (or whitespace-only) title clears the rename rather than
-    /// setting one, handing the session back to its live title — the only way back from a rename,
-    /// and the reason this command never rejects an empty title.
+    /// setting one, restoring the name the session was launched under — the only way back from a
+    /// rename, and the reason this command never rejects an empty title.
     public let title: String
 
     public init(workspaceID: String, sessionID: String, title: String) {

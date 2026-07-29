@@ -94,12 +94,11 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - an ad hoc terminal the user opens directly (for example through `New terminal`), rooted at the workspace directory
 
 #### Session names
-- A process or coding-agent terminal is named after its configured row on every surface, so a row keeps the identity the user gave it whatever the program inside prints.
-- An ad hoc terminal names itself after what it is running: it starts as a generic shell name and follows the title the shell reports (for example `vim main.swift`), across the sidebar, terminal tabs, panel window titles, and the iOS session list.
-- Renaming an ad hoc terminal pins its name. A pinned name ignores later title changes from the shell. Renaming it to an empty name clears the pin, and the terminal follows its live title again. Configured rows rename their settings entry instead, which must keep a name, so an empty rename there is discarded.
-- An ad hoc terminal also shows its working directory as secondary text beside its name, abbreviated the way fish shortens a prompt path (`~/p/spaces` for `~/projects/spaces`). A terminal sitting at the workspace directory shows none, since its workspace already says where it is. Process and coding-agent terminals never show a working directory.
-- A terminal tab is named after its selected pane, and a panel window after its selected tab, so splitting a tab and moving focus renames the tab and the window with it.
-- The command palette matches a target's name first and its secondary text second, so typing a name outranks typing a path.
+- Every terminal has a name that identifies it and keeps still: a process or coding-agent terminal takes its name from its configured row, and an ad hoc terminal from a generic shell name (`shell-1`) until the user renames it. What the program inside prints never becomes the name.
+- An ad hoc terminal row also shows the title its program reports (for example `vim main.swift`) as dimmed secondary text beside its name, so one glance reads both which terminal it is and what it is doing. A terminal whose program has reported no title shows its name alone. Process and coding-agent rows show what they run instead, as they always have. This pairing is what the sidebar, the command palette, the session picker, the iOS session list, and a bell's row under Alerts all show.
+- Renaming an ad hoc terminal changes its name and nothing else; its program's title keeps showing beside the new name. Renaming it to an empty name restores the generic name it was launched under. Configured rows rename their settings entry instead, which must keep a name, so an empty rename there is discarded.
+- A terminal tab is named after its selected pane, and a panel window after its selected tab, so splitting a tab and moving focus renames the tab and the window with it. Tabs carry the name, never the live title — the sidebar is where the live title is read.
+- The command palette matches a target's name first and its secondary text second, so typing a name outranks typing what a program printed.
 
 ## Startup
 - On launch, the main window should immediately show a neutral loading state while Spaces loads workspace data, so startup never presents a blank window.

@@ -1645,8 +1645,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
-            waitingAgents: impact.waitingAgents, deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host),
-            homeDirectory: TerminalServiceDaemonStatus.currentHomeDirectory)
+            waitingAgents: impact.waitingAgents, deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host))
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -1758,7 +1757,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
-                        entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
+                        entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
                         hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
         }
@@ -2183,7 +2182,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
-        // An empty title clears the rename (see `SpacesDeviceTerminalSessionRenameRequest.title`).
+        // An empty title clears the rename, restoring the generated name (see
+        // `SpacesDeviceTerminalSessionRenameRequest.title`).
         let title = normalizedString(request.title)
         guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title ?? "") else {
             return SpacesDeviceAPIResponse(

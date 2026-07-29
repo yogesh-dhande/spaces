@@ -12,13 +12,16 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
         case failed
         case bell
 
+        /// The row's secondary text for a state change the row cannot otherwise show. A bell has none:
+        /// the row's presence under Alerts is what says the bell rang, so its row carries the session's
+        /// live title instead and reads exactly as that session's row does elsewhere.
         var label: String {
             switch self {
             case .waitingForInput: "Waiting for input"
             case .finished: "Finished"
             case .exited: "Exited"
             case .failed: "Failed"
-            case .bell: "Bell"
+            case .bell: ""
             }
         }
     }
@@ -27,9 +30,25 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
     let kind: Kind
     let date: Date
     let title: String
+    /// Dimmed secondary text beside `title`, defaulting to what the kind has to say about the change.
+    let detail: String
     let rowType: SpacesMobileWorkspaceRowType
     let sessionID: String?
     let workspaceID: String
+
+    init(
+        sourceID: String, kind: Kind, date: Date, title: String, rowType: SpacesMobileWorkspaceRowType, sessionID: String?, workspaceID: String,
+        detail: String? = nil
+    ) {
+        self.sourceID = sourceID
+        self.kind = kind
+        self.date = date
+        self.title = title
+        self.detail = detail ?? kind.label
+        self.rowType = rowType
+        self.sessionID = sessionID
+        self.workspaceID = workspaceID
+    }
 
     /// Stable dismissal identity: the same source in the same state at the same time stays
     /// dismissed across refreshes; a new state change mints a new identity.
@@ -154,7 +173,7 @@ enum SpacesMobileAttention {
             events.append(
                 SpacesMobileAttentionEvent(
                     sourceID: "session:\(session.id)", kind: .bell, date: date, title: session.title, rowType: .workspaceTerminals,
-                    sessionID: session.id, workspaceID: session.workspaceID))
+                    sessionID: session.id, workspaceID: session.workspaceID, detail: session.liveTitle ?? ""))
         }
 
         return events

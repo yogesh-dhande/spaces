@@ -1588,20 +1588,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
-            titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            // Name then secondary text, the two-part shape a process row already uses (see
+            // `AppKitController.windowRow`): the name goes semibold once something trails it, so the
+            // two halves stay tellable apart at the sidebar's one type size.
+            titleLabel.font = .systemFont(ofSize: 11, weight: item.detail == nil ? .regular : .semibold)
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
 
-            // Ad hoc shells trail their working directory as dimmed secondary text. It compresses
-            // before the name does, so a deep path never squeezes out what the row is.
+            // Ad hoc shells trail the title their program reported as dimmed secondary text. It
+            // compresses before the name does, so a long title never squeezes out what the row is.
             if let detail = item.detail {
                 let detailLabel = NSTextField(labelWithString: detail)
                 detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
                 detailLabel.textColor = sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
-                detailLabel.lineBreakMode = .byTruncatingHead
+                detailLabel.lineBreakMode = .byTruncatingTail
                 detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
                 detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
                 row.addArrangedSubview(detailLabel)

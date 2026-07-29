@@ -2,8 +2,8 @@ import Testing
 
 @testable import spacesterminalcore
 
-/// The one rule every surface names a session by: a rename pins the name, otherwise the session
-/// shows what it is doing right now, otherwise what it was launched as.
+/// The two things a session is called: the name that identifies it (its rename, else the name it was
+/// launched under) and the title its program reports, which never becomes the name.
 @Suite struct TerminalSessionDisplayTitleTests {
     private func entry(userTitle: String? = nil, runtimeTitle: String? = nil, launchTitle: String = "shell-1", runtimeWorkingDirectory: String? = nil)
         -> TerminalSessionCatalogEntry
@@ -18,26 +18,35 @@ import Testing
             isControlAvailable: true, isSubscriptionAvailable: true)
     }
 
-    @Test func launchTitleNamesASessionThatHasNotReportedAnything() { #expect(entry().effectiveTitle == "shell-1") }
+    @Test func launchTitleNamesASessionNobodyHasRenamed() { #expect(entry().name == "shell-1") }
 
-    @Test func liveTitleReplacesTheLaunchTitle() { #expect(entry(runtimeTitle: "vim main.swift").effectiveTitle == "vim main.swift") }
-
-    @Test func renamePinsTheNameAgainstLiveTitleChanges() {
-        #expect(entry(userTitle: "deploy", runtimeTitle: "vim main.swift").effectiveTitle == "deploy")
+    /// The whole point of the split: a program retitling itself describes the session without renaming
+    /// it, so a shell the user opened stays findable as `shell-1` while it runs an editor.
+    @Test func liveTitleNeverReplacesTheName() {
+        let session = entry(runtimeTitle: "vim main.swift")
+        #expect(session.name == "shell-1")
+        #expect(session.liveTitle == "vim main.swift")
     }
 
-    /// Clearing the rename hands the name back to the live title — the pin is the only thing that
-    /// was holding it.
-    @Test func clearingTheRenameRevertsToTheLiveTitle() {
-        #expect(entry(userTitle: nil, runtimeTitle: "vim main.swift").effectiveTitle == "vim main.swift")
+    @Test func renameBecomesTheNameAndLeavesTheLiveTitleAlone() {
+        let session = entry(userTitle: "deploy", runtimeTitle: "vim main.swift")
+        #expect(session.name == "deploy")
+        #expect(session.liveTitle == "vim main.swift")
     }
 
-    /// A program that clears its title (or sets a blank one) must not leave the session nameless.
-    @Test func blankTitlesFallThroughToTheNextLevel() {
-        #expect(entry(runtimeTitle: "").effectiveTitle == "shell-1")
-        #expect(entry(runtimeTitle: "   ").effectiveTitle == "shell-1")
-        #expect(entry(userTitle: "  ", runtimeTitle: "vim main.swift").effectiveTitle == "vim main.swift")
-        #expect(entry(userTitle: " ", runtimeTitle: " ").effectiveTitle == "shell-1")
+    /// Clearing the rename restores the name the session was launched under — the only way back from a
+    /// rename. A blank stored rename is what clearing writes.
+    @Test func clearedRenameRestoresTheLaunchName() {
+        #expect(entry(userTitle: nil, runtimeTitle: "vim main.swift").name == "shell-1")
+        #expect(entry(userTitle: "  ", runtimeTitle: "vim main.swift").name == "shell-1")
+    }
+
+    /// A program that clears its title stops describing itself; the row shows its name and nothing
+    /// else rather than a blank second line.
+    @Test func blankLiveTitleReadsAsNoLiveTitle() {
+        #expect(entry(runtimeTitle: "").liveTitle == nil)
+        #expect(entry(runtimeTitle: "   ").liveTitle == nil)
+        #expect(entry().liveTitle == nil)
     }
 
     @Test func liveWorkingDirectoryReplacesTheLaunchDirectory() {

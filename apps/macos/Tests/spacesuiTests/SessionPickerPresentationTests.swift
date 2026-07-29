@@ -52,16 +52,11 @@ import workspacecore
             ])
     }
 
-    /// The daemon home every fixture overview reports. Deliberately not the test process's home: a row's
-    /// path must abbreviate against the device that owns it.
-    private let daemonHome = "/Users/ada"
-
     private func context(for workspace: SpacesDeviceWorkspaceSummary, sessions: [SpacesDeviceTerminalSessionSummary] = [])
         -> AppKitController.SessionPickerWorkspaceContext
     {
         AppKitController.SessionPickerWorkspaceContext(
-            workspaceID: workspace.id,
-            overview: SpacesDeviceOverviewPayload(workspaces: [workspace], sessions: sessions, daemonHomeDirectory: daemonHome))
+            workspaceID: workspace.id, overview: SpacesDeviceOverviewPayload(workspaces: [workspace], sessions: sessions))
     }
 
     @Test func listsSidebarTargetsInOrderExcludingBrowsers() {
@@ -160,32 +155,26 @@ import workspacecore
         }
     }
 
-    /// Picker rows describe an ad hoc shell the way the sidebar does: nothing for one sitting at the
-    /// workspace root, and for one that wandered a path abbreviated against the OWNING DEVICE's home,
-    /// with the raw path kept as the row's search text so typing a collapsed component still finds it.
-    @Test func terminalRowsAbbreviateTheirPathButMatchTheRawOne() throws {
+    /// Picker rows describe an ad hoc shell the way the sidebar does: its name, then the title its
+    /// program reported — nothing for a shell that has reported none.
+    @Test func terminalRowsShowTheNameDescribedByTheLiveTitle() throws {
         let workspace = SpacesDeviceWorkspaceSummary(
-            id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "\(daemonHome)/workspace-1",
+            id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/workspace-1",
             isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 2,
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
-                    id: "row-root", workspaceID: "workspace-1", title: "shell", workingDirectory: "\(daemonHome)/workspace-1",
-                    sessionID: "session-root", runState: .running, canOpenTerminal: true, canStop: true),
+                    id: "row-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/workspace-1",
+                    sessionID: "session-quiet", runState: .running, canOpenTerminal: true, canStop: true),
                 SpacesDeviceWorkspaceTerminalRow(
-                    id: "row-wandered", workspaceID: "workspace-1", title: "vim main.swift", workingDirectory: "\(daemonHome)/workspace-1/apps/web",
-                    sessionID: "session-wandered", runState: .running, canOpenTerminal: true, canStop: true),
+                    id: "row-busy", workspaceID: "workspace-1", title: "shell-2", workingDirectory: "/device/workspace-1", sessionID: "session-busy",
+                    runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
             ])
         let presentation = AppKitController.sessionPickerPresentation(
             newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: [])
 
-        let rootRow = try #require(presentation.items.first { $0.label == "shell" })
-        #expect(rootRow.detail == nil)
-        #expect(rootRow.searchDetail == "\(daemonHome)/workspace-1", "suppressed from display, still matchable by path")
-
-        let wanderedRow = try #require(presentation.items.first { $0.label == "vim main.swift" })
-        #expect(wanderedRow.detail == "~/w/a/web", "collapsed against the daemon's home, not the client's")
-        #expect(wanderedRow.searchDetail == "\(daemonHome)/workspace-1/apps/web")
+        #expect(try #require(presentation.items.first { $0.label == "shell-1" }).detail == nil)
+        #expect(try #require(presentation.items.first { $0.label == "shell-2" }).detail == "vim main.swift")
     }
 
     @Test func globalScopeListsEveryWorkspaceInOrderAndExcludesOpenSessionsFromEither() {

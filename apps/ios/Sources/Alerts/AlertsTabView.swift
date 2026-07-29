@@ -47,7 +47,7 @@ struct AlertsTabView: View {
 
     @ViewBuilder private func eventRow(_ event: SpacesMobileAttentionEvent) -> some View {
         let row = BandRow(
-            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.kind.label,
+            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.detail,
             detailIsMonospaced: false
         ) {
             Text(SpacesMobileAttention.abbreviatedAge(of: event.date)).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()

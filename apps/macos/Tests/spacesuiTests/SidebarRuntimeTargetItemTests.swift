@@ -47,7 +47,7 @@ import workspacecore
 
     private func fixtureItems() -> [SidebarRuntimeTargetItem] {
         AppKitController.sidebarRuntimeTargetItems(
-            detail: fixtureDetail(), browserSessions: [BrowserSession(name: "App", url: "http://localhost:3000")], daemonHomeDirectory: "/Users/ada")
+            detail: fixtureDetail(), browserSessions: [BrowserSession(name: "App", url: "http://localhost:3000")])
     }
 
     /// Runtime rows group by family: browser sessions, configured processes, coding agents, then ad hoc
@@ -120,31 +120,29 @@ import workspacecore
         #expect(AppKitController.configuredBrowserSessionIndex(named: "Unknown", in: sessions) == nil)
     }
 
-    /// Only ad hoc shells carry secondary text, and only once they leave the workspace root: a
-    /// configured process or agent is named by what it is, not by where it happens to be.
-    @Test func onlyShellsAwayFromTheWorkspaceRootCarrySecondaryText() {
+    /// Only ad hoc shells carry secondary text, and only once their program reports a title: a
+    /// configured process or agent is named by its config entry, and nothing the program prints
+    /// describes it further in the sidebar.
+    @Test func onlyShellsWithAReportedTitleCarrySecondaryText() {
         let byKey = Dictionary(uniqueKeysWithValues: fixtureItems().map { ($0.key, $0) })
-        // The fixture's shell sits at the workspace root, so it has nothing to add.
+        // The fixture's shell has reported no title, so it has nothing to add.
         #expect(byKey["terminal:sess-term"]?.detail == nil)
         #expect(byKey["process:proc-web"]?.detail == nil)
         #expect(byKey["agent:agent-1"]?.detail == nil)
         #expect(byKey["browser:http://localhost:3000"]?.detail == nil)
 
         let summary = SpacesDeviceWorkspaceSummary(
-            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/Users/ada/workspace",
-            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
+            isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
-                    id: "term-1", workspaceID: "workspace", title: "vim main.swift", workingDirectory: "/Users/ada/workspace/apps/web",
-                    sessionID: "sess-term", runState: .running, canOpenTerminal: true, canStop: true)
+                    id: "term-1", workspaceID: "workspace", title: "shell-1", workingDirectory: "/tmp/workspace", sessionID: "sess-term",
+                    runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift")
             ])
-        // `/Users/ada` is the OWNING DEVICE's home, reported by its daemon — not the home this test
-        // process runs under, which must never reach the abbreviation.
-        let wandered = AppKitController.sidebarRuntimeTargetItems(
-            detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [], daemonHomeDirectory: "/Users/ada"
-        ).first
-        #expect(wandered?.title == "vim main.swift")
-        #expect(wandered?.detail == "~/w/a/web")
+        let busy = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
+            .first
+        #expect(busy?.title == "shell-1", "what the program prints never renames the row")
+        #expect(busy?.detail == "vim main.swift")
     }
 
     @Test func shortcutIndexStopsAfterTen() {
@@ -156,8 +154,7 @@ import workspacecore
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
             isArchived: false, isHidden: false, isDefault: false, sessionCount: terminalRows.count, terminalRows: terminalRows)
-        let items = AppKitController.sidebarRuntimeTargetItems(
-            detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [], daemonHomeDirectory: "/Users/ada")
+        let items = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
         #expect(items.count == 12)
         #expect(items[9].shortcutIndex == 10)
         #expect(items[10].shortcutIndex == nil)

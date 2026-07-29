@@ -408,11 +408,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "build watcher")
     }
 
-    /// An ad hoc shell keeps a tracked window record whose name is frozen at the launch-generated
-    /// `shell-N`. The row must report what the shell is actually doing and where it is, so a user
-    /// scanning the sidebar sees `vim main.swift` in `apps/web` rather than `shell-1` at the
-    /// workspace root.
-    func testTrackedShellRowReportsTheSessionsLiveTitleAndWorkingDirectory() {
+    /// An ad hoc shell row is named by the session, not by what its program prints: the generic launch
+    /// name stays put and the live title travels beside it as the row's secondary text, so a user
+    /// scanning the sidebar reads `shell-1` and `vim main.swift` as two separate things.
+    func testTrackedShellRowKeepsItsNameAndCarriesTheLiveTitleBeside() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
@@ -428,14 +427,31 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [session])
 
         let row = overview.workspaces.first?.terminalRows.first
-        XCTAssertEqual(row?.title, "vim main.swift")
-        XCTAssertEqual(row?.workingDirectory, "/repo/feature/apps/web")
-        XCTAssertNil(row?.userTitle, "an unrenamed row reports no pin, so a client with a live title of its own may use it")
+        XCTAssertEqual(row?.title, "shell-1")
+        XCTAssertEqual(row?.liveTitle, "vim main.swift")
     }
 
-    /// A rename still pins the name on a tracked shell row: `effectiveTitle` resolves it before the
-    /// live title, so the row does not drift back to whatever the shell last reported.
-    func testTrackedShellRowKeepsARenameOverTheLiveTitle() {
+    /// A shell whose program has reported no title has no secondary text to show.
+    func testShellRowWithoutAReportedTitleCarriesNoLiveTitle() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            runtimeTitle: "   ")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
+
+        XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "shell-1")
+        XCTAssertNil(overview.workspaces.first?.terminalRows.first?.liveTitle)
+        XCTAssertNil(overview.sessions.first?.liveTitle)
+    }
+
+    /// A rename names the row; the live title keeps showing beside it rather than being displaced or
+    /// displacing the new name.
+    func testRenamedShellRowKeepsShowingItsLiveTitleBesideTheNewName() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
@@ -450,16 +466,14 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [session])
 
-        XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "build watcher")
-        XCTAssertEqual(
-            overview.workspaces.first?.terminalRows.first?.userTitle, "build watcher",
-            "the pin travels beside the resolved title so a client holding a live title knows the name is pinned")
+        let row = overview.workspaces.first?.terminalRows.first
+        XCTAssertEqual(row?.title, "build watcher")
+        XCTAssertEqual(row?.liveTitle, "vim main.swift")
     }
 
-    /// Row order follows the window records' order, not titles: titles are live, and a program
-    /// retitling itself must not reorder the list — palette and cycling requests reference rows
-    /// by list index against a later overview.
-    func testTerminalRowOrderIsStableWhenALiveTitleChanges() {
+    /// Rows are ordered by name, so a program retitling itself cannot reorder the list — palette and
+    /// cycling requests reference these rows by list index against a later overview.
+    func testTerminalRowOrderFollowsNamesNotLiveTitles() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
@@ -472,21 +486,20 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
                 id: "window-2", workspaceID: workspace.id, app: "Spaces", name: "shell-2", terminalTrackingID: "session-2", role: "terminal",
                 orderIndex: 1, lastSeenAt: "now"),
         ]
-        func rows(secondTitle: String?) -> [String?] {
+        func rows(secondTitle: String) -> [String?] {
             let sessions = [
                 makeSessionCatalogEntry(
-                    sessionID: "session-1", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id,
-                    attachmentSnapshot: .init()),
+                    sessionID: "session-1", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init()),
                 makeSessionCatalogEntry(
-                    sessionID: "session-2", title: "shell-2", workingDirectory: workspace.dir, workspaceID: workspace.id,
-                    attachmentSnapshot: .init(), runtimeTitle: secondTitle),
+                    sessionID: "session-2", title: "shell-2", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+                    runtimeTitle: secondTitle),
             ]
             let overview = SpacesDeviceOverviewBuilder.build(
                 projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: windows)], sessions: sessions)
             return overview.workspaces.first?.terminalRows.map(\.sessionID) ?? []
         }
 
-        XCTAssertEqual(rows(secondTitle: nil), ["session-1", "session-2"])
+        XCTAssertEqual(rows(secondTitle: "shell-2"), ["session-1", "session-2"])
         // "a build" sorts before "shell-1"; the row must stay in place anyway.
         XCTAssertEqual(rows(secondTitle: "a build"), ["session-1", "session-2"])
     }

@@ -239,9 +239,8 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    /// Persists a manual rename for the session. The stored user title takes precedence over
-    /// the auto-updated runtime title when the session's effective title is computed. An empty
-    /// title clears the rename, so the session follows its runtime title again.
+    /// Persists a manual rename for the session. The stored user title is the session's name; an empty
+    /// title clears it, so the session is named by its launch title again.
     public static func writeUserTitle(_ userTitle: String, sessionID: String, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try withProfileDatabaseTransaction { database in

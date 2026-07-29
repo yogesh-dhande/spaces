@@ -28,9 +28,9 @@ import spacesterminalcore
     private var contentPreparationTasks: [String: Task<Void, Never>] = [:]
     /// Window shells for materialized global panels, keyed by panel window id.
     private var panelWindows: [String: PanelWindowController] = [:]
-    /// Runtime-target pane names resolved during the current title pass (see
+    /// Runtime-target titles resolved during the current title pass (see
     /// `withRuntimeTargetTitlePass`), keyed by workspace id then session id. Empty outside a pass.
-    private var runtimeTargetTitlesByWorkspaceID: [String: [String: RuntimeTargetPaneName]] = [:]
+    private var runtimeTargetTitlesByWorkspaceID: [String: [String: String]] = [:]
     private var runtimeTargetTitlePassDepth = 0
     /// Persistence hook, wired to the client database; called after every layout change.
     var onLayoutChanged: ((PanelScope, PanelLayout) -> Void)?
@@ -731,12 +731,13 @@ import spacesterminalcore
     }
 
     /// A pane's display title: the runtime target's name (what the sidebar row shows —
-    /// e.g. "codex", "npm:dev") when the session backs a configured one, else the
-    /// terminal's own live title (see `RuntimeTargetPaneName.paneTitle`).
+    /// e.g. "codex", "npm:dev", "shell-1") when the session backs one. What the program inside prints
+    /// never renames the pane; it reads as the row's secondary text in the sidebar instead. A session
+    /// no target claims — one whose workspace rows the overview no longer lists — has no name but the
+    /// terminal's own.
     private func contentTitle(forSessionID sessionID: String) -> String {
         guard let content = contentControllers[sessionID] else { return "Terminal" }
-        return RuntimeTargetPaneName.paneTitle(
-            runtimeTargetName(forSessionID: sessionID, workspaceID: content.workspaceID), liveTitle: content.displayTitle)
+        return runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
     }
 
     /// Runs one title pass with a shared runtime-target title lookup. Resolving a workspace's
@@ -754,9 +755,9 @@ import spacesterminalcore
         return body()
     }
 
-    private func runtimeTargetName(forSessionID sessionID: String, workspaceID: String) -> RuntimeTargetPaneName? {
+    private func runtimeTargetTitle(forSessionID sessionID: String, workspaceID: String) -> String? {
         if let titles = runtimeTargetTitlesByWorkspaceID[workspaceID] { return titles[sessionID] }
-        let titles = host.runtimeTargetPaneNamesBySessionID(workspaceID: workspaceID)
+        let titles = host.runtimeTargetTitlesBySessionID(workspaceID: workspaceID)
         // Only a pass may retain a lookup: outside one nothing would ever drop it, and the next
         // read would answer from a map built before an overview update.
         if runtimeTargetTitlePassDepth > 0 { runtimeTargetTitlesByWorkspaceID[workspaceID] = titles }

@@ -328,7 +328,7 @@ extension AppKitController {
 
         func appendItem(
             id: String, workspaceID: String, workspace: SpacesDeviceWorkspaceSummary?, kind: WorkspaceRunShortcutTarget.Kind, label: String,
-            detail: String?, searchDetail: String? = nil, status: CommandPaletteItem.Status, choice: SessionPickerChoice
+            detail: String?, status: CommandPaletteItem.Status, choice: SessionPickerChoice
         ) {
             items.append(
                 CommandPaletteItem(
@@ -337,7 +337,7 @@ extension AppKitController {
                     projectTitle: workspace?.projectName ?? "", kind: kind, label: label, detail: detail, status: status,
                     // Never executed: picker mode resolves the choice mapping instead of
                     // running a focus request.
-                    focusRequest: .workspaceWindow(workspaceID: workspaceID, index: 1), recentFocusIdentity: "", searchDetail: searchDetail))
+                    focusRequest: .workspaceWindow(workspaceID: workspaceID, index: 1), recentFocusIdentity: ""))
             choices[id] = choice
         }
 
@@ -370,7 +370,6 @@ extension AppKitController {
                 if target.kind == .browser { continue }
                 let label: String
                 let detailText: String?
-                var searchDetailText: String?
                 let status: CommandPaletteItem.Status
                 switch target.kind {
                 case .process:
@@ -380,11 +379,10 @@ extension AppKitController {
                     status = .process(process.status)
                 case .window:
                     guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                    let rowText = terminalTargetRowText(
-                        window: windows[windowListIndex], workspaceDirectory: detail.dir, homeDirectory: overview.terminalPathHomeDirectory)
+                    let rowText = terminalFallbackRowText(
+                        name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
                     label = rowText.label
                     detailText = rowText.detail
-                    searchDetailText = rowText.searchDetail
                     status = .none
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { continue }
@@ -418,7 +416,7 @@ extension AppKitController {
 
                 appendItem(
                     id: "picker:\(workspaceID)::\(offset)", workspaceID: workspaceID, workspace: deviceWorkspace, kind: target.kind, label: label,
-                    detail: detailText, searchDetail: searchDetailText, status: status, choice: choice)
+                    detail: detailText, status: status, choice: choice)
             }
         }
         return (items, choices)

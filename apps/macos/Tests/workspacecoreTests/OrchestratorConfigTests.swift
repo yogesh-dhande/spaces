@@ -963,13 +963,13 @@ extension OrchestratorTests {
                     state: .running, updatedAt: "later", title: "nvim other.swift", workingDirectory: workspace.dir), paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
-            XCTAssertEqual(entry.effectiveTitle, "build watcher")
+            XCTAssertEqual(entry.name, "build watcher")
         }
     }
 
-    /// Clearing the name un-pins the session: it follows its live title again, and the window record —
-    /// which names the row only once the session is gone — goes back to the launch-generated name.
-    func testClearingAnAdHocBuiltInTerminalSessionRenameRevertsItToItsLiveTitle() throws {
+    /// Clearing the name restores the generated one the session was launched under, on the session and
+    /// on the window record — which names the row only once the session is gone.
+    func testClearingAnAdHocBuiltInTerminalSessionRenameRestoresItsGeneratedName() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -1000,7 +1000,8 @@ extension OrchestratorTests {
 
             XCTAssertNil(try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).userTitle)
             let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
-            XCTAssertEqual(entry.effectiveTitle, "vim main.swift")
+            XCTAssertEqual(entry.name, "shell-1")
+            XCTAssertEqual(entry.liveTitle, "vim main.swift", "the program's title keeps describing the session; it never names it")
             let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == "terminal-window" })
             XCTAssertEqual(window.name, "shell-1")
         }

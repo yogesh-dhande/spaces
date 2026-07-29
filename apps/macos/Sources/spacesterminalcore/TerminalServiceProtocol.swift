@@ -678,17 +678,6 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// `SpacesMobileDeviceStore.mergeAdvertisedHosts`.
     public let deviceAPIAddresses: [String]
 
-    /// The home directory of the user this daemon runs as. Clients abbreviate this device's paths
-    /// against it (`~/p/spaces`) instead of against their own home, which for an iPhone is an app
-    /// container and for a Mac viewing a Linux daemon is a different user's directory entirely — so a
-    /// client using its own home renders every path of a device it does not run on wrongly.
-    ///
-    /// `nil` means **"this daemon reported nothing"**: a status built by anything other than the
-    /// daemon itself (the synthetic placeholder for an offline device) leaves it unset, and a peer
-    /// built before this field existed omits it. Clients then abbreviate without a home segment
-    /// rather than substituting one of their own.
-    public let homeDirectory: String?
-
     /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
     /// enough to predate wire-version negotiation. It must compare as incompatible against any real
     /// `SpacesWireProtocol.version` (which starts at 1) so such a peer is blocked, not mistaken for a
@@ -698,7 +687,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public init(
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
-        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, deviceAPIAddresses: [String] = [], homeDirectory: String? = nil
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, deviceAPIAddresses: [String] = []
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -710,7 +699,6 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.waitingAgents = waitingAgents
         self.operatingSystem = operatingSystem
         self.deviceAPIAddresses = deviceAPIAddresses
-        self.homeDirectory = homeDirectory
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -724,7 +712,6 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case waitingAgents
         case operatingSystem
         case deviceAPIAddresses
-        case homeDirectory
     }
 
     /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
@@ -745,7 +732,6 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
         operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
         deviceAPIAddresses = try container.decodeIfPresent([String].self, forKey: .deviceAPIAddresses) ?? []
-        homeDirectory = try container.decodeIfPresent(String.self, forKey: .homeDirectory)
     }
 
     /// The OS of the process building this status (the daemon's own host).
@@ -756,10 +742,6 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
             "macOS"
         #endif
     }
-
-    /// The home directory of the process building this status. Only a daemon may pass it into a
-    /// status: a client's own home says nothing about the device the status describes.
-    public static var currentHomeDirectory: String { NSHomeDirectory() }
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
 

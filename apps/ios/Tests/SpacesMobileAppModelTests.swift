@@ -134,7 +134,7 @@
 
             XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
             XCTAssertEqual(browserRow?.title, "Dashboard")
-            XCTAssertEqual(browserRow?.detail(workspaceDirectory: "/repo/feature", homeDirectory: "/repo"), "localhost:3000/dashboard")
+            XCTAssertEqual(browserRow?.detail, "localhost:3000/dashboard")
             XCTAssertEqual(browserRow?.type, .browserSessions)
             XCTAssertNil(browserRow?.sessionID)
             XCTAssertEqual(browserRow?.canRun, false)
@@ -142,19 +142,19 @@
             XCTAssertEqual(browserRow?.canRestart, false)
         }
 
-        /// The displayed detail abbreviates ancestor path components, so search must still match the
-        /// shell's raw working directory: a query naming an abbreviated ancestor finds the row.
-        func testSearchMatchesRawWorkingDirectoryBehindTheAbbreviatedDetail() {
+        /// A shell is searchable by what its program is doing, not only by what it is called — the two
+        /// halves of its row both match.
+        func testSearchMatchesAShellsLiveTitle() {
             let model = makeModel()
             model.overview = makeOverview(featureTerminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
-                    id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature/backend/api",
-                    sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    id: "terminal-shell", workspaceID: "workspace-feature", title: "shell-1", workingDirectory: "/repo/feature",
+                    sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift")
             ])
 
-            model.searchText = "backend"
+            model.searchText = "vim"
             let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
-            XCTAssertEqual(rows.map(\.title), ["shell"], "an abbreviated-away ancestor component must still match")
+            XCTAssertEqual(rows.map(\.title), ["shell-1"])
         }
 
         /// Runtime rows group by family in the Mac sidebar's order: browser sessions, configured processes,
@@ -319,50 +319,28 @@
             XCTAssertFalse(model.isMutating)
         }
 
-        /// A shell row says where the shell is only once that adds something: at the workspace root the
-        /// row's workspace already answers it. A configured row always says what it runs.
-        func testRuntimeRowSecondaryTextShowsAShellsAbbreviatedDirectoryAwayFromTheWorkspaceRoot() {
-            func terminalRow(workingDirectory: String) -> SpacesMobileWorkspaceRuntimeRow {
+        /// A shell row is named by the session and described by what its program reported — nothing until
+        /// it reports something. A configured row says what it runs instead.
+        func testRuntimeRowSecondaryTextIsTheShellsLiveTitle() {
+            func terminalRow(liveTitle: String?) -> SpacesMobileWorkspaceRuntimeRow {
                 SpacesMobileWorkspaceRuntimeRow(
                     source: .terminal(
                         SpacesDeviceWorkspaceTerminalRow(
-                            id: "terminal-shell", workspaceID: "workspace-docs", title: "vim main.swift", workingDirectory: workingDirectory,
-                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)))
+                            id: "terminal-shell", workspaceID: "workspace-docs", title: "shell-1", workingDirectory: "/repo/docs",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: liveTitle)))
             }
 
-            XCTAssertEqual(terminalRow(workingDirectory: "/repo/docs").detail(workspaceDirectory: "/repo/docs", homeDirectory: "/repo"), "")
-            XCTAssertEqual(
-                terminalRow(workingDirectory: "/repo/docs/apps/web").detail(workspaceDirectory: "/repo/docs", homeDirectory: ""), "/r/d/a/web")
+            XCTAssertEqual(terminalRow(liveTitle: nil).title, "shell-1")
+            XCTAssertEqual(terminalRow(liveTitle: nil).detail, "")
+            XCTAssertEqual(terminalRow(liveTitle: "vim main.swift").title, "shell-1", "what the program prints never renames the row")
+            XCTAssertEqual(terminalRow(liveTitle: "vim main.swift").detail, "vim main.swift")
 
             let processRow = SpacesMobileWorkspaceRuntimeRow(
                 source: .process(
                     SpacesDeviceWorkspaceProcessRow(
                         id: "template-api", workspaceID: "workspace-docs", name: "api", command: "npm run dev", templateID: "template-api",
                         processID: nil, sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false)))
-            XCTAssertEqual(processRow.detail(workspaceDirectory: "/repo/docs", homeDirectory: ""), "npm run dev")
-        }
-
-        /// Paths abbreviate against the home the DEVICE's daemon reports, never this app's — an iOS app's
-        /// home is its own sandbox container, so a Mac path would otherwise render `/U/a/p/spaces` instead
-        /// of `~/p/spaces`. A daemon that reports no home leaves the home segment uncollapsed.
-        func testRuntimeRowDirectoryAbbreviatesAgainstTheDevicesHomeNotTheApps() {
-            let terminalRow = SpacesDeviceWorkspaceTerminalRow(
-                id: "terminal-shell", workspaceID: "workspace-feature", title: "vim main.swift",
-                workingDirectory: "/Users/ada/projects/spaces/apps/web", sessionID: "session-shell", runState: .running, canOpenTerminal: true,
-                canStop: true)
-            let row = SpacesMobileWorkspaceRuntimeRow(source: .terminal(terminalRow))
-
-            XCTAssertNotEqual(NSHomeDirectory(), "/Users/ada", "the app's own home must not be what makes this pass")
-            XCTAssertEqual(row.detail(workspaceDirectory: "/Users/ada/projects/spaces", homeDirectory: "/Users/ada"), "~/p/s/a/web")
-            XCTAssertEqual(row.detail(workspaceDirectory: "/Users/ada/projects/spaces", homeDirectory: ""), "/U/a/p/s/a/web")
-
-            let model = makeModel()
-            XCTAssertEqual(model.deviceHomeDirectory, "", "no overview yet means no reported home")
-            model.overview = makeOverview(
-                daemonStatus: TerminalServiceDaemonStatus(
-                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
-                    protocolVersion: SpacesWireProtocol.version, homeDirectory: "/Users/ada"))
-            XCTAssertEqual(model.deviceHomeDirectory, "/Users/ada")
+            XCTAssertEqual(processRow.detail, "npm run dev")
         }
 
         func testRunRowWithExistingSessionSendsRunMutation() async {
@@ -1558,7 +1536,7 @@
                 overview: makeOverview(featureTerminalRows: [
                     SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-feature", title: "build log", workingDirectory: "/repo/feature",
-                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, userTitle: "build log")
+                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
                 ]))
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "build log" })
 

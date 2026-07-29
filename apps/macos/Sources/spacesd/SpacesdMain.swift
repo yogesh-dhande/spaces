@@ -156,8 +156,7 @@ final class DaemonLivenessState: @unchecked Sendable {
         let snapshot = snapshot()
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
-            activeSessionCount: snapshot.sessionCount, deviceAPIAddresses: currentDeviceAPIAddresses(),
-            homeDirectory: TerminalServiceDaemonStatus.currentHomeDirectory)
+            activeSessionCount: snapshot.sessionCount, deviceAPIAddresses: currentDeviceAPIAddresses())
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -731,7 +730,7 @@ enum SpacesDaemonProfileCommandRouting {
             activeSessionCount: livenessState.snapshot().sessionCount,
             // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
             // addresses without duplicating the bound-host cache.
-            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses(), homeDirectory: TerminalServiceDaemonStatus.currentHomeDirectory)
+            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,
