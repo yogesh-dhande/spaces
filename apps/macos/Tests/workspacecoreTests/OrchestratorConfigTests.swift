@@ -93,7 +93,10 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.kind, .shell)
         XCTAssertEqual(runtimeState.sessionID, reservation.sessionID)
         XCTAssertEqual(runtimeState.state, .starting)
-        XCTAssertEqual(runtimeState.title, reservation.title)
+        // A reserved session has run nothing, so it has reported no title. Its name lives in the launch
+        // configuration; a title stamped here would read back as a live title the shell never set.
+        XCTAssertNil(runtimeState.title)
+        XCTAssertEqual(launchConfiguration.title, reservation.title)
         XCTAssertGreaterThan(runtimeState.servicePID, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.outputPath)).count, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)

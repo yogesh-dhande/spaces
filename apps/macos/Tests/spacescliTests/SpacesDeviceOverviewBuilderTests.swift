@@ -431,22 +431,32 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(row?.liveTitle, "vim main.swift")
     }
 
-    /// A shell whose program has reported no title has no secondary text to show.
+    /// A shell whose program has reported no title has no secondary text to show — the row must not
+    /// echo its own name into the secondary slot ("shell-1  shell-1").
     func testShellRowWithoutAReportedTitleCarriesNoLiveTitle() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
-        let session = makeSessionCatalogEntry(
-            sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
-            runtimeTitle: "   ")
+        let workspaceDescriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+        func rows(runtimeTitle: String?) -> (row: SpacesDeviceWorkspaceTerminalRow?, session: SpacesDeviceTerminalSessionSummary?) {
+            let session = makeSessionCatalogEntry(
+                sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+                runtimeTitle: runtimeTitle)
+            let overview = SpacesDeviceOverviewBuilder.build(projects: [project], workspaces: [workspaceDescriptor], sessions: [session])
+            return (overview.workspaces.first?.terminalRows.first, overview.sessions.first)
+        }
 
-        let overview = SpacesDeviceOverviewBuilder.build(
-            projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
-
-        XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "shell-1")
-        XCTAssertNil(overview.workspaces.first?.terminalRows.first?.liveTitle)
-        XCTAssertNil(overview.sessions.first?.liveTitle)
+        // Never reported one.
+        XCTAssertEqual(rows(runtimeTitle: nil).row?.title, "shell-1")
+        XCTAssertNil(rows(runtimeTitle: nil).row?.liveTitle)
+        XCTAssertNil(rows(runtimeTitle: nil).session?.liveTitle)
+        // Reported one.
+        XCTAssertEqual(rows(runtimeTitle: "vim main.swift").row?.liveTitle, "vim main.swift")
+        XCTAssertEqual(rows(runtimeTitle: "vim main.swift").session?.liveTitle, "vim main.swift")
+        // Cleared it.
+        XCTAssertNil(rows(runtimeTitle: "   ").row?.liveTitle)
+        XCTAssertNil(rows(runtimeTitle: "").session?.liveTitle)
     }
 
     /// A rename names the row; the live title keeps showing beside it rather than being displaced or
@@ -675,8 +685,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
             shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z", workspaceID: workspaceID, kind: kind, userTitle: userTitle)
         let runtimeState = TerminalSessionRuntimeState(
+            // No `?? title` fallback: the runtime state carries only what the program reported, so a
+            // fixture without `runtimeTitle` is a session that has reported nothing — exactly what the
+            // daemon writes for a shell that never set a title.
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-18T08:00:05Z",
-            title: runtimeTitle ?? title, workingDirectory: workingDirectory)
+            title: runtimeTitle, workingDirectory: workingDirectory)
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
             paths: TerminalSessionPaths(rootDirectory: "/tmp/\(sessionID)"), isControlAvailable: isControlAvailable,

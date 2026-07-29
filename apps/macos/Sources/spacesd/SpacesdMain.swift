@@ -2094,7 +2094,7 @@ enum SpacesDaemonProfileCommandRouting {
                     (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                     ?? TerminalSessionRuntimeState(
                         sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited,
-                        updatedAt: now, exitedAt: now, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
+                        updatedAt: now, exitedAt: now, workingDirectory: launchConfiguration.workingDirectory)
                 if runtimeState.servicePID != getpid(), Self.isLive(runtimeState), Self.isProcessAlive(pid: Int(runtimeState.servicePID)) {
                     return TerminalServiceResponse(
                         ok: false, message: "Terminal session \(sessionID) is owned by another process and was not stopped by spacesd.")
@@ -2103,8 +2103,7 @@ enum SpacesDaemonProfileCommandRouting {
                 // client's alert (whose identity is that timestamp) must survive the exit write.
                 let exitedState = TerminalSessionRuntimeState(
                     sessionID: runtimeState.sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID,
-                    childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now,
-                    title: runtimeState.title ?? launchConfiguration.title,
+                    childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title,
                     workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
                     rows: runtimeState.rows, bellAt: runtimeState.bellAt)
                 try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)

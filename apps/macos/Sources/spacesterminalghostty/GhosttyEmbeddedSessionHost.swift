@@ -564,7 +564,7 @@
             started = false
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
-                state: .exited, updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
+                state: .exited, updatedAt: now, exitedAt: now, title: currentTitle, workingDirectory: effectiveWorkingDirectory,
                 columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows, bellAt: currentBellAt)
             // All three terminal writes are enqueued (not written inline) so teardown never blocks the engine
             // on the DB lock; FIFO ordering on the serial persistence queue lands them after every pending
@@ -1514,7 +1514,10 @@
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now),
-                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
+                // The raw reported title, not `effectiveTitle`: the runtime state records what the program
+                // said, and folding the launch title in would leave every reader unable to tell an untitled
+                // session from one that titled itself after its own name.
+                title: currentTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
                 rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,

@@ -1336,7 +1336,9 @@ public final class WorkspaceOrchestrator {
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: sessionID, backend: launchConfiguration.backend, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil,
-                state: .starting, updatedAt: createdAt, title: generatedTitle, workingDirectory: workingDirectory), paths: paths)
+                // No title: nothing has run in this session yet, so it has reported nothing. The
+                // generated name lives in the launch configuration, which is where readers take it from.
+                state: .starting, updatedAt: createdAt, workingDirectory: workingDirectory), paths: paths)
         _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
         _ = FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
         let existing = try store.windows(workspaceID: workspace.id)
@@ -1397,7 +1399,7 @@ public final class WorkspaceOrchestrator {
             let failedState = TerminalSessionRuntimeState(
                 sessionID: reservation.sessionID, backend: previousRuntimeState?.backend ?? reservation.launchConfiguration.backend,
                 servicePID: previousRuntimeState?.servicePID ?? ProcessInfo.processInfo.processIdentifier, childPID: previousRuntimeState?.childPID,
-                state: .failed, updatedAt: now, exitedAt: now, title: previousRuntimeState?.title ?? reservation.launchConfiguration.title,
+                state: .failed, updatedAt: now, exitedAt: now, title: previousRuntimeState?.title,
                 workingDirectory: previousRuntimeState?.workingDirectory ?? reservation.launchConfiguration.workingDirectory,
                 columns: previousRuntimeState?.columns, rows: previousRuntimeState?.rows, foregroundPID: previousRuntimeState?.foregroundPID,
                 foregroundExecutablePath: previousRuntimeState?.foregroundExecutablePath,

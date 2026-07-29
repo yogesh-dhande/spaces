@@ -77,6 +77,12 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
     public let foregroundDetectedAgentKind: TerminalDetectedAgentKind?
     public let foregroundDisplayLabel: String?
     public let foregroundDisplayCommand: String?
+    /// The title the program running in this session last reported (OSC 0/2), or nil when it has
+    /// reported none — a shell that never set a title, or one that cleared it. It is the raw report and
+    /// never a stand-in: a reader that needs a name for a session with no reported title supplies its
+    /// own fallback (`title ?? launchConfiguration.title`), and a reader showing what the session is
+    /// doing (`TerminalSessionCatalogEntry.liveTitle`) shows nothing. Folding the launch title in here
+    /// would make those two indistinguishable and print every untitled shell's name twice.
     public let title: String?
     public let workingDirectory: String?
     public let columns: Int?

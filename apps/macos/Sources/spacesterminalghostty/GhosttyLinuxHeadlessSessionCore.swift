@@ -1380,7 +1380,9 @@
             return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
-                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle ?? launchConfiguration.title,
+                // The raw reported title, not a launch-title fallback: the runtime state records what the
+                // program said, and a reader that needs a name applies its own fallback.
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
                 workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
                 rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
@@ -1551,9 +1553,9 @@
         private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
-                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(),
-                title: currentTitle ?? launchConfiguration.title, workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory,
-                columns: terminalSize.columns, rows: terminalSize.rows, bellAt: currentBellAt)
+                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
+                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
+                rows: terminalSize.rows, bellAt: currentBellAt)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
