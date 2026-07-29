@@ -126,6 +126,7 @@ let supportTargets: [Target] = ghosttyKitSupportTargets + [
     ),
     .target(name: "systembridge"),
     .target(name: "spacesruntimecore"),
+    .target(name: "spacesptyshim"),
 ]
 
 let baseTerminalTargets: [Target] = [
@@ -158,6 +159,7 @@ let baseTerminalTargets: [Target] = [
             "spacesterminalcore",
             "spacesdevicecore",
             "ghosttyvtshim",
+            "spacesptyshim",
         ] + ghosttyKitTargetDependencies,
         linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]
     ),

@@ -1,4 +1,5 @@
 import Foundation
+import spacesptyshim
 import spacesterminalcore
 
 #if canImport(Darwin)
@@ -137,34 +138,39 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         // executable, argv, the child's full environment, and the working directory, plus the
         // fd-close bound. See the child block below for why none of it may be built after the fork.
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
-        var arguments = command.arguments.map { strdup($0) } + [nil]
-        var childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides).map { strdup($0) } + [nil]
+        let arguments = command.arguments.map { strdup($0) } + [nil]
+        let childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides).map { strdup($0) } + [nil]
         let workingDirectory = launchConfiguration.workingDirectory.isEmpty ? nil : strdup(launchConfiguration.workingDirectory)
         let fileDescriptorUpperBound = Self.inheritedFileDescriptorUpperBoundForExec()
+        // Even the argv/envp array-to-pointer bridging is compiled Swift, so it happens
+        // here too: the strdup'd element pointers are copied into plain C arrays the
+        // child can consume without touching a Swift Array again.
+        let argvStorage = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: arguments.count)
+        let envpStorage = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: childEnvironment.count)
+        for index in arguments.indices { argvStorage[index] = arguments[index] }
+        for index in childEnvironment.indices { envpStorage[index] = childEnvironment[index] }
         defer {
             free(executable)
             for argument in arguments { if let argument { free(argument) } }
             for entry in childEnvironment { if let entry { free(entry) } }
             if let workingDirectory { free(workingDirectory) }
+            argvStorage.deallocate()
+            envpStorage.deallocate()
         }
 
         let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
-            // ASYNC-SIGNAL-SAFE ONLY, from here to `execve`. This is the child of a fork taken from a
-            // heavily multithreaded process: it inherits copies of the parent's malloc arena and environ
-            // locks, and if a fork lands while another parent thread holds one, the child owns a locked
-            // mutex whose owner does not exist in it. Anything that allocates then blocks forever —
-            // building a Swift String/Array/Set, `setenv`/`unsetenv`, Foundation, even bridging a Swift
-            // String to a C string. That is precisely the observed failure: a never-exec'd copy of the
-            // daemon parked in `futex_wait` with zero CPU time and a 0-byte transcript. The environment,
-            // argv, working directory, and fd bound are precomputed in the parent for this reason —
-            // do not move any of that work back down here.
-            Self.resetSignalDispositionsForExec()
-            if fileDescriptorUpperBound > 3 { for fd in Int32(3)..<fileDescriptorUpperBound { _ = close(fd) } }
-            if let workingDirectory { _ = chdir(workingDirectory) }
-            execve(executable, &arguments, &childEnvironment)
-            _exit(127)
+            // The forked child of this multithreaded process may not run ANY Swift. Compiled
+            // Swift enters the runtime beneath arbitrary statements — lazy generic-metadata
+            // instantiation, protocol-conformance cache lookups — and those paths take
+            // process-wide locks a parent thread may have held at the fork instant. A debugger
+            // caught exactly that: this child dead in pthread_mutex_lock under
+            // swift_getTypeByMangledName with zero CPU time and a 0-byte transcript, entered
+            // from the first Swift statement after fork. The entire pre-exec body therefore
+            // lives in C (spaces_pty_child_exec, which never returns); everything it needs was
+            // materialized above, in the parent, down to the raw argv/envp arrays.
+            spaces_pty_child_exec(executable, argvStorage, envpStorage, workingDirectory, 3, fileDescriptorUpperBound)
         }
 
         lock.lock()
@@ -742,31 +748,6 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             entries.append(line)
         }
         return entries + overrides.map { "\($0.key)=\($0.value)" }
-    }
-
-    private static func resetSignalDispositionsForExec() {
-        // Remote daemons may be launched by noninteractive shells or nohup, which can
-        // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
-        // behave like a normal terminal without changing the daemon's handlers.
-        // Unrolled rather than looped over a literal array: this runs in the forked child, where
-        // allocating the array could deadlock on an inherited malloc lock (see `startIfNeeded`).
-        _ = signal(SIGHUP, SIG_DFL)
-        _ = signal(SIGINT, SIG_DFL)
-        _ = signal(SIGQUIT, SIG_DFL)
-        _ = signal(SIGTERM, SIG_DFL)
-        _ = signal(SIGPIPE, SIG_DFL)
-        _ = signal(SIGTSTP, SIG_DFL)
-        _ = signal(SIGTTIN, SIG_DFL)
-        _ = signal(SIGTTOU, SIG_DFL)
-        // A forked child also inherits the calling THREAD's signal mask, and the daemon starts sessions
-        // on the terminal engine executor — a libdispatch worker thread, which blocks terminal signals so
-        // they are delivered to the main thread instead. A PTY child that inherits SIGHUP/SIGTERM blocked
-        // cannot be gracefully terminated: the signals stay pending and its shell's traps never run, so
-        // `terminate()`'s HUP→TERM escalation is silently ineffective (only the final SIGKILL lands).
-        // Reset the mask to empty so the child starts as if spawned from a normal terminal.
-        var emptyMask = sigset_t()
-        sigemptyset(&emptyMask)
-        sigprocmask(SIG_SETMASK, &emptyMask, nil)
     }
 
     private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
