@@ -1064,7 +1064,13 @@
                 // in the same mode, which advances no epoch and changes no attachment — while its host
                 // counts serials from zero again. Carrying the previous attachment's high-water mark across
                 // that would reject every serial the reconnected client sends and pin the session to the
-                // grid it had before.
+                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+                // so a resize still in flight from the PREVIOUS host of this same id could land after the
+                // reset and outrank the new host's early serials. That needs a same-process host swap with
+                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+                // stale mark and every state payload re-announces the viewport), and the alternative —
+                // carrying an attachment incarnation in every resize request — is a wire change this
+                // corner does not justify.
                 lastResizeSerialByClientID.removeValue(forKey: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
