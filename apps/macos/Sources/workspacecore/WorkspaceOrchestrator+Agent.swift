@@ -960,7 +960,7 @@ extension WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
         )
-        var launchEnv = try terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
+        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
         _ = background
         let agentSessionID = UUID().uuidString
         launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID

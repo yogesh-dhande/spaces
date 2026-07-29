@@ -157,8 +157,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testRemotePairCommandUsesInstalledProfileCommandByDefault() throws {
         let profile = SpacesProfile(
             source: .installedFallback, databasePath: "/Users/tester/.spaces/spaces.db", rootDirectory: "/Users/tester/.spaces",
-            runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed", developmentContext: nil,
-            branchSlug: nil, worktreeHash: nil)
+            isInstalledProfile: true, runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed",
+            developmentContext: nil, branchSlug: nil, worktreeHash: nil)
 
         let pairCommand = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
         XCTAssertEqual(pairCommand.command, SpacesDevicePairingClient.installedRemotePairCommand)
@@ -172,8 +172,9 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let profileName = "schema-squash-v1-154418a8e022"
         let root = "/Users/tester/.spaces-dev/profiles/spaces/\(profileName)"
         let profile = SpacesProfile(
-            source: .explicitDatabasePath, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
-            ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+            source: .explicitDatabasePath, databasePath: "\(root)/spaces.db", rootDirectory: root, isInstalledProfile: false,
+            runtimeDirectory: "\(root)/runtime", ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil,
+            worktreeHash: nil)
 
         let pairCommand = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
         XCTAssertEqual(
@@ -259,7 +260,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
         let homeDirectory = NSHomeDirectory()
         let fallbackProfile = SpacesProfile(
-            source: .installedFallback, databasePath: "\(homeDirectory)/.spaces/spaces.db", rootDirectory: homeDirectory,
+            source: .installedFallback, databasePath: "\(homeDirectory)/.spaces/spaces.db", rootDirectory: homeDirectory, isInstalledProfile: false,
             runtimeDirectory: "\(homeDirectory)/.spaces/runtime", ipcNotificationObject: "unused-in-this-test", developmentContext: nil,
             branchSlug: nil, worktreeHash: nil)
         let expectedFallbackID = SpacesDevicePairingClient.localMacClientInstallationID(profile: fallbackProfile)
@@ -556,7 +557,11 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/dev-build-and-launch.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
-        XCTAssertTrue(script.contains(#"remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")""#))
+        // The profile name comes from the root the local binaries themselves resolved, looked up through
+        // `profile-show`, rather than from a SPACES_DB_PATH the shell was bound to: nothing exports one, and
+        // resolution refuses a live profile root named that way.
+        XCTAssertTrue(script.contains(#"remote_profile_name="$(basename "${PROFILE_ROOT:?}")""#))
+        XCTAssertTrue(script.contains(#"PROFILE_ROOT="$(spaces_profile_field "$CLI" profileRoot)""#))
         XCTAssertTrue(script.contains(#"remote_profile_root="$(remote_expand_path "~/.spaces-dev/profiles/spaces/$remote_profile_name")""#))
         XCTAssertTrue(script.contains("$quoted_install/install.sh --profile $quoted_profile_name"))
         XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet "spacesd@$profile_name.service""#))
@@ -584,9 +589,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(changedHostKey.contains("known_hosts entry changed"))
     }
 
-    /// Points `HOME` at the real account home and clears both profile overrides, the shape a shell bound
-    /// to a live profile (e.g. `spacese2e profile-show --shell`) leaves behind — the case `SpacesProfile`
-    /// refuses to resolve for a test host. Restores all three afterward; this test class runs its methods
+    /// Points `HOME` at the real account home and clears both profile overrides, the shape an unisolated
+    /// test process is left in — the case `SpacesProfile` refuses to resolve for a test host. Restores all three afterward; this test class runs its methods
     /// serially in one XCTest process, so the temporary global mutation cannot race a sibling test here.
     private func withProfileEnvironmentOverride(home: String, run: () throws -> Void) throws {
         let names = ["HOME", SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]

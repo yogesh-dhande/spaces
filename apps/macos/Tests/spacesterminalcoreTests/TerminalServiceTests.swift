@@ -40,7 +40,8 @@ import XCTest
             try makeExecutableFile(at: cli)
             try makeExecutableFile(at: service)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path], profile: makeProfile(source: .installedFallback))
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": cli.path], profile: makeProfile(isInstalled: true, source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -58,7 +59,7 @@ import XCTest
             try makeExecutableFile(at: service)
 
             let resolved = try TerminalService.resolveExecutableURL(
-                environment: ["_": appExecutable.path], profile: makeProfile(source: .installedFallback))
+                environment: ["_": appExecutable.path], profile: makeProfile(isInstalled: true, source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -73,7 +74,8 @@ import XCTest
             try makeExecutableFile(at: cli)
             try makeExecutableFile(at: service)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path], profile: makeProfile(source: .installedFallback))
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": cli.path], profile: makeProfile(isInstalled: true, source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -95,7 +97,7 @@ import XCTest
             try FileManager.default.createSymbolicLink(at: serviceHelper, withDestinationURL: serviceTarget)
 
             let resolved = try TerminalService.resolveExecutableURL(
-                environment: ["_": cliHelper.path], profile: makeProfile(source: .installedFallback))
+                environment: ["_": cliHelper.path], profile: makeProfile(isInstalled: true, source: .installedFallback))
 
             XCTAssertEqual(resolved.path, serviceHelper.path)
         }
@@ -107,8 +109,8 @@ import XCTest
             defer { try? FileManager.default.removeItem(at: layout.root) }
 
             let resolved = try TerminalService.resolveExecutableURL(
-                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .installedFallback),
-                installedLinkURLs: [layout.installedDaemon])
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                profile: makeProfile(isInstalled: true, source: .installedFallback), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, layout.installedDaemon.path)
         }
@@ -121,18 +123,18 @@ import XCTest
         func testResolveExecutableURLRefusesInstalledLinkForDevelopmentProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }
-            let profile = makeProfile(source: .developmentWorktree)
+            let profile = makeProfile(isInstalled: false, source: .developmentWorktree)
 
             XCTAssertThrowsError(
                 try TerminalService.resolveExecutableURL(
                     environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: profile,
                     installedLinkURLs: [layout.installedDaemon])
             ) { error in
-                guard case TerminalServiceError.daemonNotFound(let profileSource, let profileRoot, let searchedPaths) = error else {
+                guard case TerminalServiceError.daemonNotFound(let reportedProfile, let searchedPaths) = error else {
                     return XCTFail("Expected daemonNotFound, got \(error)")
                 }
-                XCTAssertEqual(profileSource, .developmentWorktree)
-                XCTAssertEqual(profileRoot, profile.rootDirectory)
+                XCTAssertEqual(reportedProfile.source, .developmentWorktree)
+                XCTAssertEqual(reportedProfile.rootDirectory, profile.rootDirectory)
                 XCTAssertFalse(searchedPaths.contains(layout.installedDaemon.path))
                 let message = (error as? TerminalServiceError)?.errorDescription ?? ""
                 XCTAssertTrue(message.contains(profile.rootDirectory))
@@ -148,13 +150,13 @@ import XCTest
 
             XCTAssertThrowsError(
                 try TerminalService.resolveExecutableURL(
-                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .explicitDatabasePath),
-                    installedLinkURLs: [layout.installedDaemon])
+                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                    profile: makeProfile(isInstalled: false, source: .explicitDatabasePath), installedLinkURLs: [layout.installedDaemon])
             ) { error in
-                guard case TerminalServiceError.daemonNotFound(let profileSource, _, _) = error else {
+                guard case TerminalServiceError.daemonNotFound(let reportedProfile, _) = error else {
                     return XCTFail("Expected daemonNotFound, got \(error)")
                 }
-                XCTAssertEqual(profileSource, .explicitDatabasePath)
+                XCTAssertEqual(reportedProfile.source, .explicitDatabasePath)
             }
         }
 
@@ -166,8 +168,8 @@ import XCTest
             let checkoutDaemon = try makeCheckoutRelativeDaemon(in: layout)
 
             let resolved = try TerminalService.resolveExecutableURL(
-                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .developmentWorktree),
-                installedLinkURLs: [layout.installedDaemon])
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                profile: makeProfile(isInstalled: false, source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, checkoutDaemon.path)
         }
@@ -181,18 +183,18 @@ import XCTest
             defer { try? FileManager.default.removeItem(at: layout.root) }
             let checkoutDaemon = try makeCheckoutRelativeDaemon(in: layout)
             let absentInstalledLink = layout.root.appendingPathComponent("absent-installed-spacesd", isDirectory: false)
-            let profile = makeProfile(source: .installedFallback)
+            let profile = makeProfile(isInstalled: true, source: .installedFallback)
 
             XCTAssertThrowsError(
                 try TerminalService.resolveExecutableURL(
                     environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: profile,
                     installedLinkURLs: [absentInstalledLink])
             ) { error in
-                guard case TerminalServiceError.daemonNotFound(let profileSource, let profileRoot, let searchedPaths) = error else {
+                guard case TerminalServiceError.daemonNotFound(let reportedProfile, let searchedPaths) = error else {
                     return XCTFail("Expected daemonNotFound, got \(error)")
                 }
-                XCTAssertEqual(profileSource, .installedFallback)
-                XCTAssertEqual(profileRoot, profile.rootDirectory)
+                XCTAssertEqual(reportedProfile.source, .installedFallback)
+                XCTAssertEqual(reportedProfile.rootDirectory, profile.rootDirectory)
                 XCTAssertFalse(searchedPaths.contains(checkoutDaemon.path))
                 XCTAssertTrue(searchedPaths.contains(absentInstalledLink.path))
                 let message = (error as? TerminalServiceError)?.errorDescription ?? ""
@@ -208,8 +210,8 @@ import XCTest
             try makeExecutableFile(at: buildDaemon)
 
             let resolved = try TerminalService.resolveExecutableURL(
-                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .developmentWorktree),
-                installedLinkURLs: [layout.installedDaemon])
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                profile: makeProfile(isInstalled: false, source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, buildDaemon.path)
         }
@@ -224,7 +226,7 @@ import XCTest
 
             let resolved = try TerminalService.resolveExecutableURL(
                 environment: ["_": layout.buildCLI.path, "SPACESD_EXECUTABLE": overrideDaemon.path], fileManager: layout.fileManager,
-                profile: makeProfile(source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
+                profile: makeProfile(isInstalled: false, source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, overrideDaemon.path)
         }
@@ -239,7 +241,7 @@ import XCTest
 
             let resolved = try TerminalService.resolveExecutableURL(
                 environment: ["_": layout.buildCLI.path, "SPACESD_EXECUTABLE": overrideDaemon.path], fileManager: layout.fileManager,
-                profile: makeProfile(source: .installedFallback), installedLinkURLs: [layout.installedDaemon])
+                profile: makeProfile(isInstalled: true, source: .installedFallback), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, overrideDaemon.path)
         }
@@ -329,11 +331,15 @@ import XCTest
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         }
 
-        private func makeProfile(source: SpacesProfileSource) -> SpacesProfile {
+        /// `isInstalled` is stated independently of `source` on purpose: what a profile IS decides the
+        /// candidate list, and how it was discovered is only carried along for the error text. Stating both
+        /// here is what lets a test cover a profile whose route and identity disagree.
+        private func makeProfile(isInstalled: Bool, source: SpacesProfileSource) -> SpacesProfile {
             let root = "/tmp/spaces-profile-\(UUID().uuidString)"
             return SpacesProfile(
-                source: source, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
-                ipcNotificationObject: "spaces.profile.test", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+                source: source, databasePath: "\(root)/spaces.db", rootDirectory: root, isInstalledProfile: isInstalled,
+                runtimeDirectory: "\(root)/runtime", ipcNotificationObject: "spaces.profile.test", developmentContext: nil, branchSlug: nil,
+                worktreeHash: nil)
         }
 
         /// A checkout-style build directory whose `spacesd` exists but is not executable (the observed

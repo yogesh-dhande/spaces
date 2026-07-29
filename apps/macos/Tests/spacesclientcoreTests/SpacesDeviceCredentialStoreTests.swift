@@ -15,8 +15,8 @@ final class SpacesDeviceCredentialStoreTests: XCTestCase {
         }
         let profile = SpacesProfile(
             source: .explicitDatabasePath, databasePath: root.appendingPathComponent("spaces.db").path, rootDirectory: root.path,
-            runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test", developmentContext: nil, branchSlug: nil,
-            worktreeHash: nil)
+            isInstalledProfile: false, runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test",
+            developmentContext: nil, branchSlug: nil, worktreeHash: nil)
 
         try SpacesDeviceCredentialStore.saveToken("TOKEN", deviceID: "device-one", profile: profile)
 
@@ -43,8 +43,9 @@ final class SpacesDeviceCredentialStoreTests: XCTestCase {
         }
         let profile = SpacesProfile(
             source: .explicitDatabasePath, databasePath: root.appendingPathComponent("spaces.db").path,
-            rootDirectory: root.appendingPathComponent("profile").path, runtimeDirectory: root.appendingPathComponent("runtime").path,
-            ipcNotificationObject: "test", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+            rootDirectory: root.appendingPathComponent("profile").path, isInstalledProfile: false,
+            runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test", developmentContext: nil, branchSlug: nil,
+            worktreeHash: nil)
 
         try SpacesDeviceCredentialStore.saveToken("TOKEN", deviceID: "device-one", profile: profile)
 

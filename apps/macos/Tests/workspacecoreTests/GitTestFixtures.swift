@@ -142,14 +142,12 @@ func makeTestOrchestrator(
     builtInTerminalWindowCloser: WorkspaceOrchestrator.BuiltInTerminalWindowCloser? = nil,
     builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
     builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-    daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, profileDatabasePath: (() throws -> String)? = nil,
-    currentDate: @escaping () -> Date = Date.init
+    daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
     WorkspaceOrchestrator(
         store: store, projectsRootDirectory: projectsRootDirectory, workspacesRootDirectory: workspacesRootDirectory,
         git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
         builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress,
-        profileDatabasePath: profileDatabasePath ?? { try DatabaseLocator.defaultPath() }, currentDate: currentDate)
+        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress, currentDate: currentDate)
 }

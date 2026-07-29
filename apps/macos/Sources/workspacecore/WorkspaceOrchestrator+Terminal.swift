@@ -200,30 +200,35 @@ extension WorkspaceOrchestrator {
 
     func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
-    /// Builds the environment a Spaces terminal session launches with, binding the session to the profile
-    /// this daemon serves.
+    /// Builds the environment a Spaces terminal session launches with.
     ///
-    /// `SPACES_DB_PATH` is exported from the *resolved* profile rather than forwarded from the daemon's own
-    /// environment. The installed daemon runs under launchd with no `SPACES_*` set, so forwarding would bind
-    /// dev-profile terminals and leave installed-profile terminals unbound. Agent hook configuration is
-    /// global per agent CLI and names one absolute `spaces` build, so an unbound terminal makes that build
-    /// resolve a profile from its own location on disk — reporting an agent's lifecycle to whichever profile
-    /// the hook's binary belongs to instead of the one running the agent. Exporting the resolved path makes
-    /// the terminal's profile authoritative for every `spaces` binary invoked inside it, in both directions.
+    /// `SPACES_DB_PATH` is FORWARDED from this daemon's own environment, never synthesized from the resolved
+    /// profile. Both real profiles are discoverable from a binary's own location with no environment at all —
+    /// the installed daemon under launchd falls through to `~/.spaces`, and a repo-built or deployed binary
+    /// derives its development profile from where it sits on disk — so an unbound terminal is the CORRECT
+    /// state for both: every `spaces` binary invoked inside one resolves the profile it belongs to. The only
+    /// profile that cannot be discovered that way is an ephemeral throwaway root (tests, E2E harnesses), and
+    /// that is exactly the case where the daemon itself was started with the variable and so forwards it.
     ///
-    /// The runtime directory is deliberately not exported alongside it: it derives from the directory holding
-    /// the database, so naming the database alone binds the whole profile and cannot produce a half-bound
-    /// terminal whose sockets and locks live elsewhere. A daemon started with an explicit
-    /// `SPACES_RUNTIME_DIR` — the E2E harnesses that split the two — still forwards it below, so its
-    /// terminals stay on the runtime root that daemon actually uses.
-    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) throws
-        -> [String: String]
+    /// Synthesizing it instead exported a `SPACES_DB_PATH` into every workspace terminal, including the
+    /// installed daemon's own. Anything run inside — notably an agent hook, which fires on every tool call —
+    /// inherited it, and a `spaces` invocation that autostarts a daemon hands it the whole parent
+    /// environment. A daemon serving `~/.spaces` then resolved itself through the explicit-path branch,
+    /// was classified as a development profile, and assigned and persisted a development-range Device API
+    /// port, orphaning every paired client. Profile identity belongs to the binary's location, not to an
+    /// inherited binding, which is why `SPACES_DB_PATH` is refused outright inside a live profile root.
+    ///
+    /// Accepted consequence: in a development-profile terminal, a globally-configured agent hook still runs
+    /// the INSTALLED `spaces` binary, which resolves the installed profile, so its agent signal is a silent
+    /// no-op for a workspace id that profile has never heard of. Agent-lifecycle reporting from
+    /// development-profile terminals is explicitly not supported.
+    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) -> [String:
+        String]
     {
         var env = base
         if includeInheritedPath, let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
         if includeProfileEnvironment {
-            env[DatabaseLocator.databasePathEnvironmentVariable] = try profileDatabasePath()
-            for key in ["SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
+            for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
                 if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
                     env[key] = value
                 }
@@ -288,7 +293,7 @@ extension WorkspaceOrchestrator {
         includeProfileEnvironment: Bool = true, commandPrelude: String? = nil
     ) throws -> String {
         let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
-        let runtimeEnv = try terminalLaunchEnvironment(
+        let runtimeEnv = terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
         let resolvedShellPath = shellPath ?? terminalLoginShellPath()
         // Run managed processes through an interactive login shell (`-l -i -c`), matching the ad-hoc
