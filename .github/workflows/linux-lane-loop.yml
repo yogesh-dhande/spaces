@@ -66,6 +66,17 @@ jobs:
               -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
               swift:6.2-noble \
               bash /workspace/apps/macos/scripts/run_linux_tests.sh >"$log" 2>&1 || status=$?
+            if [ "$status" -eq 124 ]; then
+              # The wedged container is the evidence: its lane script never reached its own failure
+              # dump, so capture the live process table before destroying it. procps may not be
+              # installed yet if the stall predates the lane's apt step, hence the /proc fallback.
+              {
+                echo "----- live process table of timed-out container -----"
+                docker exec "lane-iteration-$i" bash -c \
+                  'ps -eo pid,ppid,state,etime,time,wchan:32,args 2>/dev/null \
+                     || for d in /proc/[0-9]*; do echo "$d: $(tr "\0" " " < "$d/cmdline") [$(cut -d" " -f3 "$d/stat" 2>/dev/null)]"; done'
+              } >>"$log" 2>&1 || echo "----- live capture failed -----" >>"$log"
+            fi
             docker rm -f "lane-iteration-$i" >/dev/null 2>&1 || true
             duration=$(( $(date +%s) - started ))
             if [ "$status" -ne 0 ]; then
