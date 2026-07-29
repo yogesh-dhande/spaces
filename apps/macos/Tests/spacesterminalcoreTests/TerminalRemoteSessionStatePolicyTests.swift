@@ -37,6 +37,14 @@ final class TerminalRemoteSessionStatePolicyTests: XCTestCase {
             TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.resize, ownerKind: .localWindow))
         XCTAssertTrue(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.clearScreen))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: TerminalRemoteSessionStateReason.runtimeState))
+        // A clipboard write rides its own broadcast after the output turn that already carried the
+        // frame; re-exporting one here would put a second frame on the delta chain for nothing.
+        XCTAssertFalse(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite, ownerKind: .localWindow))
+        XCTAssertFalse(
+            TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite, ownerKind: .remoteViewer))
         XCTAssertFalse(TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: "unknown", ownerKind: .localWindow))
     }
 

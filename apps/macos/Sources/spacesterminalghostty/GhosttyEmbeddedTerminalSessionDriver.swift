@@ -108,6 +108,8 @@
             """
 
         var onActionEvent: (@TerminalEngineActor (GhosttyActionEvent) -> Void)?
+        /// A program's OSC 52 copy, already decoded and capped; empty text is a clear.
+        var onClipboardWrite: (@TerminalEngineActor (String) -> Void)?
         var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
         var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
         var onSessionStateChanged: (@TerminalEngineActor (GhosttyEmbeddedSessionStateChange) -> Void)?
@@ -192,12 +194,19 @@
             //    output.log gets written in the first place), so leaving it wired would
             //    append the entire transcript to output.log a second time. The screen is
             //    still fully reconstructed — the callback only tees, it does not parse.
+            //    The clipboard is suppressed for the same window (see
+            //    `GhosttyEmbeddedSurfaceUserData.isReplayingHistoricalOutput`): re-pushing every OSC 52
+            //    the transcript ever carried would overwrite the owner's clipboard with stale text. The
+            //    suppression outlives the replay by one `tick`, which is what drains the surface
+            //    messages the replay queued and therefore fires their clipboard callbacks.
             let restoreOutputHandler = outputHandler
             outputHandler = nil
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
             outputHandler = restoreOutputHandler
             ghostty_session_refresh(createdSession)
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
 
             finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: (columns: columns, rows: rows), startReadLoop: false)
 
@@ -226,7 +235,8 @@
             sessionConfig.surface.receive_resize = Self.hostManagedReceiveResizeCallback
 
             let surfaceUserData = GhosttyEmbeddedSurfaceUserData(
-                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface })
+                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface },
+                clipboardWriteHandler: { [weak self] text in self?.onClipboardWrite?(text) })
             self.surfaceUserData = surfaceUserData
             sessionConfig.surface.userdata = Unmanaged.passUnretained(surfaceUserData).toOpaque()
 
@@ -362,9 +372,11 @@
         /// Ghostty data callback remains disabled, so replay updates the renderer without
         /// appending those bytes to the transcript a second time.
         func replayPersistedHandoffOutput(at path: String, startingAt offset: UInt64) async {
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: path, startingAt: offset)
             if let session { ghostty_session_refresh(session) }
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
         }
 
         /// Final failed-`execv` fallback step: restore the data callback and normal PTY

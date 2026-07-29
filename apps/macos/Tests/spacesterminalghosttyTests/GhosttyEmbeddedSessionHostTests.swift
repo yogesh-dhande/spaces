@@ -1151,6 +1151,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(host.effectiveTitle, "live-title")
             XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/updated")
 
+            // A metadata action refreshes runtime state on the spot rather than leaving it to the periodic
+            // timer, so the row every overview and alert reads carries the new title in the same turn the
+            // program reported it. Read through the state payload, which serves the in-memory
+            // authoritative copy that refresh advances.
+            let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+            XCTAssertEqual(payload?.runtimeState?.title, "live-title")
+            XCTAssertEqual(payload?.runtimeState?.workingDirectory, "/tmp/updated")
         }
     }
 

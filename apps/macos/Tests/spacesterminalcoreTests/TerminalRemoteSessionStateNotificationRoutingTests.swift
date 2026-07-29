@@ -38,6 +38,13 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
         }
     }
 
+    /// A clipboard write changes nothing a pane presents; the receiving client acts on it where it
+    /// applies the payload. The row must exist even though it posts nothing, or the unknown-reason
+    /// default below would swallow it indistinguishably from a reason nobody registered.
+    func testClipboardWriteReasonPostsNothing() {
+        XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.clipboardWrite), [])
+    }
+
     /// A reason this build does not know must not inherit the refresh path.
     func testUnknownReasonPostsNothing() {
         XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: "not_a_reason"), [])
