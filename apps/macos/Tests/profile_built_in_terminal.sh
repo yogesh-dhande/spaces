@@ -56,6 +56,11 @@ wait_for_log_pattern_count_greater_than() {
   done
 }
 
+# Requests the owner-mode pane open until the owner summon lands. `spaces terminal show` is the only
+# thing that posts the owner-mode open IPC, and that IPC is the only producer of `mode=owner` — the
+# focus IPC deliberately opens the pane as a viewer so it cannot preempt another active owner. The
+# request repeats once a second because the app resolves a just-created session through a cold overview
+# fetch, so an early request can find nothing to open.
 wait_for_owner_window_summon() {
   local session_id="$1"
   local baseline="$2"
@@ -74,8 +79,8 @@ wait_for_owner_window_summon() {
     local now
     now="$(date +%s)"
     if (( now >= next_request_at )); then
-      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
-        focus-terminal-session-window --session-id "$session_id" >/dev/null
+      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" \
+        terminal show "$session_id" >/dev/null
       next_request_at=$((now + 1))
     fi
 

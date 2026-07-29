@@ -755,8 +755,12 @@ def run_mac_input_latency() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
-        "summary_metric": "event_to_frame_apply_ms",
+        # The enforced headline is the end-to-end keystroke->visible measure, the only phase this
+        # scenario samples for every attempt. `event_to_frame_apply_ms` needs a correlated mac-host
+        # frame-apply event and routinely resolves for none of them (issue #358), which left the
+        # gross budget checking an empty sample set and passing unconditionally.
+        "summary": summarize_latencies(measurements, "event_to_visible_ms"),
+        "summary_metric": "event_to_visible_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -1022,8 +1026,16 @@ for scenario in scenarios:
 failures = []
 for name, result in scenario_results.items():
     p95 = result["summary"]["p95_ms"]
-    if result.get("budget_enforced", True) and p95 is not None and p95 > budgets[name]["gross_p95_ms"]:
-        failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
+    if result.get("budget_enforced", True):
+        # An enforced budget with no samples is a harness failure, not a pass: a metric that stops
+        # resolving silently disables its own budget check.
+        if p95 is None:
+            failures.append(
+                f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
+                f"{budgets[name]['gross_p95_ms']}ms could not be enforced"
+            )
+        elif p95 > budgets[name]["gross_p95_ms"]:
+            failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
     if any(item.get("render_mode") != "ghostty-mirror" for item in result["measurements"]):
         failures.append(f"{name} did not remain in ghostty-mirror render mode")
 

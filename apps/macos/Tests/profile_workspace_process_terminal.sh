@@ -188,6 +188,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI
   --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' > /dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" lookup-workspace --project-dir "$PROJECT_DIR" >"$WORKSPACE_INFO_JSON"
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
+WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
@@ -199,7 +200,7 @@ import time
 print(time.time())
 PY
 )"
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" workspace start --workspace "$WORKSPACE_ID" >/dev/null
 wait_for_process_session_id "$WORKSPACE_DIR" backend "$WORK_ROOT/after-start.json" 30
 START_MS="$(ms_since "$start_started_at")"
 

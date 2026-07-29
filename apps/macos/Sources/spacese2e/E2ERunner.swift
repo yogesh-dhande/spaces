@@ -267,11 +267,16 @@ private struct E2ERunner {
         }
     }
 
+    /// Syncs the local GhosttyKit/libghostty-vt artifacts to the pinned submodule *before* building,
+    /// matching `verify-prep.sh`. The order matters: `spacesterminalghostty` compiles against the
+    /// `.local` Ghostty headers, so a `.local` tree left skewed by another worktree or an iOS/Linux
+    /// artifact swap fails the build outright. Building first makes every lane die in the shared
+    /// bootstrap step with a Ghostty compile error and never reach the sync that would have repaired it.
     private mutating func prepareSharedProducts() throws {
-        let buildScript = rootDirectory.appendingPathComponent("scripts/swiftpm.sh").path
-        try runProcess(executable: buildScript, arguments: ["build"], environment: ["SPACES_E2E_BOOTSTRAP_BUILD": "1"])
         let ghosttySetup = macOSDirectory.appendingPathComponent("scripts/setup_ghosttykit.sh").path
         try runProcess(executable: ghosttySetup, arguments: [], environment: [:])
+        let buildScript = rootDirectory.appendingPathComponent("scripts/swiftpm.sh").path
+        try runProcess(executable: buildScript, arguments: ["build"], environment: ["SPACES_E2E_BOOTSTRAP_BUILD": "1"])
     }
 
     /// Runs a scenario whose descriptor kind is `.script`; the terminal-latency and mobile

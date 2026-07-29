@@ -179,6 +179,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" lookup-workspace --project-dir "$PROJECT_DIR" >"$WORKSPACE_INFO_JSON"
 
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
+WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_wait_for_desktop_control "$SPACES_CLI"
@@ -187,7 +188,7 @@ APP_PID="$!"
 sleep 3
 wait_for_spaces_frontmost_ready
 
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" workspace start --workspace "$WORKSPACE_ID" >/dev/null
 wait_for_log_pattern_count_greater_than "spaces: perf metric=process_focus .*target=frontend .*success=1|spaces: perf metric=terminal_window_summon .*mode=owner" 0 30 || true
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>"$PROCESS_FOCUS_LOG"
 wait_for_spaces_frontmost_ready

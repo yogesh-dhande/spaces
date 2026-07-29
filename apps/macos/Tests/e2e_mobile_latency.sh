@@ -763,6 +763,19 @@ def latest_stream_payload(stream: subprocess.Popen) -> tuple[dict, int] | None:
     return reader.latest_payload, reader.latest_received_ns
 
 
+# GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec; there is deliberately no
+# compatibility path for older versions, so a mismatch is rejected rather than misread.
+RENDER_UPDATE_VERSION = 4
+
+# The two high bits of a cell's wire flags word are codec-reserved payload markers, not style flags: the
+# cell is followed, in its block's sparse text section, by its grapheme cluster (bit 15) and/or its OSC 8
+# link URL (bit 14). Style flags occupy bits 0-10 and never reach these, so a decoder strips them off the
+# flags value it reports.
+CLUSTER_PAYLOAD_FLAG = 1 << 15
+LINK_PAYLOAD_FLAG = 1 << 14
+PAYLOAD_FLAG_MASK = CLUSTER_PAYLOAD_FLAG | LINK_PAYLOAD_FLAG
+
+
 class RenderUpdateReader:
     nil_revision = (1 << 64) - 1
 
@@ -808,8 +821,8 @@ def decode_render_update(payload: dict) -> dict | None:
     if reader.read(4) != b"GRTU":
         raise ValueError("invalid render update magic")
     version = reader.u8()
-    if version != 2:
-        raise ValueError(f"unsupported render update version {version}")
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
     kind_byte = reader.u8()
     _ = reader.u16()
     session_revision = reader.revision()
@@ -879,13 +892,40 @@ def render_update_metadata(payload: dict, update: dict) -> dict:
     }
 
 
-def read_render_update_cell(reader: RenderUpdateReader) -> dict:
-    return {
-        "codepoint": reader.u32(),
-        "foregroundRGB": reader.u32(),
-        "backgroundRGB": reader.u32(),
-        "flags": reader.u16(),
-    }
+def read_render_update_cell_block(reader: RenderUpdateReader, count: int) -> list[dict]:
+    """Reads one block of `count` 14-byte cells plus the sparse text section that follows it.
+
+    That section holds one entry per payload flag bit the cells set, in cell order and cluster before link,
+    each `(UInt32 offset within the block, UInt16 utf8 byte count, bytes)`; a block whose cells set no
+    payload bits is followed by nothing at all. This harness renders base codepoints only, so the payload
+    text is read purely to keep the reader aligned with the rest of the frame.
+    """
+    cells = []
+    flagged = []
+    for index in range(count):
+        codepoint = reader.u32()
+        foreground_rgb = reader.u32()
+        background_rgb = reader.u32()
+        flags = reader.u16()
+        if flags & PAYLOAD_FLAG_MASK:
+            flagged.append((index, flags))
+        cells.append(
+            {
+                "codepoint": codepoint,
+                "foregroundRGB": foreground_rgb,
+                "backgroundRGB": background_rgb,
+                "flags": flags & ~PAYLOAD_FLAG_MASK,
+            }
+        )
+    for index, flags in flagged:
+        for payload_flag in (CLUSTER_PAYLOAD_FLAG, LINK_PAYLOAD_FLAG):
+            if not flags & payload_flag:
+                continue
+            offset = reader.u32()
+            if offset != index:
+                raise ValueError(f"render update cell payload names offset {offset}, expected {index}")
+            reader.read(reader.u16())
+    return cells
 
 
 def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: int) -> dict:
@@ -894,6 +934,8 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
     cursor_visible = reader.u8() != 0
     default_foreground_rgb = reader.u32()
     default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
     cell_count = reader.u32()
     return {
         "columns": columns,
@@ -903,25 +945,33 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
         "cursorVisible": cursor_visible,
         "defaultForegroundRGB": default_foreground_rgb,
         "defaultBackgroundRGB": default_background_rgb,
-        "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+        "cells": read_render_update_cell_block(reader, cell_count),
     }
 
 
 def read_render_update_delta(
     reader: RenderUpdateReader, base_revision: int | None, target_revision: int | None, owner_epoch: int, columns: int, rows: int
 ) -> dict:
+    cursor_column = reader.u16()
+    cursor_row = reader.u16()
+    cursor_visible = reader.u8() != 0
+    default_foreground_rgb = reader.u32()
+    default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
+    changed_cell_count = reader.u32()
     delta = {
         "baseRevision": base_revision,
         "targetRevision": target_revision,
         "ownerEpoch": owner_epoch,
         "columns": columns,
         "rows": rows,
-        "cursorColumn": reader.u16(),
-        "cursorRow": reader.u16(),
-        "cursorVisible": reader.u8() != 0,
-        "defaultForegroundRGB": reader.u32(),
-        "defaultBackgroundRGB": reader.u32(),
-        "changedCellCount": reader.u32(),
+        "cursorColumn": cursor_column,
+        "cursorRow": cursor_row,
+        "cursorVisible": cursor_visible,
+        "defaultForegroundRGB": default_foreground_rgb,
+        "defaultBackgroundRGB": default_background_rgb,
+        "changedCellCount": changed_cell_count,
         "scrollRects": [],
         "replaceCellRuns": [],
     }
@@ -944,7 +994,7 @@ def read_render_update_delta(
             {
                 "row": row,
                 "column": column,
-                "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+                "cells": read_render_update_cell_block(reader, cell_count),
             }
         )
     return delta

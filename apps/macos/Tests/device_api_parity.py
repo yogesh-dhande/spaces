@@ -23,6 +23,9 @@ TERMINAL_BACKGROUND_RGB = {
     "dark": (15 << 16) | (21 << 8) | 23,
 }
 
+# GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec.
+RENDER_UPDATE_VERSION = 4
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the shared Spaces Device API local/remote parity flow.")
@@ -413,8 +416,9 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
     """Decodes a self-contained (full) render update and returns its default background RGB (0x00RRGGBB).
 
     The `state` Device API command always exports a full self-contained frame, so only the full-frame
-    header + snapshot prologue is parsed here; deltas are never returned by `state`. Mirrors the GRTU v2
-    wire format decoded by profile_device_api.sh / e2e_mobile_latency.sh.
+    header + snapshot prologue up to the background colour is parsed here; deltas are never returned by
+    `state` and nothing past the colour is read. Mirrors the GRTU v4 wire format written by
+    GhosttyRenderUpdateBinaryCodec and decoded by profile_device_api.sh / e2e_mobile_latency.sh.
     """
     data = base64.b64decode(render_update_b64)
     offset = 0
@@ -430,8 +434,10 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
     if take(4) != b"GRTU":
         raise ValueError("invalid render update magic")
     version = take(1)[0]
-    if version != 2:
-        raise ValueError(f"unsupported render update version {version}")
+    # The codec has no compatibility path for older versions: a layout change bumps the version byte and
+    # every decoder rejects the rest rather than misreading offsets.
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
     kind_byte = take(1)[0]
     if kind_byte != 1:
         raise ValueError(f"expected a full render frame from state, got kind {kind_byte}")
@@ -451,15 +457,23 @@ def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
 
 
 def read_terminal_default_background_rgb(args: argparse.Namespace, app: dict, session_id: str) -> int | None:
+    """The session's rendered default background, or None when the state carried no frame yet.
+
+    A decode failure is deliberately not caught: it means the harness and the codec disagree about the wire
+    format, which every subsequent poll would hit identically, so raising surfaces the real error instead of
+    letting a bounded wait time out reporting an invented colour.
+    """
     response = send("state", {"sessionID": session_id}, args, app)
     state = result(response, "terminalState", f"state {session_id}")
     render_update = state.get("renderUpdate")
     if not render_update:
         return None
-    try:
-        return decode_full_frame_default_background_rgb(render_update)
-    except ValueError:
-        return None
+    return decode_full_frame_default_background_rgb(render_update)
+
+
+def format_background_rgb(rgb: int | None) -> str:
+    """Renders a background colour for an assertion message, keeping "no frame" distinct from black."""
+    return "no decodable frame" if rgb is None else f"#{rgb:06x}"
 
 
 def assert_appearance_flip_retheme(args: argparse.Namespace, app: dict, session_id: str) -> dict:
@@ -498,12 +512,12 @@ def assert_appearance_flip_retheme(args: argparse.Namespace, app: dict, session_
         raise AssertionError(
             f"setAppearance({target}) did not re-theme the live session: "
             f"expected defaultBackgroundRGB #{expected_rgb:06x}, "
-            f"observed #{(observed['rgb'] or 0):06x} (before flip #{(before_rgb or 0):06x})"
+            f"observed {format_background_rgb(observed['rgb'])} (before flip {format_background_rgb(before_rgb)})"
         ) from error
     return {
         "appearance": target,
         "expectedBackgroundRGB": f"#{expected_rgb:06x}",
-        "beforeBackgroundRGB": f"#{(before_rgb or 0):06x}",
+        "beforeBackgroundRGB": format_background_rgb(before_rgb),
     }
 
 

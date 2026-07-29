@@ -48,17 +48,31 @@ require_binary() {
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
 }
 
-wait_for_log_pattern() {
-  local pattern="$1"
+# Requests the owner-mode pane open until the owner summon lands. `spaces terminal command` only creates
+# the session; nothing opens its pane on its own, and `mode=owner` is emitted solely for the owner-mode
+# open IPC that `spaces terminal show` posts. The request repeats once a second because the app resolves a
+# just-created session through a cold overview fetch, so an early request can find nothing to open.
+wait_for_owner_window_summon() {
+  local session_id="$1"
   local timeout="${2:-30}"
+  local pattern="spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner|spaces: perf metric=terminal_window_attach_owner_surface target=session=${session_id} success=1 .*mode=owner"
   local start
+  local next_request_at=0
   start="$(date +%s)"
   while true; do
     if grep -Eq "$pattern" "$APP_LOG"; then
       return 0
     fi
-    if (( "$(date +%s)" - start >= timeout )); then
-      echo "Timed out waiting for log pattern: $pattern" >&2
+
+    local now
+    now="$(date +%s)"
+    if (( now >= next_request_at )); then
+      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
+      next_request_at=$((now + 1))
+    fi
+
+    if (( now - start >= timeout )); then
+      echo "Timed out waiting for owner window summon for session $session_id" >&2
       return 1
     fi
     sleep 0.2
@@ -130,7 +144,7 @@ run_scenario() {
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 
-  wait_for_log_pattern "spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner|spaces: perf metric=terminal_window_attach_owner_surface target=session=${session_id} success=1 .*mode=owner"
+  wait_for_owner_window_summon "$session_id"
   session_dir="$RUNTIME_DIR/terminal/sessions/$session_id"
   output_log="$session_dir/output.log"
 
