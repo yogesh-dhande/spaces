@@ -301,9 +301,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             device: snapshot.localPairedDevice, projects: retainedContent?.projects ?? snapshot.projects,
             workspacesByProject: retainedContent?.workspacesByProject ?? snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: retainedContent?.workspaceRuntimeStatusByID ?? snapshot.workspaceRuntimeStatusByID,
-            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups,
-            overview: retainedContent?.overview ?? snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus,
-            compatibility: snapshot.localCompatibility)
+            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups, overview: retainedContent?.overview ?? snapshot.localDeviceOverview,
+            daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
         // Compare against the section actually being installed, not the raw snapshot: an outage installs
         // the retained rows, so comparing with the placeholder would reload the outline on every poll of
         // a daemon that stays down and collapse the user's expanded projects each time.
@@ -345,8 +344,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
-        rebuildFlatSidebarData()
+        // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
+        // session's bell into that same set and writes it back, so a consume that ran against a not-yet
+        // loaded (empty) set would persist itself over everything the user had dismissed.
         host.loadAlertsDismissedAttentionItemIDs()
+        rebuildFlatSidebarData()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         if !localOutlineUnchanged {
             host.outlineView.reloadData()
@@ -911,6 +913,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.workspacesByProject = merged.workspacesByProject
         host.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
         host.alertsGroups = merged.alertsGroups
+        // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
+        // is typing in gets consumed — before anything reads the groups for the badge or the list.
+        host.consumeFocusedSessionBellAlerts()
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {

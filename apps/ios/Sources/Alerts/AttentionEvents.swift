@@ -10,6 +10,7 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
         case finished
         case exited
         case failed
+        case bell
 
         var label: String {
             switch self {
@@ -17,6 +18,7 @@ struct SpacesMobileAttentionEvent: Identifiable, Equatable, Sendable {
             case .finished: "Finished"
             case .exited: "Exited"
             case .failed: "Failed"
+            case .bell: "Bell"
             }
         }
     }
@@ -45,11 +47,46 @@ struct SpacesMobileAttentionGroup: Identifiable, Equatable, Sendable {
     var id: String { workspaceID }
 }
 
+/// One stretch of time the user spent looking at a session's terminal detail: the route was open and the
+/// app was in the foreground for all of it.
+///
+/// A stretch rather than a single "watch ended" moment because backgrounding the app with a detail open
+/// interrupts watching without closing the route. Recording only the end would make everything before it
+/// count as watched, and the bells rung while the app was away — exactly the ones the user cannot
+/// possibly have seen — would be swallowed on the next refresh. One visit therefore produces a sequence
+/// of these, and the stretches between them (the app in the background) are what the user missed.
+struct SpacesMobileTerminalWatchWindow: Equatable, Sendable {
+    let startedAt: Date
+    let endedAt: Date
+
+    /// Whether `date` falls in this watch, widened at both ends by `tolerance` (see
+    /// `SpacesMobileAttention.watchedBellSkewTolerance`).
+    func contains(_ date: Date, tolerance: TimeInterval) -> Bool {
+        date >= startedAt.addingTimeInterval(-tolerance) && date <= endedAt.addingTimeInterval(tolerance)
+    }
+}
+
 /// Pure derivation of attention events from an overview payload. All recency comes from the
 /// payload's ISO-8601 fields (`updatedAt`, `exitedAt`); sources without a usable timestamp are
 /// skipped rather than dated with a synthesized time.
 enum SpacesMobileAttention {
-    static func events(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAttentionEvent] {
+    /// Slack added to both ends of a watch window when deciding whether a bell rang inside it. `bellAt`
+    /// comes from the daemon's clock while the window comes from this phone's, so an exact comparison
+    /// would let ordinary skew between two NTP-synced clocks put a watched bell outside the window and
+    /// alert for the session the user was just looking at. The cost is bounded the other way: a real bell
+    /// rung within the tolerance of the window's edges is dropped, and the daemon's 30-second
+    /// bell-coalescing window means the next one alerts normally.
+    static let watchedBellSkewTolerance: TimeInterval = 2
+
+    /// - Parameters:
+    ///   - focusedSessionID: the session the user is watching right now, whose bell is happening in front
+    ///     of them rather than being something to alert about.
+    ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. Overview
+    ///     polling is paused while a detail is open, so a bell rung during a watch is first seen after
+    ///     that watch ended — a bell inside any of them is one the user saw ring.
+    static func events(
+        in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]
+    ) -> [SpacesMobileAttentionEvent] {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
@@ -103,11 +140,33 @@ enum SpacesMobileAttention {
                     sessionID: session.id, workspaceID: session.workspaceID))
         }
 
+        // A bell is a fact about the session itself, not the row-level exit/agent state the dedupe above
+        // guards against, so every session with a bell gets an event regardless of representedSessionIDs.
+        // The daemon records a bell no matter which client (if any) is looking at the session, since it
+        // can't see client focus: a Ghostty attachment survives tab switches, and iOS backgrounding just
+        // drops the socket without detaching. Each client is responsible for dropping the alert for the
+        // session it currently has open.
+        for session in overview.sessions where session.id != focusedSessionID && !invisibleWorkspaceIDs.contains(session.workspaceID) {
+            guard let date = date(fromISO8601: session.bellAt) else { continue }
+            // Any window, not just the newest: one visit to a terminal is split into several by the app
+            // backgrounding and returning, and the bell may belong to any of them.
+            if watchWindowsBySessionID[session.id]?.contains(where: { $0.contains(date, tolerance: watchedBellSkewTolerance) }) == true { continue }
+            events.append(
+                SpacesMobileAttentionEvent(
+                    sourceID: "session:\(session.id)", kind: .bell, date: date, title: session.title, rowType: .workspaceTerminals,
+                    sessionID: session.id, workspaceID: session.workspaceID))
+        }
+
         return events
     }
 
-    static func groups(in overview: SpacesDeviceOverviewPayload, dismissedEventIDs: Set<String>) -> [SpacesMobileAttentionGroup] {
-        let remaining = events(in: overview).filter { !dismissedEventIDs.contains($0.id) }
+    static func groups(
+        in overview: SpacesDeviceOverviewPayload, dismissedEventIDs: Set<String>, focusedSessionID: String?,
+        watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]
+    ) -> [SpacesMobileAttentionGroup] {
+        let remaining = events(in: overview, focusedSessionID: focusedSessionID, watchWindowsBySessionID: watchWindowsBySessionID).filter {
+            !dismissedEventIDs.contains($0.id)
+        }
         guard !remaining.isEmpty else { return [] }
         let workspaceByID = Dictionary(uniqueKeysWithValues: overview.workspaces.map { ($0.id, $0) })
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })

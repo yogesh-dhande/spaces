@@ -673,6 +673,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(mirrorView.debugSearchStatusVisible)
     }
 
+    /// The bell is a tag-only action, so the parser must recognize it from the tag alone — it carries no
+    /// payload to validate, and an unrecognized tag is silently dropped.
+    func testGhosttyActionEventParserParsesRingBell() {
+        var bell = ghostty_action_s()
+        bell.tag = GHOSTTY_ACTION_RING_BELL
+        XCTAssertEqual(GhosttyActionEventParser.parse(bell), .ringBell)
+    }
+
     func testGhosttyActionEventParserParsesSearchEvents() {
         var start = ghostty_action_s()
         start.tag = GHOSTTY_ACTION_START_SEARCH

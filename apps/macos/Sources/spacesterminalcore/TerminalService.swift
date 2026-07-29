@@ -559,7 +559,7 @@ import Foundation
                 sessionID: sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID, childPID: runtimeState.childPID,
                 state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                rows: runtimeState.rows)
+                rows: runtimeState.rows, bellAt: runtimeState.bellAt)
             try TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
         }

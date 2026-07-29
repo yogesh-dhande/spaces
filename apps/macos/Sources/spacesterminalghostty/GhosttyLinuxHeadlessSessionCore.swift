@@ -127,6 +127,11 @@
         /// deliberately does not restore titles.
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        /// When the running program last rang the bell, coalesced by `bellCoalescer`. Cached on the core
+        /// for the same reason the title is: a handoff rebuilds the vt session, and the replay carries no
+        /// bell at all, so the value has to come from the row the pre-exec image wrote.
+        private var currentBellAt: String?
+        var bellCoalescer = TerminalBellCoalescer()
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
         // The Spaces theme appearance the vt session is currently themed for. The headless daemon
         // cannot read the client's OS appearance, so it defaults to dark and adopts the attaching
@@ -488,6 +493,13 @@
             if let persisted = try? TerminalSessionPersistence.readRuntimeState(paths: paths) {
                 currentTitle = persisted.title
                 currentWorkingDirectory = persisted.workingDirectory
+                // The bell timestamp is the identity of an alert a client may not have dismissed yet, so
+                // the resumed core must republish exactly the one the pre-exec image did rather than let
+                // the handoff silently retract it. The coalescing window is restored with it: a fresh
+                // coalescer would let the first bell after the handoff advance the timestamp and raise a
+                // second alert for a bell the user has already been shown.
+                currentBellAt = persisted.bellAt
+                bellCoalescer.seedLastAdvanced(at: persisted.bellAt.flatMap(GhosttyRemoteSessionStateTimestamp.date(from:)))
             }
 
             // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
@@ -551,6 +563,7 @@
             let events = drainSessionEvents()
             let metadataChanged = applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
             sendQueryResponses(events.ptyResponse)
+            applyBellEvents(count: events.bellCount)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
             // After the output broadcast: that payload carries the screen frame, this one carries no
@@ -1084,11 +1097,12 @@
         }
 
         /// One output turn's terminal events, drained from the vt session's event sink. The sink also
-        /// records bells and clipboard writes; this core does not consume those, so the drain releases
-        /// them along with the rest of the record.
+        /// records clipboard writes; this core does not consume those, so the drain releases them along
+        /// with the rest of the record.
         private struct SessionEvents {
             var titleChanged = false
             var pwdChanged = false
+            var bellCount: UInt32 = 0
             var ptyResponse = Data()
         }
 
@@ -1099,9 +1113,24 @@
             var raw = SpacesGhosttyVtSessionEvents()
             spaces_ghostty_vt_session_drain_events(vtSession, &raw)
             defer { spaces_ghostty_vt_session_events_free(&raw) }
-            var events = SessionEvents(titleChanged: raw.title_changed, pwdChanged: raw.pwd_changed)
+            var events = SessionEvents(titleChanged: raw.title_changed, pwdChanged: raw.pwd_changed, bellCount: raw.bell_count)
             if let response = raw.pty_response, raw.pty_response_len > 0 { events.ptyResponse = Data(bytes: response, count: raw.pty_response_len) }
             return events
+        }
+
+        /// Folds this turn's bells into the timestamp the runtime state publishes. The whole turn's bells
+        /// are one ring: the count says how many arrived, and the coalescer decides whether that ring is
+        /// new enough to move the timestamp. The caller writes and broadcasts the runtime state right
+        /// after, so the bell rides the same output-turn write the rest of the metadata does.
+        ///
+        /// One timestamp per session is the alert model: a later bell REPLACES the identity, so a bell
+        /// a client suppresses as watched can supersede an earlier unwatched one that never alerted
+        /// (two rings over 30s apart straddling a client's watch window with no refresh between).
+        /// Accepted: closing it means per-session bell history on the wire, and the user is already
+        /// looking at this terminal when the superseding bell rings.
+        private func applyBellEvents(count: UInt32) {
+            guard count > 0, let bellAt = bellCoalescer.ring() else { return }
+            currentBellAt = GhosttyRemoteSessionStateTimestamp.string(from: bellAt)
         }
 
         /// Writes the terminal's own replies to the program's queries (cursor position, mode reports,
@@ -1330,7 +1359,7 @@
                 rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
         }
 
         /// Advances the in-memory authoritative state immediately (so broadcasts show live truth regardless of
@@ -1498,11 +1527,11 @@
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
                 state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(),
                 title: currentTitle ?? launchConfiguration.title, workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory,
-                columns: terminalSize.columns, rows: terminalSize.rows)
+                columns: terminalSize.columns, rows: terminalSize.rows, bellAt: currentBellAt)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }

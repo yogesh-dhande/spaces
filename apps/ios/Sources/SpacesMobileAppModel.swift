@@ -471,6 +471,34 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Attention events the user cleared. In-memory only; identities are stable per source+kind+date
     /// so a cleared event stays cleared across refreshes until the source changes state again.
     var dismissedAlertIDs: Set<String> = []
+    /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
+    /// the terminal navigation flow as its selected session changes. Having the route open is not the
+    /// same as watching it — see `watchedTerminalSessionID`.
+    private(set) var activeTerminalSessionID: String?
+    /// When the current watch of `activeTerminalSessionID` began, or nil when nothing is being watched.
+    /// A watch runs while the detail route is open *and* the app is in the foreground: the route alone
+    /// says nothing about whether the user can see it.
+    @ObservationIgnored private var activeTerminalWatchStartedAt: Date?
+    /// The session the user is actually looking at, which is what bell suppression keys on.
+    var watchedTerminalSessionID: String? { activeTerminalWatchStartedAt == nil ? nil : activeTerminalSessionID }
+    /// The user's recent watches of each recently watched session's terminal detail, oldest first.
+    /// Overview polling is paused while a detail is open, so a bell rung during a watch is only seen
+    /// after it ends; these windows suppress it then. In-memory only, like `dismissedAlertIDs`.
+    ///
+    /// A list rather than one window per session because a single visit to a terminal produces several:
+    /// backgrounding the app ends one and returning starts the next, and the bell rung before the app
+    /// went away is only seen after the user finally leaves the detail — by which time a
+    /// keep-the-latest-only rule would have dropped the window that covers it. The windows are
+    /// deliberately never merged: the gap between them is the stretch the user could not see, and
+    /// closing it would re-suppress exactly the bells this is meant to surface.
+    private(set) var terminalWatchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]] = [:]
+    /// Upper bound on remembered watch windows per session. Each window only has to survive from its
+    /// watch ending to the next overview refresh, so a handful covers even repeated backgrounding within
+    /// one visit; past the bound the oldest window is dropped.
+    private static let maxRememberedWatchesPerSession = 8
+    /// Upper bound on sessions with remembered watches, dropping the one whose watching ended longest
+    /// ago, so rapid session hopping cannot grow the map without bound.
+    private static let maxRememberedWatchedSessions = 16
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
     /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
@@ -535,6 +563,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// inject a fake that advances on command instead of sleeping past `refreshFailureAlertDelay` in
     /// real time. Production always uses the real clock.
     @ObservationIgnored private let now: @Sendable () -> ContinuousClock.Instant
+    /// Wall-clock source for terminal watch windows, which are compared against daemon-stamped bell
+    /// timestamps and so cannot use the monotonic clock above. Tests inject a fake to place a bell inside
+    /// or outside a watch window exactly, instead of racing the real clock's sub-millisecond gaps against
+    /// the comparison's skew tolerance. Production always uses the real clock.
+    @ObservationIgnored private let wallClock: @Sendable () -> Date
 
     init() {
         #if DEBUG
@@ -551,6 +584,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonUpdateTimeout = .seconds(30)
         refreshFailureAlertDelay = .seconds(5)
         now = { ContinuousClock.now }
+        wallClock = { Date() }
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -581,7 +615,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
-        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+        wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.settings = settings
         pairedDevices = []
@@ -594,6 +629,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.daemonUpdateTimeout = daemonUpdateTimeout
         self.refreshFailureAlertDelay = refreshFailureAlertDelay
         self.now = now
+        self.wallClock = wallClock
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -650,7 +686,59 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// with the user's cleared events filtered out.
     var attentionGroups: [SpacesMobileAttentionGroup] {
         guard let overview else { return [] }
-        return SpacesMobileAttention.groups(in: overview, dismissedEventIDs: dismissedAlertIDs)
+        return SpacesMobileAttention.groups(
+            in: overview, dismissedEventIDs: dismissedAlertIDs, focusedSessionID: watchedTerminalSessionID,
+            watchWindowsBySessionID: terminalWatchWindowsBySessionID)
+    }
+
+    /// Points bell suppression at the terminal detail now on screen, or nil once none is. Leaving a
+    /// detail (closing it, or switching straight to another session) closes the outgoing session's watch
+    /// window, so the bell it rang while the user was watching does not alert once polling resumes.
+    func setActiveTerminalSession(_ sessionID: String?) {
+        guard sessionID != activeTerminalSessionID else { return }
+        endActiveTerminalWatch()
+        activeTerminalSessionID = sessionID
+        if sessionID != nil { activeTerminalWatchStartedAt = wallClock() }
+    }
+
+    /// Ends the watch when the app leaves the foreground. The detail route survives backgrounding
+    /// untouched, so without this the app would keep counting a session the user cannot see as watched
+    /// and swallow the bells it rang while away.
+    func suspendTerminalWatch() { endActiveTerminalWatch() }
+
+    /// Ends the watch on `sessionID` because its terminal detail left the screen — including the ways that
+    /// never route through `setActiveTerminalSession`, such as a device switch tearing the whole
+    /// navigation stack down. A no-op unless that session is still the one being watched, so a teardown
+    /// arriving after another session's detail has taken over leaves the new watch alone, and the ordinary
+    /// back-out (which ends the watch through `setActiveTerminalSession(nil)` first) records one window
+    /// rather than two.
+    func endTerminalWatch(forSessionID sessionID: String) {
+        guard activeTerminalSessionID == sessionID else { return }
+        setActiveTerminalSession(nil)
+    }
+
+    /// Resumes watching the still-open detail route on return to the foreground. The new watch starts
+    /// now, so the stretch spent in the background stays outside every recorded window and a bell rung
+    /// in it alerts.
+    func resumeTerminalWatch() {
+        guard activeTerminalSessionID != nil, activeTerminalWatchStartedAt == nil else { return }
+        activeTerminalWatchStartedAt = wallClock()
+    }
+
+    private func endActiveTerminalWatch() {
+        guard let sessionID = activeTerminalSessionID, let startedAt = activeTerminalWatchStartedAt else { return }
+        activeTerminalWatchStartedAt = nil
+        var windows = terminalWatchWindowsBySessionID[sessionID] ?? []
+        windows.append(SpacesMobileTerminalWatchWindow(startedAt: startedAt, endedAt: wallClock()))
+        if windows.count > Self.maxRememberedWatchesPerSession { windows.removeFirst(windows.count - Self.maxRememberedWatchesPerSession) }
+        terminalWatchWindowsBySessionID[sessionID] = windows
+        if terminalWatchWindowsBySessionID.count > Self.maxRememberedWatchedSessions,
+            let stalest = terminalWatchWindowsBySessionID.min(by: {
+                ($0.value.last?.endedAt ?? .distantPast) < ($1.value.last?.endedAt ?? .distantPast)
+            })?.key
+        {
+            terminalWatchWindowsBySessionID.removeValue(forKey: stalest)
+        }
     }
 
     /// Undismissed attention-event count, shown as the Alerts tab badge.
@@ -659,7 +747,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Marks every currently derived attention event dismissed.
     func clearAlerts() {
         guard let overview else { return }
-        dismissedAlertIDs.formUnion(SpacesMobileAttention.events(in: overview).map(\.id))
+        dismissedAlertIDs.formUnion(
+            SpacesMobileAttention.events(
+                in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
+            ).map(\.id))
     }
 
     /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.

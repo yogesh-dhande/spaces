@@ -431,7 +431,15 @@
                 guard acceptsSearchResultEvent else { return }
                 searchSelected = selected
                 updateSearchStatusLabel()
-            case .setTitle, .setWorkingDirectory: break
+            // A mirrored frame is display only: the daemon that owns the session records its bell, its
+            // title, and its working directory, and this view reads them back from the session state.
+            //
+            // Dropping `.ringBell` here also means a bell in the terminal the user is typing in produces
+            // nothing at all — no sound, no flash — because the alert it raises is consumed as seen (see
+            // `AlertsController.consumeFocusedSessionBellAlerts`). That is the decided behavior, not a gap:
+            // a bell you are watching happen needs no notification, and Spaces renders no in-terminal bell
+            // feedback by choice. Do not add one here.
+            case .setTitle, .setWorkingDirectory, .ringBell: break
             }
         }
 

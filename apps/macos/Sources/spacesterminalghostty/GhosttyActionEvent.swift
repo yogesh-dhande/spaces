@@ -23,6 +23,10 @@ public enum GhosttyActionEvent: Sendable, Equatable {
 
     case setTitle(String)
     case setWorkingDirectory(String)
+    /// The program rang the terminal bell (BEL, or an OSC that ends in one). Tag-only: Ghostty carries no
+    /// payload with it, and the count is not meaningful either — its terminal layer already debounces
+    /// repeats at 100 ms, so the event says the session rang, not how often.
+    case ringBell
     case openURL(kind: OpenURLKind, value: String)
     case mouseOverLink(String?)
     case startSearch(String?)
@@ -53,6 +57,7 @@ public enum GhosttyActionEvent: Sendable, Equatable {
                 guard let needle = action.action.start_search.needle else { return .startSearch(nil) }
                 let value = String(cString: needle)
                 return .startSearch(value.isEmpty ? nil : value)
+            case GHOSTTY_ACTION_RING_BELL: return .ringBell
             case GHOSTTY_ACTION_END_SEARCH: return .endSearch
             case GHOSTTY_ACTION_SEARCH_TOTAL:
                 let total = action.action.search_total.total
