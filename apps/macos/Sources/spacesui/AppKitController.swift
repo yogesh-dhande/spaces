@@ -2048,7 +2048,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-                detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                detachClientAction: detachClientAction,
                 onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(

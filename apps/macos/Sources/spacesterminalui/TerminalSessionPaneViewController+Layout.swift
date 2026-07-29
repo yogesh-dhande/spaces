@@ -271,7 +271,7 @@ extension TerminalSessionPaneViewController {
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
         takeoverButton.isHidden = isOwner || !isInteractive || isWaitingForRequestedOwnership
-        takeoverButton.isEnabled = !isOwner && isInteractive && takeoverTask == nil && !isWaitingForRequestedOwnership
+        takeoverButton.isEnabled = !isOwner && isInteractive && !isTakeoverAttemptPending && !isWaitingForRequestedOwnership
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
         } else {
@@ -382,7 +382,9 @@ extension TerminalSessionPaneViewController {
         if runtimeState?.state.isInteractive == true {
             if isOwner { return "" }
             let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "another client"
-            if takeoverTask != nil || preferredAttachmentMode == .owner { return "Waiting for terminal ownership…\nCurrent owner: \(ownerLabel)" }
+            if isTakeoverAttemptPending || preferredAttachmentMode == .owner {
+                return "Waiting for terminal ownership…\nCurrent owner: \(ownerLabel)"
+            }
             return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
         }
 

@@ -199,6 +199,47 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         var closeHookRan = false
     }
 
+    /// Records the pane's attach/detach sends in the order they reach the daemon, and can hold the
+    /// first of them open. The pane issues both off the main actor, so a gate is what lets a test
+    /// observe what the pane did while a send was still outstanding — the slow-link case the async
+    /// attach exists for.
+    private final class GatedControlSendRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private let gate = DispatchSemaphore(value: 0)
+        private var events: [String] = []
+        /// Bounded so a regression that makes a send synchronous fails an assertion instead of
+        /// hanging the suite.
+        private let gateTimeoutSeconds = 5.0
+
+        func recordAfterGate(_ event: String) {
+            _ = gate.wait(timeout: .now() + gateTimeoutSeconds)
+            record(event)
+        }
+
+        /// Records that a send started and then holds it open. Where `recordAfterGate` proves a send has
+        /// not happened, this proves one is in flight: the entry is the test's signal that the send is
+        /// past the pane's current-intent check and blocked inside the action, which is the only window
+        /// in which an outstanding send can still be superseded.
+        func recordThenAwaitGate(_ event: String) {
+            record(event)
+            _ = gate.wait(timeout: .now() + gateTimeoutSeconds)
+        }
+
+        func record(_ event: String) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        func openGate() { gate.signal() }
+
+        var recorded: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
+        }
+    }
+
     private final class TakeoverAttemptRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var attemptClientIDs: [String] = []
@@ -289,8 +330,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         performInitialRefresh: Bool = true, reusableOwnerClientID: String? = nil,
         attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
-        copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        copySelectionAction: (@MainActor () -> Bool)? = nil, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
@@ -311,9 +351,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             reusableOwnerClientID: reusableOwnerClientID, pasteImageAction: pasteImageAction, pasteboardImageReadAction: pasteboardImageReadAction,
             takeoverAction: takeoverAction, attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
             detachClientAction: detachClientAction ?? persistenceBackedDetachAction(paths), copySelectionAction: copySelectionAction,
-            detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, defersInitialOwnerClientAttach: attachClientAction == nil,
-            pasteClipboardAction: pasteClipboardAction, ownerWindowFocusAction: ownerWindowFocusAction,
-            ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
+            defersInitialOwnerClientAttach: attachClientAction == nil, pasteClipboardAction: pasteClipboardAction,
+            ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowClose: onWindowClose,
             sessionHostProvider: sessionHostProvider ?? { @MainActor @Sendable _, _ in resolvedHost })
     }
 
@@ -332,7 +371,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.displayTitle, "Terminal session-1")
     }
 
-    @MainActor func testShowAttachesClientAndCloseDetachesClient() throws {
+    @MainActor func testShowAttachesClientAndCloseDetachesClient() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -347,10 +386,12 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { clientID in capture.detachedClientID = clientID })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNotNil(capture.attachedClientID)
         XCTAssertNil(capture.detachedClientID)
 
         controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
     }
 
@@ -358,7 +399,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// the injected state provider and control closures — it never reads the daemon's
     /// `spaces.db`. The store is left empty so any persistence read would surface as a
     /// nil runtime state, which the assertions reject.
-    @MainActor func testControllerRendersFromInjectedProviderWithoutPersistence() throws {
+    @MainActor func testControllerRendersFromInjectedProviderWithoutPersistence() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -383,6 +424,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { clientID in capture.detachedClientID = clientID }, sessionHostProvider: { _, _ in host })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertGreaterThan(provider.refreshStateCallCount, 0)
         XCTAssertEqual(controller.lastObservedRuntimeState?.state, .running)
@@ -391,6 +433,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertNil(try? TerminalSessionPersistence.readRuntimeState(paths: paths))
 
         controller.closeEmbedded()
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
     }
 
@@ -398,7 +441,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// refocus path moves keyboard focus and stops there, so repeat visits issue no state fetch and no
     /// re-attach however many times they happen. The full show path — what every pane that is not already
     /// owner-attached still runs — pays both.
-    @MainActor func testRefocusingAnOwnerAttachedPaneIssuesNoStateFetchOrAttach() throws {
+    @MainActor func testRefocusingAnOwnerAttachedPaneIssuesNoStateFetchOrAttach() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -418,6 +461,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             performInitialRefresh: false, attachClientAction: { _, _ in }, detachClientAction: { _ in }, sessionHostProvider: { _, _ in host })
 
         controller.showEmbedded(focus: true)
+        // The pane holds the owner surface once the attach it issued has landed: until then it is not
+        // the daemon's owner, so the host is held at viewer.
+        await controller.debugAwaitPendingClientControl()
         XCTAssertTrue(controller.holdsOwnerAttachedSurface)
 
         let refreshStateCallCount = provider.refreshStateCallCount
@@ -435,7 +481,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
     /// A pane whose session another client has taken over does not hold the owner attachment, so a
     /// re-show of it must not be short-circuited: reclaiming ownership is the point of the request.
-    @MainActor func testPaneWhoseSessionAnotherClientOwnsDoesNotHoldTheOwnerSurface() throws {
+    @MainActor func testPaneWhoseSessionAnotherClientOwnsDoesNotHoldTheOwnerSurface() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -455,6 +501,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             performInitialRefresh: false, attachClientAction: { _, _ in }, detachClientAction: { _ in }, sessionHostProvider: { _, _ in host })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertTrue(controller.holdsOwnerAttachedSurface)
 
         host.activeOwnerClientIDValue = "iphone-client"
@@ -462,7 +509,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.holdsOwnerAttachedSurface)
     }
 
-    @MainActor func testCloseForSessionTerminationSkipsDetachAndSurfaceRelease() throws {
+    @MainActor func testCloseForSessionTerminationSkipsDetachAndSurfaceRelease() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -476,16 +523,19 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { clientID in capture.detachedClientID = clientID })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNotNil(capture.attachedClientID)
 
         controller.closeEmbedded(sessionIsTerminating: true)
 
+        // Draining proves the negative: a detach queued by this close would have run by now.
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNil(capture.detachedClientID)
         XCTAssertFalse(host.didReleaseSurface)
         XCTAssertTrue(controller.debugDidCloseWindow)
     }
 
-    @MainActor func testCloseEmbeddedCanDetachClientAsynchronously() async throws {
+    @MainActor func testCloseEmbeddedDetachesClientAsynchronously() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -502,9 +552,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             detachClientAction: { clientID in
                 capture.detachedClientID = clientID
                 detachedExpectation.fulfill()
-            }, detachClientSynchronouslyOnClose: false)
+            })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNotNil(capture.attachedClientID)
 
         controller.closeEmbedded()
@@ -527,13 +578,14 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: "session-close-hook", paths: .init(rootDirectory: root.path),
             stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
             attachClientAction: { client, _ in capture.attachedClientID = client.id },
-            detachClientAction: { clientID in capture.detachedClientID = clientID }, detachClientSynchronouslyOnClose: false,
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
             onCloseClientDetached: {
                 capture.detachedClientIDWhenCloseHookRan = capture.detachedClientID
                 hookRan.fulfill()
             })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNotNil(capture.attachedClientID)
 
         controller.closeEmbedded()
@@ -542,9 +594,215 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(capture.detachedClientIDWhenCloseHookRan, capture.attachedClientID)
     }
 
+    /// Presenting a pane must not wait on the attach: the attach is a device round-trip that takes
+    /// seconds on a slow link, and a workspace switch presents every pane in it from the main thread.
+    /// The show completes against the pane's last known state while the attach is still outstanding,
+    /// and the attach still reaches the daemon exactly once, in the mode the show asked for.
+    @MainActor func testShowEmbeddedCompletesWithoutWaitingForTheAttachSend() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = GatedControlSendRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-async-attach", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { _, mode in recorder.recordAfterGate("attach:\(mode.rawValue)") },
+            detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+
+        XCTAssertTrue(recorder.recorded.isEmpty, "showEmbedded returned only after the attach send landed")
+
+        recorder.openGate()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.owner.rawValue)"])
+    }
+
+    /// A close during an outstanding attach drops that attach instead of sending it: the close
+    /// supersedes the attachment the pane was asking for, so the attach never reaches the daemon and
+    /// there is no attachment for the detach behind it to have to take back down. The detach still
+    /// goes — it is what releases an attachment this pane may already hold from an earlier show.
+    @MainActor func testCloseDuringOutstandingAttachDropsTheSupersededAttach() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = GatedControlSendRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-attach-detach-order", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { _, mode in recorder.record("attach:\(mode.rawValue)") }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        // The attachment intent is recorded before the send, so this is the pane with an attach
+        // outstanding — the state the close has to supersede.
+        XCTAssertTrue(controller.isClientAttached)
+
+        controller.closeEmbedded()
+
+        XCTAssertTrue(recorder.recorded.isEmpty)
+
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["detach"])
+        XCTAssertFalse(controller.isClientAttached)
+    }
+
+    /// Ordering the sends is not enough on its own: a queued attach whose intent the pane has already
+    /// replaced must never reach the daemon. Here another client takes the session while this pane's
+    /// owner attach is still queued, so the refresh replaces it with a viewer attach. Sending the stale
+    /// owner attach anyway would displace the new owner and the viewer attach behind it would then
+    /// demote this client, leaving the session with nobody owning it.
+    @MainActor func testAttachSupersededBeforeItSendsNeverReachesTheDaemon() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-superseded-owner-attach"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "superseded", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let recorder = GatedControlSendRecorder()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost, attachClientAction: { _, mode in recorder.record("attach:\(mode.rawValue)") },
+            detachClientAction: { _ in recorder.record("detach") })
+
+        // Nothing owns the session yet, so the show asks for owner.
+        controller.showEmbedded(focus: true)
+        XCTAssertEqual(controller.attachmentMode, .owner)
+
+        // Another client takes ownership before that attach is sent; the refresh that sees it replaces
+        // the pane's intent with a viewer attach.
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:02Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+        controller.debugForceRefresh()
+
+        XCTAssertTrue(recorder.recorded.isEmpty)
+
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.viewer.rawValue)"])
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+    }
+
+    /// A failed attach is the one case the optimistic attachment state is wrong: the pane says why in
+    /// the input status and forgets the attachment, so presenting it again attaches instead of
+    /// treating the failed request as the live one.
+    @MainActor func testFailedAttachSurfacesTheErrorAndRetriesOnNextShow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        enum AttachFailure: Error { case deviceUnreachable }
+        let recorder = GatedControlSendRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-attach-failure", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { _, mode in
+                recorder.record("attach:\(mode.rawValue)")
+                throw AttachFailure.deviceUnreachable
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertTrue(controller.debugInputStatus.contains("deviceUnreachable"), controller.debugInputStatus)
+        XCTAssertTrue(controller.debugShowsInputStatus)
+        XCTAssertFalse(controller.isClientAttached)
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.owner.rawValue)", "attach:\(TerminalAttachmentMode.owner.rawValue)"])
+    }
+
+    /// An attach the daemon has answered clears the failure an earlier attempt left behind: a pane that
+    /// is attached and healthy must not keep showing why a previous try did not land.
+    @MainActor func testSuccessfulAttachClearsTheEarlierAttachFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        enum AttachFailure: Error { case deviceUnreachable }
+        let recorder = GatedControlSendRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-attach-failure-cleared", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { _, mode in
+                recorder.record("attach:\(mode.rawValue)")
+                if recorder.recorded.count == 1 { throw AttachFailure.deviceUnreachable }
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+        XCTAssertTrue(controller.debugInputStatus.contains("deviceUnreachable"), controller.debugInputStatus)
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(controller.debugInputStatus, "")
+        XCTAssertFalse(controller.debugShowsInputStatus)
+        XCTAssertTrue(controller.isClientAttached)
+    }
+
+    /// An attach superseded while it was already in flight — the one window the pre-send check cannot
+    /// cover — must not report its failure: the pane has moved on to a newer attach, and reporting it
+    /// would leave an attached, healthy pane showing an obsolete error that nothing later takes down.
+    @MainActor func testSupersededAttachFailureLeavesNoErrorOnTheNewerAttach() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        enum AttachFailure: Error { case deviceUnreachable }
+        let recorder = GatedControlSendRecorder()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-superseded-attach", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { _, mode in
+                // The first send is held open mid-flight so the ownership request below supersedes it
+                // there; it then fails, which is the case under test.
+                guard recorder.recorded.isEmpty else {
+                    recorder.record("attach:\(mode.rawValue)")
+                    return
+                }
+                recorder.recordThenAwaitGate("attach:\(mode.rawValue)")
+                throw AttachFailure.deviceUnreachable
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        // Yields the main actor so the queued send passes its current-intent check and reaches the
+        // action, which is where it parks until the gate opens.
+        let inFlightDeadline = Date().addingTimeInterval(5)
+        while recorder.recorded.isEmpty && Date() < inFlightDeadline { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(recorder.recorded.count, 1)
+
+        controller.requestOwnershipIfNeeded()
+
+        recorder.openGate()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.owner.rawValue)", "attach:\(TerminalAttachmentMode.owner.rawValue)"])
+        XCTAssertEqual(controller.debugInputStatus, "")
+        XCTAssertFalse(controller.debugShowsInputStatus)
+        XCTAssertTrue(controller.isClientAttached)
+    }
+
     /// A session-terminating close is the daemon already stopping the session, so it must not fire the
     /// close hook — running the ad hoc cleanup then would be redundant work against a dying session.
-    @MainActor func testCloseForSessionTerminationSkipsCloseHook() throws {
+    @MainActor func testCloseForSessionTerminationSkipsCloseHook() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -554,14 +812,16 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: "session-terminate-no-hook", paths: .init(rootDirectory: root.path),
             stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
             attachClientAction: { client, _ in capture.attachedClientID = client.id },
-            detachClientAction: { clientID in capture.detachedClientID = clientID }, detachClientSynchronouslyOnClose: false,
-            onCloseClientDetached: { capture.closeHookRan = true })
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, onCloseClientDetached: { capture.closeHookRan = true })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNotNil(capture.attachedClientID)
 
         controller.closeEmbedded(sessionIsTerminating: true)
 
+        // Draining proves the negative: a detach queued by this close would have run by now.
+        await controller.debugAwaitPendingClientControl()
         XCTAssertNil(capture.detachedClientID)
         XCTAssertFalse(capture.closeHookRan)
     }
@@ -955,7 +1215,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.debugRenderedOutput.contains("Current owner: Owner Mac"))
     }
 
-    @MainActor func testOwnerSeekingCustomAttachRegistersViewerWhenAnotherClientOwnsSession() throws {
+    @MainActor func testOwnerSeekingCustomAttachRegistersViewerWhenAnotherClientOwnsSession() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -989,6 +1249,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertEqual(capture.attachedClientID, controller.clientID)
@@ -998,7 +1259,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.attachmentMode, .viewer)
     }
 
-    @MainActor func testOwnerSeekingPaneReattachesAsOwnerWhenPreviousOwnerDetachedAfterViewerAttach() throws {
+    @MainActor func testOwnerSeekingPaneReattachesAsOwnerWhenPreviousOwnerDetachedAfterViewerAttach() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1033,6 +1294,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedModes, [.viewer])
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
@@ -1040,6 +1302,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
         controller.requestOwnershipIfNeeded()
+        await controller.debugAwaitPendingClientControl()
 
         fakeHost.hasSurface = true
         fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
@@ -1057,7 +1320,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
-    @MainActor func testRequestOwnershipDoesNotAttachAgainWhenAlreadyActiveOwner() throws {
+    @MainActor func testRequestOwnershipDoesNotAttachAgainWhenAlreadyActiveOwner() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1087,11 +1350,14 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.attachedModes, [.owner])
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
 
         controller.requestOwnershipIfNeeded()
 
+        // Draining proves the negative: a second attach queued by the reclaim would have run by now.
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.attachedModes, [.owner])
         XCTAssertEqual(controller.attachmentMode, .owner)
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
@@ -1152,7 +1418,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
     /// Cross-device safety: a stored owner client id that does NOT match the session's current owner
     /// (another device owns it) never reclaims ownership. The pane attaches as a viewer and leaves the
     /// current owner and the manual takeover UI unchanged — a stale local mapping is inert.
-    @MainActor func testStoredOwnerClientIDForForeignOwnerStillAttachesAsViewer() throws {
+    @MainActor func testStoredOwnerClientIDForForeignOwnerStillAttachesAsViewer() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1188,6 +1454,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertEqual(controller.clientID, staleStoredClientID)
@@ -1197,7 +1464,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.attachmentMode, .viewer)
     }
 
-    @MainActor func testOwnerSeekingPanePromotesWhenBlockingOwnerDetachesAfterViewerAttach() throws {
+    @MainActor func testOwnerSeekingPanePromotesWhenBlockingOwnerDetachesAfterViewerAttach() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1234,11 +1501,17 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedModes, [.viewer])
         XCTAssertEqual(controller.attachmentMode, .viewer)
 
         try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
+        controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
+        // The owner attach lands after the refresh that issued it, so what promotes the pane's own
+        // presentation is the next refresh — in the app, the attachment-state broadcast the daemon
+        // sends when the attach lands.
         controller.debugForceRefresh()
 
         let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
@@ -1249,7 +1522,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
     }
 
-    @MainActor func testOwnerSeekingPaneKeepsOwnerRequestAfterViewerMirrorDuringFocusRefresh() throws {
+    @MainActor func testOwnerSeekingPaneKeepsOwnerRequestAfterViewerMirrorDuringFocusRefresh() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1284,8 +1557,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         try TerminalSessionPersistence.detachClient(id: remoteOwner.id, paths: paths, detachedAt: "2026-05-20T00:00:02Z")
         controller.requestOwnershipIfNeeded()
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.attachedModes, [.viewer, .owner])
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
 
@@ -1301,6 +1576,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
 
         controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedClientID, controller.clientID)
         XCTAssertEqual(capture.attachedModes, [.viewer, .owner, .owner])
@@ -1308,7 +1584,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.attachmentMode, .owner)
     }
 
-    @MainActor func testOwnerPaneDoesNotReclaimOwnershipAfterRemoteTakeoverDuringPassiveRefresh() throws {
+    @MainActor func testOwnerPaneDoesNotReclaimOwnershipAfterRemoteTakeoverDuringPassiveRefresh() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1336,6 +1612,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
         XCTAssertEqual(capture.attachedModes, [.owner])
 
         let remoteOwner = TerminalClient(
@@ -1347,8 +1624,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: sessionID, newOwnerClientID: remoteOwner.id, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
 
         controller.debugAttachLocalClientIfNeeded()
+        await controller.debugAwaitPendingClientControl()
         controller.debugForceRefresh()
         controller.debugForceRefresh()
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(capture.attachedModes, [.owner, .viewer])
         XCTAssertEqual(controller.attachmentMode, .viewer)
@@ -1390,6 +1669,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(controller.attachmentMode, .viewer)
         XCTAssertFalse(controller.debugShowsTerminalSurface)
@@ -1421,6 +1701,165 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
     }
 
+    /// The takeover must reach the daemon behind the attach the same show issued. Sent independently it
+    /// could overtake it, and the daemon would either refuse a takeover naming a client it has not seen
+    /// attach or grant it and then let the late viewer attach demote this client straight back.
+    @MainActor func testTakeoverAfterShowReachesTheDaemonBehindTheQueuedAttach() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-takeover-order"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "takeover-order", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let recorder = GatedControlSendRecorder()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                recorder.recordAfterGate("attach:\(mode.rawValue)")
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            },
+            takeoverAction: { clientID in
+                recorder.record("takeover")
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
+                return TerminalControlResponse(ok: true, message: "Took over ownership.")
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        controller.requestOwnershipIfNeeded()
+
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertTrue(recorder.recorded.isEmpty)
+
+        recorder.openGate()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.viewer.rawValue)", "takeover"])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.mode == .owner }?.clientID, controller.clientID)
+    }
+
+    /// The retry timeout measures a takeover that is sending, not one waiting its turn behind other
+    /// controls. A takeover queued behind a slow attach has asked the daemon for nothing yet, so a
+    /// re-request must leave it alone: treating the wait as the attempt would put a second takeover on
+    /// the wire, whose late answer can contradict the first after ownership was already granted.
+    @MainActor func testTakeoverQueuedBehindAnAttachIsNotRetriedAsStale() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-takeover-queued"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "queued-takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let recorder = GatedControlSendRecorder()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                recorder.record("attach:\(mode.rawValue)")
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            },
+            takeoverAction: { clientID in
+                recorder.record("takeover")
+                try TerminalSessionPersistence.transferOwnership(
+                    sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
+                return TerminalControlResponse(ok: true, message: "Took over ownership.")
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+        controller.requestOwnershipIfNeeded()
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertTrue(recorder.recorded.isEmpty)
+
+        // Long past the retry timeout, but the queued takeover has not started sending, so this must be
+        // refused rather than queue a second one behind it.
+        controller.takeOverOwnership(now: Date(timeIntervalSinceNow: 3600))
+
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.viewer.rawValue)", "takeover"])
+        XCTAssertFalse(controller.debugTakeoverPending)
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.mode == .owner }?.clientID, controller.clientID)
+    }
+
+    /// A cold open presents the pane's content immediately, but its host must not act as the owner
+    /// until the daemon has confirmed the attach: an interactive host sends keystrokes and its
+    /// owner-attach viewport on its own queues, and those would reach the daemon ahead of the attach
+    /// and be refused. The host is attached as a viewer meanwhile — the pane still renders — and flips
+    /// to owner when the attach lands.
+    @MainActor func testColdOpenHoldsTheHostAtViewerUntilTheAttachIsConfirmed() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-cold-open-interactivity"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "cold-open", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let recorder = GatedControlSendRecorder()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "cold")
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            attachClientAction: { client, mode in
+                recorder.recordAfterGate("attach:\(mode.rawValue)")
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            }, detachClientAction: { _ in recorder.record("detach") })
+
+        controller.showEmbedded(focus: true)
+
+        // The host's attachment mode is what governs whether it accepts input and sends the
+        // owner-attach viewport, so a viewer attach is the pane presenting a non-interactive host.
+        XCTAssertEqual(fakeHost.attachedModes, [.viewer])
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+
+        recorder.openGate()
+        await controller.debugAwaitPendingClientControl()
+
+        XCTAssertEqual(recorder.recorded, ["attach:\(TerminalAttachmentMode.owner.rawValue)"])
+        XCTAssertEqual(fakeHost.attachedModes, [.viewer, .owner])
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+    }
+
     @MainActor func testOwnerSeekingPaneRestoresTakeoverControlsAfterFailedOwnerRequest() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1449,6 +1888,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             takeoverAction: { _ in TerminalControlResponse(ok: false, message: "Takeover denied.") }, detachClientAction: { _ in })
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertEqual(controller.attachmentMode, .viewer)
         XCTAssertTrue(controller.debugShowsTakeoverButton)
@@ -1497,7 +1937,6 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let fakeHost = FakeGhosttySessionHost()
         fakeHost.hasSurface = false
         let attempts = TakeoverAttemptRecorder()
-        let firstAttemptEntered = DispatchSemaphore(value: 0)
         let releaseFirstAttempt = DispatchSemaphore(value: 0)
         defer { releaseFirstAttempt.signal() }
 
@@ -1506,7 +1945,6 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             takeoverAction: { clientID in
                 let attempt = attempts.record(clientID: clientID)
                 if attempt == 1 {
-                    firstAttemptEntered.signal()
                     _ = releaseFirstAttempt.wait(timeout: .now() + 10)
                     try TerminalSessionPersistence.transferOwnership(
                         sessionID: sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: "2026-05-20T00:00:03Z")
@@ -1517,19 +1955,30 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 return TerminalControlResponse(ok: true, message: "Took over ownership.")
             }, detachClientAction: { _ in })
         controller.showEmbedded(focus: true)
+        // The show's viewer attach rides the same control queue as the takeovers below, so letting it
+        // finish first keeps what follows about the takeovers alone.
+        await controller.debugAwaitPendingClientControl()
 
         controller.requestOwnershipIfNeeded()
-        XCTAssertEqual(firstAttemptEntered.wait(timeout: .now() + 1), .success)
+        // Every queued control checks in on the main actor before it sends, so waiting for the first
+        // takeover to start has to yield the main actor rather than block it.
+        let entryDeadline = Date().addingTimeInterval(5)
+        while attempts.count == 0 && Date() < entryDeadline { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(attempts.count, 1)
         XCTAssertTrue(controller.debugTakeoverPending)
         XCTAssertFalse(controller.debugTakeoverEnabled)
 
         fakeHost.hasSurface = true
         fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
         fakeHost.snapshotTextValue = "owned"
-        controller.debugSetTakeoverTaskStartedAt(Date(timeIntervalSinceNow: -60))
+        controller.debugSetTakeoverAttemptStartedAt(Date(timeIntervalSinceNow: -60))
         controller.takeOverOwnership()
+        // The retry is issued while the stale attempt is still outstanding and rides the same control
+        // queue, so it reaches the daemon behind it: releasing the stale one here is what lets the
+        // retry send at all, and its late success then has to lose to the retry's.
+        releaseFirstAttempt.signal()
 
-        let deadline = Date().addingTimeInterval(1)
+        let deadline = Date().addingTimeInterval(2)
         while Date() < deadline {
             controller.debugForceRefresh()
             if attempts.count >= 2 && controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
@@ -2455,7 +2904,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(ownerController.displayTitle, "ghostty")
     }
 
-    @MainActor func testGhosttyOwnerMetadataRefreshCanSkipLiveAttachUntilShow() throws {
+    @MainActor func testGhosttyOwnerMetadataRefreshCanSkipLiveAttachUntilShow() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2486,9 +2935,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
 
         controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
 
         XCTAssertGreaterThan(host.attachCount, 0)
-        XCTAssertEqual(host.attachedModes.first, .owner)
+        XCTAssertEqual(host.attachedModes.last, .owner)
     }
 
     @MainActor func testGhosttyOwnerScrollRequestsSurfaceRefresh() throws {
@@ -2773,6 +3223,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let viewerController = makeGhosttyController(
             sessionID: "session-notify", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
+
+        // Both controllers attach on their initial refresh; letting those sends land first keeps a late
+        // one from re-owning the session underneath the ownership this test drives.
+        await ownerController.debugAwaitPendingClientControl()
+        await viewerController.debugAwaitPendingClientControl()
 
         let owner = TerminalClient(
             id: ownerController.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
@@ -3262,7 +3717,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugInputStatus, "")
     }
 
-    @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() throws {
+    @MainActor func testGhosttyOwnerCloseMarksControllerAndReopenUsesFreshClientAttachment() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3293,6 +3748,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let firstClientID = firstController.clientID
 
         firstController.closeEmbedded()
+        await firstController.debugAwaitPendingClientControl()
 
         XCTAssertTrue(firstController.debugDidCloseWindow)
 
@@ -3306,6 +3762,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: "2026-05-09T00:00:03Z")
             })
         reopenedController.showEmbedded(focus: true)
+        await reopenedController.debugAwaitPendingClientControl()
         reopenedController.debugForceRefresh()
 
         let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
@@ -3314,7 +3771,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(activeOwners.count, 1)
         XCTAssertEqual(activeOwners.first?.clientID, reopenedController.clientID)
         XCTAssertNotEqual(reopenedController.clientID, firstClientID)
-        XCTAssertTrue(snapshot.attachments.contains { $0.clientID == firstClientID && $0.detachedAt != nil })
+        // The close superseded the first pane's attach before it went out, so that client left no live
+        // attachment behind — the stronger form of the guarantee than a row marked detached.
+        XCTAssertFalse(snapshot.attachments.contains { $0.clientID == firstClientID && $0.detachedAt == nil })
         XCTAssertEqual(reopenedController.displayTitle, "backend")
         XCTAssertEqual(reopenedController.debugRendererSummary, "Renderer: ghostty-mirror")
     }
