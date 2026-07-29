@@ -55,6 +55,7 @@ for suite in \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessMouseEncodingTests \
   GhosttyLinuxHeadlessSessionBellTests \
+  GhosttyLinuxHeadlessSessionClipboardTests \
   GhosttyLinuxHeadlessSessionGraphemeTests \
   GhosttyLinuxHeadlessSessionMetadataTests \
   GhosttyLinuxHeadlessSessionQueryResponseTests \

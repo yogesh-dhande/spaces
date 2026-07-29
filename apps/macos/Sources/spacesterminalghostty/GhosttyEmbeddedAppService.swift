@@ -56,7 +56,9 @@ import Foundation
             runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
                 GhosttyClipboardBridge.confirmReadClipboard(userdata: userdata, content: content, state: state)
             }
-            runtimeConfig.write_clipboard_cb = { _, _, content, len, _ in GhosttyClipboardBridge.writeClipboard(content: content, len: UInt(len)) }
+            runtimeConfig.write_clipboard_cb = { userdata, location, content, len, _ in
+                GhosttyEmbeddedClipboardWriteForwarder.forward(userdata: userdata, location: location, content: content, count: Int(len))
+            }
             runtimeConfig.close_surface_cb = { userdata, _ in
                 guard let userdata else { return }
                 let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()

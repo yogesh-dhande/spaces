@@ -426,6 +426,7 @@
             sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
             self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [sessionDriver] in sessionDriver.requestSurfaceRefresh() }
             sessionDriver.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+            sessionDriver.onClipboardWrite = { [weak self] text in self?.forwardClipboardWriteToOwner(text) }
             sessionDriver.onSessionStateChanged = { [weak self] change in self?.applySessionStateChange(change) }
             sessionDriver.onSurfaceCellSizeChanged = { [weak self] columns, rows in
                 guard let self else { return }
@@ -1831,6 +1832,23 @@
             refreshRuntimeState(force: true)
         }
 
+        /// Sends a program's OSC 52 copy to the client that owns the session, so the text lands on the
+        /// machine the user is typing on rather than on this daemon's host.
+        ///
+        /// Dropped when nothing owns the session: a copy is a one-shot with no destination then, and
+        /// queueing it for a future owner would paste text the user copied in a session they had walked
+        /// away from. Replayed writes never reach here — the driver's replay bracket refuses them at
+        /// the runtime callback, where a replayed write is still distinguishable from a live one.
+        ///
+        /// The copy rides the state stream and touches no runtime state, so this deliberately does not
+        /// force a runtime-state write the way the metadata and bell paths do.
+        private func forwardClipboardWriteToOwner(_ text: String) {
+            guard let ownerClientID = activeOwnerClientID() else { return }
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite,
+                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
+        }
+
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
             lastSessionStateRevision = max(lastSessionStateRevision ?? change.revision, change.revision)
             lastSessionStateFlags = change.flags
@@ -2185,7 +2203,9 @@
                 markNextBroadcastFullWhenMissingRenderUpdate: true)
         }
 
-        private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
+        private func broadcastCurrentState(
+            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+        ) {
             guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
             let ownerClient = activeOwnerClient()
@@ -2195,7 +2215,8 @@
             )
             guard stateStreamServer != nil,
                 let payload = currentRemoteSessionState(
-                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed)
+                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed,
+                    clipboardWrite: clipboardWrite)
             else { return }
             broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
         }
@@ -2240,7 +2261,8 @@
 
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
+            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
+            clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2303,7 +2325,7 @@
                     sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                     screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                     title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate)
+                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
             }
             if markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
             return GhosttyRemoteSessionStatePayload(
@@ -2311,7 +2333,7 @@
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                outputEndByteOffset: bootstrapOutputEndByteOffset)
+                outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite)
         }
 
         private func makeRenderUpdate(

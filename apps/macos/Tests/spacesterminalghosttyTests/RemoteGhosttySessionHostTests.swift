@@ -89,6 +89,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             lock.unlock()
         }
 
+        /// Serves `payloads` in order, one per `.state` request, then repeats the last one — so a test can
+        /// put a payload the host applies but does not cache (a clipboard write) behind a fence payload it
+        /// does cache, and know the first was served and consumed once the fence is observable.
+        func setPayloads(_ payloads: [GhosttyRemoteSessionStatePayload]) {
+            lock.lock()
+            self.payloads = payloads
+            lock.unlock()
+        }
+
         func requests() -> [TerminalServiceRequest] {
             lock.lock()
             defer { lock.unlock() }
@@ -274,6 +283,185 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sentText.count, 1)
         XCTAssertEqual(sentText.first?.0, "line one\nline two")
         XCTAssertEqual(sentText.first?.1, true)
+    }
+
+    // MARK: - Owner-targeted clipboard writes
+
+    /// The product behavior: a program's copy inside the session lands on the clipboard of the machine
+    /// the user is typing on. The daemon addresses the write to the owning client; this client owns the
+    /// session, so it writes its own pasteboard.
+    @MainActor func testOwnerAppliesAClipboardWriteAddressedToIt() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-owner")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-owner", targetClientID: fixture.clientID, text: "copied text"))
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied text"
+        }
+    }
+
+    /// The write fans out to every subscriber of the session, so a client that is not its target must
+    /// leave its own clipboard alone — otherwise a copy made on the Mac the user is typing on would also
+    /// overwrite the clipboard of every other device watching the session.
+    @MainActor func testNonTargetClientIgnoresAClipboardWrite() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-other")
+        defer { fixture.tearDown() }
+
+        // The clipboard payload is not cached by the host (it is an event, not state), so a following
+        // state payload the host DOES cache is the fence proving the clipboard payload was served first.
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-other", targetClientID: "someone-elses-client", text: "not for us"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-other", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    /// A clipboard write is an event, not state: the host applies the copy and reduces nothing, so an
+    /// out-of-order one cannot regress the title, runtime state, or ownership the pane is showing.
+    @MainActor func testClipboardWritePayloadDoesNotBecomeCachedState() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-not-state")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-not-state", targetClientID: fixture.clientID, text: "copied", title: "clipboard"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-not-state", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied"
+        }
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNotEqual(fixture.host.effectiveTitle, "clipboard")
+    }
+
+    /// A clipboard write is a one-shot: it rides exactly the payload that announced it. The client's
+    /// stored state drops the field on merge, so the payloads that follow — output, metadata, anything —
+    /// must not re-paste the same text over whatever the user has copied since.
+    @MainActor func testALaterPayloadDoesNotRepeatTheClipboardWrite() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-once")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"))
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied once"
+        }
+
+        fixture.pasteboard.clearContents()
+        fixture.recorder.setPayload(
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"))
+        waitForCondition("the later payload is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "later"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    /// Another device took the session over. This pane's requested attachment mode still reads `.owner` —
+    /// a demotion releases the surface without re-attaching as a viewer — so gating the copy on that mode
+    /// would let a write addressed to the former owner land on this Mac's clipboard while somebody else
+    /// owns the session. Ownership has to come from the state the host holds, which says otherwise.
+    @MainActor func testDemotedOwnerIgnoresAClipboardWriteAddressedToIt() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-demoted")
+        defer { fixture.tearDown() }
+
+        let takeover = payloadClaimingOwner(
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.attachmentState, title: "taken-over"),
+            ownerClientID: "another-mac")
+        fixture.recorder.setPayloads([
+            takeover,
+            clipboardPayload(sessionID: "remote-clipboard-demoted", targetClientID: fixture.clientID, text: "not ours any more"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("the takeover is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.activeOwnerClientID() == "another-mac"
+        }
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    private struct ClipboardFixture {
+        let host: RemoteGhosttySessionHost
+        let recorder: DirectTerminalServiceRecorder
+        let pasteboard: NSPasteboard
+        let clientID: String
+        let tearDown: () -> Void
+    }
+
+    /// A running remote session this client owns, with a uniquely-named pasteboard injected so the tests
+    /// never touch the developer's real clipboard.
+    @MainActor private func makeClipboardFixture(sessionID: String) throws -> ClipboardFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let clientID = "mac-owner-\(sessionID)"
+        // The daemon's payload says this client owns the session, which is what the host reads to decide
+        // it is the live owner — the attachment it requested is not evidence of that on its own.
+        let ownerPayload = payloadClaimingOwner(fixture.payload, ownerClientID: clientID)
+        let recorder = DirectTerminalServiceRecorder(payload: ownerPayload)
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send)
+        waitForCondition("host renders the running session") { host.snapshotText() != nil }
+
+        try host.attach(
+            client: TerminalClient(
+                id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-28T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-clipboard-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        host.clipboardPasteboardOverrideForTesting = pasteboard
+        return ClipboardFixture(
+            host: host, recorder: recorder, pasteboard: pasteboard, clientID: clientID,
+            tearDown: {
+                pasteboard.releaseGlobally()
+                try? FileManager.default.removeItem(at: root)
+            })
+    }
+
+    /// Re-emits a running payload with an attachment snapshot naming `ownerClientID` as the live owner.
+    private func payloadClaimingOwner(_ payload: GhosttyRemoteSessionStatePayload, ownerClientID: String) -> GhosttyRemoteSessionStatePayload {
+        let owner = TerminalClient(
+            id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: ownerClientID), connectedAt: "2026-07-28T00:00:00Z")
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt,
+            sessionStateRevision: payload.sessionStateRevision, sessionStateFlags: payload.sessionStateFlags,
+            screenStateRevision: payload.screenStateRevision, runtimeState: payload.runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                clients: [owner],
+                attachments: [
+                    TerminalAttachment(sessionID: payload.sessionID, clientID: ownerClientID, mode: .owner, attachedAt: "2026-07-28T00:00:00Z")
+                ]), title: payload.title, workingDirectory: payload.workingDirectory, outputByteCount: payload.outputByteCount,
+            outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: payload.renderUpdate)
+    }
+
+    private func clipboardPayload(sessionID: String, targetClientID: String, text: String, title: String = "remote")
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: "2026-07-28T00:00:03Z",
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+            workingDirectory: "/tmp/work", outputByteCount: nil,
+            clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
+    }
+
+    private func remoteStatePayloadWithTitle(sessionID: String, reason: String, title: String) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: reason, emittedAt: "2026-07-28T00:00:04Z", sessionStateRevision: nil, sessionStateFlags: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/work", outputByteCount: nil)
     }
 
     @MainActor func testRemoteMirrorEncodesPreciseScrollMods() {

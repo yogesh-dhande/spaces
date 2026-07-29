@@ -20,8 +20,15 @@
             guard let content, len > 0 else { return }
             let buffer = UnsafeBufferPointer(start: content, count: Int(len))
             guard let text = preferredPlainText(from: buffer) else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            writePlainText(text, to: .general)
+        }
+
+        /// Replaces a pasteboard's contents with `text`. Empty text clears it and writes nothing, which
+        /// is how an OSC 52 clear reaches the owner's machine.
+        static func writePlainText(_ text: String, to pasteboard: NSPasteboard) {
+            pasteboard.clearContents()
+            guard !text.isEmpty else { return }
+            pasteboard.setString(text, forType: .string)
         }
 
         static func copySelection(from surface: ghostty_surface_t?) -> Bool {

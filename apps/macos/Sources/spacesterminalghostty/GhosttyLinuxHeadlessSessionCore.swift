@@ -570,7 +570,22 @@
             // screen state at all, so the frame keeps the delta chain and the metadata reason only
             // drives the client's title refresh.
             if metadataChanged { postSessionMetadataDidChange() }
+            if let clipboardText = events.clipboardText { forwardClipboardWriteToOwner(clipboardText) }
             scheduleInputOutputResyncIfNeeded()
+        }
+
+        /// Sends a program's OSC 52 copy to the client that owns the session, so the text lands on the
+        /// machine the user is typing on rather than on this daemon's host.
+        ///
+        /// Dropped when nothing owns the session: a copy is a one-shot with no destination then, and
+        /// queueing it for a future owner would paste text the user copied in a session they had walked
+        /// away from. Broadcast after the output payload so the frame that carried the escape sequence
+        /// is already on the wire.
+        private func forwardClipboardWriteToOwner(_ text: String) {
+            guard let ownerClientID = activeOwnerClientID() else { return }
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite,
+                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
         }
 
         @discardableResult private func appendTranscript(_ data: Data) -> Bool {
@@ -1096,14 +1111,18 @@
             screenStateRevision &+= 1
         }
 
-        /// One output turn's terminal events, drained from the vt session's event sink. The sink also
-        /// records clipboard writes; this core does not consume those, so the drain releases them along
-        /// with the rest of the record.
+        /// One output turn's terminal events, drained from the vt session's event sink.
         private struct SessionEvents {
             var titleChanged = false
             var pwdChanged = false
             var bellCount: UInt32 = 0
             var ptyResponse = Data()
+            /// The turn's OSC 52 write, `nil` when the program performed none. An EMPTY string is a
+            /// clear (the program asked for the destination to be emptied), which is a real
+            /// instruction the owner applies — hence the optional rather than an empty-means-none
+            /// sentinel. Over-cap and non-standard-destination writes never reach here: the shim
+            /// drops them at capture.
+            var clipboardText: String?
         }
 
         /// Takes the events the vt session accumulated during the writes since the last drain. The C
@@ -1115,6 +1134,13 @@
             defer { spaces_ghostty_vt_session_events_free(&raw) }
             var events = SessionEvents(titleChanged: raw.title_changed, pwdChanged: raw.pwd_changed, bellCount: raw.bell_count)
             if let response = raw.pty_response, raw.pty_response_len > 0 { events.ptyResponse = Data(bytes: response, count: raw.pty_response_len) }
+            // Copy the clipboard bytes into a Swift value before the `defer` above frees the C buffer.
+            // A cleared write carries no buffer, so it becomes the empty string the owner clears with.
+            if let clipboard = raw.clipboard_text, raw.clipboard_len > 0 {
+                events.clipboardText = String(decoding: UnsafeRawBufferPointer(start: clipboard, count: raw.clipboard_len), as: UTF8.self)
+            } else if raw.clipboard_cleared {
+                events.clipboardText = ""
+            }
             return events
         }
 
@@ -1396,11 +1422,11 @@
             TerminalOverviewSignal.post()
         }
 
-        private func broadcastCurrentState(reason: String) {
+        private func broadcastCurrentState(reason: String, clipboardWrite: TerminalClipboardWritePayload? = nil) {
             guard !suppressBroadcastsForHandoff else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let startedAt = performanceLoggingEnabled ? Date() : nil
-            guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
+            guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed, clipboardWrite: clipboardWrite) else { return }
             stateStreamServer?.broadcast(payload)
             guard performanceLoggingEnabled, let startedAt else { return }
             let decodedUpdate = payload.decodedRenderUpdate
@@ -1423,7 +1449,7 @@
 
         private func makeStatePayload(
             reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false
+            markNextBroadcastFull: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
@@ -1474,7 +1500,7 @@
                 screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
-                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate)
+                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
         }
 
         private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String, exportMode: RenderStateExportMode) -> GhosttyRenderUpdate {

@@ -66,6 +66,10 @@
         private var lastRenderUpdateResyncAt: Date?
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
+        /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
+        /// touches the developer's real clipboard. Nil in the app, where the write goes to
+        /// `NSPasteboard.general`.
+        var clipboardPasteboardOverrideForTesting: NSPasteboard?
         private var lastRequestedViewportSize: (columns: Int, rows: Int)?
         /// The mirror surface generation the last owner attach measured its viewport against. An attach
         /// that finds a different generation is looking at a rebuilt surface and re-sends the viewport.
@@ -224,6 +228,14 @@
 
         public func activeOwnerClientID() -> String? {
             ensureStateStreamStartedIfNeeded()
+            return currentOwnerClientID()
+        }
+
+        /// Who owns the session according to the state this host currently holds — the one notion of live
+        /// ownership, shared with `activeOwnerClientID()`, which only adds the subscription kick callers
+        /// coming from outside need. Split out so a caller already inside the payload-apply path can ask
+        /// the same question without re-entering the subscription machinery on every event.
+        private func currentOwnerClientID() -> String? {
             guard isInteractiveRuntimeStateForControl() else { return nil }
             return latestState?.attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         }
@@ -458,6 +470,15 @@
         }
 
         private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
+            // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
+            // whichever route delivered it may have done so out of order with respect to the state
+            // payloads around it (see `DeviceTerminalSessionStateModel.apply`).
+            applyClipboardWrite(from: incomingPayload)
+            // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen
+            // state, and its runtime/attachment snapshot is a repeat of the output turn that carried the
+            // escape sequence — so reducing it is skipped rather than risking an out-of-order payload
+            // regressing the cached title, runtime state, or ownership.
+            guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
             let decodeStartedAt = Date()
             let reduction = stateReducer.reduce(
                 incomingPayload: incomingPayload, previousPayload: latestState,
@@ -527,6 +548,26 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
                 detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
             if postNotifications { postLocalNotifications(for: payload) }
+        }
+
+        /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
+        /// session and the write is addressed to it.
+        ///
+        /// The payload fans out to every subscriber, so the target check is what makes it the owner's
+        /// clipboard and nobody else's. Read from the incoming payload rather than `latestState`: the
+        /// merge deliberately drops the field, so the write is applied exactly once, on arrival — and on
+        /// arrival is before any state reduction, so no ordering rule can swallow it.
+        private func applyClipboardWrite(from payload: GhosttyRemoteSessionStatePayload) {
+            guard let clipboardWrite = payload.clipboardWrite else { return }
+            // Ownership comes from the state this host currently holds, never from `attachedMode`: that is
+            // the mode this pane last REQUESTED, and it still reads `.owner` after a takeover elsewhere
+            // demoted this one (the demotion releases the surface without re-attaching as a viewer) and
+            // after the session ended. Because the copy deliberately bypasses timestamp ordering, a delayed
+            // event addressed to the former owner would otherwise overwrite this Mac's clipboard while
+            // another device owns the session.
+            guard let attachedClientID = attachedClient?.id, currentOwnerClientID() == attachedClientID else { return }
+            guard clipboardWrite.targetClientID == attachedClientID else { return }
+            GhosttyClipboardBridge.writePlainText(clipboardWrite.text, to: clipboardPasteboardOverrideForTesting ?? .general)
         }
 
         private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
