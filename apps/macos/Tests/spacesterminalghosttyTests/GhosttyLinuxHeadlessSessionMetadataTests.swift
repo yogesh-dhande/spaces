@@ -298,7 +298,8 @@
             try await resumedCore.resumeFromHandoff(
                 DaemonHandoffSessionRecord(
                     sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance))
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
 
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
             #expect(payload.title == "handed off")
@@ -392,7 +393,8 @@
             try await resumedCore.resumeFromHandoff(
                 DaemonHandoffSessionRecord(
                     sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance))
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
             #expect(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) }?.title == "before handoff")
 
             let liveBytes = Array("\u{1B}]2;\u{07}".utf8)
@@ -436,7 +438,8 @@
             try await resumedCore.resumeFromHandoff(
                 DaemonHandoffSessionRecord(
                     sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance))
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
 
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
             #expect(payload.title == "final")

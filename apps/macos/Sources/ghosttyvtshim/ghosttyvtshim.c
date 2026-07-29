@@ -752,13 +752,26 @@ bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
     GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
     // One userdata serves every callback, and callback options take the function pointer itself rather
     // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, session);
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty);
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell);
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed);
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed);
-    terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write);
-    return true;
+    const struct {
+        GhosttyTerminalOption option;
+        const void *value;
+    } registrations[] = {
+        {GHOSTTY_TERMINAL_OPT_USERDATA, session},
+        {GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty},
+        {GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell},
+        {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
+        {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
+        {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+    };
+
+    // Every registration is attempted and every result folded in: the caller depends on these events
+    // exclusively for metadata and query replies, so a session that got only some of its callbacks is
+    // silent feature loss rather than degraded output, and has to be reported as a failure.
+    bool registered = true;
+    for (size_t index = 0; index < sizeof(registrations) / sizeof(registrations[0]); index++) {
+        registered &= terminal_set(session->terminal, registrations[index].option, registrations[index].value) == GHOSTTY_SUCCESS;
+    }
+    return registered;
 }
 
 void spaces_ghostty_vt_session_drain_events(SpacesGhosttyVtSession *session, SpacesGhosttyVtSessionEvents *out_events) {

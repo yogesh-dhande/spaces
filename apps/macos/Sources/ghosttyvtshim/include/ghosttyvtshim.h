@@ -155,7 +155,9 @@ typedef struct {
 } SpacesGhosttyVtSessionEvents;
 
 // Registers the terminal's effect callbacks against this session, so subsequent writes accumulate
-// events into the session's sink. Returns false when the library predates the option API.
+// events into the session's sink. Returns false when the library predates the option API or when any
+// one of the registrations is refused — a session with only some of its callbacks installed silently
+// loses whichever half of the contract below it did not get, so callers must treat false as fatal.
 //
 // Opt-in on purpose. A session that replays historical bytes — transcript rendering, scrollback for an
 // ended run, trim preambles — must NEVER enable events: every bell and clipboard write the transcript

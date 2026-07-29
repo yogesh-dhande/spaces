@@ -804,7 +804,7 @@
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: size.columns,
                 rows: size.rows, ownerEpoch: ownerEpoch, screenStateRevision: lastScreenStateRevision ?? 0,
-                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue)
+                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue, transcriptOffsetAtQuiesce: handoffTranscriptReplayOffset)
         }
 
         /// Holds the PTY sink boundary while the daemon performs its final persistence

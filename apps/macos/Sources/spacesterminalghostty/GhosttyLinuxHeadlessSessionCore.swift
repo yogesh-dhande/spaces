@@ -8,12 +8,14 @@
     enum GhosttyLinuxHeadlessSessionError: LocalizedError {
         case vtSessionUnavailable
         case vtReplayFailed
+        case eventRegistrationFailed
         case snapshotUnavailable
 
         var errorDescription: String? {
             switch self {
             case .vtSessionUnavailable: "libghostty-vt is not available for the headless terminal session."
             case .vtReplayFailed: "libghostty-vt could not replay the terminal transcript."
+            case .eventRegistrationFailed: "libghostty-vt could not register the headless terminal session's event callbacks."
             case .snapshotUnavailable: "Unable to export a headless terminal render frame."
             }
         }
@@ -178,10 +180,13 @@
             guard let vtSession = makeVTSession(columns: terminalSize.columns, rows: terminalSize.rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            self.vtSession = vtSession
             // A fresh session replays nothing, so every event it raises from here on belongs to live
             // output the user is watching.
-            _ = spaces_ghostty_vt_session_enable_events(vtSession)
+            guard spaces_ghostty_vt_session_enable_events(vtSession) else {
+                spaces_ghostty_vt_session_free(vtSession)
+                throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
+            }
+            self.vtSession = vtSession
             started = true
             terminating = false
             writeRuntimeState(state: .starting)
@@ -393,7 +398,8 @@
 
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
-                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
+                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue,
+                transcriptOffsetAtQuiesce: handoffTranscriptReplayOffset)
         }
 
         /// Holds the PTY sink boundary while the daemon performs its final persistence
@@ -479,11 +485,26 @@
             // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
             // synchronously into a replacement VT session, then swaps it in and arms the
             // full-frame flag.
-            try recreateVTRenderer(columns: record.columns, rows: record.rows)
+            try recreateVTRenderer(columns: record.columns, rows: record.rows, eventsLiveFromTranscriptOffset: record.transcriptOffsetAtQuiesce)
 
             // Adopt the inherited PTY only AFTER replay so no live byte races ahead of the
             // replayed transcript. The read loop starts here.
             ptyDriver.adopt(masterFD: record.masterFD, childPID: record.childPID)
+
+            // The handoff-window suffix replayed above with events live, so this drain carries exactly
+            // what those bytes raised. Nothing ever parsed them — the old image buffered them straight
+            // to output.log — so the program may still be blocked on a query, and its title or pwd may
+            // be newer than the row this core seeded from; both are settled here. The replies need the
+            // adopted PTY, which is why the drain sits after `adopt` rather than inside the rebuild;
+            // everything between the two is synchronous on the engine actor, so no live output can
+            // interleave. The same suffix's bells and clipboard writes are dropped: they are as old as
+            // the handoff window, so alerting on them would be alerting on output the user already
+            // scrolled past. The macOS core needs none of this — its replay runs through the GhosttyKit
+            // surface, which answers queries itself through its runtime write callback — so the record's
+            // offset is written there for truthfulness and consumed only here.
+            let events = drainSessionEvents()
+            applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+            sendQueryResponses(events.ptyResponse)
 
             ownerEpoch = record.ownerEpoch
             // Advance past the recorded revision and force the first broadcast to a full
@@ -1181,25 +1202,55 @@
         /// Only the handoff resume paths use this — renderer memory did not survive the
         /// exec there, so the transcript is the sole source of truth. A live resize never
         /// comes here: it resizes the existing vt session in place (reflow) instead.
-        private func recreateVTRenderer(columns: Int, rows: Int) throws {
+        ///
+        /// `eventsLiveFromTranscriptOffset` splits the replay: bytes before it are replayed with events
+        /// off (they were already parsed once, by the pre-exec image), bytes from it onward with events
+        /// live, so the caller's drain sees exactly what the unparsed handoff-window suffix raised. Nil
+        /// (or an offset at/past the end of the file) replays the whole transcript with events off and
+        /// enables them at the tail.
+        private func recreateVTRenderer(columns: Int, rows: Int, eventsLiveFromTranscriptOffset: UInt64?) throws {
             guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            do {
-                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
-                    let succeeded = chunk.withUnsafeBytes { rawBuffer in
-                        spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
-                    }
-                    guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+            func writeReplay(_ bytes: Data) throws {
+                guard !bytes.isEmpty else { return }
+                let succeeded = bytes.withUnsafeBytes { rawBuffer in
+                    spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
                 }
+                guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+            }
+            func enableEvents() throws {
+                guard spaces_ghostty_vt_session_enable_events(replacementSession) else {
+                    throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
+                }
+            }
+            do {
+                var replayedByteCount: UInt64 = 0
+                var eventsEnabled = false
+                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
+                    let chunkStart = replayedByteCount
+                    replayedByteCount &+= UInt64(chunk.count)
+                    guard !eventsEnabled, let boundary = eventsLiveFromTranscriptOffset, boundary < replayedByteCount else {
+                        try writeReplay(chunk)
+                        return
+                    }
+                    // The boundary falls at or inside this chunk: write the already-parsed head, turn
+                    // events on, then let the rest of the chunk replay under them.
+                    let headCount = boundary > chunkStart ? Int(boundary - chunkStart) : 0
+                    try writeReplay(chunk.prefix(headCount))
+                    try enableEvents()
+                    eventsEnabled = true
+                    try writeReplay(chunk.dropFirst(headCount))
+                }
+                // Events are enabled only AFTER the replay above, so the historical bells and clipboard
+                // writes the transcript carries do not fire a second time. Still before the swap, so a
+                // failure here unwinds into the catch below with the current session untouched.
+                if !eventsEnabled { try enableEvents() }
                 if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
                 vtSession = replacementSession
                 // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
                 // keep the cached values when the replay never re-emits the escape sequences.
                 seedMetadataFromVTSession()
-                // Events are enabled only AFTER the replay above, so the historical bells and clipboard
-                // writes the transcript carries do not fire a second time.
-                _ = spaces_ghostty_vt_session_enable_events(replacementSession)
                 renderUpdateBaseline = nil
                 forceNextBroadcastFullRenderUpdate = true
                 if replayedOutput { screenStateRevision &+= 1 }
