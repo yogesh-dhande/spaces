@@ -163,13 +163,18 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -277,7 +282,7 @@
                 return Box(sourceCore)
             }
             let sourceCore = sourceCoreBox.value
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             guard let record = try await sourceCore.quiesceForHandoff() else {
                 Issue.record("quiesce produced no handoff record for a live session")
@@ -305,13 +310,13 @@
             // Scrollback/screen rebuilt from the replayed output.log.
             let owner = Self.remoteOwnerClient(id: "remote-owner")
             try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
-            try await waitAsync { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
 
             // PTY I/O is live through the adopted fd: bytes injected on the slave land in
             // output.log on the resumed core exactly once.
             let secondMarker = "HANDOFF_MARKER_BETA"
             #expect(write(pty.slave, "\(secondMarker)\n", secondMarker.utf8.count + 1) > 0)
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(secondMarker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(secondMarker) == true }
 
             let transcript = try String(contentsOfFile: paths.outputPath)
             #expect(occurrences(of: marker, in: transcript) == 1, "replay must not re-append the original transcript to output.log")
@@ -331,7 +336,7 @@
                 return Box(sourceCore)
             }
             let sourceCore = sourceCoreBox.value
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(clearedMarker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(clearedMarker) == true }
             let clearResponse = TerminalEngineActor.runSynchronously {
                 sourceCore.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
             }
@@ -415,7 +420,7 @@
             // Keep the source alive so its owner attachment persists into the resumed core:
             // terminate() detaches clients, and the render-state export needs an owner.
             defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
-            try await waitAsync { Self.renderedScreenText(of: sourceCore)?.contains("DONE") == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: sourceCore)?.contains("DONE") == true }
             let preHandoffLines = nonEmptyTrimmedLines(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: sourceCore) })
             #expect(preHandoffLines.count >= 2, "a 154-column line must wrap at grid width 100")
 
@@ -468,7 +473,7 @@
                 return Box(sourceCore)
             }
             let sourceCore = sourceCoreBox.value
-            try await waitAsync { Self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
 
             guard let record = try await sourceCore.quiesceForHandoff() else {
                 Issue.record("quiesce produced no handoff record")
@@ -511,7 +516,7 @@
             // The first post-resume payload advances past the recorded revision and is a
             // self-contained full render update (the replayed marker must be on screen for
             // a render frame to be produced).
-            try await waitAsync { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
             try await TerminalEngineActor.run {
                 let payload = try #require(resumedCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial))
                 let resumedRevision = try #require(payload.screenStateRevision)
@@ -539,7 +544,7 @@
 
             // Wait for the short-lived child to exit and drive the session-closed path
             // (which flips the session out of its started state).
-            try await waitAsync { !core.isStarted }
+            try await waitAsync(transcriptPath: paths.outputPath) { !core.isStarted }
 
             let record = try await core.quiesceForHandoff()
             #expect(record == nil, "a session whose child already exited must not produce a handoff record")
@@ -563,7 +568,7 @@
             }
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
             guard let record = try await core.quiesceForHandoff() else {
@@ -576,20 +581,22 @@
                 core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(duringHandoffMarker)\n"))
             }
             #expect(duringHandoffResponse.ok, "handoff-window input must reach the live child")
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(duringHandoffMarker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) {
+                (try? String(contentsOfFile: paths.outputPath))?.contains(duringHandoffMarker) == true
+            }
             #expect(
                 TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) }?.contains(duringHandoffMarker) != true,
                 "quiesced output must bypass the renderer")
 
             await core.resumeInPlaceAfterFailedExec()
-            try await waitAsync { Self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true }
 
             // The state-stream socket answers again: a fresh subscriber gets an initial payload.
             let received = InitialPayloadCollector()
             let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in received.record(payload) }
             try client.start()
             defer { client.stop() }
-            try await waitAsync { received.count > 0 }
+            try await waitAsync(transcriptPath: paths.outputPath) { received.count > 0 }
 
             // Output flows again through the rebound (never rebuilt) session and lands in
             // output.log: `cat` echoes the sent line back through the still-live child.
@@ -598,7 +605,7 @@
                 core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(afterMarker)\n"))
             }
             #expect(sendResponse.ok, "post-rebind send must succeed: \(sendResponse.message)")
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(afterMarker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(afterMarker) == true }
 
             let transcript = try String(contentsOfFile: paths.outputPath)
             #expect(occurrences(of: marker, in: transcript) == 1)
@@ -626,7 +633,7 @@
                 return Box(core)
             }
             let core = coreBox.value
-            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             TerminalEngineActor.runSynchronously { core.terminate() }
             // terminate() enqueues its exited-state write off the engine; block on the persistence

@@ -4,7 +4,8 @@
 # the repo at /workspace and named volumes for the staged sources, build scratch, and caches.
 set -euo pipefail
 apt-get update -qq
-apt-get install -y -qq pkg-config libsqlite3-dev libssl-dev openssl rsync >/dev/null
+# procps supplies the `ps` the failure-time state dump below uses; the swift base image does not carry it.
+apt-get install -y -qq pkg-config libsqlite3-dev libssl-dev openssl rsync procps >/dev/null
 
 # Stage sources onto container-native fs: resource copies (e.g. AppIcon.icns) from the
 # virtiofs bind mount fail deterministically with EINTR under the amd64 runner, and
@@ -47,6 +48,19 @@ fi
 # fails the lane.
 suite_log="$(mktemp)"
 trap 'rm -f "$suite_log"' EXIT
+
+# Issue #371: the x86_64 lane intermittently fails a PTY-backed suite whose child never writes a byte,
+# while the same suites take under a second everywhere else. The machine's own state around the failure
+# is the missing evidence, so the lane records what it is running on and, when an invocation fails, what
+# every process on the box was doing at that moment.
+echo "lane host: nproc=$(nproc) loadavg=$(cat /proc/loadavg)"
+
+dump_lane_state() {
+  echo "----- lane process table -----" >&2
+  ps -eo pid,ppid,state,etime,time,wchan:32,args >&2
+  echo "----- lane loadavg: $(cat /proc/loadavg) -----" >&2
+}
+
 for suite in \
   SpacesTestHostDetectionTests \
   TerminalServiceSystemdUnitTests \
@@ -56,10 +70,20 @@ for suite in \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \
   GhosttyLinuxHeadlessSubmitOrderingTests; do
+  suite_started="$(date +%s)"
+  echo "==> $suite start $(date -Is)"
+  # `set -e` would abandon the run before the state dump, so the invocation's status is captured
+  # instead of exiting on it; the dump runs and then the lane exits with that status.
+  suite_status=0
   swift test \
     --scratch-path /root/spaces-test-build \
     --jobs 4 \
-    --filter "$suite" 2>&1 | tee "$suite_log"
+    --filter "$suite" 2>&1 | tee "$suite_log" || suite_status=$?
+  echo "==> $suite end $(date -Is) duration=$(( $(date +%s) - suite_started ))s status=$suite_status"
+  if [ "$suite_status" -ne 0 ]; then
+    dump_lane_state
+    exit "$suite_status"
+  fi
   if grep -q 'Test run with 0 tests in 0 suites' "$suite_log"; then
     echo "error: $suite matched no tests, so it did not run." >&2
     echo "The Linux test targets do not compile it. Add its source file to the Linux 'sources:' list" >&2

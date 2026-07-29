@@ -1,0 +1,86 @@
+# TEMPORARY. This workflow exists only to reproduce issue #371 ("Linux x86_64 artifact lane flakes:
+# PTY children starve, a rotating cast of tests hangs") with evidence: it runs the x86_64 Linux
+# unit-test lane in a loop on one runner and keeps every iteration's log. Delete this file when #371
+# is resolved.
+name: Linux lane loop (#371)
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: How many times to run the Linux unit-test lane
+        required: false
+        default: "10"
+
+jobs:
+  loop:
+    runs-on: ubuntu-24.04
+    # The first iteration builds the test products cold, and the artifact build precedes it; a failing
+    # iteration burns its full 15s-per-wait deadlines before it reports.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # Same build the pr-checks x86_64 leg runs; it stages .local/ghosttyvt/lib-linux/libghostty-vt.so,
+      # which the test lane requires.
+      - name: Build Linux spacesd artifact
+        run: |
+          set -euo pipefail
+          builder_image="$(apps/macos/scripts/ensure_linux_builder_image.sh --arch x86_64)"
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            "$builder_image" \
+            bash -lc 'apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
+
+      - name: Loop the Linux unit-test lane
+        run: |
+          set -uo pipefail
+          iterations='${{ inputs.iterations }}'
+          mkdir -p linux-lane-loop-logs
+          failures=0
+          summary=""
+          for i in $(seq 1 "$iterations"); do
+            log="linux-lane-loop-logs/iteration-$i.log"
+            started="$(date +%s)"
+            status=0
+            docker run --rm --init --platform linux/amd64 \
+              -v "$PWD":/workspace \
+              -v spaces-linux-src:/root/src \
+              -v spaces-linux-zig:/root/spaces-zig-cache \
+              -v spaces-linux-test-build:/root/spaces-test-build \
+              -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+              swift:6.2-noble \
+              bash /workspace/apps/macos/scripts/run_linux_tests.sh >"$log" 2>&1 || status=$?
+            duration=$(( $(date +%s) - started ))
+            if [ "$status" -ne 0 ]; then
+              failures=$(( failures + 1 ))
+              result="FAIL (exit $status)"
+              echo "::group::iteration $i failed — full log"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              result="pass"
+            fi
+            echo "iteration $i: $result in ${duration}s"
+            summary="$summary| $i | $result | ${duration}s |"$'\n'
+          done
+
+          {
+            echo "| iteration | result | duration |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$summary"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo "$failures of $iterations iterations failed"
+          [ "$failures" -eq 0 ]
+
+      - name: Upload iteration logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-lane-loop-logs
+          path: linux-lane-loop-logs

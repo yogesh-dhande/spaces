@@ -54,12 +54,18 @@
 
         /// Nonisolated poller so its suspensions don't hold the engine's queue while the engine runs the
         /// queued writes the condition is waiting on.
-        private func waitUntil(timeout: TimeInterval = 15, _ comment: Comment, condition: @escaping @Sendable () -> Bool) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+        private func waitUntil(
+            timeout: TimeInterval = 15, transcriptPath: String? = nil, _ comment: Comment, condition: @escaping @Sendable () -> Bool
+        ) async throws {
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if condition() { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: String(describing: comment), elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(condition(), comment)
         }
 
@@ -85,7 +91,9 @@
                 return Box(core)
             }
             let outputPath = paths.outputPath
-            try await waitUntil("the child must reach its echo loop") { Self.transcript(at: outputPath).contains("KEYS_READY") }
+            try await waitUntil(transcriptPath: outputPath, "the child must reach its echo loop") {
+                Self.transcript(at: outputPath).contains("KEYS_READY")
+            }
             return (coreBox, outputPath)
         }
 
@@ -105,10 +113,12 @@
 
             // Enter keeps its legacy encoding even under the Kitty protocol, so a shell stays usable.
             sendKey("enter", to: core)
-            try await waitUntil("Enter must send a carriage return") { Self.transcript(at: outputPath).contains("^M") }
+            try await waitUntil(transcriptPath: outputPath, "Enter must send a carriage return") { Self.transcript(at: outputPath).contains("^M") }
 
             sendKey("shift+enter", to: core)
-            try await waitUntil("Shift+Enter must send the Kitty sequence") { Self.transcript(at: outputPath).contains("^[[13;2u") }
+            try await waitUntil(transcriptPath: outputPath, "Shift+Enter must send the Kitty sequence") {
+                Self.transcript(at: outputPath).contains("^[[13;2u")
+            }
 
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^M", in: output) == 1, "Shift+Enter must not also send a carriage return: \(output)")
@@ -119,10 +129,12 @@
             defer { terminate(core) }
 
             sendKey("enter", to: core)
-            try await waitUntil("Enter must send a carriage return") { Self.transcript(at: outputPath).contains("^M") }
+            try await waitUntil(transcriptPath: outputPath, "Enter must send a carriage return") { Self.transcript(at: outputPath).contains("^M") }
 
             sendKey("shift+enter", to: core)
-            try await waitUntil("Shift+Enter must send xterm's modified-key form") { Self.transcript(at: outputPath).contains("^[[27;2;13~") }
+            try await waitUntil(transcriptPath: outputPath, "Shift+Enter must send xterm's modified-key form") {
+                Self.transcript(at: outputPath).contains("^[[27;2;13~")
+            }
 
             let output = Self.transcript(at: outputPath)
             #expect(Self.occurrences(of: "^M", in: output) == 1, "Shift+Enter must not submit the line: \(output)")
@@ -133,7 +145,9 @@
             defer { terminate(core) }
 
             sendKey("up", to: core)
-            try await waitUntil("DECCKM must switch the arrow to its SS3 form") { Self.transcript(at: outputPath).contains("^[OA") }
+            try await waitUntil(transcriptPath: outputPath, "DECCKM must switch the arrow to its SS3 form") {
+                Self.transcript(at: outputPath).contains("^[OA")
+            }
         }
 
         /// The Mac line-editing chords are fixed byte sequences on purpose, so they must not start varying
@@ -143,13 +157,13 @@
             defer { terminate(core) }
 
             sendKey("cmd+left", to: core)
-            try await waitUntil("cmd+left must stay ctrl+a") { Self.transcript(at: outputPath).contains("^A") }
+            try await waitUntil(transcriptPath: outputPath, "cmd+left must stay ctrl+a") { Self.transcript(at: outputPath).contains("^A") }
 
             sendKey("opt+backspace", to: core)
-            try await waitUntil("opt+backspace must stay ctrl+w") { Self.transcript(at: outputPath).contains("^W") }
+            try await waitUntil(transcriptPath: outputPath, "opt+backspace must stay ctrl+w") { Self.transcript(at: outputPath).contains("^W") }
 
             sendKey("opt+left", to: core)
-            try await waitUntil("opt+left must stay meta-b") { Self.transcript(at: outputPath).contains("^[b") }
+            try await waitUntil(transcriptPath: outputPath, "opt+left must stay meta-b") { Self.transcript(at: outputPath).contains("^[b") }
         }
     }
 #endif

@@ -121,13 +121,18 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -207,7 +212,7 @@
             try await TerminalEngineActor.run { Self.attachRemoteOwner(to: core, id: "remote-owner") }
 
             // The replayed transcript renders the marker onto the live screen before the clear.
-            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: core)?.contains(marker) == true }
 
             // Make the trim fail without disturbing the append: pre-create a directory at the sibling
             // output.log.trim temp path so the trim's open-for-writing throws EISDIR (unblockable even by
