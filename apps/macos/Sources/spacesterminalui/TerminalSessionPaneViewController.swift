@@ -340,9 +340,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
             updateInputStatus(message: "Terminal is still preparing.", isError: false)
             return
         }
-        // A retry supersedes an outstanding attempt only once that attempt has run past its timeout.
-        // Superseding it is the new attempt id assigned below: every completion path is keyed by it, so
-        // whatever the stale attempt eventually answers is inert.
+        // A retry supersedes an outstanding attempt only once that attempt has been *sending* for longer
+        // than the timeout. An attempt still queued behind other controls has stamped no start and is
+        // not stale however long it has waited: treating the wait as the attempt would duplicate the
+        // takeover on the wire the moment a busy queue outlasted the budget. Superseding is the new
+        // attempt id assigned below; every completion path is keyed by it, so whatever the stale attempt
+        // eventually answers is inert.
         if isTakeoverAttemptPending {
             guard let takeoverAttemptStartedAt, now.timeIntervalSince(takeoverAttemptStartedAt) >= Self.takeoverAttemptTimeout else { return }
         }
@@ -350,14 +353,20 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let attemptID = UUID()
         let clientID = client.id
         takeoverButton.isEnabled = false
-        takeoverAttemptStartedAt = startedAt
+        takeoverAttemptStartedAt = nil
         takeoverAttemptID = attemptID
         // The takeover rides the pane's client-control queue for the same reason attach and detach do:
         // the daemon has to see it behind the attach this pane already issued. Sent on its own it could
         // overtake that attach, and the daemon would either refuse a takeover naming a client it has not
         // seen attach, or grant it and then have the late attach demote this client straight back to
         // viewer — leaving the session with no owner.
+        //
+        // Unlike the attach, the send needs no current-intent check of its own: an attempt can only be
+        // superseded after it has stamped a start, which happens here immediately before the send, so a
+        // superseded takeover is always one already on the wire. A retry then names the same client the
+        // stale attempt did, which is why the daemon seeing both is harmless.
         clientControlQueue.enqueue(priority: .userInitiated) { [weak self, takeoverAction] in
+            await self?.beginTakeoverAttempt(id: attemptID)
             let controlStartedAt = Date()
             do {
                 let response = try takeoverAction(clientID)
@@ -397,6 +406,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
         }
         refreshNow(allowGhosttyOwnerAttach: false)
+    }
+
+    /// Stamps the moment a queued takeover starts sending, which is what the retry timeout measures.
+    /// Skipped for an attempt that is no longer current, so a stale attempt cannot restamp the one that
+    /// replaced it.
+    private func beginTakeoverAttempt(id: UUID) {
+        guard takeoverAttemptID == id else { return }
+        takeoverAttemptStartedAt = Date()
     }
 
     private func finishFailedTakeoverAttempt(id: UUID, message: String) {
@@ -554,7 +571,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     }
                     lastObservedAttachmentMode = nil
                     if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
-                        ownerAttachmentRequested = false
+                        // The pane presents as a viewer behind whoever the snapshot says owns the session,
+                        // but it gives up SEEKING ownership only on evidence that it lost an attachment it
+                        // held. With an attach still outstanding this snapshot carries no such evidence —
+                        // it cannot describe this client's attachment at all — and giving up on it would
+                        // park an owner-seeking pane as a viewer for good, since nothing short of a user
+                        // request asks again. That mirrors `shouldPreserveOwnerRequest` below, which keeps
+                        // the request across an observed viewer attachment for the same reason.
+                        if pendingAttach == nil { ownerAttachmentRequested = false }
                         preferredAttachmentMode = .viewer
                     }
                 }
@@ -712,17 +736,30 @@ private final class NotificationObserverBag: @unchecked Sendable {
         pendingAttach = (id: attachID, mode: requestedMode)
         let attachingClient = client
         clientControlQueue.enqueue(priority: .userInitiated) { [weak self, attachClientAction] in
+            // Ordering the sends is not enough on its own: a queued attach the pane has already replaced
+            // asks the daemon for a mode that is wrong by definition. An owner attach superseded by the
+            // viewer attach a lost-ownership refresh issued would, if it still went out, displace the
+            // session's new owner — and the viewer attach behind it then demotes this client, leaving
+            // the session with nobody owning it. So only the newest intent gets to send.
+            let isCurrentIntent = await self?.isCurrentPendingAttach(id: attachID) ?? false
+            guard isCurrentIntent else { return }
             do {
                 try attachClientAction(attachingClient, requestedMode)
-                await MainActor.run { self?.finishAttach(id: attachID, mode: requestedMode, error: nil) }
-            } catch { await MainActor.run { self?.finishAttach(id: attachID, mode: requestedMode, error: error) } }
+                await self?.finishAttach(id: attachID, mode: requestedMode, error: nil)
+            } catch { await self?.finishAttach(id: attachID, mode: requestedMode, error: error) }
         }
     }
 
-    /// Completion for an attach send that has landed. A superseded attach — a newer attach or a detach
-    /// has replaced it — is inert here: its outcome describes a request the pane has already moved on
-    /// from, so it neither rolls back the current intent nor reports anything, which is what keeps a
-    /// stale failure from sitting on a pane the daemon has since answered.
+    /// Whether `id` is still the attach the pane wants sent. Its queued send checks this immediately
+    /// before going out, so a superseded attach is dropped rather than delivered; `pendingAttach` is
+    /// left alone either way, since by then it belongs to the intent that replaced this one.
+    private func isCurrentPendingAttach(id: UUID) -> Bool { pendingAttach?.id == id }
+
+    /// Completion for an attach send that has landed. An attach superseded while it was in flight — the
+    /// window the pre-send check in `attachLocalClientIfNeeded` cannot cover — is inert here: its
+    /// outcome describes a request the pane has already moved on from, so it neither rolls back the
+    /// current intent nor reports anything, which is what keeps a stale failure from sitting on a pane
+    /// the daemon has since answered.
     ///
     /// A confirmed attach is where the pane's host becomes interactive: clearing `pendingAttach` moves
     /// `confirmedHostAttachmentMode` to the requested mode, and re-running the host attach is what
