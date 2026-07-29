@@ -13,7 +13,7 @@
     /// and they must survive the vt-session rebuild a daemon handoff performs.
     ///
     /// These drive real escape sequences through a real PTY child, so they exercise the whole path:
-    /// PTY output -> vt session -> shim getters -> OSC 7 decode -> runtime state.
+    /// PTY output -> vt session -> shim change events and getters -> OSC 7 decode -> runtime state.
     ///
     /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops
     /// onto the engine for every core call: cores are created inside a `TerminalEngineActor.run`
@@ -189,9 +189,9 @@
         /// Clearing the title returns the session to its launch-configuration title rather than
         /// leaving the stale one in place. Both clear spellings are pinned because they surface
         /// differently at the VT layer: a whitespace-only payload reads back as a present title that
-        /// normalizes to blank, while an empty payload reads back as absent (the same reading a
-        /// never-set title produces, which is why clearing on absence requires the vt session to have
-        /// reported the title first). The macOS host treats both as cleared.
+        /// normalizes to blank, while an empty payload reads back as absent — indistinguishable from a
+        /// never-set title except for the change event that accompanies it. The macOS host treats both
+        /// as cleared.
         @Test func clearedTitleFallsBackToTheLaunchConfiguration() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
@@ -250,7 +250,8 @@
             let coreBox = try await startCore(
                 makeConfiguration(
                     named: "metadata-ssh",
-                    script: "printf '\\033]7;file://localhost/srv/local\\007'; sleep 1; printf '\\033]7;file://far-end.example.com/srv/remote\\007'; printf 'SETTLED\\n'"
+                    script:
+                        "printf '\\033]7;file://localhost/srv/local\\007'; sleep 1; printf '\\033]7;file://far-end.example.com/srv/remote\\007'; printf 'SETTLED\\n'"
                 ), paths: paths)
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
@@ -297,7 +298,8 @@
             try await resumedCore.resumeFromHandoff(
                 DaemonHandoffSessionRecord(
                     sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance))
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
 
             let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
             #expect(payload.title == "handed off")
@@ -305,16 +307,144 @@
 
             // The rebuilt vt session never saw the OSC 2 sequence, so it reports the title as absent.
             // New live output must not read that absence as "the program cleared the title" and erase
-            // the recovered value — clearing requires a present→absent transition the vt session
-            // actually observed.
+            // the recovered value — the title is only ever re-read when the program reports one.
             let liveBytes = Array("fresh output after handoff\r\n".utf8)
             #expect(liveBytes.withUnsafeBufferPointer { write(pty.slave, $0.baseAddress, $0.count) } == liveBytes.count)
-            try await waitAsync {
-                (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("fresh output after handoff") == true
-            }
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("fresh output after handoff") == true }
             let refreshed = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
             #expect(refreshed.title == "handed off")
             #expect(refreshed.runtimeState?.title == "handed off")
+        }
+
+        /// A title set and then cleared inside a single write ends cleared. The daemon never sees the
+        /// intermediate value — it reads the title back after the write — so what makes the clear stick
+        /// is the change event, not the observation of a present→absent transition.
+        @Test func aTitleSetAndClearedInOneWriteEndsCleared() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let core = try await startCore(
+                makeConfiguration(
+                    named: "metadata-same-turn-clear",
+                    script: "printf '\\033]2;temporary\\007'; sleep 1; printf '\\033]2;second\\007\\033]2;\\007SETTLED\\n'"), paths: paths
+            ).value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+            try await waitAsync { Self.payload(of: core)?.title == "temporary" }
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
+            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
+            #expect(payload.title == Self.launchTitle)
+            #expect(payload.runtimeState?.title == Self.launchTitle)
+        }
+
+        /// A rejected OSC 7 never clears or replaces the directory an earlier accepted report
+        /// established, even when it arrives in the same write as a report that would have been
+        /// accepted: the value is read back after the write, so the terminal has already overwritten
+        /// the intermediate payload with the unusable one.
+        @Test func aRejectedOSC7InTheSameWriteLeavesTheAcceptedDirectoryStanding() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let core = try await startCore(
+                makeConfiguration(
+                    named: "metadata-same-turn-reject",
+                    script: "printf '\\033]7;file://localhost/srv/local\\007'; sleep 1;"
+                        + " printf '\\033]7;file://localhost/srv/second\\007\\033]7;not-a-uri\\007SETTLED\\n'"), paths: paths
+            ).value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+            try await waitAsync { Self.payload(of: core)?.workingDirectory == "/srv/local" }
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8))?.contains("SETTLED") == true }
+            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: core) })
+            #expect(payload.workingDirectory == "/srv/local")
+            #expect(payload.runtimeState?.workingDirectory == "/srv/local")
+        }
+
+        /// A program that clears its title right after a daemon handoff is honoured: the rebuilt vt
+        /// session never saw the title being set, and the clear reads back exactly like a title that was
+        /// never set, so only the change event distinguishes them.
+        @Test func aTitleClearedAfterAHandoffFallsBackToTheLaunchConfiguration() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let configuration = makeConfiguration(named: "metadata-clear-after-handoff", script: "printf '\\033]2;before handoff\\007'")
+            let core = try await startCore(configuration, paths: paths).value
+            try await waitAsync { (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.title == "before handoff" }
+
+            guard let record = try await core.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record for a live session")
+                return
+            }
+            TerminalEngineActor.runSynchronously { core.terminate() }
+
+            // Stand in for a trimmed transcript, so the rebuilt session recovers the title from the
+            // runtime-state row rather than from replayed escape sequences.
+            try Data("TRIMMED\r\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let pty = try makeAdoptablePTY()
+            let resumedCoreBox = await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+            }
+            try await resumedCore.resumeFromHandoff(
+                DaemonHandoffSessionRecord(
+                    sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
+            #expect(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) }?.title == "before handoff")
+
+            let liveBytes = Array("\u{1B}]2;\u{07}".utf8)
+            #expect(liveBytes.withUnsafeBufferPointer { write(pty.slave, $0.baseAddress, $0.count) } == liveBytes.count)
+            try await waitAsync { Self.payload(of: resumedCore)?.title == Self.launchTitle }
+            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
+            #expect(payload.runtimeState?.title == Self.launchTitle)
+        }
+
+        /// The rebuild replays the whole transcript, so every title the session ever set is re-emitted.
+        /// The rebuilt session must adopt only the final value and announce nothing: a replay is not new
+        /// activity, and re-announcing it would churn every attached client's tab and pane titles.
+        @Test func aRebuildAdoptsTheReplayedTitleWithoutAnnouncingIt() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let configuration = makeConfiguration(
+                named: "metadata-replay", script: "printf '\\033]2;first\\007'; sleep 1; printf '\\033]2;final\\007'")
+            let core = try await startCore(configuration, paths: paths).value
+            try await waitAsync { (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.title == "final" }
+
+            guard let record = try await core.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record for a live session")
+                return
+            }
+            TerminalEngineActor.runSynchronously { core.terminate() }
+
+            // Armed only after the first core is gone, so it counts the rebuild's postings alone.
+            let metadataChanges = NotificationCounter(.spacesTerminalSessionMetadataDidChange, sessionID: configuration.sessionID)
+            defer { metadataChanges.stop() }
+
+            let pty = try makeAdoptablePTY()
+            let resumedCoreBox = await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
+            defer {
+                tearDown(pty)
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+            }
+            try await resumedCore.resumeFromHandoff(
+                DaemonHandoffSessionRecord(
+                    sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
+                    ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+                    transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce))
+
+            let payload = try #require(TerminalEngineActor.runSynchronously { Self.payload(of: resumedCore) })
+            #expect(payload.title == "final")
+            #expect(payload.runtimeState?.title == "final")
+            #expect(metadataChanges.count == 0, "replaying a transcript must not announce its historical title changes")
         }
 
         // MARK: - Handoff fixtures

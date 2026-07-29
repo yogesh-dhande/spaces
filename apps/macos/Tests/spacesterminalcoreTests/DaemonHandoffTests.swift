@@ -43,7 +43,8 @@ final class DaemonHandoffTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let session = DaemonHandoffSessionRecord(
-            sessionID: "session-1", masterFD: 42, childPID: 4242, columns: 120, rows: 40, ownerEpoch: 7, screenStateRevision: 99, appearance: "dark")
+            sessionID: "session-1", masterFD: 42, childPID: 4242, columns: 120, rows: 40, ownerEpoch: 7, screenStateRevision: 99, appearance: "dark",
+            transcriptOffsetAtQuiesce: 4096)
         let table = DaemonHandoffTable(
             formatVersion: DaemonHandoffTable.currentFormatVersion, generation: 1, pid: getpid(), sourceVersion: "1.2.3",
             writtenAt: "2026-07-12T00:00:00.000Z", sessions: [session])
@@ -68,6 +69,7 @@ final class DaemonHandoffTests: XCTestCase {
         XCTAssertEqual(consumedSession.ownerEpoch, session.ownerEpoch)
         XCTAssertEqual(consumedSession.screenStateRevision, session.screenStateRevision)
         XCTAssertEqual(consumedSession.appearance, session.appearance)
+        XCTAssertEqual(consumedSession.transcriptOffsetAtQuiesce, session.transcriptOffsetAtQuiesce)
 
         // Consume deletes the table whether or not it was adoptable.
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
@@ -153,6 +155,9 @@ final class DaemonHandoffTests: XCTestCase {
         XCTAssertEqual(session.ownerEpoch, 3)
         XCTAssertEqual(session.screenStateRevision, 5)
         XCTAssertEqual(session.appearance, "light")
+        // Written by a build that predates the field, so it decodes absent rather than failing the
+        // whole table — the shape every future field has to keep.
+        XCTAssertNil(session.transcriptOffsetAtQuiesce)
     }
 
     // MARK: - descriptor helpers

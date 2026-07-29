@@ -135,7 +135,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
     private static func handoffRecord(from record: DaemonHandoffSessionRecord, adopting pty: AdoptablePTY) -> DaemonHandoffSessionRecord {
         DaemonHandoffSessionRecord(
             sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-            ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance)
+            ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+            transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce)
     }
 
     /// Engine-isolated; call from inside a `TerminalEngineActor.run`/`runSynchronously` bridge.

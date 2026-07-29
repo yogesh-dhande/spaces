@@ -129,6 +129,9 @@ struct SpacesGhosttyVtSession {
     GhosttyRenderState render_state;
     GhosttyRenderStateRowIterator row_iterator;
     GhosttyRenderStateRowCells row_cells;
+    // Filled by the effect callbacks (only once `spaces_ghostty_vt_session_enable_events` has run) and
+    // emptied by `spaces_ghostty_vt_session_drain_events`.
+    SpacesGhosttyVtSessionEvents pending;
 };
 
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session);
@@ -637,6 +640,155 @@ bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const 
     return true;
 }
 
+// Upper bound on one turn's accumulated query responses. The write_pty callback runs on the hot
+// `ghostty_terminal_vt_write` path, so a program spraying queries must not be able to grow this buffer
+// without bound; past the cap the excess is dropped and the responses already recorded still go out.
+#define SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES (64u * 1024u)
+
+// The effect callbacks. All of these run synchronously inside `ghostty_terminal_vt_write`, so each one
+// only records into the session's sink: no allocation beyond the two accumulators, no re-entry into the
+// terminal, no blocking.
+
+static void spaces_ghostty_vt_on_bell(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    if (session->pending.bell_count < UINT32_MAX) session->pending.bell_count++;
+}
+
+static void spaces_ghostty_vt_on_title_changed(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    session->pending.title_changed = true;
+}
+
+static void spaces_ghostty_vt_on_pwd_changed(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    session->pending.pwd_changed = true;
+}
+
+static void spaces_ghostty_vt_on_write_pty(GhosttyTerminal terminal, void *userdata, const uint8_t *data, size_t len) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || data == NULL || len == 0) return;
+
+    // Responses are appended, never replaced: a single write turn can produce several (a DA reply and a
+    // cursor-position report, say) and the program parses them in the order the terminal emitted them.
+    size_t existing = session->pending.pty_response_len;
+    if (existing >= SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES) return;
+    size_t room = SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES - existing;
+    size_t take = len < room ? len : room;
+    char *grown = (char *)realloc(session->pending.pty_response, existing + take);
+    if (grown == NULL) return;
+    memcpy(grown + existing, data, take);
+    session->pending.pty_response = grown;
+    session->pending.pty_response_len = existing + take;
+}
+
+static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
+    GhosttyTerminal terminal, void *userdata, const GhosttyClipboardWrite *request
+) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || request == NULL) return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+    // Sized struct: a request smaller than this build's struct predates a field read below.
+    if (request->size < sizeof(GhosttyClipboardWrite)) return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+
+    // Spaces carries only the system clipboard; the selection clipboards have no counterpart here.
+    if (request->location != GHOSTTY_CLIPBOARD_LOCATION_STANDARD) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    }
+
+    if (request->contents_len == 0) {
+        free(session->pending.clipboard_text);
+        session->pending.clipboard_text = NULL;
+        session->pending.clipboard_len = 0;
+        session->pending.clipboard_cleared = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+    }
+
+    // The representations are alternative encodings of one value; Spaces stores text, so the first
+    // `text/plain` one wins and a write offering none is refused.
+    const GhosttyClipboardContent *chosen = NULL;
+    static const char plain_text_prefix[] = "text/plain";
+    const size_t plain_text_prefix_len = sizeof(plain_text_prefix) - 1;
+    for (size_t index = 0; index < request->contents_len && chosen == NULL; index++) {
+        const GhosttyClipboardContent *content = &request->contents[index];
+        if (content->mime.ptr == NULL || content->mime.len < plain_text_prefix_len) continue;
+        if (memcmp(content->mime.ptr, plain_text_prefix, plain_text_prefix_len) != 0) continue;
+        chosen = content;
+    }
+    if (chosen == NULL) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    }
+    if (chosen->data.len > (size_t)SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+    }
+
+    // The payload is borrowed for the callback's duration only, so it is copied here.
+    char *copy = (char *)malloc(chosen->data.len > 0 ? chosen->data.len : 1);
+    if (copy == NULL) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR;
+    }
+    if (chosen->data.len > 0 && chosen->data.ptr != NULL) memcpy(copy, chosen->data.ptr, chosen->data.len);
+
+    // Last write of the turn wins, including over a clear that arrived earlier in the same turn.
+    free(session->pending.clipboard_text);
+    session->pending.clipboard_text = copy;
+    session->pending.clipboard_len = chosen->data.len;
+    session->pending.clipboard_cleared = false;
+    return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+}
+
+bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
+    if (session == NULL || session->terminal == NULL || session->symbols.terminal_set == NULL) return false;
+    GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
+    // One userdata serves every callback, and callback options take the function pointer itself rather
+    // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
+    const struct {
+        GhosttyTerminalOption option;
+        const void *value;
+    } registrations[] = {
+        {GHOSTTY_TERMINAL_OPT_USERDATA, session},
+        {GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty},
+        {GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell},
+        {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
+        {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
+        {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+    };
+
+    // Every registration is attempted and every result folded in: the caller depends on these events
+    // exclusively for metadata and query replies, so a session that got only some of its callbacks is
+    // silent feature loss rather than degraded output, and has to be reported as a failure.
+    bool registered = true;
+    for (size_t index = 0; index < sizeof(registrations) / sizeof(registrations[0]); index++) {
+        registered &= terminal_set(session->terminal, registrations[index].option, registrations[index].value) == GHOSTTY_SUCCESS;
+    }
+    return registered;
+}
+
+void spaces_ghostty_vt_session_drain_events(SpacesGhosttyVtSession *session, SpacesGhosttyVtSessionEvents *out_events) {
+    if (out_events == NULL) return;
+    memset(out_events, 0, sizeof(*out_events));
+    if (session == NULL) return;
+    *out_events = session->pending;
+    memset(&session->pending, 0, sizeof(session->pending));
+}
+
+void spaces_ghostty_vt_session_events_free(SpacesGhosttyVtSessionEvents *events) {
+    if (events == NULL) return;
+    free(events->clipboard_text);
+    free(events->pty_response);
+    memset(events, 0, sizeof(*events));
+}
+
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
     if (session == NULL) return;
 
@@ -653,6 +805,7 @@ void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
         session->symbols.terminal_free(session->terminal);
     }
 
+    spaces_ghostty_vt_session_events_free(&session->pending);
     spaces_ghostty_vt_unload_symbols(&session->symbols);
     free(session);
 }
