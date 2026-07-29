@@ -741,6 +741,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
             // viewer attach a lost-ownership refresh issued would, if it still went out, displace the
             // session's new owner — and the viewer attach behind it then demotes this client, leaving
             // the session with nobody owning it. So only the newest intent gets to send.
+            // Accepted residual: the check runs at send time, so an owner attach superseded while
+            // ALREADY IN FLIGHT can still land, and the same ownerless corner exists inside that one
+            // network round trip. Both clients then read the true state off the attachment broadcast
+            // and either's takeover prompt restores it in one action; closing the window needs the
+            // attach request to carry an ownership precondition the daemon checks — a wire change a
+            // two-client race inside one RTT does not justify.
             let isCurrentIntent = await self?.isCurrentPendingAttach(id: attachID) ?? false
             guard isCurrentIntent else { return }
             do {
