@@ -701,19 +701,35 @@ import Foundation
         public var errorDescription: String? {
             switch self {
             case .daemonNotFound(let profile, let searchedPaths):
-                let described: (kind: String, explanation: String) =
-                    profile.isInstalledProfile
-                    ? (
+                // A BOUND invocation gets its own explanation because the remedy the other two share does not
+                // exist for it: `SPACESD_EXECUTABLE` is subtracted from what a bound process may act on
+                // (`SpacesProfile.environmentServingThisProfile`), so naming a daemon with it would only
+                // reproduce this failure. Nothing this process can point at may serve that profile — that is
+                // the rule, not a gap — so the only way forward is the installed daemon existing again.
+                let described: (kind: String, explanation: String)
+                if profile.source == .explicitInstalledProfile {
+                    described = (
+                        "installed",
+                        "This invocation is BOUND to that profile rather than belonging to it, so only the installed layout's own daemon "
+                            + "(~/.spaces/bin/spacesd, /usr/local/bin/spacesd) may serve it: neither this build's own spacesd nor SPACESD_EXECUTABLE "
+                            + "applies, and the variable is ignored here so a binding can never start another build against a profile a user relies "
+                            + "on. Repair or reinstall the Spaces app so the installed daemon is present again, or drop --installed-profile to act "
+                            + "on this checkout's own development profile."
+                    )
+                } else if profile.isInstalledProfile {
+                    described = (
                         "installed",
                         "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
                             + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
                     )
-                    : (
+                } else {
+                    described = (
                         "development",
                         "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
                             + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
                             + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
                     )
+                }
                 // The discovery route is carried as provenance only: it explains how a surprising profile was
                 // arrived at without being what decided anything above.
                 return "No spacesd was found for the \(described.kind) profile at \(profile.rootDirectory) "

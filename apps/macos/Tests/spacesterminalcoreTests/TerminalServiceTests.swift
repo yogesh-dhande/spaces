@@ -265,6 +265,37 @@ import XCTest
             }
         }
 
+        // The message is what an operator acts on, so it is pinned. A bound invocation cannot be told to set
+        // `SPACESD_EXECUTABLE`: the variable is subtracted from what a bound process may act on, so following
+        // that advice reproduces this exact failure. It gets the remedies that exist instead, and it names the
+        // profile — the point of a bound run is that the operator is acting on one their checkout does not
+        // imply.
+        func testDaemonNotFoundForABoundInstalledProfileExplainsThatNoOverrideCanServeIt() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let message = TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: ["/absent/spacesd"]).localizedDescription
+
+            XCTAssertTrue(message.contains(profile.rootDirectory), "The failure must name the profile it is about: \(message)")
+            XCTAssertTrue(message.contains("BOUND to that profile"), "It must say why this profile's rules differ: \(message)")
+            XCTAssertTrue(
+                message.contains("SPACESD_EXECUTABLE") && message.contains("ignored here"),
+                "It must say the override is ignored rather than offer it as a remedy: \(message)")
+            XCTAssertTrue(message.contains("reinstall the Spaces app"), "It must offer the remedy that exists: \(message)")
+            XCTAssertTrue(message.contains("--installed-profile"), "It must offer the way out of bound mode: \(message)")
+        }
+
+        // The other profiles are unchanged: for them the override does work, and recommending it is the point.
+        func testDaemonNotFoundForProfilesTheBuildOwnsStillRecommendsTheOverride() {
+            for profile in [
+                makeProfile(isInstalled: true, source: .installedFallback), makeProfile(isInstalled: false, source: .developmentWorktree),
+            ] {
+                let message = TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: ["/absent/spacesd"]).localizedDescription
+
+                XCTAssertTrue(message.contains("set SPACESD_EXECUTABLE"), "A \(profile.source.rawValue) profile can still be pinned: \(message)")
+                XCTAssertFalse(message.contains("ignored here"), "Only a bound profile ignores the override: \(message)")
+            }
+        }
+
         // The daemon `ensureRunning` spawns has to resolve the SAME profile the spawn was decided for. A
         // bound installed profile is stated on this process's command line, which a child never sees, so an
         // inherited `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` would be the only thing reaching it — and the
