@@ -370,6 +370,14 @@ apps/macos/Tests/e2e.sh terminal --scenario daemon-exec-handoff
 
 `e2e_daemon_exec_handoff.sh` launches a directly-supervised `spacesd` behind a `bin/spacesd` symlink, starts a long-lived shell session printing a marker then a steady tick output, flips the symlink to a second on-disk copy of the same build, and pokes the daemon with `spaces daemon apply-update`. It proves the daemon pid is unchanged (exec, not a supervisor respawn), the session's child pid survives, the expected `handoff_resume generation=N` line lands in the daemon log, the pre-handoff scrollback marker is still in `terminal tail`, live I/O keeps flowing (a freshly sent line round-trips), and no runtime state lands `.failed`. It repeats the flip-and-poke a second time to also cover a double handoff (`generation=2`) before a normal idle shutdown.
 
+For a plain SIGTERM to the daemon:
+
+```bash
+apps/macos/Tests/e2e.sh terminal --scenario daemon-signal-shutdown
+```
+
+`e2e_daemon_signal_shutdown.sh` launches a directly-supervised `spacesd`, starts a long-lived session, and sends `SIGTERM` to the daemon pid directly rather than going through the control socket. It proves the daemon logs the signal, exits, and — the discriminating check — the session's `terminal_runtime_states` row is finalized to `exited` rather than left stuck at `running`, which is only true if the signal ran the same graceful teardown (transcript flush, attachment finalization, durable runtime-state write) as the `.shutdown` command.
+
 For the coding-agent orchestration surface (`spaces agent` list/status/annotate/subscribe/kill and notification injection):
 
 ```bash
