@@ -522,25 +522,47 @@ def assert_appearance_flip_retheme(args: argparse.Namespace, app: dict, session_
 
 
 def wait_for_process_row(args: argparse.Namespace, app: dict, workspace_id: str, state: str) -> dict:
+    # `wait_for` reports only the predicate's last value, and a predicate that returns None cannot say
+    # whether the row was missing or merely in another state — two failures with completely different
+    # causes. The observed rows are captured here so the timeout names which one happened.
+    observed: dict = {}
+
     def attempt():
         workspace = workspace_overview(args, app, workspace_id)
+        observed["processRows"] = [{"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("processRows") or []]
         row = find_named_row(workspace, "processRows", PROCESS_NAME)
         if row and row.get("runState") == state:
             return row
         return None
 
-    return wait_for(attempt, f"{PROCESS_NAME} row state {state}")
+    try:
+        return wait_for(attempt, f"{PROCESS_NAME} row state {state}")
+    except TimeoutError as error:
+        rows = observed.get("processRows")
+        detail = "no processRows at all" if rows == [] else f"processRows={json.dumps(rows, sort_keys=True)}"
+        raise TimeoutError(f"{error} ({detail})") from None
 
 
 def wait_for_agent_row(args: argparse.Namespace, app: dict, workspace_id: str, state: str) -> dict:
+    # Same ambiguity as wait_for_process_row: distinguish a missing row from a row in another state.
+    observed: dict = {}
+
     def attempt():
         workspace = workspace_overview(args, app, workspace_id)
+        observed["codingAgentRows"] = [
+            {"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("codingAgentRows") or []
+        ]
         row = find_named_row(workspace, "codingAgentRows", AGENT_NAME)
         if row and row.get("runState") == state:
             return row
         return None
 
-    return wait_for(attempt, f"{AGENT_NAME} row state {state}")
+    try:
+        return wait_for(attempt, f"{AGENT_NAME} row state {state}")
+    except TimeoutError as error:
+        rows = observed.get("codingAgentRows")
+        detail = "no codingAgentRows at all" if rows == [] else f"codingAgentRows={json.dumps(rows, sort_keys=True)}"
+        raise TimeoutError(f"{error} ({detail})") from None
 
 
 def require_config_rows(args: argparse.Namespace, app: dict, workspace_id: str) -> tuple[dict, dict]:

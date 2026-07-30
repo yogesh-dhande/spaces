@@ -3490,8 +3490,11 @@ with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
         "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
         (secondary_session_id,),
     ).fetchone()
+    # The row stores the payload plus `has_final_render`, the flag every device-overview build reads
+    # to answer "can this ended pane replay?" without decoding the payload. The emitting reason lives
+    # inside the payload itself.
     persisted_final = db.execute(
-        "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
+        "SELECT payload_json, has_final_render FROM terminal_remote_session_states WHERE session_id = ?",
         (session_id,),
     ).fetchone()
 require(process_is_alive(expected_service_pid), f"spacesd pid {expected_service_pid} exited after ctrl+c.")
@@ -3510,9 +3513,16 @@ require(
     f"Secondary child process is not alive after ctrl+c: {secondary_state!r}",
 )
 require(persisted_final is not None, "Primary session did not persist a final remote state payload.")
-require(persisted_final[0] == "terminated", f"Persisted final payload reason was not terminated: {persisted_final[0]!r}")
-persisted_final_payload = json.loads(persisted_final[1])
+persisted_final_payload = json.loads(persisted_final[0])
+require(
+    persisted_final_payload.get("reason") == "terminated",
+    f"Persisted final payload reason was not terminated: {persisted_final_payload.get('reason')!r}",
+)
 require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
+require(
+    persisted_final[1] == 1,
+    f"Persisted final payload was not flagged as carrying a replayable frame: has_final_render={persisted_final[1]!r}",
+)
 
 overview_response = send_mobile_request({"command": "overview"})
 require(overview_response.get("ok"), f"Device API overview failed after ctrl+c: {overview_response}")
