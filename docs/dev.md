@@ -788,7 +788,7 @@ npm run dev
 npm run build
 ```
 
-`scripts/make-readme-device-art.py` regenerates the README's device-framed product shots (`docs/media/readme-devices.png`, `docs/media/readme-ios.png`) from the screenshots in `apps/web/public/media/`.
+`scripts/make-readme-device-art.py` regenerates the README's device-framed product shot (`docs/media/readme-ios.png`) from the screenshots in `apps/web/public/media/`.
 
 ## Version Metadata
 

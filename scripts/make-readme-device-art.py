@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Regenerate the README's device-framed product shots.
+"""Regenerate the README's device-framed product shot.
 
-Composes a MacBook shell around `apps/web/public/media/hero.png` and iPhone
-shells around `apps/web/public/media/ios-sessions.png` /
-`ios-terminal.png`, then writes the results to `docs/media/`. GitHub strips
-CSS from rendered READMEs, so the device chrome has to be baked into the
-PNGs themselves rather than drawn with a wrapper + box-shadow in HTML.
+Composes iPhone shells around `apps/web/public/media/ios-sessions.png` /
+`ios-terminal.png`, then writes the result to `docs/media/readme-ios.png`.
+GitHub strips CSS from rendered READMEs, so the device chrome has to be
+baked into the PNG itself rather than drawn with a wrapper + box-shadow in
+HTML.
 
-The source screenshots already contain their own chrome (macOS traffic
-lights top-left in hero.png; iOS status bar + Dynamic Island in the phone
-shots), so the shells drawn here are deliberately "dumb": a MacBook lid is
-just bezel + rounded top corners (no titlebar), and a phone is just the
-metal rail + side buttons (no notch cutout). Drawing either would
-duplicate chrome that is already baked into the screenshot.
+The iOS screenshots already contain their own chrome (status bar + Dynamic
+Island), so the phone shell drawn here is deliberately "dumb": just the
+metal rail + side buttons, no notch cutout. Drawing one would duplicate
+chrome that is already baked into the screenshot.
 
 Every shape is drawn at `SUPERSAMPLE`x the final pixel size and downscaled
-once with LANCZOS at the very end of each composite, so rounded corners and
+once with LANCZOS at the very end of the composite, so rounded corners and
 tapered edges stay smooth instead of jagged. Run with no arguments:
 
     python3 scripts/make-readme-device-art.py
@@ -31,48 +29,37 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_DIR = REPO_ROOT / "apps" / "web" / "public" / "media"
 OUT_DIR = REPO_ROOT / "docs" / "media"
 
-HERO_PATH = MEDIA_DIR / "hero.png"
 IOS_SESSIONS_PATH = MEDIA_DIR / "ios-sessions.png"
 IOS_TERMINAL_PATH = MEDIA_DIR / "ios-terminal.png"
 
-DEVICES_OUT_PATH = OUT_DIR / "readme-devices.png"
 IOS_OUT_PATH = OUT_DIR / "readme-ios.png"
 
 # Everything is drawn this many times larger than the final pixel size, then
-# downscaled once with LANCZOS. That's what keeps rounded corners and the
-# tapered MacBook base smooth instead of jagged.
+# downscaled once with LANCZOS. That's what keeps rounded corners smooth
+# instead of jagged.
 SUPERSAMPLE = 4
 
-DEVICES_FINAL_WIDTH = 1800
 IOS_FINAL_WIDTH = 1000
 
-# Neutral device greys, chosen to read cleanly on both GitHub's light and
-# dark theme (no near-white and no near-black that would flatten into the
-# page background). Both the MacBook and the iPhone shell share this one
-# dark-aluminium palette -- BEZEL_COLOR/RAIL_HIGHLIGHT/MAC_LIGHT are the
-# Mac's own bezel/hinge/deck tones; METAL_MID exists only for the phone
-# rail's darker mid-band, which needs to stay dark enough to read as a
-# shadow without dropping all the way to PHONE_BEZEL_COLOR's near-black --
-# collapsing that gap is what makes a dark rail look like flat dark plastic.
-BEZEL_COLOR = (28, 31, 32)  # #1c1f20 -- Mac lid bezel
-RAIL_HIGHLIGHT = (58, 65, 67)  # #3a4143 -- brightest hinge/rail highlight
-MAC_LIGHT = (74, 77, 82)  # #4a4d52 -- deck / rail mid-light tone
+# Neutral dark-aluminium grey, chosen to read cleanly on both GitHub's light
+# and dark theme (no near-white and no near-black that would flatten into
+# the page background). RAIL_HIGHLIGHT/RAIL_LIGHT are the phone rail's
+# brightest highlight and mid-light tone; METAL_MID is its darker mid-band,
+# which needs to stay dark enough to read as a shadow without dropping all
+# the way to PHONE_BEZEL_COLOR's near-black -- collapsing that gap is what
+# makes a dark rail look like flat dark plastic.
+RAIL_HIGHLIGHT = (58, 65, 67)  # #3a4143 -- brightest rail highlight
+RAIL_LIGHT = (74, 77, 82)  # #4a4d52 -- rail mid-light tone
 METAL_MID = (53, 55, 59)  # #35373b -- darker mid-band, phone rail only
-MAC_BASE_FRONT_DARK = (18, 20, 21)  # darker than BEZEL_COLOR -- the base's
-# bottom front edge, where the deck should read darkest.
-HINGE_LINE_COLOR = (10, 11, 12)  # thin dark seam at the very bottom of the
-# lid, where it meets the base -- what makes the two pieces read as hinged
-# rather than as one continuous slab.
 SCREEN_BACKING = (12, 14, 15)  # #0c0e0f
 
 # The phone's black bezel -- what actually separates the metal rail from the
-# glass on a real device -- uses its own near-black distinct from
-# BEZEL_COLOR so it reads darker than the Mac's bezel/hinge tones.
+# glass on a real device -- uses its own near-black, distinct from and
+# darker than the rail tones above.
 PHONE_BEZEL_COLOR = (8, 8, 9)  # #080809
 
 SHADOW_ALPHA = 0.24  # low-alpha soft grounding shadow; anything heavier
-# reads as a grey box on GitHub's light theme. Shared by both shells now
-# that they're the same dark-aluminium tone.
+# reads as a grey box on GitHub's light theme.
 RAIL_CONTOUR = (72, 75, 80)  # thin stroke traced at the rail's true outer
 # edge -- keeps a crisp silhouette against GitHub's dark theme (#0d1117),
 # where a dark-aluminium rail alone has little contrast against the page.
@@ -140,166 +127,17 @@ def add_ground_shadow(
     return Image.alpha_composite(canvas, shadow)
 
 
-def mac_frame(screenshot: Image.Image, lid_width: int) -> tuple[Image.Image, dict]:
-    """Render a MacBook lid + base shell around `screenshot` at hi-res.
-
-    `screenshot` already contains the macOS traffic lights, so the lid draws
-    bezel only -- no titlebar. Returns (sprite, info); `info` gives the
-    sprite-local pixel boxes of the lid and the base so a caller can align
-    other sprites (e.g. an overlapping phone) against specific device
-    features instead of guessing offsets.
-    """
-    bezel_side = round(lid_width * 0.015)
-    bezel_top = bezel_side
-    bezel_bottom = round(lid_width * 0.02)
-    lid_radius = round(lid_width * 0.016)
-
-    screen_w = lid_width - 2 * bezel_side
-    screen_h = round(screen_w * screenshot.height / screenshot.width)
-    lid_height = screen_h + bezel_top + bezel_bottom
-
-    # The base's top edge sits flush against the lid (same width, no seam);
-    # the bottom (front) edge flares outward for the classic tapered-wedge
-    # look. The thumb-scoop lives on that bottom edge: a real MacBook's
-    # scoop is a shallow indentation in the *front* of the base, which in
-    # this straight-on view is the base's bottom edge, not a hole floating
-    # in the middle of the deck.
-    base_overhang = round(lid_width * 0.08)  # bottom-edge flare, per side
-    base_half_bottom = lid_width / 2 + base_overhang
-    base_height = round(lid_width * 0.036)
-    scoop_width = base_half_bottom * 2 * 0.16
-    scoop_depth = base_height * 0.40
-
-    shadow_blur = lid_width * 0.018
-    margin = round(shadow_blur * 3 + lid_width * 0.035)
-
-    canvas_w = round(2 * base_half_bottom + 2 * margin)
-    canvas_h = round(lid_height + base_height + 2 * margin)
-    cx = canvas_w / 2
-
-    lid_x0 = cx - lid_width / 2
-    lid_x1 = cx + lid_width / 2
-    lid_y0 = float(margin)
-    lid_y1 = lid_y0 + lid_height
-
-    base_y0 = lid_y1
-    base_y1 = base_y0 + base_height
-    base_top_l, base_top_r = lid_x0, lid_x1
-    base_bot_l, base_bot_r = cx - base_half_bottom, cx + base_half_bottom
-
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-
-    # Soft grounding shadow beneath the whole silhouette.
-    canvas = add_ground_shadow(
-        canvas,
-        (lid_x0 + lid_width * 0.03, lid_y0, lid_x1 - lid_width * 0.03, base_y1),
-        radius=lid_radius,
-        blur=shadow_blur,
-        y_offset=lid_width * 0.012,
-    )
-
-    # --- Base: tapered trapezoid, lighter top edge fading to a darker
-    # bottom edge, with a shallow thumb-scoop cut *upward* into the bottom
-    # (front) edge. The scoop's cut rectangle is drawn past the outer
-    # bottom edge so it merges with the already-transparent exterior --
-    # the scoop becomes part of the silhouette's outline instead of a
-    # separately-masked hole, so it reads correctly on any background. ---
-    base_mask = Image.new("L", (canvas_w, canvas_h), 0)
-    bmd = ImageDraw.Draw(base_mask)
-    bmd.polygon(
-        [
-            (base_top_l, base_y0),
-            (base_top_r, base_y0),
-            (base_bot_r, base_y1),
-            (base_bot_l, base_y1),
-        ],
-        fill=255,
-    )
-    scoop_l = cx - scoop_width / 2
-    scoop_r = cx + scoop_width / 2
-    bmd.rounded_rectangle(
-        _int_box((scoop_l, base_y1 - scoop_depth, scoop_r, base_y1 + 2)),
-        radius=round(scoop_depth * 0.55),
-        corners=(True, True, False, False),
-        fill=0,
-    )
-
-    # Thin hinge highlight right at the top edge, a flat deck mid-tone
-    # through the body, then darker toward the bottom front edge -- a broad
-    # top-to-bottom wash reads as a seam under the screen rather than a
-    # metal deck.
-    base_gradient = vertical_gradient_image(
-        canvas_w,
-        round(base_height),
-        [(0.0, RAIL_HIGHLIGHT), (0.15, MAC_LIGHT), (0.85, MAC_LIGHT), (1.0, MAC_BASE_FRONT_DARK)],
-    )
-    base_rgb = Image.new("RGB", (canvas_w, canvas_h), BEZEL_COLOR)
-    base_rgb.paste(base_gradient, (0, round(base_y0)))
-    base_layer = base_rgb.convert("RGBA")
-    base_layer.putalpha(base_mask)
-    canvas = Image.alpha_composite(canvas, base_layer)
-
-    # --- Lid: dark bezel, rounded top corners only (the bottom edge sits
-    # flush against the base, so it stays square). A 1px lighter top edge
-    # gives the bezel a hint of dimension. ---
-    lid_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(lid_layer)
-    highlight_h = max(SUPERSAMPLE, round(lid_width * 0.0015))
-    ld.rounded_rectangle(
-        _int_box((lid_x0, lid_y0, lid_x1, lid_y1)),
-        radius=lid_radius,
-        corners=(True, True, False, False),
-        fill=RAIL_HIGHLIGHT + (255,),
-    )
-    ld.rounded_rectangle(
-        _int_box((lid_x0, lid_y0 + highlight_h, lid_x1, lid_y1)),
-        radius=max(0, lid_radius - highlight_h),
-        corners=(True, True, False, False),
-        fill=BEZEL_COLOR + (255,),
-    )
-
-    # Hinge line: a thin darker stroke at the very bottom of the lid, where
-    # it meets the base -- what makes the two pieces read as a hinged
-    # laptop rather than one continuous slab. Sits inside the chin bezel
-    # (bezel_bottom), well below the screen, so it never overlaps it.
-    hinge_h = max(SUPERSAMPLE, round(lid_width * 0.0015))
-    ld.rectangle(
-        _int_box((lid_x0, lid_y1 - hinge_h, lid_x1, lid_y1)),
-        fill=HINGE_LINE_COLOR + (255,),
-    )
-
-    # Screen: inset rectangle, screenshot resized to fit exactly (aspect
-    # already matches since screen_h was derived from it) -- no cropping,
-    # no distortion, no extra rounding (the source frame is already flat).
-    screen_x0 = lid_x0 + bezel_side
-    screen_y0 = lid_y0 + bezel_top
-    screen_x1 = screen_x0 + screen_w
-    screen_y1 = screen_y0 + screen_h
-    fitted = screenshot.resize((round(screen_w), round(screen_h)), Image.LANCZOS)
-    lid_layer.paste(fitted, (round(screen_x0), round(screen_y0)))
-
-    canvas = Image.alpha_composite(canvas, lid_layer)
-
-    info = {
-        "lid_box": (lid_x0, lid_y0, lid_x1, lid_y1),
-        "base_bottom_box": (base_bot_l, base_y0, base_bot_r, base_y1),
-        "margin": margin,
-    }
-    return canvas, info
-
-
 def phone_frame(screenshot: Image.Image, rail_width: int) -> tuple[Image.Image, dict]:
     """Render an iPhone dark-aluminium shell around `screenshot` at hi-res.
 
     `screenshot` already contains the status bar and Dynamic Island, so this
     draws the rail, black bezel, and side buttons only -- no notch cutout.
 
-    Structure outside in: a dark-aluminium rail (the same METAL_* palette as
-    mac_frame's lid/base, the outer ring the eye reads as "metal"), a
-    near-black bezel ring inset from it (what actually separates the metal
-    from the glass on a real device -- without it the rail reads as a flat
-    border rather than a machined edge), then the screen clipped just inside
-    that.
+    Structure outside in: a dark-aluminium rail (the outer ring the eye
+    reads as "metal"), a near-black bezel ring inset from it (what actually
+    separates the metal from the glass on a real device -- without it the
+    rail reads as a flat border rather than a machined edge), then the
+    screen clipped just inside that.
     """
     rail_thickness = rail_width * 0.022
     bezel_thickness = rail_width * 0.025
@@ -331,9 +169,8 @@ def phone_frame(screenshot: Image.Image, rail_width: int) -> tuple[Image.Image, 
     rail_x1, rail_y1 = rail_x0 + rail_width, rail_y0 + rail_height
 
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    # Same grounding-shadow treatment as the Mac shell (SHADOW_ALPHA) now
-    # that the rail is the same dark-aluminium tone -- a dark shape already
-    # reads clearly on a white background without a deeper shadow.
+    # Low-alpha grounding-shadow treatment (SHADOW_ALPHA) -- a dark shape
+    # already reads clearly on a white background without a deeper shadow.
     canvas = add_ground_shadow(
         canvas,
         (rail_x0, rail_y0, rail_x1, rail_y1),
@@ -356,7 +193,7 @@ def phone_frame(screenshot: Image.Image, rail_width: int) -> tuple[Image.Image, 
         x0, x1 = sorted((near, far))
         box = _int_box((x0, y_center - length / 2, x1, y_center + length / 2))
         radius = button_thickness / 2
-        bd.rounded_rectangle(box, radius=radius, fill=MAC_LIGHT + (255,))
+        bd.rounded_rectangle(box, radius=radius, fill=RAIL_LIGHT + (255,))
         bd.rounded_rectangle(box, radius=radius, outline=METAL_MID + (255,), width=button_outline_w)
 
     # Left: action button, then volume up / down, positioned as percentages
@@ -381,9 +218,9 @@ def phone_frame(screenshot: Image.Image, rail_width: int) -> tuple[Image.Image, 
         round(rail_height),
         [
             (0.0, RAIL_HIGHLIGHT),
-            (0.25, MAC_LIGHT),
+            (0.25, RAIL_LIGHT),
             (0.5, METAL_MID),
-            (0.75, MAC_LIGHT),
+            (0.75, RAIL_LIGHT),
             (1.0, RAIL_HIGHLIGHT),
         ],
     )
@@ -489,53 +326,6 @@ def _paste_sprite(canvas: Image.Image, sprite: Image.Image, pos: tuple[int, int]
     return Image.alpha_composite(canvas, layer)
 
 
-def build_devices_composite() -> None:
-    hero = Image.open(HERO_PATH).convert("RGBA")
-    ios_sessions = Image.open(IOS_SESSIONS_PATH).convert("RGBA")
-
-    mac_lid_width_hi = 3200
-    mac_img, mac_info = mac_frame(hero, mac_lid_width_hi)
-
-    phone_rail_width_hi = round(mac_lid_width_hi * 0.27)
-    phone_img, phone_info = phone_frame(ios_sessions, phone_rail_width_hi)
-
-    canvas_w = mac_img.width + phone_img.width
-    canvas_h = mac_img.height + phone_img.height
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-
-    mac_pos = (round(canvas_w * 0.2), round(canvas_h * 0.15))
-    canvas = _paste_sprite(canvas, mac_img, mac_pos)
-
-    lid_x0, lid_y0, lid_x1, lid_y1 = mac_info["lid_box"]
-    base_x0, base_y0, base_x1, base_y1 = mac_info["base_bottom_box"]
-    lid_height = lid_y1 - lid_y0
-
-    # Phone's rail right edge lines up with the Mac base's (wider) right
-    # edge, and its top overlaps the lid's lower-right corner so it hangs
-    # down well past the base -- per the approved composition sketch.
-    target_right = mac_pos[0] + base_x1
-    target_top = mac_pos[1] + lid_y0 + lid_height * 0.56
-
-    rail_x0, rail_y0, rail_x1, rail_y1 = phone_info["rail_box"]
-    phone_pos = (round(target_right - rail_x1), round(target_top - rail_y0))
-    canvas = _paste_sprite(canvas, phone_img, phone_pos)
-
-    crop_box = (
-        min(mac_pos[0], phone_pos[0]),
-        min(mac_pos[1], phone_pos[1]),
-        max(mac_pos[0] + mac_img.width, phone_pos[0] + phone_img.width),
-        max(mac_pos[1] + mac_img.height, phone_pos[1] + phone_img.height),
-    )
-    canvas = canvas.crop(crop_box)
-
-    final_height = round(canvas.height * (DEVICES_FINAL_WIDTH / canvas.width))
-    canvas = canvas.resize((DEVICES_FINAL_WIDTH, final_height), Image.LANCZOS)
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    canvas.save(DEVICES_OUT_PATH)
-    print(f"wrote {DEVICES_OUT_PATH} ({canvas.width}x{canvas.height})")
-
-
 def build_ios_composite() -> None:
     ios_sessions = Image.open(IOS_SESSIONS_PATH).convert("RGBA")
     ios_terminal = Image.open(IOS_TERMINAL_PATH).convert("RGBA")
@@ -570,7 +360,6 @@ def build_ios_composite() -> None:
 
 
 def main() -> None:
-    build_devices_composite()
     build_ios_composite()
 
 

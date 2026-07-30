@@ -4,8 +4,6 @@ Manage parallel coding sessions across all of your devices
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 
-<p align="center"><img src="docs/media/readme-devices.png" width="900" alt="The Spaces macOS app showing projects, workspaces, and a built-in terminal, with the iOS app showing the same workspaces on an iPhone"></p>
-
 ## Features
 
 - **Projects and workspaces** — a project is any directory, Git or not; a workspace is one feature, branch, or experiment inside it, backed by a Git worktree or a separate clone. Keeps parallel work separate instead of stashing and switching branches in one checkout.
