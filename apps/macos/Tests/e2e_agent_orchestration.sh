@@ -283,7 +283,9 @@ spawn_fails_fast_when_the_child_exits() {
   spawn_out="$("$SPACES_CLI" agent spawn --workspace "$FIXTURE_WORKSPACE_ID" --command "$missing_command" 2>&1)"
   spawn_status=$?
   set -e
-  elapsed_ms=$(( "$(now_ms)" - start_ms ))
+  # Unquoted on purpose: `$(( ))` does not strip quotes the way `(( ))` does, so a quoted command
+  # substitution here is a literal token and an arithmetic syntax error.
+  elapsed_ms=$(( $(now_ms) - start_ms ))
   # The failed spawn leaves its session record behind; record it so cleanup tears it down.
   session_id="$(printf '%s' "$spawn_out" | sed -nE 's/.*Agent session ([0-9A-F-]{36}).*/\1/p' | head -n 1)"
   if [[ -n "$session_id" ]]; then
@@ -327,7 +329,10 @@ spawn_runs_the_command_through_the_login_environment() {
 baseline=("${(@f)$(env -i HOME=$HOME /bin/zsh -l -c 'print -rl -- $path')}")
 extra=(${path:|baseline})
 print -r -- "spawnpathextra=${#extra}"
-read
+# Blocks so the spawned agent stays the terminal's foreground process for detection to identify. The
+# baseline run below feeds it /dev/null, where `read` returns 1 at EOF — tolerated so that a probe
+# doing exactly what it was asked cannot fail the step under `set -e`/`pipefail`.
+read || true
 PROBE
 
   baseline_extra="$(env -i HOME="$HOME" TERM=dumb /bin/zsh -l -i "$probe_script" </dev/null 2>/dev/null \
