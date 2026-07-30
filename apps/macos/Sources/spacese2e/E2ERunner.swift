@@ -135,6 +135,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "daemon-exec-handoff",
             kind: .script(scriptName: "e2e_daemon_exec_handoff.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
+            name: "daemon-signal-shutdown",
+            kind: .script(scriptName: "e2e_daemon_signal_shutdown.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
             name: "edit-shortcuts",
             kind: .script(scriptName: "e2e_terminal_edit_shortcuts.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(

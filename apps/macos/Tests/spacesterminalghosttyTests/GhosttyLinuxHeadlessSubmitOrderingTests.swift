@@ -58,13 +58,18 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -92,7 +97,9 @@
 
             let outputPath = paths.outputPath
             let transcript = { (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "" }
-            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+            try await waitAsync(transcriptPath: outputPath) {
+                ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY")
+            }
 
             let firstMarker = "SUBMIT_ORDER_FIRST"
             let secondMarker = "SUBMIT_ORDER_SECOND"
@@ -107,7 +114,9 @@
 
             // Each marker appears once as the PTY echo of the typed line and once as `cat`'s output of the
             // submitted line, so two occurrences of the second marker means both Enters landed.
-            try await waitAsync { Self.occurrences(of: secondMarker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
+            try await waitAsync(transcriptPath: outputPath) {
+                Self.occurrences(of: secondMarker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2
+            }
 
             let output = transcript()
             #expect(

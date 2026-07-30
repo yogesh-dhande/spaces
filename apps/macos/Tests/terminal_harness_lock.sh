@@ -78,11 +78,10 @@ terminal_harness_pids_owning_unix_socket() {
 # Stops the Caddy router belonging to the profile at `runtime_dir`.
 #
 # The daemon spawns Caddy as a detached `Process().run()` child and reaps it only in its own shutdown
-# teardown, so Caddy outlives every other way a daemon can end. On macOS that includes a plain
-# `kill`: the daemon's termination handling hangs off NSApplication, and its SIGTERM/SIGINT signal
-# sources are `#if canImport(Glibc)` (Linux only), so SIGTERM takes the default disposition and skips
-# teardown entirely. Every harness step builds its own throwaway profile, so nothing ever adopts the
-# orphan Caddy the way a restarted daemon on a persistent profile would, and one accumulates per step.
+# teardown, so Caddy outlives any daemon end that skips that teardown — a SIGKILL, a crash, or a
+# wedged daemon that never answers its shutdown command. Every harness step builds its own throwaway
+# profile, so nothing ever adopts the orphan Caddy the way a restarted daemon on a persistent profile
+# would, and one accumulates per step.
 #
 # After a clean daemon shutdown the admin socket is already unlinked and this is a no-op, which is what
 # makes it a backstop rather than a second teardown path. Scoping is by that admin socket, whose name
@@ -130,15 +129,17 @@ stop_caddy_router_for_runtime_dir() {
 
 # Stops everything the profile at `runtime_dir` is running: its terminal service daemon and the Caddy
 # router that daemon owns. Harness cleanup must route daemon teardown through here rather than
-# `kill`ing the daemon's pid, because only the daemon's own graceful shutdown reaps its children --
-# see stop_caddy_router_for_runtime_dir for why a bare SIGTERM does not.
+# `kill`ing the daemon's pid: the `.shutdown` socket command is the supported stop — it reports
+# whether the daemon accepted it and waits for the socket to disappear — and the Caddy backstop
+# covers a daemon that died without running its teardown.
 stop_terminal_service_for_runtime_dir() {
   local runtime_dir="$1"
   local timeout="${2:-5}"
   # Optional: the launched daemon's own pid, for the one gap the socket-scoped stop cannot cover — a
   # daemon that wedged or died before binding its service socket leaves nothing to address the
   # graceful shutdown to, so a caller that recorded the pid at launch passes it here and a still-live
-  # process is KILLed (macOS spacesd ignores TERM, and a pre-bind daemon has no children to reap).
+  # process is KILLed (a wedge that never bound its socket is not trusted to honor TERM either, and a
+  # pre-bind daemon has no children to reap).
   local fallback_pid="${3:-}"
   [[ -n "$runtime_dir" ]] || return 0
   stop_terminal_service_daemon_for_runtime_dir "$runtime_dir" "$timeout"

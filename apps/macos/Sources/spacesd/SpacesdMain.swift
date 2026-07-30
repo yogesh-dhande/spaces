@@ -348,6 +348,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
+        // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
+        // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
+        // after its engine snapshot escape termination and `startSharedServices()` can restart services
+        // the stop phase already stopped. Deferred rather than fixed here because both residues self-heal:
+        // an unterminated session's row falls to `recoverStaleSessions`' dead-pid branch at the next
+        // daemon start, and an orphaned Caddy is adopted through its live admin socket by the next
+        // daemon's `ensureRunning`. The window is also only the successor image's post-handoff adoption —
+        // `resumeSessionsFromHandoffIfNeeded` returns without suspending on a fresh boot.
         let adoptedSessionIDs = try await resumeSessionsFromHandoffIfNeeded()
         // Reconcile stale runtime rows AFTER handoff adoption so the adopted sessions are exempt: the
         // sweep repairs any live-state row that claims this pid but was not adopted, which is the backstop
@@ -527,6 +535,66 @@ enum SpacesDaemonProfileCommandRouting {
         // durable runtime row stays stuck at `.running`. This is a cold path; the writes are bounded by
         // SQLite's busy timeout plus the bounded exited-state retry, so a blocking drain is acceptable.
         for core in terminatedCores { await core.drainPersistenceForShutdown() }
+    }
+
+    private var shutdownTask: Task<Void, Never>?
+    private var handoffCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Single entry point for every termination path — the SIGTERM/SIGINT handler, AppKit's
+    /// `applicationWillTerminate`, and the control socket's `shutdownAndExit`. Any of them can fire
+    /// while another is mid-teardown (launchd sends SIGTERM to a daemon that may also be quitting),
+    /// and running `shutdown()` twice would re-drive per-core teardown against already-terminated
+    /// cores. Main-actor isolation makes the check-and-store atomic (no suspension between them), and
+    /// a late caller AWAITS the in-flight task rather than returning early — otherwise a signal
+    /// handler's `exit(0)` could fire out from under a teardown still flushing transcripts.
+    ///
+    /// The handoff wait lives INSIDE the stored task, not before it: a suspension between the
+    /// `shutdownTask` read and its store would let two callers each start a teardown.
+    func shutdownOnce() async {
+        if let shutdownTask {
+            await shutdownTask.value
+            return
+        }
+        let task = Task { @MainActor in
+            await self.awaitHandoffCompletion()
+            await self.shutdown()
+        }
+        shutdownTask = task
+        await task.value
+    }
+
+    /// Suspends until no exec-in-place handoff is in flight, so a termination signal cannot interleave
+    /// teardown with one. `performExecHandoff` suspends at every quiesce and drain, so without this a
+    /// signal-handler task lands between them and `terminateAllSessions()` closes a master descriptor
+    /// the handoff is still about to hand to `prepareDescriptorForHandoff` — the quiesce-versus-
+    /// terminate exclusion `HostManagedPTYTerminalSessionDriver.terminate()` documents as an invariant
+    /// its callers uphold. The handoff's own keep-running failure path is the second reason: it calls
+    /// `startSharedServices()`, which would relaunch the router and reopen the socket a moment before
+    /// `exit(0)` — orphaning exactly the Caddy the graceful shutdown exists to reap.
+    ///
+    /// Waiting rather than refusing is what keeps the signal honest on the path that matters: a handoff
+    /// that fails leaves the daemon running, and a refused signal would strand a `launchctl stop`
+    /// against a daemon that never goes away. `while` rather than `if` because a fresh handoff can
+    /// start between the waiters being resumed and this task being scheduled; each iteration suspends,
+    /// so it cannot spin.
+    ///
+    /// Accepted: a handoff that reaches `execv` replaces the image, so this task and its continuation
+    /// die with the old image and the signal is dropped — the successor keeps running under the same
+    /// pid, and the caller has to signal again. Honoring it instead would mean either aborting a
+    /// handoff past its point of no return or persisting the request across exec for the successor to
+    /// act on, and both add a failure path to the update mechanism to serve a race that needs a signal
+    /// inside the quiesce window AND a successful exec, and that a second signal resolves immediately.
+    private func awaitHandoffCompletion() async {
+        while handoffInProgress {
+            await withCheckedContinuation { continuation in handoffCompletionWaiters.append(continuation) }
+        }
+    }
+
+    /// Called from `performExecHandoff`'s `defer` — see `awaitHandoffCompletion()`.
+    private func resumeHandoffCompletionWaiters() {
+        let waiters = handoffCompletionWaiters
+        handoffCompletionWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Stops everything except the per-session cores: the lifecycle timer, database-change
@@ -763,10 +831,12 @@ enum SpacesDaemonProfileCommandRouting {
     /// Explicit exit for daemon-initiated termination (shutdown commands, restart requests).
     /// Runs cleanup directly and exits rather than routing through `NSApp.terminate`, so the
     /// exit does not depend on AppKit termination machinery and the shutdown command reaps
-    /// children identically on macOS and Linux. External NSApp-driven termination (e.g. logout)
-    /// still reaches `shutdown()` through the app delegate.
+    /// children identically on macOS and Linux. External termination — a SIGTERM/SIGINT, or
+    /// NSApp-driven termination such as logout — still reaches `shutdown()` through the signal
+    /// handler or the app delegate; `shutdownOnce()` is what keeps those from re-entering
+    /// teardown if they race this path.
     private func shutdownAndExit() async -> Never {
-        await shutdown()
+        await shutdownOnce()
         exit(0)
     }
 
@@ -786,8 +856,26 @@ enum SpacesDaemonProfileCommandRouting {
             writeStandardError("spacesd handoff_refused reason=already_in_progress\n")
             return
         }
+        // The other half of the teardown/handoff exclusion `awaitHandoffCompletion()` establishes: that
+        // one covers a signal arriving during a handoff, this one covers a handoff starting during a
+        // teardown. `requestDaemonRestart()` fires this on a 150ms timer, which is easily long enough to
+        // land inside a `shutdown()` suspended on a service or core drain, and quiescing — or exec'ing,
+        // which would replace the image and discard the shutdown outright — against a daemon already
+        // tearing down races the same descriptor teardown. `shutdownTask` rather than
+        // `shutdownInProgress` is the flag to read: `shutdownOnce()` stores it synchronously before it
+        // suspends, whereas `shutdownInProgress` is not set until `shutdown()` itself begins, leaving a
+        // window this guard would miss.
+        guard shutdownTask == nil else {
+            writeStandardError("spacesd handoff_refused reason=shutting_down\n")
+            return
+        }
         handoffInProgress = true
-        defer { handoffInProgress = false }
+        // Registered after the refusal guard above, so a refused second trigger neither clears the flag
+        // nor releases waiters belonging to the handoff that is actually running.
+        defer {
+            handoffInProgress = false
+            resumeHandoffCompletionWaiters()
+        }
 
         let currentUptime = ProcessInfo.processInfo.systemUptime
         let elapsedSinceLastHandoff = lastHandoffResumeUptime.map { Swift.max(0, currentUptime - $0) }
@@ -2569,7 +2657,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             // bridge. Bound the pump so a stuck cleanup cannot hang logout.
             let shutdownComplete = DispatchSemaphore(value: 0)
             Task { @MainActor in
-                await controller.shutdown()
+                await controller.shutdownOnce()
                 shutdownComplete.signal()
             }
             let deadline = Date(timeIntervalSinceNow: 5)
@@ -2611,6 +2699,13 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 let controller = try MainActor.assumeIsolated { try SpacesDaemonController(launchExecutablePath: launchExecutablePath) }
                 let delegate = SpacesDaemonAppDelegate(controller: controller)
                 app.delegate = delegate
+                // AppKit's `applicationWillTerminate` only reaches NSApp-driven termination (logout,
+                // `NSApp.terminate`); a plain SIGTERM/SIGINT (what launchd and `kill` send) never runs it,
+                // so without this the whole graceful teardown — transcript flush, attachment finalization,
+                // reconcile-store WAL checkpoint, router stop — is skipped and the process dies mid-write.
+                // Install the same signal sources the non-AppKit branch uses, before `app.run()` so nothing
+                // can signal the process in the gap.
+                let signalSources = installTerminationSignalHandlers(controller: controller)
                 // Kick startup as a main-actor Task and then run the app run loop: `start()` awaits the
                 // exec-in-place resume, which needs the run loop pumping ticks, and the request-accepting
                 // server starts only after the resume completes.
@@ -2620,7 +2715,10 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                         exit(1)
                     }
                 }
-                app.run()
+                // Hold the signal sources for the run loop's lifetime — see
+                // `installTerminationSignalHandlers` for why letting them deallocate silently disables
+                // graceful shutdown.
+                withExtendedLifetime(signalSources) { app.run() }
             } catch {
                 writeStandardError("spacesd: \(error)\n")
                 exit(1)
@@ -2646,7 +2744,7 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 // is not the forbidden main→engine bridge.
                 let shutdownComplete = DispatchSemaphore(value: 0)
                 Task { @MainActor in
-                    await controller.shutdown()
+                    await controller.shutdownOnce()
                     shutdownComplete.signal()
                 }
                 while shutdownComplete.wait(timeout: .now()) == .timedOut {
@@ -2691,33 +2789,39 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         setenv("PATH", path, 1)
     }
 
-    #if canImport(Glibc)
-        private static func installTerminationSignalHandlers(controller: SpacesDaemonController) -> [DispatchSourceSignal] {
-            [SIGTERM, SIGINT].map { signalNumber in
-                _ = signal(signalNumber, SIG_IGN)
-                let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
-                source.setEventHandler {
-                    writeStandardError("spacesd: received \(signalName(signalNumber)); shutting down\n")
-                    Task { @MainActor in
-                        await controller.shutdown()
-                        exit(0)
-                    }
+    /// Installs a `DispatchSourceSignal` for SIGTERM and SIGINT so a signalled daemon runs its graceful
+    /// teardown (transcript flush, attachment finalization, reconcile-store WAL checkpoint, router stop)
+    /// instead of dying at the kernel's default disposition, which is an immediate, teardown-free exit.
+    /// `signal(n, SIG_IGN)` must run before the dispatch source is created: a `DispatchSourceSignal` only
+    /// OBSERVES a signal's delivery, it does not change what the signal does to the process, so without
+    /// first ignoring it the default disposition (terminate) still fires the instant the signal arrives.
+    /// The caller must hold the returned sources for the process's lifetime with `withExtendedLifetime` —
+    /// a released `DispatchSourceSignal` cancels, which reverts to the ignore-only disposition installed
+    /// above and silently disables graceful shutdown for the rest of the process's life, with no error to
+    /// signal the regression.
+    private static func installTerminationSignalHandlers(controller: SpacesDaemonController) -> [DispatchSourceSignal] {
+        [SIGTERM, SIGINT].map { signalNumber in
+            _ = signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+            source.setEventHandler {
+                writeStandardError("spacesd: received \(signalName(signalNumber)); shutting down\n")
+                Task { @MainActor in
+                    await controller.shutdownOnce()
+                    exit(0)
                 }
-                source.resume()
-                return source
             }
+            source.resume()
+            return source
         }
+    }
 
-        private static func signalName(_ signalNumber: Int32) -> String {
-            switch signalNumber {
-            case SIGTERM: "SIGTERM"
-            case SIGINT: "SIGINT"
-            default: "signal \(signalNumber)"
-            }
+    private static func signalName(_ signalNumber: Int32) -> String {
+        switch signalNumber {
+        case SIGTERM: "SIGTERM"
+        case SIGINT: "SIGINT"
+        default: "signal \(signalNumber)"
         }
-    #else
-        private static func installTerminationSignalHandlers(controller _: SpacesDaemonController) -> [DispatchSourceSignal] { [] }
-    #endif
+    }
 }
 
 private func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
