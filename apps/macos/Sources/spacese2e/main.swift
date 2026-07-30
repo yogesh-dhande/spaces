@@ -30,8 +30,8 @@ struct SpacesE2ECommand: ParsableCommand {
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
             TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
-            OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
-            MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
+            OpenRemoteDevicePairingWindowCommand.self, SeedPairedDeviceCommand.self, RecordScreenCommand.self, ProfileShowCommand.self,
+            ProfileAppOwnerCommand.self, MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
             ProfileCommand.self, ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self,
             ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
@@ -403,6 +403,48 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
             RemoteDevicePairingWindowPayload(
                 name: result.name, host: result.host, port: result.port, pairingLink: result.linkString,
                 certificateFingerprint: link.certificateFingerprint, expiresAt: result.expiresAt))
+    }
+}
+
+/// Records a device a harness already paired out of band — the remote Device API E2E pairs this Mac
+/// over SSH and reports the issued token — into this profile's client store and secret store.
+///
+/// It goes through the client store's own writers on purpose. A harness that hand-writes the
+/// `paired_devices` row leaves a client database that has tables but not the rest of the schema, and
+/// schema creation only ever runs on an empty database, so the app then fails its first read of any
+/// other client table.
+private struct SeedPairedDeviceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "seed-paired-device", abstract: "Record an already-paired remote device in this profile's client store.")
+
+    @Option(name: .long, help: "Device id the remote daemon's pinned certificate resolves to.") var deviceID: String
+
+    @Option(name: .long, help: "Device display name.") var name: String
+
+    @Option(name: .long, help: "Remote Device API host.") var host: String
+
+    @Option(name: .long, help: "Remote Device API port.") var port: Int
+
+    @Option(name: .long, help: "Remote daemon certificate fingerprint to pin.") var certificateFingerprint: String
+
+    @Option(name: .long, help: "Remote SSH host.") var sshHost: String?
+
+    @Option(name: .long, help: "Remote SSH user.") var sshUser: String?
+
+    @Option(name: .long, help: "Remote SSH port.") var sshPort: Int?
+
+    @Option(name: .long, help: "Auth token the remote daemon issued to this Mac client.") var authToken: String
+
+    func run() throws {
+        let timestamp = nowISO8601()
+        // The only device a harness seeds this way is the Linux remote daemon under test, and its
+        // seeding stands in for a pairing that already happened, so it is also the last selected one.
+        let device = SpacesPairedDeviceRecord(
+            id: deviceID, name: name, platform: "linux", host: host, port: port, certificateFingerprint: certificateFingerprint,
+            sshHost: normalizedOptional(sshHost), sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: timestamp, updatedAt: timestamp,
+            lastSelectedAt: timestamp)
+        try SpacesClientDatabase.withDefaultDatabase { try $0.upsert(device: device) }
+        try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID)
     }
 }
 
@@ -1407,8 +1449,7 @@ private struct DemoRecorder {
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
             if let state = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState,
-                let update = state.decodedRenderUpdate,
-                let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
+                let update = state.decodedRenderUpdate, let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
                 applied.snapshot.columns == columns, applied.snapshot.rows == rows
             {
                 return
