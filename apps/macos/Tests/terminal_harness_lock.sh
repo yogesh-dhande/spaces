@@ -135,9 +135,17 @@ stop_caddy_router_for_runtime_dir() {
 stop_terminal_service_for_runtime_dir() {
   local runtime_dir="$1"
   local timeout="${2:-5}"
+  # Optional: the launched daemon's own pid, for the one gap the socket-scoped stop cannot cover — a
+  # daemon that wedged or died before binding its service socket leaves nothing to address the
+  # graceful shutdown to, so a caller that recorded the pid at launch passes it here and a still-live
+  # process is KILLed (macOS spacesd ignores TERM, and a pre-bind daemon has no children to reap).
+  local fallback_pid="${3:-}"
   [[ -n "$runtime_dir" ]] || return 0
   stop_terminal_service_daemon_for_runtime_dir "$runtime_dir" "$timeout"
   stop_caddy_router_for_runtime_dir "$runtime_dir" "$timeout"
+  if [[ -n "$fallback_pid" ]] && kill -0 "$fallback_pid" >/dev/null 2>&1; then
+    kill -9 "$fallback_pid" >/dev/null 2>&1 || true
+  fi
 }
 
 stop_terminal_service_daemon_for_runtime_dir() {

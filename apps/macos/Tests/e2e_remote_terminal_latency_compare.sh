@@ -72,7 +72,7 @@ parse_args() {
 
 cleanup() {
   local exit_code=$?
-  stop_terminal_service_for_runtime_dir "$LOCAL_RUNTIME_DIR" 5
+  stop_terminal_service_for_runtime_dir "$LOCAL_RUNTIME_DIR" 5 "${LOCAL_SERVICE_PID:-}"
   release_terminal_harness_lock
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved remote terminal comparison root: %s\n' "$WORK_ROOT" >&2

@@ -295,7 +295,7 @@ cleanup() {
     kill "$DEVICE_API_PID" >/dev/null 2>&1 || true
     wait "$DEVICE_API_PID" >/dev/null 2>&1 || true
   fi
-  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5 "${SERVICE_PID:-}"
   cleanup_remote_e2e_host
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved mobile latency root: %s\n' "$WORK_ROOT" >&2
@@ -334,6 +334,7 @@ measure_remote_rtt_ms
 prepare_remote_workspace
 
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
+SERVICE_PID=$!
 
 service_socket="$(terminal_service_socket_path_for_runtime_dir "$RUNTIME_DIR")"
 service_deadline=$((SECONDS + 15))

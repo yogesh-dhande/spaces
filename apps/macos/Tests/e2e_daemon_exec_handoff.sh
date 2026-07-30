@@ -52,7 +52,7 @@ cleanup() {
     # socket is unresponsive) rather than a raw `kill`: a plain SIGTERM to spacesd on macOS does not
     # run its NSApplication termination delegate, so shared child services it started (e.g. the
     # Caddy router) would otherwise leak as orphans.
-    stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" >/dev/null 2>&1 || true
+    stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5 "${SERVICE_PID:-}" >/dev/null 2>&1 || true
     wait "$SERVICE_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK_ROOT"
