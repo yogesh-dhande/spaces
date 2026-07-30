@@ -1226,9 +1226,13 @@ public final class WorkspaceOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawCommand = (trimmedCommand?.isEmpty == false) ? command! : interactiveShellCommand(cwd: workspace.dir)
+        // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
+        // virtue of the terminal); with one, the command runs through that same interactive login shell
+        // so it resolves exactly the tools the bare session would.
+        let shellCommand =
+            (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
         return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, rawCommand: rawCommand, kind: .shell,
+            project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
             defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
     }
 
@@ -1238,6 +1242,8 @@ public final class WorkspaceOrchestrator {
     /// first signal, so a coding agent (e.g. Codex) that emits `working` before `init` still registers.
     /// The default title is the matched coding agent's display name (or the command's executable
     /// basename when no supported agent matches — spawn's hook gate has already ensured one does).
+    /// The command runs through the interactive login shell, so a spawned agent resolves the same
+    /// binaries the user's own terminal does (`claude` in `~/.local/bin`, an fnm-managed `codex`).
     @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?) throws
         -> TerminalServiceSessionSummary
     {
@@ -1249,14 +1255,16 @@ public final class WorkspaceOrchestrator {
             SupportedCodingAgentHook.matching(command: command)?.displayName
             ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
         return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, rawCommand: command, kind: .agent, defaultTitle: defaultTitle)
+            project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
+            defaultTitle: defaultTitle)
     }
 
     /// Shared launch path for ad-hoc command and agent sessions: builds the workspace environment,
-    /// prefixes the shell command, persists the tracked terminal window, and marks the workspace
-    /// running. The only per-caller differences are the launch `kind` and the fallback title.
+    /// prefixes `shellCommand` (already in its shell form) with that environment, persists the tracked
+    /// terminal window, and marks the workspace running. The only per-caller differences are the launch
+    /// `kind` and the fallback title.
     @discardableResult private func launchWorkspaceCommandSession(
-        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, rawCommand: String, kind: TerminalSessionKind, defaultTitle: String
+        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
@@ -1269,7 +1277,7 @@ public final class WorkspaceOrchestrator {
                 runtimeManifest: runtimeManifest
             ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
-        let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
+        let launchCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind)
