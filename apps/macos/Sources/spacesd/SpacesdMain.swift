@@ -348,6 +348,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
+        // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
+        // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
+        // after its engine snapshot escape termination and `startSharedServices()` can restart services
+        // the stop phase already stopped. Deferred rather than fixed here because both residues self-heal:
+        // an unterminated session's row falls to `recoverStaleSessions`' dead-pid branch at the next
+        // daemon start, and an orphaned Caddy is adopted through its live admin socket by the next
+        // daemon's `ensureRunning`. The window is also only the successor image's post-handoff adoption —
+        // `resumeSessionsFromHandoffIfNeeded` returns without suspending on a fresh boot.
         let adoptedSessionIDs = try await resumeSessionsFromHandoffIfNeeded()
         // Reconcile stale runtime rows AFTER handoff adoption so the adopted sessions are exempt: the
         // sweep repairs any live-state row that claims this pid but was not adopted, which is the backstop
