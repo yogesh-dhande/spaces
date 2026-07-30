@@ -564,11 +564,18 @@ enum SpacesDaemonProfileCommandRouting {
     /// `startSharedServices()`, which would relaunch the router and reopen the socket a moment before
     /// `exit(0)` — orphaning exactly the Caddy the graceful shutdown exists to reap.
     ///
-    /// Waiting rather than refusing is what keeps the signal honest: a handoff that succeeds replaces
-    /// the image (nothing here runs again), and one that fails leaves the daemon running, so a refused
-    /// signal would strand a `launchctl stop` against a daemon that never goes away. `while` rather
-    /// than `if` because a fresh handoff can start between the waiters being resumed and this task
-    /// being scheduled; each iteration suspends, so it cannot spin.
+    /// Waiting rather than refusing is what keeps the signal honest on the path that matters: a handoff
+    /// that fails leaves the daemon running, and a refused signal would strand a `launchctl stop`
+    /// against a daemon that never goes away. `while` rather than `if` because a fresh handoff can
+    /// start between the waiters being resumed and this task being scheduled; each iteration suspends,
+    /// so it cannot spin.
+    ///
+    /// Accepted: a handoff that reaches `execv` replaces the image, so this task and its continuation
+    /// die with the old image and the signal is dropped — the successor keeps running under the same
+    /// pid, and the caller has to signal again. Honoring it instead would mean either aborting a
+    /// handoff past its point of no return or persisting the request across exec for the successor to
+    /// act on, and both add a failure path to the update mechanism to serve a race that needs a signal
+    /// inside the quiesce window AND a successful exec, and that a second signal resolves immediately.
     private func awaitHandoffCompletion() async {
         while handoffInProgress {
             await withCheckedContinuation { continuation in handoffCompletionWaiters.append(continuation) }
@@ -839,6 +846,19 @@ enum SpacesDaemonProfileCommandRouting {
         // flag is cleared only on the keep-running failure paths; on success execv replaces the image.
         guard !handoffInProgress else {
             writeStandardError("spacesd handoff_refused reason=already_in_progress\n")
+            return
+        }
+        // The other half of the teardown/handoff exclusion `awaitHandoffCompletion()` establishes: that
+        // one covers a signal arriving during a handoff, this one covers a handoff starting during a
+        // teardown. `requestDaemonRestart()` fires this on a 150ms timer, which is easily long enough to
+        // land inside a `shutdown()` suspended on a service or core drain, and quiescing — or exec'ing,
+        // which would replace the image and discard the shutdown outright — against a daemon already
+        // tearing down races the same descriptor teardown. `shutdownTask` rather than
+        // `shutdownInProgress` is the flag to read: `shutdownOnce()` stores it synchronously before it
+        // suspends, whereas `shutdownInProgress` is not set until `shutdown()` itself begins, leaving a
+        // window this guard would miss.
+        guard shutdownTask == nil else {
+            writeStandardError("spacesd handoff_refused reason=shutting_down\n")
             return
         }
         handoffInProgress = true
