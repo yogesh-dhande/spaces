@@ -51,8 +51,9 @@ cleanup() {
     # terminal_harness_lock.sh's other callers use (falling back to SIGTERM/SIGKILL by pid if the
     # socket is unresponsive) rather than a raw `kill`: `.shutdown` is the supported stop, and unlike
     # a bare signal it reports whether the daemon accepted it and waits for the socket to disappear,
-    # so cleanup does not return while the daemon is still on its way out.
-    stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" >/dev/null 2>&1 || true
+    # so cleanup does not return while the daemon is still on its way out. The recorded pid is the
+    # last-resort fallback for a daemon that wedged before binding the socket the stop is scoped to.
+    stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5 "${SERVICE_PID:-}" >/dev/null 2>&1 || true
     wait "$SERVICE_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK_ROOT"

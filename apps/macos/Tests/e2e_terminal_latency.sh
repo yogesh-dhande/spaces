@@ -196,10 +196,10 @@ scenario_results: dict[str, dict] = {}
 socket_path_cache: dict[str, Path] = {}
 
 budgets = {
-    "mac-input-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
-    "mac-scrollback-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
-    "mac-scrollback-partial-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
-    "mac-command-output-catchup": {"gross_p95_ms": 2000, "target_p95_ms": 150},
+    "mac-input-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
+    "mac-scrollback-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
+    "mac-scrollback-partial-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
+    "mac-command-output-catchup": {"gross_p95_ms": 100, "target_p95_ms": 100},
 }
 
 
@@ -529,6 +529,7 @@ def send_terminal_control(
     command: str,
     *,
     text: str | None = None,
+    key: str | None = None,
     append_newline: bool = False,
     scroll_vertical: int | None = None,
     timeout: float = 10,
@@ -546,6 +547,8 @@ def send_terminal_control(
     ]
     if text is not None:
         arguments.extend(["--text", text])
+    if key is not None:
+        arguments.extend(["--key", key])
     if append_newline:
         arguments.append("--append-newline")
     if scroll_vertical is not None:
@@ -755,8 +758,12 @@ def run_mac_input_latency() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
-        "summary_metric": "event_to_frame_apply_ms",
+        # The enforced headline is the end-to-end keystroke->visible measure, the only phase this
+        # scenario samples for every attempt. `event_to_frame_apply_ms` needs a correlated mac-host
+        # frame-apply event and routinely resolves for none of them (issue #358), which left the
+        # gross budget checking an empty sample set and passing unconditionally.
+        "summary": summarize_latencies(measurements, "event_to_visible_ms"),
+        "summary_metric": "event_to_visible_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -881,8 +888,7 @@ def run_mac_scrollback_latency(
         "phase_summaries": summarize_phases(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
-        "report_only": True,
-        "budget_enforced": False,
+        "budget_enforced": True,
     }
 
 
@@ -893,7 +899,14 @@ def run_mac_command_output_catchup() -> dict:
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
     def type_shell_command(command_text: str) -> tuple[int, int, int]:
-        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "send", text=command_text, append_newline=True, timeout=15)
+        # Emulates a user typing a command: the line is typed, then Return is pressed as its own
+        # keystroke. Deliberately NOT the `append_newline` submit path — that is the orchestration
+        # /notification composer path, which sends the text as a paste before its Enter so agent TUIs
+        # read the two as separate events. Keeping the two paths distinct keeps this scenario measuring
+        # the render cost of typing and pressing Return, which is what it exists to track.
+        # The timed window opens at the Return keystroke, since that is the event that produces output.
+        send_terminal_control(session_id, "send", text=command_text, timeout=15)
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "key", key="enter", timeout=15)
         key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
 
@@ -1022,8 +1035,16 @@ for scenario in scenarios:
 failures = []
 for name, result in scenario_results.items():
     p95 = result["summary"]["p95_ms"]
-    if result.get("budget_enforced", True) and p95 is not None and p95 > budgets[name]["gross_p95_ms"]:
-        failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
+    if result.get("budget_enforced", True):
+        # An enforced budget with no samples is a harness failure, not a pass: a metric that stops
+        # resolving silently disables its own budget check.
+        if p95 is None:
+            failures.append(
+                f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
+                f"{budgets[name]['gross_p95_ms']}ms could not be enforced"
+            )
+        elif p95 > budgets[name]["gross_p95_ms"]:
+            failures.append(f"{name} p95 {p95}ms exceeded gross budget {budgets[name]['gross_p95_ms']}ms")
     if any(item.get("render_mode") != "ghostty-mirror" for item in result["measurements"]):
         failures.append(f"{name} did not remain in ghostty-mirror render mode")
 

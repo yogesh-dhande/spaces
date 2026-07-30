@@ -30,11 +30,33 @@ extension SQLiteStore {
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
-    /// `recordAgentExitStatus`, launcher launch) hold the authoritative record they just computed, so on
-    /// conflict the row's lifecycle columns take the caller's values: `status`, `session_key`, and
-    /// `claimed_launcher_name` are overwritten from `excluded`.
+    /// launcher launch) hold the authoritative record they just computed, so on conflict the row's
+    /// lifecycle columns take the caller's values: `status`, `session_key`, and `claimed_launcher_name`
+    /// are overwritten from `excluded`.
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         try upsertAgentWindow(record, conflictClause: Self.lifecycleOwningConflictClause)
+    }
+
+    /// Records a finalized exit status on an agent row, but only while the row still is the one the
+    /// caller judged — same id, still bound to the same terminal session. The exit reconcilers
+    /// (`reconcileExitedSessionBackedAgentRows`, the foreground reconciler) run on their own connection
+    /// without the workspace lifecycle lock, so a stop or restart can delete the row, and a fresh agent
+    /// reusing the row can rebind it to a new session, between the pass reading its snapshot and writing
+    /// its verdict. An upsert would re-insert the deleted row: it would hold the configured launcher's
+    /// slot on a dead session (reported "exited" forever) and, still carrying the agent's name, force the
+    /// replacement agent onto a deduplicated `<name>-2` row. Returns whether the write applied.
+    public func markAgentWindowExitStatus(_ snapshot: AgentWindowRecord, status: AgentWindowStatus, updatedAt: String) throws -> Bool {
+        let expectedSessionID = spacesAgentTerminalSessionID(snapshot)
+        return try withImmediateTransaction {
+            try execute(
+                sql: """
+                    UPDATE agent_sessions
+                    SET status = ?, updated_at = ?
+                    WHERE id = ? AND terminal_session_id IS NULLIF(?, '')
+                    """, bindings: [status.rawValue, updatedAt, snapshot.id, expectedSessionID ?? ""])
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
+            return changed > 0
+        }
     }
 
     /// Detection/reconciler upsert. Foreground detection and the exited-session reconciler only ever

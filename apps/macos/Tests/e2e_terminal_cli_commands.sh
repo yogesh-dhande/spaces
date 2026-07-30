@@ -19,9 +19,7 @@ RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/rt}"
 export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 APP_PID=""
-SERVICE_PID=""
 no_attach_session_id=""
-no_attach_service_pid=""
 session_id=""
 
 cleanup() {
@@ -31,18 +29,11 @@ cleanup() {
       env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" terminate-terminal-session "$cleanup_session_id" >/dev/null 2>&1 || true
     fi
   done
-  if [[ -n "$no_attach_service_pid" ]] && [[ "$no_attach_service_pid" != "$SERVICE_PID" ]] && kill -0 "$no_attach_service_pid" >/dev/null 2>&1; then
-    kill "$no_attach_service_pid" >/dev/null 2>&1 || true
-    wait "$no_attach_service_pid" >/dev/null 2>&1 || true
-  fi
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -148,27 +139,6 @@ else:
 PY
 }
 
-terminal_service_pid() {
-  local session_id="$1"
-  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$session_id" <<'PY'
-import os
-import sqlite3
-import sys
-
-db_path = sys.argv[1]
-root_directory = os.path.normpath(sys.argv[2])
-with sqlite3.connect(db_path) as db:
-    row = db.execute(
-        "SELECT service_pid FROM terminal_runtime_states WHERE root_directory = ?",
-        (root_directory,),
-    ).fetchone()
-if row:
-    print(row[0])
-else:
-    raise SystemExit("missing terminal runtime state")
-PY
-}
-
 attach_control_client() {
   local session_id="$1"
   local attachment_mode="$2"
@@ -245,7 +215,6 @@ no_attach_payload="python3 -c 'import time; print(\"__cli_noattach_ready__\", fl
 no_attach_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$no_attach_payload" --title cli-e2e-no-attach)"
 no_attach_session_id="$(extract_session_id "$no_attach_output")"
 [[ -n "$no_attach_session_id" ]] || { echo "Failed to parse unattached session ID from: $no_attach_output" >&2; exit 1; }
-no_attach_service_pid="$(terminal_service_pid "$no_attach_session_id")"
 sleep 2
 no_attach_list="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal list)"
 printf '%s\n' "$no_attach_list" | grep -Fq "$no_attach_session_id" || {
@@ -262,7 +231,6 @@ command_payload="stty raw -echo; python3 -c 'import os,sys,select,time; data=byt
 command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title cli-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
-SERVICE_PID="$(terminal_service_pid "$session_id")"
 
 wait_for_control_socket "$session_id"
 owner_client_id="$(attach_control_client "$session_id" owner)"

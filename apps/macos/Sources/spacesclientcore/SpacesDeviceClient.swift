@@ -285,8 +285,10 @@ public enum SpacesDeviceClient {
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
     /// status so the common compatible case costs a single round-trip. The standalone `daemonStatus`
     /// handshake is issued only as a fallback when the overview itself fails to decode — a
-    /// wire-incompatible daemon (a separate macOS/Linux install pair, not this build). This is the
-    /// per-refresh hot path; see `docs/implementation.md` (device compatibility handshake).
+    /// wire-incompatible daemon (a separate macOS/Linux install pair, not this build). For the local
+    /// device a transport failure re-resolves the daemon's current endpoint and retries once, since a
+    /// stored local port is not durable. This is the per-refresh hot path; see
+    /// `docs/implementation.md` (device compatibility handshake).
     public static func resolveOverview(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceOverviewResolution {
@@ -298,25 +300,96 @@ public enum SpacesDeviceClient {
     }
 
     static func resolveOverview(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
+        database providedDatabase: SpacesClientDatabase? = nil,
+        bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalRecoveryBootstrapProvider
     ) throws -> SpacesDeviceOverviewResolution {
-        let payload: SpacesDeviceOverviewPayload
-        do { payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview } catch {
-            // The overview did not decode (a wire-incompatible daemon's payload) or the device is
-            // unreachable. Ask the frozen core, which stays decodable across versions: an incompatible
-            // verdict means "blocked" (render the block, no overview); anything else is a genuine
-            // connection error to surface.
-            if let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) {
-                let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
-                if !verdict.isCompatible { return SpacesDeviceOverviewResolution(overview: nil, daemonStatus: status, compatibility: verdict) }
+        do { return try resolutionFromInlineStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
+            // The local daemon's Device API endpoint is not durable: it can idle-shut-down, be restarted,
+            // or be relaunched on a freshly assigned port, so the port in the caller's `paired_devices`
+            // record goes stale without anything invalidating it. A transport failure against the local
+            // device is therefore first read as "this Mac's endpoint needs re-resolving", not "the device
+            // is gone". Only the local device — a remote device's endpoint is configured, so a transport
+            // failure there is a genuinely unreachable device with nothing to re-resolve.
+            guard device.id == SpacesPairedDeviceRecord.localDeviceID, isDeviceAPITransportFailure(error) else {
+                return try resolutionFromHandshake(
+                    device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
             }
+            return try recoveredLocalResolution(
+                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase,
+                bootstrap: bootstrap)
+        }
+    }
+
+    /// The local device's bounded endpoint recovery: re-resolve this Mac's daemon and resolve once more
+    /// against it. Two steps, each taken at most once — a bootstrap that starts the daemon if it is down
+    /// and waits out a Device API listener still coming up (`defaultLocalRecoveryBootstrapProvider`), then
+    /// a single overview retry against the refreshed record. There is no loop here: a recovery that does
+    /// not succeed reports the failure rather than trying again.
+    ///
+    /// Both outcomes are logged as `terminal_device_local_endpoint_recovery`, because a recovery that
+    /// silently fails to produce an overview is indistinguishable — from the app log alone — from a
+    /// session that was never resolvable, which is what makes this failure mode expensive to diagnose.
+    private static func recoveredLocalResolution(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
+        database providedDatabase: SpacesClientDatabase?, bootstrap: LocalBootstrapProvider
+    ) throws -> SpacesDeviceOverviewResolution {
+        let startedAt = Date()
+        let refreshed: SpacesPairedDeviceRecord
+        do {
+            let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
+            refreshed = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+        } catch {
+            // The daemon could not be started or would not answer its control socket, so there is no
+            // current endpoint to retry against. `isLocalDaemonUnreachableError` classifies this for the
+            // caller, which degrades to an offline local section.
+            logLocalEndpointRecoveryMetric(device: device, refreshedPort: nil, startedAt: startedAt, success: false, stage: "bootstrap")
             throw error
         }
-        // The verdict rides inline on the overview, so no second round-trip is needed.
+        do {
+            let resolution = try resolutionFromInlineStatus(device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+            logLocalEndpointRecoveryMetric(device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
+            return resolution
+        } catch {
+            logLocalEndpointRecoveryMetric(device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: false, stage: "overview")
+            return try resolutionFromHandshake(
+                device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
+        }
+    }
+
+    private static func logLocalEndpointRecoveryMetric(
+        device: SpacesPairedDeviceRecord, refreshedPort: Int?, startedAt: Date, success: Bool, stage: String
+    ) {
+        TerminalPerformance.logMetric(
+            "terminal_device_local_endpoint_recovery", target: "device=\(device.id)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: success, detail: "stage=\(stage) stale_port=\(device.port) live_port=\(refreshedPort.map(String.init) ?? "nil")")
+    }
+
+    /// One overview round-trip, resolved through the compatibility verdict the overview carries inline —
+    /// so the compatible steady state needs no second round-trip.
+    private static func resolutionFromInlineStatus(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+    ) throws -> SpacesDeviceOverviewResolution {
+        let payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview
         let status = payload.daemonStatus
         let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
         let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
         return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
+    }
+
+    /// The overview did not decode (a wire-incompatible daemon's payload) or the device is unreachable.
+    /// Ask the frozen core, which stays decodable across versions: an incompatible verdict means
+    /// "blocked" (render the block, no overview); anything else rethrows `overviewError` as a genuine
+    /// connection error to surface.
+    private static func resolutionFromHandshake(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
+        overviewError: any Error
+    ) throws -> SpacesDeviceOverviewResolution {
+        if let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) {
+            let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
+            if !verdict.isCompatible { return SpacesDeviceOverviewResolution(overview: nil, daemonStatus: status, compatibility: verdict) }
+        }
+        throw overviewError
     }
 
     /// Frozen-core restart request: asks the daemon to restart itself. The OS service manager
@@ -699,6 +772,17 @@ public enum SpacesDeviceClient {
     public static func defaultLocalBootstrapProvider(_ clientApp: SpacesDeviceClientApp, _ presentedToken: String?) throws
         -> SpacesDeviceAPIControlResponse
     { try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp, presentedToken: presentedToken) }
+
+    /// The bootstrap used when a Device API request has already failed to reach this Mac's daemon, so the
+    /// daemon may be down entirely and about to be started here. It waits out a just-started daemon whose
+    /// Device API listener is not bound yet instead of reporting that as a failure — which the ordinary
+    /// bootstrap does whenever the daemon hosts sessions, since its own recovery for it is a relaunch it
+    /// must not aim at live sessions. Recovery is the only caller: a first bootstrap has no reason to
+    /// spend time waiting on a listener, and reporting a not-running Device API promptly is what lets the
+    /// sidebar degrade to offline quickly.
+    public static func defaultLocalRecoveryBootstrapProvider(_ clientApp: SpacesDeviceClientApp, _ presentedToken: String?) throws
+        -> SpacesDeviceAPIControlResponse
+    { try SpacesDeviceAPIControlClient.bootstrapLocalClientAwaitingDeviceAPI(clientApp: clientApp, presentedToken: presentedToken) }
 
     /// True when a Device API failure is the transport failing to reach the daemon at all, rather than a
     /// reachable daemon's answer. Device-neutral: the pinned-TLS request path is identical for the local

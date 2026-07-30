@@ -157,6 +157,71 @@ extension OrchestratorTests {
         XCTAssertNotNil(updated?.exitedAt)
     }
 
+    // The exit reconcile runs on its own store connection and takes no workspace lifecycle lock, so a
+    // stop can delete the process row after the reconcile snapshotted it. Marking the snapshot exited
+    // must not re-create the row: a resurrected row reports the configured process as "exited" forever,
+    // where the deleted row correctly reports it as not started.
+    func testStopDuringProcessReconcileDoesNotResurrectDeletedProcess() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let interleave = ReconcileInterleave()
+        let orchestrator = makeTestOrchestrator(store: store, currentDate: { interleave.runOnce() })
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
+            terminalTrackingID: "session-old", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        // refreshProcessStatuses reads its snapshot immediately before it reads the clock, so deleting
+        // here lands the stop between the snapshot and the exited write.
+        interleave.action = { try? store.deleteRunningProcess(id: process.id) }
+        let didUpdate = try orchestrator.refreshProcessStatuses(workspaceID: workspace.id)
+
+        XCTAssertTrue(
+            try store.runningProcesses(workspaceID: workspace.id).isEmpty,
+            "A process stopped mid-reconcile must stay deleted instead of reappearing as exited.")
+        XCTAssertFalse(didUpdate, "The reconcile wrote nothing, so it must not report a change.")
+    }
+
+    // Mirror image of the stop race: a restart replaces the row's terminal session while the reconcile
+    // holds a snapshot of the old one. The stale exited write must not strand the live process's row as
+    // exited, nor rebind it to the terminated session.
+    func testRestartDuringProcessReconcileKeepsRestartedProcessRunning() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let interleave = ReconcileInterleave()
+        let orchestrator = makeTestOrchestrator(store: store, currentDate: { interleave.runOnce() })
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
+            terminalTrackingID: "session-old", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        interleave.action = {
+            let restarted = RunningProcessRecord(
+                id: process.id, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
+                terminalTrackingID: "session-new", pid: Int(getpid()), status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+            try? store.upsert(runningProcess: restarted)
+        }
+        _ = try orchestrator.refreshProcessStatuses(workspaceID: workspace.id)
+
+        let reconciled = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
+        XCTAssertEqual(reconciled.status, .running, "A process restarted mid-reconcile must not be marked exited from the stale snapshot.")
+        XCTAssertEqual(reconciled.terminalTrackingID, "session-new", "The restarted row must keep its new terminal session.")
+        XCTAssertNil(reconciled.exitedAt)
+    }
+
     // Tests check and update process statuses skips newly started processes by arranging representative inputs and asserting the expected result.
     func testCheckAndUpdateProcessStatusesSkipsNewlyStartedProcesses() throws {
         let root = try makeTempDirectory()
@@ -1746,5 +1811,52 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
             XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
+    }
+}
+
+/// Runs a one-shot mutation from an injected orchestrator closure, so a concurrent stop, restart, or
+/// reconcile write can be interleaved at an exact point of a real product code path without adding a
+/// test-only seam. `runOnce()` is the clock form: `refreshProcessStatuses` reads the clock immediately
+/// after it snapshots the running processes.
+final class ReconcileInterleave: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingAction: (() throws -> Void)?
+    private var caughtError: (any Error)?
+
+    var action: (() throws -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return pendingAction
+        }
+        set {
+            lock.lock()
+            pendingAction = newValue
+            lock.unlock()
+        }
+    }
+
+    var thrownError: (any Error)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return caughtError
+    }
+
+    func run() {
+        lock.lock()
+        let pending = pendingAction
+        pendingAction = nil
+        lock.unlock()
+        guard let pending else { return }
+        do { try pending() } catch {
+            lock.lock()
+            caughtError = error
+            lock.unlock()
+        }
+    }
+
+    func runOnce() -> Date {
+        run()
+        return Date()
     }
 }

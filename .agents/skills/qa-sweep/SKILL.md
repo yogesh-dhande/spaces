@@ -28,6 +28,58 @@ Every defect worth reporting here lives in one of these blind spots. If a findin
 5. **Snapshot before, verify after.** Record project ids, workspace ids, `git worktree list`, and the live session list up front; `diff` each at the end and show the empty diffs.
 6. **Keep raw artifacts in the scratchpad**, and never read a full `sample` transcript into context — `grep`/`awk` it.
 
+## 0. Run the e2e and latency suites first
+
+Do this before any measurement. It is a gate, not correctness re-testing (§9): a sweep run on a build
+whose suite is red measures sand, and the suite itself rots silently because these lanes are manual and
+outside CI.
+
+Run the **whole matrix, one invocation per lane/scenario**, recording pass/fail per case and continuing
+past failures. The `exhaustive` lane aborts on its first failure, so a single early break hides the rest;
+driving each scenario separately yields the complete inventory in one pass. Cover every `app`, `terminal`,
+`mobile`, and `device-api` scenario plus `device-api latency-compare`, which `exhaustive` omits.
+
+Then classify every failure before investigating anything, because the two kinds need opposite responses:
+
+- **Harness drift** — the test encodes a contract the product no longer has. Fix the test and open a PR.
+  Signatures: a wire/format version the product has moved past; a CLI verb that no longer exists (exit 64,
+  "unexpected arguments"); a wait on a perf metric or detail field nothing emits; a missing argument the
+  command now requires.
+- **Product defect** — file an issue with a priority label.
+
+Read the failure, do not trust its message. Failures mislead in three recurring ways:
+a decoder that returns `None` on error and a caller that formats `None` as a plausible value (a stale
+format gate reported a themed background as `#000000`); one broken shared bootstrap step failing every
+lane for one reason; and a leaked process poisoning later lanes.
+
+**Before blaming a desktop lane, rule out the two environment states that make one fail misleadingly.**
+
+1. **A locked screen.** With the screen locked, AX still reports an app's windows, titles, and
+   focused/main, but publishes no `kAXPosition`/`kAXSize` — so any lane that resolves a window frame to
+   post a mouse event fails with a message about the window, not about the lock. Check it directly
+   (`CGSessionCopyCurrentDictionary()`'s `CGSSessionScreenIsLocked`) rather than inferring it, and abort a
+   sweep instead of recording the results: a whole run of desktop lanes will fail for this one reason.
+   The control that identifies it in one step is re-running a desktop lane that passed earlier in the same
+   session — if a lane whose code did not change now fails, suspect the environment, not the diff.
+2. **Another instance owning desktop-global control** (`spacese2e profile-desktop-control-owner`). A lane
+   that leaks a `SpacesApp` leaves it holding the lease, and every later desktop lane then fails after its
+   full wait with an unrelated-looking message. Only ever stop an instance your own run created.
+
+For the latency lanes, two checks matter more than the numbers:
+
+1. **Confirm each enforced metric actually has samples.** A budget compared against a `None` p95 is
+   skipped, so the lane passes unconditionally and gates nothing. Report the sample count beside every
+   percentile.
+2. **Confirm the lane exercises the path a user takes.** A scenario that drives a programmatic submit
+   measures that path's deliberate input pacing, not terminal latency — user typing is a text write plus
+   a separate Return keystroke and does not go through the submit sequencer. Getting this wrong makes a
+   lane report an order of magnitude too slow and hides the render cost it exists to track.
+
+Attribute a slow phase before calling it a hotspot: take the per-phase p50/p95 breakdown, then confirm
+with an independent measurement outside Spaces (a raw PTY driving the same shell) and with the daemon's own
+perf log. A wide phase often means the process being waited on had not produced output yet, rather than
+that the phase is expensive.
+
 ## 1. Baseline
 
 Capture idle CPU, RSS, threads, fds, and DB size for app, daemon, and caddy, plus one `sample <pid> 10` of each. In a `sample`, ignore idle-wait leaves (`kevent64`, `__workq_kernreturn`, `mach_msg2_trap`, `__psynch_cvwait`, `__ulock_wait2`) — blocked threads, not CPU.
@@ -100,7 +152,9 @@ Search open **and** closed issues first.
 
 ## 9. Do not re-test what e2e already asserts
 
-These have existing lanes in `apps/macos/Tests/`. Re-running them here is duplicated effort, and asserting them by hand is worse than the automated version. Touch them only when *measuring resource behaviour* rather than checking correctness.
+These have existing lanes in `apps/macos/Tests/`. Run them as the opening gate (§0), then do not re-assert
+them by hand — asserting a covered invariant manually is worse than the automated version. Touch them again
+only when *measuring resource behaviour* rather than checking correctness.
 
 `e2e_agent_orchestration.sh` (agent lifecycle and signal transitions) · `e2e_daemon_exec_handoff.sh` (handoff with live sessions) · `e2e_daemon_idle_shutdown.sh` · `e2e_terminal_latency.sh`, `e2e_mobile_latency.sh`, `e2e_remote_terminal_latency_compare.sh` (latency regression gating) · `e2e_terminal_ended_session_scroll.sh` (ended-session replay) · `e2e_terminal_edit_shortcuts.sh`, `e2e_terminal_mouse_reporting_scroll.sh` (input fidelity) · `e2e_terminal_cli_commands.sh` · `e2e_local_device_api.sh`, `e2e_remote_device_api.sh`, `e2e_remote_terminal_send.sh` · `e2e_macos_app.sh`, `e2e_mobile.sh` · `e2e_fixture_repos.sh`. Migrations, themes, deep links, restore, and automations have unit/integration coverage.
 

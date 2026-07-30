@@ -1730,6 +1730,73 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func loadWorkspaceTerminalRows(
         workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry], sessionIDsWithFinalRender: Set<String>
     ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
+        Self.workspaceTerminalRows(
+            workspaces: workspaces, sessions: sessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender,
+            catalogEntry: { terminalCatalogEntry(sessionID: $0) },
+            endedWindowSessions: Self.endedTerminalWindowSessions(workspaces: workspaces, liveSessions: sessions))
+    }
+
+    /// The ended sessions still held by a terminal-window record, read in one query for the whole build.
+    ///
+    /// The window walk in `workspaceTerminalRows` needs each such session's persisted launch configuration
+    /// and runtime state, and there is one candidate per terminal window whose session has exited. Reading
+    /// them per row would put two connection round-trips per candidate on a build that runs several times a
+    /// second, on the profile database's serialized lane — the lane every mutation also waits behind. One
+    /// batched read keeps the cost flat, and a device whose held sessions are all still running issues no
+    /// query at all.
+    ///
+    /// An ended session's attachment snapshot is empty by construction: exiting detaches every client, and
+    /// the ended pane a client shows is client-local and holds no attachment. So the entry is built with an
+    /// empty snapshot and no live control/subscription rather than paying a query to read that back — the
+    /// builder forces both availability flags false for a non-interactive session anyway.
+    private static func endedTerminalWindowSessions(
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], liveSessions: [TerminalSessionCatalogEntry]
+    ) -> [String: TerminalSessionCatalogEntry] {
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        var candidates = Set<String>()
+        for descriptor in workspaces {
+            for window in descriptor.windows where window.roleValue == .terminal {
+                guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), !liveSessionIDs.contains(sessionID) else { continue }
+                candidates.insert(sessionID)
+            }
+        }
+        guard let runtimes = try? TerminalSessionPersistence.endedSessionRuntimes(sessionIDs: candidates) else { return [:] }
+        return Dictionary(
+            runtimes.compactMap { runtime -> (String, TerminalSessionCatalogEntry)? in
+                guard let paths = try? TerminalSessionPaths.forStoredSession(id: runtime.sessionID, rootDirectory: runtime.rootDirectory) else {
+                    return nil
+                }
+                return (
+                    runtime.sessionID,
+                    TerminalSessionCatalogEntry(
+                        launchConfiguration: runtime.launchConfiguration, runtimeState: runtime.runtimeState, attachmentSnapshot: .init(),
+                        paths: paths, isControlAvailable: false, isSubscriptionAvailable: false)
+                )
+            }, uniquingKeysWith: { existing, _ in existing })
+    }
+
+    /// One row per product record that holds a terminal session — a `running_processes`, `agent_sessions`,
+    /// or terminal `runtime_targets` row — carrying that session's full catalog entry.
+    ///
+    /// `catalogEntry` is the persisted lookup (`terminalCatalogEntry`) used whenever `sessions`, the live
+    /// interactive catalog, does not carry the session. That is what keeps a session describable after it
+    /// exits: its entry is what `sessions` publishes, and a pane cannot be opened for a session whose
+    /// launch configuration nothing reports. All three record kinds resolve through it, so all three keep
+    /// their ended sessions openable for exactly as long as the retention rule
+    /// (`SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`) holds them — the behavior `docs/spec.md`
+    /// describes for an exited target, whichever kind of row backs it.
+    ///
+    /// `endedWindowSessions` is the batched counterpart for the terminal-window walk below
+    /// (`endedTerminalWindowSessions`): every candidate it needs is known before the walk starts, so they
+    /// are read together instead of one row at a time.
+    ///
+    /// Static and taking both lookups as parameters so the whole rule is exercisable without a running
+    /// daemon or on-disk sessions.
+    static func workspaceTerminalRows(
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
+        sessionIDsWithFinalRender: Set<String>, catalogEntry: (String) -> TerminalSessionCatalogEntry?,
+        endedWindowSessions: [String: TerminalSessionCatalogEntry]
+    ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
         let sessionsByID = Dictionary(sessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { existing, _ in existing })
@@ -1741,7 +1808,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 guard process.terminalApp == TerminalHost.spaces.appName, let sessionID = normalizedTerminalSessionID(process.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: process.templateName, rowKind: .process, rowSourceID: process.id,
@@ -1754,17 +1821,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }) {
                 guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID) else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
+            }
+
+            // A terminal window's own row. Only sessions the live catalog does not already carry: a live
+            // one is published as an ad hoc summary, which is the only summary that carries a `liveTitle`,
+            // so claiming it here would drop what the program prints. What is left is the ended-but-held
+            // session — the case the process and agent loops above already cover through the same lookup.
+            for window in descriptor.windows where window.roleValue == .terminal {
+                guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), sessionsByID[sessionID] == nil else { continue }
+                guard representedSessionIDs.insert(sessionID).inserted else { continue }
+                guard let entry = endedWindowSessions[sessionID] else { continue }
+                rows.append(
+                    SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
+                        entry: entry, workspace: descriptor, title: entry.name, rowKind: .liveSession, rowSourceID: window.id,
                         hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
         }
         return rows
     }
 
-    private func preferredProcessRecord(_ records: [RunningProcessRecord]) -> RunningProcessRecord? {
+    private static func preferredProcessRecord(_ records: [RunningProcessRecord]) -> RunningProcessRecord? {
         records.max { lhs, rhs in
             let lhsRank = processRecordRank(lhs)
             let rhsRank = processRecordRank(rhs)
@@ -1773,7 +1854,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func processRecordRank(_ record: RunningProcessRecord) -> Int {
+    private static func processRecordRank(_ record: RunningProcessRecord) -> Int {
         switch record.status {
         case .running: return 3
         case .idle: return 2
@@ -1781,7 +1862,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func preferredAgentRecord(_ records: [AgentWindowRecord]) -> AgentWindowRecord? {
+    private static func preferredAgentRecord(_ records: [AgentWindowRecord]) -> AgentWindowRecord? {
         records.max { lhs, rhs in
             let lhsRank = agentRecordRank(lhs)
             let rhsRank = agentRecordRank(rhs)
@@ -1790,7 +1871,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func agentRecordRank(_ record: AgentWindowRecord) -> Int {
+    private static func agentRecordRank(_ record: AgentWindowRecord) -> Int {
         if record.provider == .spaces, let sessionID = normalizedTerminalSessionID(record.terminalTrackingID),
             let paths = try? TerminalSessionPaths.forSession(id: sessionID),
             (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state.isInteractive == true
@@ -1806,14 +1887,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func processSlotKey(_ record: RunningProcessRecord) -> String {
+    private static func processSlotKey(_ record: RunningProcessRecord) -> String {
         if let templateID = record.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
             return "process-id:\(templateID)"
         }
         return "process:\(normalizedSlotName(record.templateName))"
     }
 
-    private func agentSlotKey(_ record: AgentWindowRecord) -> String {
+    private static func agentSlotKey(_ record: AgentWindowRecord) -> String {
         if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
             return "agent-id:\(claimedLauncherID)"
         }
@@ -1821,7 +1902,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return "agent:\(normalizedSlotName(slotName))"
     }
 
-    private func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    private static func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 
     private func terminalCatalogEntry(sessionID: String, fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
@@ -1836,7 +1917,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
     }
 
-    private func normalizedTerminalSessionID(_ value: String?) -> String? {
+    private static func normalizedTerminalSessionID(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
     }

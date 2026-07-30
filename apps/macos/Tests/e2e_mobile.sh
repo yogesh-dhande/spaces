@@ -26,6 +26,9 @@ fi
 MOBILE_ARTIFACT_NAME="${SPACES_MOBILE_E2E_ARTIFACT_NAME:-$MOBILE_DEVICE_KEY}"
 CODEX_RESUME_THREAD_ID="${SPACES_MOBILE_CODEX_RESUME_THREAD_ID:-019e380a-9def-7852-9834-74c67b2da894}"
 USER_HOME="${HOME:?}"
+# Where the demo puts its ephemeral profile roots; mirrors run_mobile_terminal_demo.sh's own default so
+# cleanup can recognize a demo profile without the demo having reported which root it used.
+DEMO_ROOT_PARENT="${SPACES_MOBILE_DEMO_ROOT_PARENT:-$USER_HOME/.spaces-dev/mobile-demo}"
 SOURCE_CODEX_HOME="${SPACES_MOBILE_CODEX_HOME:-${CODEX_HOME:-$USER_HOME/.codex}}"
 E2E_CODEX_HOME="$SOURCE_CODEX_HOME"
 USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
@@ -279,6 +282,50 @@ terminate_pid_if_command_matches() {
   kill -9 "$pid" >/dev/null 2>&1 || true
 }
 
+# Stops a demo SpacesApp that outlived its run while holding the desktop-global control lease.
+#
+# `DEMO_APP_PID` is parsed from the demo's metadata block, so a demo that dies before printing it — a
+# failed bring-up — leaves cleanup with no pid to reap at all. An orphaned demo app keeps desktop-global
+# control, and every later desktop-driving lane then fails out its full frontmost/window wait instead of
+# naming the lease. The lease records its own holder, so read it and stop that process when it is a
+# SpacesApp running on a demo profile root. Scoped to `DEMO_ROOT_PARENT` so a real profile's app — the
+# installed one, or another worktree's — is never touched.
+#
+# The candidate must also be orphaned (reparented to launchd), which is what tells a leak apart from a
+# live run: the demo launches SpacesApp as its own child, so an app whose demo shell is still alive
+# belongs to a mobile lane that is still using it. Another worktree's mobile lane can be mid-run while
+# this one fails waiting for the shared harness lock, and killing its app would break a passing run.
+stop_leaked_demo_desktop_control_owner() {
+  local owner_json leaked_pid parent_pid
+  owner_json="$("$SPACES_E2E_BIN" profile-desktop-control-owner --json 2>/dev/null || true)"
+  [[ -n "$owner_json" ]] || return 0
+  leaked_pid="$(
+    python3 - "$DEMO_ROOT_PARENT" "$owner_json" <<'PY' || true
+import json
+import sys
+
+root_parent = sys.argv[1].rstrip("/") + "/"
+try:
+    payload = json.loads(sys.argv[2])
+except ValueError:
+    raise SystemExit(0)
+owner = payload.get("owner") or {}
+pid = owner.get("pid")
+profile_root = owner.get("profileRoot") or ""
+if isinstance(pid, int) and pid > 0 and profile_root.startswith(root_parent):
+    print(pid)
+PY
+  )"
+  [[ -n "$leaked_pid" ]] || return 0
+  parent_pid="$(ps -o ppid= -p "$leaked_pid" 2>/dev/null | tr -d ' ')"
+  if [[ "$parent_pid" != "1" ]]; then
+    printf 'Leaving demo SpacesApp pid %s alone: its demo (ppid %s) is still running.\n' "$leaked_pid" "$parent_pid" >&2
+    return 0
+  fi
+  printf 'Stopping demo SpacesApp still holding desktop control: pid %s\n' "$leaked_pid" >&2
+  terminate_pid_if_command_matches "$leaked_pid" "leaked demo app" "SpacesApp"
+}
+
 cleanup() {
   local exit_code=$?
   if [[ -n "$DEMO_PID" ]]; then
@@ -290,6 +337,7 @@ cleanup() {
     fi
   fi
   terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
+  stop_leaked_demo_desktop_control_owner
   if [[ "$DEMO_DEVICE_API_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
     terminate_pid_if_command_matches "$DEMO_DEVICE_API_PID" "demo Device API" "spacesd"
   fi
@@ -3442,8 +3490,11 @@ with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
         "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
         (secondary_session_id,),
     ).fetchone()
+    # The row stores the payload plus `has_final_render`, the flag every device-overview build reads
+    # to answer "can this ended pane replay?" without decoding the payload. The emitting reason lives
+    # inside the payload itself.
     persisted_final = db.execute(
-        "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
+        "SELECT payload_json, has_final_render FROM terminal_remote_session_states WHERE session_id = ?",
         (session_id,),
     ).fetchone()
 require(process_is_alive(expected_service_pid), f"spacesd pid {expected_service_pid} exited after ctrl+c.")
@@ -3462,9 +3513,16 @@ require(
     f"Secondary child process is not alive after ctrl+c: {secondary_state!r}",
 )
 require(persisted_final is not None, "Primary session did not persist a final remote state payload.")
-require(persisted_final[0] == "terminated", f"Persisted final payload reason was not terminated: {persisted_final[0]!r}")
-persisted_final_payload = json.loads(persisted_final[1])
+persisted_final_payload = json.loads(persisted_final[0])
+require(
+    persisted_final_payload.get("reason") == "terminated",
+    f"Persisted final payload reason was not terminated: {persisted_final_payload.get('reason')!r}",
+)
 require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
+require(
+    persisted_final[1] == 1,
+    f"Persisted final payload was not flagged as carrying a replayable frame: has_final_render={persisted_final[1]!r}",
+)
 
 overview_response = send_mobile_request({"command": "overview"})
 require(overview_response.get("ok"), f"Device API overview failed after ctrl+c: {overview_response}")
