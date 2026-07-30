@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 9
+    public static let currentVersion = 10
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -228,6 +228,14 @@ public enum DatabaseSchema {
                     );
                     ALTER TABLE terminal_runtime_states ADD COLUMN bell_at TEXT;
                     """)
+        },
+        // Records the coding agent kind (claude/codex/opencode) detected for an agent session, so the
+        // identity survives the agent process ending: the live foreground state it is detected from is
+        // cleared by the exit, and the exit notification the child's subscribers receive names the kind.
+        // Existing rows carry NULL, which renders honestly as "coding agent" until a detection lands —
+        // the same reading a row whose foreground was never classified has always had.
+        DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "Add agent_sessions.detected_agent_kind", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN detected_agent_kind TEXT;")
         },
     ]
 
@@ -538,6 +546,7 @@ public enum DatabaseSchema {
               claimed_launcher_id TEXT,
               claimed_launcher_name TEXT,
               note TEXT,
+              detected_agent_kind TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,

@@ -84,9 +84,14 @@ resolve_worktree_profile() {
   # either abort the run or point it at another profile entirely. This is the first thing main() does,
   # so everything below runs unbound. See spaces_profile_clear_inherited_binding.
   spaces_profile_clear_inherited_binding
-  # The root is looked up only because the fixture directory below lives inside it.
-  PROFILE_ROOT="$("$SPACES_E2E" profile-show --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["profileRoot"])')"
+  # The root is looked up only because the fixture directory below lives inside it; the database path is
+  # how the lifecycle-event assertions read what the daemon recorded (no CLI reports the event log).
+  local profile_json
+  profile_json="$("$SPACES_E2E" profile-show --json)"
+  PROFILE_ROOT="$(json_field "$profile_json" 'd["profileRoot"]')"
+  DB_PATH="$(json_field "$profile_json" 'd["databasePath"]')"
   [[ -n "$PROFILE_ROOT" ]] || fail "profile-show did not report a profile root"
+  [[ -n "$DB_PATH" ]] || fail "profile-show did not report a database path"
   # Pin the daemon binary to the debug build so autolaunch uses this checkout's spacesd.
   export SPACESD_EXECUTABLE="$SPACESD_BIN"
   printf '[agent-e2e] profile root=%s\n' "$PROFILE_ROOT"
@@ -150,6 +155,41 @@ json_field() {
   printf '%s' "$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))' "$2"
 }
 
+# How many lifecycle events of one type and source the daemon recorded for an agent row. Read straight
+# from the database because the event log is the daemon's own record of what it finalized and no CLI
+# surfaces it; a duplicate here is what turns into a duplicate injected block for every subscriber.
+agent_event_count() {
+  local agent_id="$1" event_type="$2" event_source="$3"
+  python3 - "$DB_PATH" "$agent_id" "$event_type" "$event_source" <<'PY'
+import sqlite3
+import sys
+
+db_path, agent_id, event_type, event_source = sys.argv[1:5]
+with sqlite3.connect(db_path) as db:
+    row = db.execute(
+        "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ? AND event_type = ? AND source = ?",
+        (agent_id, event_type, event_source),
+    ).fetchone()
+print(row[0] if row else 0)
+PY
+}
+
+# The pid of a session's current foreground process, as the daemon's foreground sampler recorded it —
+# the process its agent classification was made from, and so exactly the process to quit to simulate a
+# coding agent exiting on its own.
+foreground_pid() {
+  local session_id="$1"
+  python3 - "$DB_PATH" "$session_id" <<'PY'
+import sqlite3
+import sys
+
+db_path, session_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute("SELECT foreground_pid FROM terminal_runtime_states WHERE session_id = ?", (session_id,)).fetchone()
+print(row[0] if row and row[0] else "")
+PY
+}
+
 provision_fixture() {
   # Stable fixture directory under the profile root so re-runs reuse one project row instead of
   # accumulating (there is no project-removal CLI). register-project is idempotent for the same dir.
@@ -160,6 +200,14 @@ provision_fixture() {
   FIXTURE_WORKSPACE_ID="$(json_field "$register_json" 'd["id"]')"
   [[ -n "$FIXTURE_WORKSPACE_ID" ]] || fail "could not resolve fixture workspace id from: $register_json"
   printf '[agent-e2e] fixture workspace=%s dir=%s\n' "$FIXTURE_WORKSPACE_ID" "$FIXTURE_DIR"
+
+  # A stand-in coding agent for the hookless-exit step. Foreground detection classifies a process by its
+  # executable and argv[0] basename, so a `codex`-named symlink to `sleep` is classified exactly as the
+  # real CLI is — and, like codex and opencode, it emits no session-end hook when it quits, which is the
+  # case only the daemon's foreground reconciler can finalize. Part A stays real-agent-free.
+  FAKE_AGENT_BIN="$FIXTURE_DIR/bin/codex"
+  mkdir -p "$FIXTURE_DIR/bin"
+  ln -sf /bin/sleep "$FAKE_AGENT_BIN"
 }
 
 # ---------------------------------------------------------------------------
@@ -264,7 +312,75 @@ part_a() {
   printf '%s' "$bogus_err" | grep -Fqi "no agent session" || fail "bogus kill lacked the expected error: $bogus_err"
   pass "step 5b: killing a nonexistent session errored loudly"
 
+  part_a_hookless_exit
+
   printf '=== Part A passed ===\n'
+}
+
+# Step 6: a coding agent that emits no session-end hook (codex and opencode never do) quits on its own,
+# leaving its shell alive. Only the daemon's foreground reconciler can observe that, and two of its
+# reconcile loops see the same transition, so this pins the two facts a subscribed orchestrator depends
+# on: one exit is announced exactly once, and the announcement names the child's coding agent.
+part_a_hookless_exit() {
+  [[ -n "${SHELL:-}" ]] || fail "SHELL must be set: this step runs the same login shell Spaces launches sessions with."
+  local K W agent_id agent_pid
+  # The inner interactive login shell is what hands the agent the terminal foreground (job control),
+  # exactly as a user-typed `codex` gets it. `read` is a shell builtin, so once the agent is gone the
+  # shell ITSELF is the foreground process — the plain-shell revert the reconciler finalizes on, with the
+  # terminal still alive.
+  open_session child-K "exec $SHELL -ilc '\"$FAKE_AGENT_BIN\" 600; read -r _'"
+  K="$OPENED_SESSION_ID"
+  open_session orch-W 'stty -echo; cat'
+  W="$OPENED_SESSION_ID"
+  printf '[agent-e2e] hookless child K=%s watcher W=%s\n' "$K" "$W"
+
+  # Wait for foreground detection to classify the child, which is also what proves the kind is known
+  # BEFORE the exit — the state the exited block has to still report afterwards.
+  local detect_start list_json detected
+  detect_start="$(now_ms)"
+  while true; do
+    list_json="$("$SPACES_CLI" agent list --json)"
+    detected="$(json_field "$list_json" 'next((r.get("agent") or "" for r in d if r.get("terminalSessionID")=="'"$K"'"), "")')"
+    if [[ "$detected" == "codex" ]]; then
+      break
+    fi
+    if (( "$(now_ms)" - detect_start >= 45000 )); then
+      fail "foreground detection never classified K=$K as codex: $list_json"
+    fi
+    sleep 0.3
+  done
+  agent_id="$(json_field "$list_json" 'next((r["id"] for r in d if r.get("terminalSessionID")=="'"$K"'"), "")')"
+  [[ -n "$agent_id" ]] || fail "could not resolve the agent row id for K=$K"
+  pass "step 6a: the child was detected as codex before it exited"
+
+  # A subscribe requires hook evidence, which a hookless agent still produces for its turns; only its
+  # session END is missing.
+  signal "$K" working
+  "$SPACES_CLI" agent subscribe "$K" --subscriber "$W" >/dev/null || fail "subscribe W->K failed"
+
+  agent_pid="$(foreground_pid "$K")"
+  [[ -n "$agent_pid" ]] || fail "no foreground pid recorded for K=$K"
+  kill "$agent_pid" || fail "could not quit the detected agent process (pid=$agent_pid) for K=$K"
+
+  wait_for_notification "$W" exited "$K" || fail "the hookless exit never reached the subscriber W"
+  pass "step 6b: the hookless exit was announced to the subscriber"
+
+  # Settle before counting: the duplicate this pins was a second reconcile pass recording the same exit
+  # within the same second as the first.
+  sleep 3
+  local exited_blocks kind_blocks reconciler_exits
+  exited_blocks="$(tail_count "$W" "is exited")"
+  [[ "$exited_blocks" == "1" ]] || fail "expected exactly one injected exited block in W's tail, got $exited_blocks"
+  pass "step 6c: one child exit injected exactly one exited block"
+  kind_blocks="$(tail_count "$W" "(codex) is exited")"
+  if [[ "$kind_blocks" != "1" ]]; then
+    "$SPACES_CLI" terminal tail "$W" --lines 120 >&2
+    fail "the injected block did not name the child's coding agent (codex)"
+  fi
+  pass "step 6d: the injected block named the child's coding agent"
+  reconciler_exits="$(agent_event_count "$agent_id" exit foreground_reconciler)"
+  [[ "$reconciler_exits" == "1" ]] || fail "expected exactly one reconciler exit event for K=$K, got $reconciler_exits"
+  pass "step 6e: exactly one reconciler exit was recorded for the child"
 }
 
 # ---------------------------------------------------------------------------

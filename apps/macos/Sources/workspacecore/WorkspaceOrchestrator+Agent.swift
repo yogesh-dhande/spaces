@@ -15,8 +15,9 @@ extension WorkspaceOrchestrator {
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
                 // A row already finalized (its exit delivered — `.exited`, or an exit event recorded on a
                 // previous pass) is skipped so it is never re-entered and its subscribers never get a
-                // duplicate exited notice — the outer gate mirrored by the chokepoint's own idempotency
-                // gate. A live turn-complete `.done` row is deliberately NOT skipped: it is not finalized,
+                // duplicate exited notice — an early-out over the chokepoint's own atomic claim, which is
+                // what actually admits one caller when two passes race. A live turn-complete `.done` row is
+                // deliberately NOT skipped: it is not finalized,
                 // and if its foreground has genuinely reverted to a plain shell the agent quit after its
                 // turn, so the block below finalizes it (with the exited notice) rather than leaving a
                 // stale coding-agent row on the shell.
@@ -61,14 +62,16 @@ extension WorkspaceOrchestrator {
         return executableName == shellBasename
     }
 
-    func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (label: String, displayCommand: String?)? {
+    func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (kind: String, label: String, displayCommand: String?)? {
         guard let kind = runtimeState.foregroundDetectedAgentKind else { return nil }
         let label = runtimeState.foregroundDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayCommand = runtimeState.foregroundDisplayCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel, displayCommand.flatMap { $0.isEmpty ? nil : $0 })
+        return (kind.displayLabel, label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel, displayCommand.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    func insertAdHocDetectedAgent(detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String) throws {
+    func insertAdHocDetectedAgent(
+        detectedAgent: (kind: String, label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String
+    ) throws {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
             window.roleValue == .terminal && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
         }
@@ -92,8 +95,8 @@ extension WorkspaceOrchestrator {
         // these initial values are the ones written.
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle, createdAt: now,
-            updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
+            detectedAgentKind: detectedAgent.kind, createdAt: now, updatedAt: now)
         let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
@@ -144,8 +147,9 @@ extension WorkspaceOrchestrator {
     /// terminal reuses the row id): the status half because that reset moves `.exited` back to `.idle`, and
     /// the event half because `agentSessionHasRecordedExitEvent` discounts an `exit` event once a later
     /// `init` event lands — so a reincarnated live agent is finalizable again and its kill/sweep delivers a
-    /// fresh exited notice. The single finalized-fact predicate shared by the chokepoint's idempotency gate
-    /// and both reconciler gates.
+    /// fresh exited notice. This is the Swift reading of that fact, used by both reconciler gates and by the
+    /// chokepoint's `.destroyed` reason; an `.exited` reason evaluates the identical fact inside
+    /// `claimAgentSessionExitEvent`, where the check and the exit record are one atomic statement.
     func agentRowIsFinalized(_ record: AgentWindowRecord) throws -> Bool {
         if record.status == .exited { return true }
         return try store.agentSessionHasRecordedExitEvent(agentSessionID: record.id)
@@ -620,8 +624,9 @@ extension WorkspaceOrchestrator {
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: resolvedStatus, note: existing.note, createdAt: existing.createdAt,
-                updatedAt: now)
+                claimedLauncherName: resolvedClaimedLauncherName, status: resolvedStatus, note: existing.note,
+                detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
+                    ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -638,7 +643,8 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
             terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
-            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: resolvedStatus, createdAt: now, updatedAt: now)
+            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: resolvedStatus,
+            detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID), createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -677,7 +683,9 @@ extension WorkspaceOrchestrator {
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note, createdAt: existing.createdAt, updatedAt: now)
+                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note,
+                detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
+                    ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -696,12 +704,14 @@ extension WorkspaceOrchestrator {
             environmentKeys: environmentKeys)
     }
 
-    @discardableResult public func handleAgentExit(
-        _ existing: AgentWindowRecord, eventType: String = "exit", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
-    ) throws -> AgentWindowRecord? {
+    /// Applies an exit's disposition to the row — keep it `.done` (configured launcher), demote it (a
+    /// never-signaled ad-hoc detection row on a live terminal), keep it `.exited` (any other row on a live
+    /// terminal), or delete it (its terminal has ended). The exit's lifecycle event is NOT recorded here:
+    /// `finalizeAgentRow` records it as the atomic claim that admits exactly one caller to this
+    /// disposition, so recording it again would duplicate the very event that claim exists to make unique.
+    @discardableResult public func handleAgentExit(_ existing: AgentWindowRecord) throws -> AgentWindowRecord? {
         if try spacesAgentRecordIsConfiguredLauncher(workspaceID: existing.workspaceID, record: existing) {
-            return try recordAgentExitStatus(
-                existing, status: .done, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+            return try recordAgentExitStatus(existing, status: .done)
         }
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
@@ -719,14 +729,8 @@ extension WorkspaceOrchestrator {
             // The agent process ended but its terminal session is still open, so keep the row and mark it
             // `exited` (not `idle`): the terminal stays addressable and a restart reuses it, while remote
             // watchers see a real exit transition instead of a status change they treat as "not started".
-            return try recordAgentExitStatus(
-                existing, status: .exited, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+            return try recordAgentExitStatus(existing, status: .exited)
         }
-        appendAgentSessionEvent(
-            agentSessionID: existing.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID, sessionKey: existing.sessionKey,
-                environmentKeys: environmentKeys), createdAt: nowISO8601())
         terminateBuiltInTerminalSession(existing.terminalTrackingID)
         // Drop the row's inbound watch edges explicitly before the delete: the FK is `ON DELETE RESTRICT`,
         // so the delete would otherwise fail. `finalizeAgentRow` notified those subscribers `exited` first.
@@ -740,27 +744,19 @@ extension WorkspaceOrchestrator {
     /// Writes the finalized exit status onto the row, or reports nothing to record when the row changed
     /// under the caller — a stop or restart deleted it, or a fresh agent rebound it to another session —
     /// which `markAgentWindowExitStatus` decides against the stored row rather than re-inserting the
-    /// caller's snapshot.
-    func recordAgentExitStatus(
-        _ existing: AgentWindowRecord, status: AgentWindowStatus, eventType: String, eventSource: String, environmentKeys: [String]?
-    ) throws -> AgentWindowRecord? {
+    /// caller's snapshot. The exit's lifecycle event was already recorded by the chokepoint's claim.
+    func recordAgentExitStatus(_ existing: AgentWindowRecord, status: AgentWindowStatus) throws -> AgentWindowRecord? {
         let now = nowISO8601()
         guard try store.markAgentWindowExitStatus(existing, status: status, updatedAt: now) else { return nil }
         let terminalTarget: TerminalTargetRecord? =
             if existing.terminalTarget != nil || existing.terminalTrackingID != nil {
                 TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, trackingID: existing.terminalTrackingID)
             } else { nil }
-        let updated = AgentWindowRecord(
+        return AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
             runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
             claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
-            createdAt: existing.createdAt, updatedAt: now)
-        appendAgentSessionEvent(
-            agentSessionID: updated.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
-                environmentKeys: environmentKeys), createdAt: now)
-        return updated
+            detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
     }
 
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {
@@ -825,12 +821,15 @@ extension WorkspaceOrchestrator {
     /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
     /// a watched child's subscribers are always told it exited before the row goes away and that the
     /// terminated terminal's own watch state is always torn down. In order it:
-    ///  1. gates on the finalized fact for idempotency (`agentRowIsFinalized` — status `.exited`, or a
-    ///     recorded `exit` event) — an already-finalized row is never re-notified (a `.destroyed` reason
-    ///     still deletes it and tears down watch state; an `.exited` reason is a no-op), so a repeated
-    ///     reconcile pass over an already-exited row delivers no duplicate notice. Keying on the recorded
-    ///     exit event, not `.done` status, is what lets killing a live agent that is merely resting `.done`
-    ///     between turns still deliver its one exited notice;
+    ///  1. gates on the finalized fact for idempotency (status `.exited`, or a recorded `exit` event) — an
+    ///     already-finalized row is never re-notified (a `.destroyed` reason still deletes it and tears
+    ///     down watch state; an `.exited` reason is a complete no-op that records nothing and notifies
+    ///     nobody). An `.exited` reason evaluates that fact and records the exit event in ONE atomic
+    ///     claim (`claimAgentSessionExitEvent`), not a read followed by a write: the two reconcile loops
+    ///     that observe a terminal runtime-state change run on their own connections and both see the same
+    ///     transition, so a plain read-then-write gate let both pass it and deliver the notice twice.
+    ///     Keying on the recorded exit event, not `.done` status, is what lets killing a live agent that is
+    ///     merely resting `.done` between turns still deliver its one exited notice;
     ///  2. renders/enqueues the `exited` notice to the row's subscribers (`childDidTransition`) while its
     ///     inbound edges still exist — a no-op when it has no subscribers;
     ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
@@ -850,9 +849,9 @@ extension WorkspaceOrchestrator {
     /// without subscribers) delivery is simply never attempted because the row has no subscribers.
     @discardableResult public func finalizeAgentRow(_ record: AgentWindowRecord, reason: AgentTerminationReason) throws -> AgentWindowRecord? {
         let engine = makeAgentNotificationEngine()
-        let alreadyFinalized = try agentRowIsFinalized(record)
         switch reason {
         case .destroyed(let terminateTerminalSession):
+            let alreadyFinalized = try agentRowIsFinalized(record)
             // Destroys delete the row and (usually) terminate the backing terminal. During a daemon
             // handoff the terminal side becomes a silent no-op (`terminateBuiltInTerminalSession` defers to
             // the successor daemon), so proceeding would delete rows for a terminal that survives the
@@ -869,16 +868,23 @@ extension WorkspaceOrchestrator {
             if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
             return nil
         case .exited(let eventType, let eventSource, let environmentKeys):
-            if alreadyFinalized { return record }
-            // A row a stop/restart already deleted was finalized by that destroy, which delivered its
-            // exited notice before deleting. The reconcilers that report exits hold snapshots read on
-            // another connection without the lifecycle lock, so one can arrive here for a row that is
-            // gone; re-notifying its subscribers would duplicate that notice, and the write below would
-            // resurrect the row. The write itself is conditional on the same fact, closing the window
-            // between this read and it.
-            guard try store.agentWindow(id: record.id) != nil else { return nil }
+            // Claim the row's single exit finalization and record its `exit` event atomically, BEFORE
+            // anything is notified. Every step below — the exited notice to subscribers, the disposition,
+            // the terminal's own subscriber teardown — belongs to the caller that won the claim, so a
+            // second observer of the same transition does nothing at all. Two reconcile loops observe
+            // terminal runtime-state changes on their own connections and both see the transition, so a
+            // read-then-write gate here let both notify and both record; the losing claim also covers a
+            // row a stop/restart already deleted (its destroy delivered the notice before deleting) and a
+            // row already finalized on an earlier pass. Returning the row as it now stands — nil once it
+            // is gone — reports that settled state to the caller.
+            let claimedExit = try store.claimAgentSessionExitEvent(
+                agentSessionID: record.id, eventType: eventType, source: eventSource,
+                message: agentSessionEventMessage(
+                    provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
+                    environmentKeys: environmentKeys), createdAt: nowISO8601())
+            guard claimedExit else { return try store.agentWindow(id: record.id) }
             try engine.childDidTransition(agent: record, transition: .exited)
-            let result = try handleAgentExit(record, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+            let result = try handleAgentExit(record)
             if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
             return result
         }
@@ -1019,17 +1025,27 @@ extension WorkspaceOrchestrator {
         return value
     }
 
-    /// The coding agent's detected kind (claude/codex/opencode) for a terminal session — the `agent:`
-    /// field of an orchestration row — read only from the session's persisted foreground runtime state,
-    /// never the `.agent` launch title. This is the machine-readable identity remote notification
-    /// rendering uses as the `(<kind>)` parenthetical; keeping it off the launch title is what prevents a
-    /// "Reviewer (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings.
-    /// Nil until a kind is detected, which renders honestly as "coding agent" downstream.
-    func agentRuntimeKind(terminalSessionID: String) -> String? {
-        guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+    /// The coding agent kind (claude/codex/opencode) a terminal session's LIVE foreground state reports,
+    /// never the `.agent` launch title — keeping it off the launch title is what prevents a "Reviewer
+    /// (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings. This is the
+    /// detection source the kind is persisted from; it goes nil the moment the agent process ends, so no
+    /// consumer reads it alone (see `resolvedAgentKind`).
+    func liveDetectedAgentKind(terminalSessionID: String?) -> String? {
+        guard let terminalSessionID, !terminalSessionID.isEmpty, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         else { return nil }
         return runtimeState.foregroundDetectedAgentKind?.displayLabel
+    }
+
+    /// The coding agent kind for an agent row — the `agent:` field of an orchestration row and the
+    /// `(<kind>)` parenthetical of every notification block. The row's persisted kind is authoritative:
+    /// it was written when detection classified the session and is refreshed by every later observation,
+    /// so it still names the agent at exit, when the live foreground state has already reverted to a plain
+    /// shell (or vanished with the session) and would report nothing. Live state is read only for a row
+    /// that has no persisted kind yet. Nil when no kind was ever detected, which renders honestly as
+    /// "coding agent" downstream.
+    public func resolvedAgentKind(_ agent: AgentWindowRecord) -> String? {
+        agent.detectedAgentKind ?? liveDetectedAgentKind(terminalSessionID: agent.terminalTrackingID)
     }
 
     /// Builds the orchestration view of coding-agent sessions shared by the local `agent list`/`status`
@@ -1050,7 +1066,7 @@ extension WorkspaceOrchestrator {
                     // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
                     // report the same label. Collapsing kind and label made remote rendering emit
                     // "Reviewer (Reviewer)" and dropped the kind from listings.
-                    let detectedKind = terminalSessionID.flatMap { agentRuntimeKind(terminalSessionID: $0) }
+                    let detectedKind = resolvedAgentKind(agent)
                     rows.append(
                         TerminalServiceAgentSessionRow(
                             id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind, label: trimmedOrNilAgentField(agent.label),

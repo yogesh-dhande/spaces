@@ -14,10 +14,11 @@ public struct AgentNotificationEngine {
     /// (a dead/absent session), which the engine treats as the subscriber having vanished.
     public typealias DeliverLine = (_ subscriberTerminalSessionID: String, _ line: String) throws -> Void
 
-    /// Resolves the coding-agent kind label (claude/codex/opencode, or a launch title) for a local watched
-    /// agent, used for the `(<kind>)` parenthetical. The daemon wires this to the same runtime-label
-    /// resolution `agent list` uses; a `nil` result renders as `coding agent`. Defaults to `nil` so tests
-    /// and non-daemon callers do not have to supply session-file access.
+    /// Resolves the coding-agent kind label (claude/codex/opencode) for a local watched agent, used for
+    /// the `(<kind>)` parenthetical. Every caller wires this to `WorkspaceOrchestrator.resolvedAgentKind`,
+    /// the same resolution `agent list` reports — the kind persisted on the agent row, which still names
+    /// the agent after its process is gone; a `nil` result renders as `coding agent`. Defaults to `nil` so
+    /// tests and non-daemon callers do not have to supply one.
     public typealias ResolveAgentKind = (_ agent: AgentWindowRecord) -> String?
 
     /// The lifecycle transitions that produce a notification. `working`/`init` never do.
@@ -269,9 +270,7 @@ public struct AgentNotificationEngine {
     /// an apostrophe means a note like "don't" renders as "dont", an accepted readability cost.
     private static func shellSafeNotificationField(_ value: String) -> String {
         let forbidden = Set("$`;|&<>()\"'\\".unicodeScalars)
-        let filtered = value.unicodeScalars.filter { scalar in
-            !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar)
-        }
+        let filtered = value.unicodeScalars.filter { scalar in !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar) }
         return String(String.UnicodeScalarView(filtered))
     }
 }

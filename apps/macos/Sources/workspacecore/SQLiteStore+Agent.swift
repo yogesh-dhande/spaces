@@ -26,13 +26,17 @@ extension SQLiteStore {
         agent_sessions.status,
         agent_sessions.note,
         agent_sessions.created_at,
-        agent_sessions.updated_at
+        agent_sessions.updated_at,
+        COALESCE(agent_sessions.detected_agent_kind, '')
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
     /// launcher launch) hold the authoritative record they just computed, so on conflict the row's
     /// lifecycle columns take the caller's values: `status`, `session_key`, and `claimed_launcher_name`
-    /// are overwritten from `excluded`.
+    /// are overwritten from `excluded`. `detected_agent_kind` is the exception both upserts share: a
+    /// caller that observed no kind (foreground detection has not classified the session, or already
+    /// cleared its classification at exit) carries nil, and nil must never erase a kind the row already
+    /// learned — the stored value is what the exit notification names.
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         try upsertAgentWindow(record, conflictClause: Self.lifecycleOwningConflictClause)
     }
@@ -87,6 +91,7 @@ extension SQLiteStore {
           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
           claimed_launcher_name = excluded.claimed_launcher_name,
           note = COALESCE(excluded.note, agent_sessions.note),
+          detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           updated_at = excluded.updated_at
         """
 
@@ -102,6 +107,7 @@ extension SQLiteStore {
           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
           claimed_launcher_name = COALESCE(excluded.claimed_launcher_name, agent_sessions.claimed_launcher_name),
           note = COALESCE(excluded.note, agent_sessions.note),
+          detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           created_at = agent_sessions.created_at,
           updated_at = agent_sessions.updated_at
         """
@@ -113,15 +119,15 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, detected_agent_kind, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
                     terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
-                    record.note ?? "", record.createdAt, record.updatedAt,
+                    record.note ?? "", record.detectedAgentKind ?? "", record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -339,6 +345,42 @@ extension SQLiteStore {
                     """, bindings: [agentSessionID]), row.count >= 2, let lastExitRowID = Int64(row[0]), let lastInitRowID = Int64(row[1])
         else { return false }
         return lastExitRowID > 0 && lastExitRowID > lastInitRowID
+    }
+
+    /// Claims the one exit finalization an agent session's current life is allowed, recording its `exit`
+    /// lifecycle event in the same statement. Returns whether THIS caller claimed it; a false result means
+    /// the exit was already recorded (or the row is gone) and the caller must do nothing further.
+    ///
+    /// The check and the record are one conditional INSERT inside an immediate transaction, so two
+    /// reconcile passes observing the same transition on their own connections cannot both pass a
+    /// finalized check and both record the exit — the very read-then-write window that duplicated the
+    /// event and, with it, the notification every subscriber received. The condition is exactly the
+    /// finalized fact `agentSessionHasRecordedExitEvent` and `agentRowIsFinalized` read: the row must
+    /// still exist, must not already be held `exited`, and must have no `exit` event recorded after its
+    /// last `init` (which is what scopes the fact to the row's CURRENT life, so a fresh agent reusing the
+    /// row is finalizable again). `eventType` binds both the recorded event and the condition, so the
+    /// claim is self-consistent for whatever event type the termination reason carries.
+    public func claimAgentSessionExitEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) throws
+        -> Bool
+    {
+        try withImmediateTransaction {
+            try execute(
+                sql: """
+                    INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, created_at)
+                    SELECT ?, ?, ?, ?, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND status <> ?)
+                      AND COALESCE(
+                            (SELECT MAX(CASE WHEN event_type = ? THEN rowid END) FROM agent_session_events WHERE agent_session_id = ?), 0)
+                          <= COALESCE(
+                            (SELECT MAX(CASE WHEN event_type = 'init' THEN rowid END) FROM agent_session_events WHERE agent_session_id = ?), 0)
+                    """,
+                bindings: [
+                    UUID().uuidString, agentSessionID, eventType, source, message ?? "", createdAt, agentSessionID, AgentWindowStatus.exited.rawValue,
+                    eventType, agentSessionID, agentSessionID,
+                ])
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
+            return changed > 0
+        }
     }
 
     private func decodeAgentSubscription(row: [String]) -> AgentSubscriptionRecord? {
@@ -596,7 +638,7 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 18 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
@@ -607,8 +649,8 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
             terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
-            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14], createdAt: row[15],
-            updatedAt: row[16])
+            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14],
+            detectedAgentKind: row[17].isEmpty ? nil : row[17], createdAt: row[15], updatedAt: row[16])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {
