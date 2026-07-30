@@ -64,13 +64,15 @@ terminal_service_socket_path_for_runtime_dir() {
 # Process IDs holding the given unix domain socket open.
 #
 # `lsof -t <path>` resolves regular files but not unix domain sockets on macOS, so it silently returns
-# nothing for these; the socket appears only in the `-U` listing, whose NAME column is the path with an
-# extra leading slash. Match that column exactly rather than by substring so a longer sibling socket
+# nothing for these; the socket appears only in the `-U` listing, whose NAME column is the path exactly
+# as the process bound it — spacesd binds the plain absolute path, while Caddy's admin address yields a
+# doubled leading slash. Match either exact form rather than a substring so a longer sibling socket
 # path in the same directory can never be mistaken for this one.
 terminal_harness_pids_owning_unix_socket() {
   local socket_path="$1"
   [[ -n "$socket_path" ]] || return 0
-  lsof -nP -U 2>/dev/null | awk -v name="/$socket_path" '$NF == name { print $2 }' | sort -u
+  lsof -nP -U 2>/dev/null | awk -v name="$socket_path" -v doubled="/$socket_path" \
+    '$NF == name || $NF == doubled { print $2 }' | sort -u
 }
 
 # Stops the Caddy router belonging to the profile at `runtime_dir`.
