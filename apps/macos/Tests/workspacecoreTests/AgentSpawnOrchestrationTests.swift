@@ -45,6 +45,27 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
         XCTAssertEqual(terminalWindow.name, "Codex")
     }
 
+    /// A spawned agent's command runs through an interactive login shell. That is what makes it resolve
+    /// the same binaries the user's own terminal does — `claude` installed to `~/.local/bin`, an
+    /// fnm-managed `codex` — because those PATH entries live in `~/.zshrc`, which a non-interactive
+    /// login shell never reads.
+    func testCreateWorkspaceAgentSessionRunsTheCommandThroughAnInteractiveLoginShell() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeAgentOrchestrator(store: store, launchCapture: launchCapture, terminateCapture: TerminalTerminateCapture())
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "claude --model haiku", title: nil)
+
+        let command = try XCTUnwrap(launchCapture.snapshot().first?.command)
+        XCTAssertTrue(command.contains(" -l -i -c "), "agent command must run under an interactive login shell: \(command)")
+        XCTAssertTrue(command.contains("claude --model haiku"))
+    }
+
     func testCreateWorkspaceAgentSessionHonorsExplicitTitleAndRejectsBlankCommand() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -82,8 +103,8 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
-                sessionID: session.id, title: "Reviewer", workingDirectory: projectDir.path, shell: "/bin/zsh", command: "claude",
-                createdAt: "now", workspaceID: workspace.id, kind: .agent), paths: paths)
+                sessionID: session.id, title: "Reviewer", workingDirectory: projectDir.path, shell: "/bin/zsh", command: "claude", createdAt: "now",
+                workspaceID: workspace.id, kind: .agent), paths: paths)
 
         let killed = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: session.id)
 
@@ -125,8 +146,8 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
-                    sessionID: sessionID, title: kind.rawValue, workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
-                    createdAt: "now", workspaceID: workspace.id, kind: kind), paths: paths)
+                    sessionID: sessionID, title: kind.rawValue, workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now",
+                    workspaceID: workspace.id, kind: kind), paths: paths)
 
             let killed = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: sessionID)
 
