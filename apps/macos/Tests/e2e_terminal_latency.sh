@@ -197,8 +197,8 @@ socket_path_cache: dict[str, Path] = {}
 
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
-    "mac-scrollback-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
-    "mac-scrollback-partial-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
+    "mac-scrollback-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
+    "mac-scrollback-partial-latency": {"gross_p95_ms": 100, "target_p95_ms": 75},
     "mac-command-output-catchup": {"gross_p95_ms": 100, "target_p95_ms": 100},
 }
 
@@ -888,8 +888,7 @@ def run_mac_scrollback_latency(
         "phase_summaries": summarize_phases(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
-        "report_only": True,
-        "budget_enforced": False,
+        "budget_enforced": True,
     }
 
 

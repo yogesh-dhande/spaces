@@ -1731,7 +1731,7 @@ with open(sys.argv[1]) as fh:
 target = sys.argv[2]
 for process in data.get("runningProcesses", []):
     if process.get("name") == target:
-        print(process.get("terminalNativeID") or process.get("terminalTrackingID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 }
@@ -5177,7 +5177,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5198,7 +5198,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")
@@ -5402,7 +5402,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5421,7 +5421,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     if session_id and session_id not in known:
         print(session_id)
         break
@@ -5447,7 +5447,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 session_id = sys.argv[2]
 for window in data["windows"]:
-    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
+    if (window.get("terminalTrackingID") or "") == session_id:
         print("1")
         break
 else:
@@ -5469,7 +5469,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )"
@@ -5484,7 +5484,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )" "frontend session stable after closing process terminal window"
@@ -5582,7 +5582,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5601,7 +5601,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")

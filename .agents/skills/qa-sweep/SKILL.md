@@ -52,11 +52,18 @@ a decoder that returns `None` on error and a caller that formats `None` as a pla
 format gate reported a themed background as `#000000`); one broken shared bootstrap step failing every
 lane for one reason; and a leaked process poisoning later lanes.
 
-**Before blaming a desktop lane, check who owns desktop-global control**
-(`spacese2e profile-desktop-control-owner`). A lane that leaks a `SpacesApp` — cleanup that kills only the
-launcher it spawned from, after the launcher already exited — leaves that app holding the lease, and every
-later desktop lane then fails after its full wait with an unrelated-looking message. Only ever stop an
-instance your own run created.
+**Before blaming a desktop lane, rule out the two environment states that make one fail misleadingly.**
+
+1. **A locked screen.** With the screen locked, AX still reports an app's windows, titles, and
+   focused/main, but publishes no `kAXPosition`/`kAXSize` — so any lane that resolves a window frame to
+   post a mouse event fails with a message about the window, not about the lock. Check it directly
+   (`CGSessionCopyCurrentDictionary()`'s `CGSSessionScreenIsLocked`) rather than inferring it, and abort a
+   sweep instead of recording the results: a whole run of desktop lanes will fail for this one reason.
+   The control that identifies it in one step is re-running a desktop lane that passed earlier in the same
+   session — if a lane whose code did not change now fails, suspect the environment, not the diff.
+2. **Another instance owning desktop-global control** (`spacese2e profile-desktop-control-owner`). A lane
+   that leaks a `SpacesApp` leaves it holding the lease, and every later desktop lane then fails after its
+   full wait with an unrelated-looking message. Only ever stop an instance your own run created.
 
 For the latency lanes, two checks matter more than the numbers:
 

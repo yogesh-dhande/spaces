@@ -469,10 +469,10 @@ render_update_baselines: dict[str, dict] = {}
 socket_path_cache: dict[str, Path] = {}
 
 budgets = {
-    ("ios-input-latency", "local", "local"): {"gross_p95_ms": 1000, "target_p95_ms": 150},
-    ("ios-scrollback-latency", "local", "local"): {"gross_p95_ms": 750, "target_p95_ms": 100},
-    ("ios-input-latency", "ios-constrained", "local"): {"gross_p95_ms": 3000, "target_p95_ms": 600},
-    ("ios-scrollback-latency", "ios-constrained", "local"): {"gross_p95_ms": 2500, "target_p95_ms": None},
+    ("ios-input-latency", "local", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
+    ("ios-scrollback-latency", "local", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
+    ("ios-input-latency", "ios-constrained", "local"): {"gross_p95_ms": 150, "target_p95_ms": 100},
+    ("ios-scrollback-latency", "ios-constrained", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
 }
 
 
@@ -1726,8 +1726,7 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
         "visible_render_summary": summarize_visible_render_samples(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
-        "report_only": True,
-        "budget_enforced": False,
+        "budget_enforced": True,
     }
 
 
