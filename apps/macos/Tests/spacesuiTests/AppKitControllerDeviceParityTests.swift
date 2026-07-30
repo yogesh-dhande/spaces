@@ -1,9 +1,10 @@
 import Foundation
 import Testing
 import spacesclientcore
-import spacesdeviceapi
 import spacesdevicecore
 import workspacecore
+
+@testable import spacesdeviceapi
 
 @testable import spacesterminalcore
 @testable import spacesui
@@ -920,6 +921,63 @@ import workspacecore
             workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
             updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: false, isSubscriptionAvailable: false,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
+    }
+
+    /// Opening an ended terminal's pane for the first time — the session is in no loaded overview, so the
+    /// pane is resolved cold against the device. The session exited and its terminal window record is all
+    /// that holds it, which is the state a local daemon restart leaves behind, and the resolve has to come
+    /// back with a request that can actually describe the pane: its workspace and its shell. The overview
+    /// here is built by the daemon's own row derivation rather than hand-assembled, since whether the
+    /// session is published at all is that derivation's decision.
+    @Test func coldResolveOpensAnEndedSessionHeldOnlyByItsTerminalWindowRow() async throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-ended", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let endedWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace, windows: [endedWindow])
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-ended", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Shell",
+            workingDirectory: "/repo/feature", shell: "/bin/zsh", command: "seq 1 300", createdAt: "2026-07-29T12:00:00Z",
+            workspaceID: workspace.id, kind: .shell)
+        let endedEntry = TerminalSessionCatalogEntry(
+            launchConfiguration: launchConfiguration,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "session-ended", backend: .ghosttyEmbedded, servicePID: 321, childPID: 654, state: .exited,
+                updatedAt: "2026-07-29T12:00:05Z", title: nil, workingDirectory: "/repo/feature"),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), paths: TerminalSessionPaths(rootDirectory: "/tmp/session-ended"),
+            isControlAvailable: false, isSubscriptionAvailable: false)
+        let rows = SpacesDeviceAPIServer.workspaceTerminalRows(
+            workspaces: [descriptor], sessions: [], sessionIDsWithFinalRender: ["session-ended"],
+            catalogEntry: { $0 == "session-ended" ? endedEntry : nil })
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [descriptor], workspaceRows: rows, liveSessions: [],
+            daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))
+        let device = SpacesPairedDeviceRecord(
+            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
+        let clientApp = SpacesDeviceClientApp(
+            installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
+
+        let match = await AppKitController.resolveSessionSummaryMatchOffMain(
+            sessionID: "session-ended", device: device, clientApp: clientApp,
+            resolveOverview: { device, _ in
+                SpacesDeviceOverviewResolution(
+                    overview: SpacesDeviceOverview(device: device, overview: overview), daemonStatus: nil, compatibility: nil)
+            })
+
+        let resolved = try #require(match)
+        let request = AppKitController.terminalSessionPaneOpenRequest(from: resolved)
+        #expect(request.sessionID == "session-ended")
+        #expect(request.workspaceID == "workspace-ended")
+        #expect(request.shell == "/bin/zsh")
+        #expect(request.command == "seq 1 300")
+        #expect(request.workingDirectory == "/repo/feature")
+        #expect(request.kind == .shell)
+        #expect(request.initialState == .exited)
+        #expect(request.deviceID == "local")
     }
 
     @Test func coldTerminalOverviewLookupRunsOffMainThread() async {

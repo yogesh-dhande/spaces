@@ -649,9 +649,107 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [endedShellWindow])], sessions: [])
 
-        // The session left `sessions` the moment it exited, but the daemon still retains it.
-        XCTAssertFalse(overview.sessions.contains { $0.id == "session-ended-shell" })
+        // The window row alone keeps the session retained: it holds no live core, so nothing but the
+        // product record it is referenced by can be the reason. What the daemon then publishes for it is
+        // covered by `testEndedSessionHeldOnlyByATerminalWindowRowStaysOpenable`, which builds the rows
+        // the daemon derives from this same record instead of passing none.
         XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
+    }
+
+    /// A session whose only product record is its terminal window keeps its `sessions` entry after it
+    /// exits, and its row keeps offering the open — `docs/spec.md`: an exited target opens its pane in
+    /// its ended state, and the terminal row is named there alongside process and coding-agent rows. The
+    /// entry is what makes the ended pane openable at all: a client needs the session's launch
+    /// configuration (workspace and shell) to describe the pane, and it has no other source for it.
+    func testEndedSessionHeldOnlyByATerminalWindowRowStaysOpenable() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let endedShellWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace, windows: [endedShellWindow])
+        let endedSession = makeSessionCatalogEntry(
+            sessionID: "session-ended-shell", title: "Shell", workingDirectory: "/repo/feature", state: .exited, workspaceID: workspace.id,
+            attachmentSnapshot: .init())
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
+            projects: [project], workspaces: [descriptor], liveSessions: [], retainedSessions: [endedSession],
+            sessionIDsWithFinalRender: ["session-ended-shell"])
+
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
+        let summary = try XCTUnwrap(overview.sessions.first { $0.id == "session-ended-shell" })
+        // The two fields a pane cannot be opened without.
+        XCTAssertEqual(summary.workspaceID, workspace.id)
+        XCTAssertEqual(summary.shell, "/bin/zsh")
+        XCTAssertEqual(summary.state, .exited)
+        // A shell, so the pane opens as one rather than as a process or coding-agent pane.
+        XCTAssertEqual(summary.rowKind, .liveSession)
+        XCTAssertEqual(summary.hasFinalRender, true)
+        // The ended core is gone, so nothing claims live control of it.
+        XCTAssertEqual(summary.isControlAvailable, false)
+        XCTAssertEqual(summary.isSubscriptionAvailable, false)
+
+        let row = try XCTUnwrap(overview.workspaces.first?.terminalRows.first)
+        XCTAssertEqual(row.sessionID, "session-ended-shell")
+        XCTAssertTrue(row.canOpenTerminal)
+        XCTAssertEqual(row.runState, .exited)
+        // Nothing to stop: the session is already gone.
+        XCTAssertFalse(row.canStop)
+    }
+
+    /// A live terminal-window session stays an ad hoc summary. Only the ad hoc summary carries
+    /// `liveTitle`, so publishing a live session from its window record instead would drop what the
+    /// program running in it prints.
+    func testLiveTerminalWindowSessionStaysAnAdHocSummaryCarryingItsLiveTitle() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let shellWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-live-shell", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace, windows: [shellWindow])
+        let liveSession = makeSessionCatalogEntry(
+            sessionID: "session-live-shell", title: "Shell", workingDirectory: "/repo/feature", workspaceID: workspace.id,
+            attachmentSnapshot: .init(), runtimeTitle: "vim README.md")
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
+            projects: [project], workspaces: [descriptor], liveSessions: [liveSession])
+
+        let summary = try XCTUnwrap(overview.sessions.first { $0.id == "session-live-shell" })
+        XCTAssertEqual(summary.rowKind, .liveSession)
+        XCTAssertEqual(summary.liveTitle, "vim README.md")
+        // No product row claimed it, which is what leaves the live title in place.
+        XCTAssertNil(summary.rowSourceID)
+        XCTAssertEqual(overview.sessions.filter { $0.id == "session-live-shell" }.count, 1)
+    }
+
+    /// A session claimed by a process row is described by that row alone: its terminal window record
+    /// must not publish a second summary for the same session.
+    func testEndedSessionClaimedByAProcessRowIsPublishedOnceAsThatProcess() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let exitedProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
+            terminalTrackingID: "session-shared", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")
+        let processWindow = WindowRecord(
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", terminalTrackingID: "session-shared", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
+            project: project, workspace: workspace, runningProcesses: [exitedProcess], windows: [processWindow])
+        let endedSession = makeSessionCatalogEntry(
+            sessionID: "session-shared", title: "api", workingDirectory: "/repo/feature", state: .exited, workspaceID: workspace.id,
+            attachmentSnapshot: .init())
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
+            projects: [project], workspaces: [descriptor], liveSessions: [], retainedSessions: [endedSession])
+
+        XCTAssertEqual(overview.sessions.filter { $0.id == "session-shared" }.count, 1)
+        XCTAssertEqual(overview.sessions.first { $0.id == "session-shared" }?.rowKind, .process)
     }
 
     /// An exited process/agent row keeps its session retained too, matching the collector's rule; a
