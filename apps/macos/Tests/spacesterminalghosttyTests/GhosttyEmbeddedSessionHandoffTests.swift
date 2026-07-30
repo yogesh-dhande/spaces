@@ -113,12 +113,23 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let slave = open(slaveName, O_RDWR | O_NOCTTY)
         XCTAssertGreaterThanOrEqual(slave, 0, "opening the PTY slave failed")
 
+        // Spawn `/bin/sleep` itself rather than `sh -c "sleep 120"`: `tearDown` kills exactly the pid
+        // reported here, and a shell layer can fork the real `sleep` instead of exec'ing it, leaving that
+        // grandchild running after the shell is killed. Redirect the child's stdio to /dev/null so it never
+        // inherits the test runner's stdout/stderr: a surviving child holding SwiftPM's output pipe blocks
+        // `swift test` on pipe EOF long after the test binary itself has exited.
         var childPID: pid_t = 0
-        let path = "/bin/sh"
-        let arguments = [path, "-c", "sleep 120"]
+        let path = "/bin/sleep"
+        let arguments = ["sleep", "120"]
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
         defer { for argument in argv where argument != nil { free(argument) } }
-        XCTAssertEqual(posix_spawn(&childPID, path, nil, nil, &argv, environ), 0, "posix_spawn of the liveness child failed")
+        var fileActions: posix_spawn_file_actions_t?
+        XCTAssertEqual(posix_spawn_file_actions_init(&fileActions), 0, "posix_spawn_file_actions_init failed")
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0), 0, "redirecting child stdin failed")
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0), 0, "redirecting child stdout failed")
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0), 0, "redirecting child stderr failed")
+        XCTAssertEqual(posix_spawn(&childPID, path, &fileActions, nil, &argv, environ), 0, "posix_spawn of the liveness child failed")
 
         return AdoptablePTY(master: master, slave: slave, childPID: childPID)
     }
@@ -610,16 +621,18 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
 
     // MARK: - 6. Input drain before handoff (finding D1)
 
-    /// A `terminal send --submit` splits into the text write and a carriage return the sequencer holds
-    /// back by its separation delay. If a handoff `execv` fires right after the send, it would destroy the
-    /// sequencer with the CR (or the whole line) unwritten. `quiesceForHandoff` must drain the pending
-    /// sequencer work — and the host PTY write queue — before returning the record.
+    /// A `terminal send --submit` is acknowledged before its bytes reach the PTY: it becomes two sequencer
+    /// writes (the pasted text, then the carriage return) sitting behind the host's asynchronous PTY write
+    /// queue. If a handoff `execv` fires right after the send, it would destroy both with the CR (or the
+    /// whole line) unwritten, so `quiesceForHandoff` must drain the sequencer chain and the PTY write queue
+    /// before returning the record.
     ///
     /// The child runs `stty -echo; cat`, so it re-emits a line only once its terminating newline arrives:
-    /// "PAYLOAD" reaches `output.log` only if the submit's CR was actually written. Quiesce must also have
-    /// taken at least the pending CR's separation delay (proving it waited for the drain rather than
-    /// returning while the CR was still queued) — before the fix it returned immediately.
-    func testQuiesceDrainsPendingSubmitCarriageReturnBeforeHandoff() async throws {
+    /// "PAYLOAD" reaches `output.log` only if the submit's text AND its CR were actually written through
+    /// the quiesce path. That the drain *waits* for a queued write rather than letting it run later is
+    /// covered directly (and synchronously) by `TerminalControlInputSequencerTests`; an in-process test
+    /// cannot observe it here, because nothing destroys the queues the way a real `execv` would.
+    func testQuiesceWritesPendingSubmitThroughHandoff() async throws {
         try Self.requireGhosttyAvailable()
         let paths = try Self.makeTemporaryPaths()
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
@@ -635,19 +648,13 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
         try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains("SUBMIT_READY") == true }
 
-        // Submit a line, then quiesce immediately while the trailing CR is still held in the sequencer.
+        // Submit a line, then quiesce immediately while the text and its trailing CR are still queued.
         let submitMarker = "DRAIN_PAYLOAD"
         TerminalEngineActor.runSynchronously {
             _ = sourceCore.handleControlRequest(TerminalControlRequest(command: "send", text: submitMarker, appendNewline: true))
         }
-        let quiesceStartedAt = ContinuousClock.now
         guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
-        let quiesceDuration = quiesceStartedAt.duration(to: .now)
         _ = record
-
-        // Quiesce must have waited for the pending CR (its separation delay), not returned while it was queued.
-        XCTAssertGreaterThanOrEqual(
-            quiesceDuration, .milliseconds(300), "quiesce returned before draining the pending submit carriage return (\(quiesceDuration))")
 
         // `cat` re-emits the line only after the CR lands, so its presence proves the CR was written before
         // the handoff record was returned. The direct-to-file writer installed by quiesce keeps appending.

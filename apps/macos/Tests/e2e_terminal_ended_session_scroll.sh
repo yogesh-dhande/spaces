@@ -40,15 +40,9 @@ cleanup() {
   fi
   # The scroll's endpoint recovery relaunches spacesd on a fresh port, and SERVICE_PID still names
   # the daemon the scenario stopped, so stop whichever daemon serves the profile now that the
-  # session is terminated and the app is gone. The pid kill below covers failure paths where the
-  # daemon still hosts the session and refuses the idle-only stop.
-  if [[ -x "$SPACES_CLI" ]]; then
-    SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_terminal_service_if_idle "$SPACES_CLI" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
+  # session is terminated and the app is gone -- unconditionally, not only when idle, since a
+  # failure path can leave the daemon still hosting the session.
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 

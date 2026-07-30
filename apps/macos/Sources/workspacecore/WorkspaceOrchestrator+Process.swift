@@ -82,12 +82,13 @@ extension WorkspaceOrchestrator {
         var didUpdate = false
         for process in processes where process.status == .running {
             if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), !runtimeState.state.isInteractive {
+                let exitedPID = runtimeState.childPID.map(Int.init) ?? process.pid
+                let exitedAt = runtimeState.exitedAt ?? nowISO8601()
+                guard try store.markRunningProcessExited(process, pid: exitedPID, exitedAt: exitedAt) else { continue }
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID,
-                    pid: runtimeState.childPID.map(Int.init) ?? process.pid, status: .exited, logPath: process.logPath,
-                    lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: runtimeState.exitedAt ?? nowISO8601())
-                try store.upsert(runningProcess: updatedProcess)
+                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID, pid: exitedPID, status: .exited,
+                    logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: exitedAt)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                 continue
@@ -107,12 +108,13 @@ extension WorkspaceOrchestrator {
                 didUpdate = true
             }
             if !isProcessAlive(pid: pid) {
+                let exitedAt = nowISO8601()
+                guard try store.markRunningProcessExited(process, pid: process.pid, exitedAt: exitedAt) else { continue }
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
                     runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID,
                     pid: process.pid, status: .exited, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                    exitedAt: nowISO8601())
-                try store.upsert(runningProcess: updatedProcess)
+                    exitedAt: exitedAt)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
             }

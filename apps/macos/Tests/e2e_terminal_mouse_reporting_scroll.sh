@@ -22,7 +22,6 @@ APP_LOG="$WORK_ROOT/spaces-app.log"
 PROBE_SCRIPT="$WORK_ROOT/mouse-reporting-scroll.py"
 PROBE_OUTPUT="$WORK_ROOT/mouse-reporting-input.bin"
 APP_PID=""
-SERVICE_PID=""
 session_id=""
 
 cleanup() {
@@ -34,10 +33,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -54,24 +50,6 @@ require_binary() {
 extract_session_id() {
   local output="$1"
   printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
-}
-
-terminal_service_pid() {
-  local target_session_id="$1"
-  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$target_session_id" <<'PY'
-import os
-import sqlite3
-import sys
-
-with sqlite3.connect(sys.argv[1]) as db:
-    row = db.execute(
-        "SELECT service_pid FROM terminal_runtime_states WHERE root_directory = ?",
-        (os.path.normpath(sys.argv[2]),),
-    ).fetchone()
-if not row:
-    raise SystemExit("missing terminal runtime state")
-print(row[0])
-PY
 }
 
 wait_for_tail_contains() {
@@ -179,7 +157,6 @@ command_output="$(
 )"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
-SERVICE_PID="$(terminal_service_pid "$session_id")"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" focus-terminal-session-window --session-id "$session_id" >/dev/null

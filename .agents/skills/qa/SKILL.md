@@ -30,6 +30,15 @@ Every defect worth reporting here lives in one of these blind spots. If a findin
 5. **Snapshot before, verify after.** Record project ids, workspace ids, `git worktree list`, and the live session list up front; `diff` each at the end and show the empty diffs.
 6. **Keep raw artifacts in the scratchpad**, and never read a full `sample` transcript into context — `grep`/`awk` it.
 
+## 0. Run the e2e and latency suites first
+
+Do this before any measurement, and run it through the **`e2e` skill** — that skill owns lane selection,
+the environment states that make a lane fail misleadingly, and the flake-versus-regression call (§10).
+It is a gate, not correctness re-testing (§9): a sweep run on a build whose suite is red measures sand,
+and the suite itself rots silently because these lanes are manual and outside CI.
+
+Abort the sweep rather than recording results if the gate does not come back clean.
+
 ## 1. Baseline
 
 Capture idle CPU, RSS, threads, fds, and DB size for app, daemon, and caddy, plus one `sample <pid> 10` of each. In a `sample`, ignore idle-wait leaves (`kevent64`, `__workq_kernreturn`, `mach_msg2_trap`, `__psynch_cvwait`, `__ulock_wait2`) — blocked threads, not CPU.

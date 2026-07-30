@@ -300,9 +300,10 @@ bool spaces_ghostty_vt_session_state_preamble(
     size_t *out_len
 );
 
-// Test-support: reports whether a DEC private (ansi=false) or ANSI (ansi=true) mode is currently set
-// on the session's terminal. Returns false if the underlying query fails. Used by trim tests to
-// assert that a preamble round-trips terminal modes.
+// Reports whether a DEC private (ansi=false) or ANSI (ansi=true) mode is currently set on the
+// session's terminal. Returns false if the underlying query fails. The submit path reads bracketed
+// paste (2004) through this to decide whether a submit's carriage return needs temporal separation
+// from its unframed text; trim tests use it to assert that a preamble round-trips terminal modes.
 bool spaces_ghostty_vt_session_mode_is_set(
     SpacesGhosttyVtSession *session,
     uint16_t mode_value,

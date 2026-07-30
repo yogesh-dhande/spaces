@@ -31,7 +31,7 @@ mkdir -p "$SPACES_RUNTIME_DIR"
 service_log="$temp_root/terminal-service.log"
 device_api_log="$temp_root/device-api.log"
 metrics_path="${METRICS_PATH:-$temp_root/metrics.json}"
-trap 'pkill -P $$ >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
+trap 'stop_terminal_service_for_runtime_dir "$SPACES_RUNTIME_DIR"; pkill -P $$ >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
 
 "$terminal_service" >"$service_log" 2>&1 &
 service_pid=$!
@@ -50,7 +50,14 @@ if [[ ! -S "$service_socket" ]]; then
   exit 1
 fi
 
-session_output="$("$spaces_cli" terminal command --command 'echo ready; cat' --title 'device-api-profile')"
+# terminal command is workspace-scoped; register a fixture project and use its default workspace. This
+# throwaway profile has no workspace of its own, and without an explicit id the command resolves the
+# workspace from the current directory and fails outright.
+fixture_project_dir="$temp_root/device-api-fixture-project"
+mkdir -p "$fixture_project_dir"
+fixture_workspace_id="$("$spacese2e" register-project --project-dir "$fixture_project_dir" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
+session_output="$("$spaces_cli" terminal command --workspace "$fixture_workspace_id" --command 'echo ready; cat' --title 'device-api-profile')"
 session_id="$(awk '/Started terminal session/ { print $4 }' <<<"$session_output")"
 if [[ -z "$session_id" ]]; then
   echo "Failed to parse session id from: $session_output" >&2
@@ -196,6 +203,18 @@ def connect_stream(payload: dict) -> subprocess.Popen:
 
 render_update_baselines: dict[str, dict] = {}
 
+# GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec; there is deliberately no
+# compatibility path for older versions, so a mismatch is rejected rather than misread.
+RENDER_UPDATE_VERSION = 4
+
+# The two high bits of a cell's wire flags word are codec-reserved payload markers, not style flags: the
+# cell is followed, in its block's sparse text section, by its grapheme cluster (bit 15) and/or its OSC 8
+# link URL (bit 14). Style flags occupy bits 0-10 and never reach these, so a decoder strips them off the
+# flags value it reports.
+CLUSTER_PAYLOAD_FLAG = 1 << 15
+LINK_PAYLOAD_FLAG = 1 << 14
+PAYLOAD_FLAG_MASK = CLUSTER_PAYLOAD_FLAG | LINK_PAYLOAD_FLAG
+
 
 class RenderUpdateReader:
     nil_revision = (1 << 64) - 1
@@ -234,13 +253,40 @@ class RenderUpdateReader:
         return self.read(self.u16()).decode("utf-8")
 
 
-def read_render_update_cell(reader: RenderUpdateReader) -> dict:
-    return {
-        "codepoint": reader.u32(),
-        "foregroundRGB": reader.u32(),
-        "backgroundRGB": reader.u32(),
-        "flags": reader.u16(),
-    }
+def read_render_update_cell_block(reader: RenderUpdateReader, count: int) -> list[dict]:
+    """Reads one block of `count` 14-byte cells plus the sparse text section that follows it.
+
+    That section holds one entry per payload flag bit the cells set, in cell order and cluster before link,
+    each `(UInt32 offset within the block, UInt16 utf8 byte count, bytes)`; a block whose cells set no
+    payload bits is followed by nothing at all. This harness renders base codepoints only, so the payload
+    text is read purely to keep the reader aligned with the rest of the frame.
+    """
+    cells = []
+    flagged = []
+    for index in range(count):
+        codepoint = reader.u32()
+        foreground_rgb = reader.u32()
+        background_rgb = reader.u32()
+        flags = reader.u16()
+        if flags & PAYLOAD_FLAG_MASK:
+            flagged.append((index, flags))
+        cells.append(
+            {
+                "codepoint": codepoint,
+                "foregroundRGB": foreground_rgb,
+                "backgroundRGB": background_rgb,
+                "flags": flags & ~PAYLOAD_FLAG_MASK,
+            }
+        )
+    for index, flags in flagged:
+        for payload_flag in (CLUSTER_PAYLOAD_FLAG, LINK_PAYLOAD_FLAG):
+            if not flags & payload_flag:
+                continue
+            offset = reader.u32()
+            if offset != index:
+                raise ValueError(f"render update cell payload names offset {offset}, expected {index}")
+            reader.read(reader.u16())
+    return cells
 
 
 def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: int) -> dict:
@@ -249,6 +295,8 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
     cursor_visible = reader.u8() != 0
     default_foreground_rgb = reader.u32()
     default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
     cell_count = reader.u32()
     return {
         "columns": columns,
@@ -258,25 +306,33 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
         "cursorVisible": cursor_visible,
         "defaultForegroundRGB": default_foreground_rgb,
         "defaultBackgroundRGB": default_background_rgb,
-        "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+        "cells": read_render_update_cell_block(reader, cell_count),
     }
 
 
 def read_render_update_delta(
     reader: RenderUpdateReader, base_revision: int | None, target_revision: int | None, owner_epoch: int, columns: int, rows: int
 ) -> dict:
+    cursor_column = reader.u16()
+    cursor_row = reader.u16()
+    cursor_visible = reader.u8() != 0
+    default_foreground_rgb = reader.u32()
+    default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
+    changed_cell_count = reader.u32()
     delta = {
         "baseRevision": base_revision,
         "targetRevision": target_revision,
         "ownerEpoch": owner_epoch,
         "columns": columns,
         "rows": rows,
-        "cursorColumn": reader.u16(),
-        "cursorRow": reader.u16(),
-        "cursorVisible": reader.u8() != 0,
-        "defaultForegroundRGB": reader.u32(),
-        "defaultBackgroundRGB": reader.u32(),
-        "changedCellCount": reader.u32(),
+        "cursorColumn": cursor_column,
+        "cursorRow": cursor_row,
+        "cursorVisible": cursor_visible,
+        "defaultForegroundRGB": default_foreground_rgb,
+        "defaultBackgroundRGB": default_background_rgb,
+        "changedCellCount": changed_cell_count,
         "scrollRects": [],
         "replaceCellRuns": [],
     }
@@ -296,7 +352,7 @@ def read_render_update_delta(
         column = reader.u16()
         cell_count = reader.u16()
         delta["replaceCellRuns"].append(
-            {"row": row, "column": column, "cells": [read_render_update_cell(reader) for _ in range(cell_count)]}
+            {"row": row, "column": column, "cells": read_render_update_cell_block(reader, cell_count)}
         )
     return delta
 
@@ -309,8 +365,8 @@ def decode_render_update(payload: dict) -> dict | None:
     if reader.read(4) != b"GRTU":
         raise ValueError("invalid render update magic")
     version = reader.u8()
-    if version != 2:
-        raise ValueError(f"unsupported render update version {version}")
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
     kind_byte = reader.u8()
     _ = reader.u16()
     session_revision = reader.revision()
@@ -389,10 +445,10 @@ def materialize_render_update(payload: dict) -> dict:
     session_id = payload.get("sessionID")
     if not session_id or not payload.get("renderUpdate"):
         return payload
-    try:
-        update = decode_render_update(payload)
-    except Exception:
-        return payload
+    # A decode error is raised, not skipped: it means this harness and the codec disagree about the wire
+    # format, and swallowing it turns that into the far less useful "timed out waiting for streamed
+    # terminal state" further down, with the real cause nowhere in the output.
+    update = decode_render_update(payload)
     if not update:
         return payload
     if update["kind"] == "full":
@@ -646,6 +702,6 @@ print(json.dumps(metrics, indent=2, sort_keys=True))
 PY
 
 kill "$device_api_pid" >/dev/null 2>&1 || true
-kill "$service_pid" >/dev/null 2>&1 || true
 wait "$device_api_pid" >/dev/null 2>&1 || true
+stop_terminal_service_for_runtime_dir "$SPACES_RUNTIME_DIR"
 wait "$service_pid" >/dev/null 2>&1 || true

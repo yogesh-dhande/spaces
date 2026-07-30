@@ -737,10 +737,15 @@ extension WorkspaceOrchestrator {
         return nil
     }
 
+    /// Writes the finalized exit status onto the row, or reports nothing to record when the row changed
+    /// under the caller — a stop or restart deleted it, or a fresh agent rebound it to another session —
+    /// which `markAgentWindowExitStatus` decides against the stored row rather than re-inserting the
+    /// caller's snapshot.
     func recordAgentExitStatus(
         _ existing: AgentWindowRecord, status: AgentWindowStatus, eventType: String, eventSource: String, environmentKeys: [String]?
-    ) throws -> AgentWindowRecord {
+    ) throws -> AgentWindowRecord? {
         let now = nowISO8601()
+        guard try store.markAgentWindowExitStatus(existing, status: status, updatedAt: now) else { return nil }
         let terminalTarget: TerminalTargetRecord? =
             if existing.terminalTarget != nil || existing.terminalTrackingID != nil {
                 TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, trackingID: existing.terminalTrackingID)
@@ -750,7 +755,6 @@ extension WorkspaceOrchestrator {
             runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
             claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
             createdAt: existing.createdAt, updatedAt: now)
-        try store.upsertAgentWindow(updated)
         appendAgentSessionEvent(
             agentSessionID: updated.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
@@ -866,6 +870,13 @@ extension WorkspaceOrchestrator {
             return nil
         case .exited(let eventType, let eventSource, let environmentKeys):
             if alreadyFinalized { return record }
+            // A row a stop/restart already deleted was finalized by that destroy, which delivered its
+            // exited notice before deleting. The reconcilers that report exits hold snapshots read on
+            // another connection without the lifecycle lock, so one can arrive here for a row that is
+            // gone; re-notifying its subscribers would duplicate that notice, and the write below would
+            // resurrect the row. The write itself is conditional on the same fact, closing the window
+            // between this read and it.
+            guard try store.agentWindow(id: record.id) != nil else { return nil }
             try engine.childDidTransition(agent: record, transition: .exited)
             let result = try handleAgentExit(record, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
             if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }

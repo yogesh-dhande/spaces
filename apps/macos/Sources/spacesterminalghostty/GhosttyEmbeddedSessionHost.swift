@@ -109,6 +109,8 @@
             return true
         }
 
+        func bracketedPasteActive() -> Bool { sessionDriver.bracketedPasteActive() }
+
         func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
         func childPID() -> Int32? { sessionDriver.childPID() }
@@ -273,8 +275,8 @@
         /// daemon reads a complete mirror; termination enqueues its final writes last so FIFO ordering lands
         /// the terminated payload after every pending mirror write.
         private let persistence: TerminalCorePersistenceQueue
-        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
-        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session so a
+        /// submit's pasted text and its carriage return stay an adjacent pair; see
         /// `TerminalControlInputSequencer`.
         private let controlInputSequencer = TerminalControlInputSequencer()
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
@@ -761,12 +763,13 @@
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
 
-            // Drain accepted-but-unwritten control input before handing off. A `terminal send --submit`
-            // splits into the text write and a carriage return the sequencer holds back by its separation
-            // delay; the host PTY write queue is likewise asynchronous. The control server is stopped above,
-            // so no new sends can enqueue — await the sequencer chain and then the PTY write queue so the
-            // `execv` that inherits this same master fd cannot destroy either with the CR (or the whole line)
-            // unwritten. The child's echo of the drained input flows through the normal output path below.
+            // Drain accepted-but-unwritten control input before handing off. A control send is acknowledged
+            // before its bytes reach the PTY: a `terminal send --submit` becomes two sequencer writes (the
+            // pasted text, then the carriage return), and the host PTY write queue behind them is likewise
+            // asynchronous. The control server is stopped above, so no new sends can enqueue — await the
+            // sequencer chain and then the PTY write queue so the `execv` that inherits this same master fd
+            // cannot destroy either with the CR (or the whole line) unwritten. The child's echo of the
+            // drained input flows through the normal output path below.
             await controlInputSequencer.drain()
             await rendererHostStorage.drainPendingInputWrites()
 
@@ -1216,10 +1219,7 @@
                 if request.appendNewline { text.append("\n") }
                 guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
                 markLocalOwnerCommandInputOutputResyncPending()
-                let pasteText = text
-                controlInputSequencer.enqueueWrite { [weak self] in
-                    await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) }
-                }
+                enqueueControlInputPaste(text)
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
@@ -1230,21 +1230,27 @@
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
                 // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
-                // Agent TUIs (Claude Code, Codex, OpenCode) treat text bytes immediately followed by the
-                // carriage return, arriving in one PTY read burst, as a pasted block and leave it
-                // unsubmitted in the composer. So the text (which may itself contain newlines, e.g. a
-                // multi-line notification) is written first, and the CR (0x0D) is written as a separate
-                // burst after a delay (see `TerminalControlInputSequencer`) so the TUI reads it as a
-                // distinct Enter keystroke that submits. Enter is a CR because shells and Claude Code
-                // accept LF or CR while Codex and OpenCode submit only on CR. An empty text with
-                // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
-                // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
-                // keep the single inline write. Writes land shortly after the response through the
-                // sequencer, which keeps the text+CR pair ordered against every later input write.
-                let isTextPayload = request.bytes == nil
-                if request.appendNewline, isTextPayload, !payload.isEmpty {
-                    enqueueControlInputWrite(payload)
-                    enqueueControlSubmitCarriageReturn()
+                // Agent TUIs (Claude Code, Codex, OpenCode) group bytes that arrive in one PTY read burst
+                // into a paste, so text merged with its own carriage return lands in the composer
+                // unsubmitted. The text (which may itself contain newlines, e.g. a multi-line notification)
+                // goes in as a paste and the CR (0x0D) follows as its own write. Ghostty derives the paste
+                // encoding from the live terminal state: an application that enabled bracketed paste
+                // (DECSET 2004) receives the text framed by paste markers — the frame closes before the CR
+                // arrives, making the CR a distinct Enter keystroke no matter how the bytes are batched into
+                // read bursts, so the CR follows immediately. An application with bracketed paste OFF — an
+                // agent TUI still initializing right after a detection-based spawn is the case that matters —
+                // receives the text unframed, so only time can keep the CR out of the text's read burst:
+                // that CR goes through the sequencer's separated path instead (issue #187). Enter is a CR
+                // because shells and Claude Code accept LF or CR while Codex and OpenCode submit only on CR.
+                // An empty text with appendNewline is a bare Enter (e.g. answering a TUI dialog): there is
+                // nothing to frame, so the CR goes in alone. Byte payloads are opaque input rather than
+                // composer text, so they keep the single inline write. Both writes funnel through the
+                // sequencer, which keeps the text+CR pair adjacent and ordered against every later input
+                // write.
+                if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
+                    let framed = rendererHostStorage.bracketedPasteActive()
+                    enqueueControlInputPaste(text)
+                    if framed { enqueueControlInputWrite(Data([0x0D])) } else { enqueueSeparatedControlInputCarriageReturn() }
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
@@ -1261,16 +1267,27 @@
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
+        /// The CR of a submit whose text went out unframed (bracketed paste off): spaced from the text
+        /// and from the next write so the receiving composer reads it as a distinct Enter keystroke.
+        private func enqueueSeparatedControlInputCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+            }
+        }
+
+        /// Writes text through ghostty's paste encoder, which frames it with bracketed-paste markers when
+        /// the running application enabled DECSET 2004 and passes it through verbatim otherwise. Used both
+        /// for an explicit paste request and for the text half of a submit, where the framing is what keeps
+        /// the following carriage return a distinct Enter keystroke.
+        private func enqueueControlInputPaste(_ text: String) {
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(text) }
+            }
+        }
+
         /// Queued through the same sequencer as text writes so a key press never overtakes the text it was
         /// meant to follow.
         private func enqueueControlKeyPress(_ spec: TerminalKeySpec) {
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendKey(spec) } }
-        }
-
-        private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
-            }
         }
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {

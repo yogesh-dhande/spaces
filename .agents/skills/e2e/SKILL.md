@@ -39,9 +39,12 @@ Every invocation writes a Markdown report under `apps/macos/.artifacts/e2e-runs/
 3. **Run in the foreground.** A backgrounded e2e run gets killed on dormancy and reports long after the fact. Own these runs from the main loop.
 4. **Quiet machine.** These lanes are timing-sensitive; a concurrent build or stress run in another worktree produces failures that are about load, not the code. The mirror-surface suites are stricter still — only one embedded ghostty app may be live per process and effectively one consumer machine-wide, so `SurfaceSnapshotTimeout` usually means a second run is already going. Check `pgrep -af 'SpacesApp|spacesd|spacese2e|xctest'` before blaming the change.
 5. **The `app` lane takes over the desktop, and drives the user's real Chrome.** It closes real browser windows. Do not run it repeatedly on a machine someone is using; say what it will do and let the user choose the moment.
-6. **Remote lanes need `.env`.** `scripts/spaces-e2e-env.sh` sources the gitignored repo-root `.env`; a fresh worktree has none, so copy it in. A remote daemon must be on the same wire-protocol version as the local build — redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first. Tailscale SSH returns exit 0 for everything, so never trust a remote exit code alone; check the output.
-7. **Ghostty artifacts must match the pinned submodule.** `ghostty_session_new_headless failed` / `ghostty_mirror_new failed` is usually artifact skew or a stale debug daemon, not a product bug — `apps/macos/scripts/setup_ghostty.sh --build` rebuilds from the pin. After switching branches in a worktree, clean the stale debug products first.
-8. **Never pipe the run** through `tee`/`head` in a way that masks the exit code.
+6. **Two environment states make a desktop lane fail misleadingly — rule them out before blaming the lane.**
+   - **A locked screen.** With the screen locked, AX still reports an app's windows, titles, and focused/main, but publishes no `kAXPosition`/`kAXSize` — so any lane that resolves a window frame to post a mouse event fails with a message about the window, not about the lock. Check it directly (`CGSessionCopyCurrentDictionary()`'s `CGSSessionScreenIsLocked`) rather than inferring it, and abort the run instead of recording the results: a whole run of desktop lanes will fail for this one reason. The control that identifies it in one step is re-running a desktop lane that passed earlier in the same session — if a lane whose code did not change now fails, suspect the environment, not the diff.
+   - **Another instance owning desktop-global control** (`spacese2e profile-desktop-control-owner`). A lane that leaks a `SpacesApp` leaves it holding the lease, and every later desktop lane then fails after its full wait with an unrelated-looking message. Only ever stop an instance your own run created.
+7. **Remote lanes need `.env`.** `scripts/spaces-e2e-env.sh` sources the gitignored repo-root `.env`; a fresh worktree has none, so copy it in. A remote daemon must be on the same wire-protocol version as the local build — redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first. Tailscale SSH returns exit 0 for everything, so never trust a remote exit code alone; check the output.
+8. **Ghostty artifacts must match the pinned submodule.** `ghostty_session_new_headless failed` / `ghostty_mirror_new failed` is usually artifact skew or a stale debug daemon, not a product bug — `apps/macos/scripts/setup_ghostty.sh --build` rebuilds from the pin. After switching branches in a worktree, clean the stale debug products first.
+9. **Never pipe the run** through `tee`/`head` in a way that masks the exit code.
 
 ## 3. Latency and profiling scenarios
 
@@ -58,10 +61,24 @@ Reporting rules:
 2. **Warm up and repeat.** A single cold pass measures cache-miss cost. Raise `--samples` before drawing a conclusion; a cold-directory measurement once overstated a penalty by more than an order of magnitude.
 3. **Before and after, same machine, same conditions.** A perf claim needs both numbers in one table, and the table goes on the PR.
 4. **Say which network profile and which target produced each number.** `local` and `ios-constrained` are not comparable, and neither are Mac and iOS totals — they measure different endpoints.
+5. **Confirm each enforced metric actually has samples.** A budget compared against a `None` p95 is skipped, so the lane passes unconditionally and gates nothing. Report the sample count beside every percentile.
+6. **Confirm the lane exercises the path a user takes.** A scenario that drives a programmatic submit measures that path's deliberate input pacing, not terminal latency — user typing is a text write plus a separate Return keystroke and does not go through the submit sequencer. Getting this wrong makes a lane report an order of magnitude too slow and hides the render cost it exists to track.
 
-## 4. Flake or regression
+Attribute a slow phase before calling it a hotspot: take the per-phase p50/p95 breakdown, then confirm with an independent measurement outside Spaces (a raw PTY driving the same shell) and with the daemon's own perf log. A wide phase often means the process being waited on had not produced output yet, rather than that the phase is expensive.
 
-Assume neither. Decide it:
+## 4. Flake, harness drift, or regression
+
+When running the whole matrix, drive **one invocation per lane/scenario**, recording pass/fail per case and continuing past failures. The `exhaustive` lane aborts on its first failure, so a single early break hides the rest; driving each scenario separately yields the complete inventory in one pass. Cover every `app`, `terminal`, `mobile`, and `device-api` scenario plus `device-api latency-compare`, which `exhaustive` omits.
+
+Classify every failure before investigating anything, because the kinds need opposite responses:
+
+- **Harness drift** — the test encodes a contract the product no longer has. Fix the test and open a PR. Signatures: a wire/format version the product has moved past; a CLI verb that no longer exists (exit 64, "unexpected arguments"); a wait on a perf metric or detail field nothing emits; a missing argument the command now requires.
+- **Product defect** — file an issue with a priority label.
+- **Flake** — decided by the steps below, never assumed.
+
+Read the failure, do not trust its message. Failures mislead in three recurring ways: a decoder that returns `None` on error and a caller that formats `None` as a plausible value (a stale format gate reported a themed background as `#000000`); one broken shared bootstrap step failing every lane for one reason; and a leaked process poisoning later lanes.
+
+Assume neither flake nor regression. Decide it:
 
 1. Re-run the failing scenario alone on a quiet machine. Most timing failures do not survive isolation.
 2. If it fails in CI only, check whether other PRs' runs fail the same way at the same step — a shared failure is infrastructure, not the change. Worker oversubscription on a small runner shows up as a live-but-silent child; cap the workers rather than raising timeouts.

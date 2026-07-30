@@ -124,6 +124,7 @@ KNOWN_SPACES_NOISY_SESSION_ID=""
 REMOTE_DEVICE_RESULT_JSON=""
 REMOTE_DEVICE_PROJECT_ID=""
 REMOTE_DEVICE_WORKSPACE_ID=""
+REMOTE_DEVICE_DEFAULT_WORKSPACE_ID=""
 REMOTE_DEVICE_WEB_BROWSER_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
@@ -928,99 +929,37 @@ mac_client_installation_id() {
     "$SPACES_E2E_CLI" mac-client-installation-id
 }
 
+# Records the remote daemon this run already paired with (over SSH, inside the remote Device API
+# E2E) in the app's client store, so the launched app lists the remote device's projects.
+#
+# The write goes through `spacese2e seed-paired-device` rather than SQL from here: the client
+# database creates its schema only when the file has no tables at all, so a hand-written
+# `paired_devices` row would leave every other client table missing and the app would fail its first
+# client-store read instead of loading the sidebar.
 seed_remote_device_for_macos() {
   [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 0
-  python3 - "$REMOTE_DEVICE_RESULT_JSON" "$TMP_CLIENT_DB" "$TMP_CLIENT_SECRET_DIR" <<'PY'
-import json
-import os
-import sqlite3
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-result_path = Path(sys.argv[1])
-client_db = Path(sys.argv[2])
-secret_dir = Path(sys.argv[3])
-payload = json.loads(result_path.read_text())
-device_id = payload["deviceID"]
-now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-client_db.parent.mkdir(parents=True, exist_ok=True)
-with sqlite3.connect(client_db) as db:
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS paired_devices (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          platform TEXT NOT NULL,
-          host TEXT NOT NULL,
-          port INTEGER NOT NULL,
-          certificate_fingerprint TEXT NOT NULL,
-          ssh_host TEXT,
-          ssh_user TEXT,
-          ssh_port INTEGER,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          last_selected_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS migration_state (
-          current_version INTEGER NOT NULL
-        );
-        """
-    )
-    db.execute("DELETE FROM migration_state")
-    db.execute("INSERT INTO migration_state(current_version) VALUES (1)")
-    db.execute(
-        """
-        INSERT INTO paired_devices(
-          id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name = excluded.name,
-          platform = excluded.platform,
-          host = excluded.host,
-          port = excluded.port,
-          certificate_fingerprint = excluded.certificate_fingerprint,
-          ssh_host = excluded.ssh_host,
-          ssh_user = excluded.ssh_user,
-          ssh_port = excluded.ssh_port,
-          updated_at = excluded.updated_at,
-          last_selected_at = excluded.last_selected_at
-        """,
-        (
-            device_id,
-            payload.get("name") or "Remote Device",
-            "linux",
-            payload["remoteDaemonHost"],
-            int(payload["remoteDaemonPort"]),
-            payload["certificateFingerprint"],
-            os.environ.get("SPACES_E2E_REMOTE_SSH_HOST", ""),
-            os.environ.get("SPACES_E2E_REMOTE_SSH_USER", ""),
-            os.environ.get("SPACES_E2E_REMOTE_SSH_PORT", "") or None,
-            now,
-            now,
-            now,
-        ),
-    )
-
-def sanitize(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    sanitized = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
-    return sanitized or "device"
-
-secret_dir.mkdir(parents=True, exist_ok=True)
-os.chmod(secret_dir, 0o700)
-safe_id = sanitize(device_id)
-path = secret_dir / f"device-auth-token-{safe_id}.secret"
-path.write_text(str(payload["macAuthToken"]).strip())
-os.chmod(path, 0o600)
-PY
+  local -a seed_args=(
+    seed-paired-device
+    --device-id "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "deviceID")"
+    --name "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "name")"
+    --host "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonHost")"
+    --port "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonPort")"
+    --certificate-fingerprint "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "certificateFingerprint")"
+    --auth-token "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "macAuthToken")"
+  )
+  [[ -n "${SPACES_E2E_REMOTE_SSH_HOST:-}" ]] && seed_args+=(--ssh-host "$SPACES_E2E_REMOTE_SSH_HOST")
+  [[ -n "${SPACES_E2E_REMOTE_SSH_USER:-}" ]] && seed_args+=(--ssh-user "$SPACES_E2E_REMOTE_SSH_USER")
+  [[ -n "${SPACES_E2E_REMOTE_SSH_PORT:-}" ]] && seed_args+=(--ssh-port "$SPACES_E2E_REMOTE_SSH_PORT")
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" \
+    SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" "$SPACES_E2E_CLI" "${seed_args[@]}" \
+    || fail "failed seeding the paired remote device into the app's client store"
   REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
   REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
+  REMOTE_DEVICE_DEFAULT_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "defaultWorkspaceID")"
   REMOTE_DEVICE_WEB_BROWSER_URL="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteWebBrowserURL")"
   [[ -n "$REMOTE_DEVICE_PROJECT_ID" ]] || fail "remote Device API result missing projectID"
   [[ -n "$REMOTE_DEVICE_WORKSPACE_ID" ]] || fail "remote Device API result missing workspaceID"
+  [[ -n "$REMOTE_DEVICE_DEFAULT_WORKSPACE_ID" ]] || fail "remote Device API result missing defaultWorkspaceID"
   [[ -n "$REMOTE_DEVICE_WEB_BROWSER_URL" ]] || fail "remote Device API result missing remoteWebBrowserURL"
 }
 
@@ -1356,8 +1295,10 @@ run_remote_device_ui_parity() {
   wait_for_ui_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID" "remote workspace row"
   ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
   wait_for_ui_identifier "workspace-detail-title-label" "remote workspace detail title"
+  # Lifecycle controls offer only the actions that apply to the workspace's current state, so the
+  # remote workspace — which the remote Device API lane leaves stopped — shows Launch and no Stop
+  # here. Stop is asserted after the remote process starts, below.
   wait_for_ui_identifier "workspace-detail-launch-restart" "remote workspace lifecycle action"
-  wait_for_ui_identifier "workspace-detail-stop" "remote workspace stop action"
   wait_for_ui_identifier "workspace-detail-overflow" "remote workspace overflow action"
   # The panel rework (#109) moved workspace browser sessions out of the detail view and into the
   # sidebar as runtime-target rows: sidebar-target-<workspaceID>-browser:<resolved service URL>.
@@ -1367,6 +1308,17 @@ run_remote_device_ui_parity() {
   remote_device_wait_service_port_state "bindable"
   remote_device_run_workspace_process "remote-web-server"
   remote_device_wait_service_port_state "open"
+  # The remote process running makes its workspace running, so its detail footer must offer Stop
+  # alongside Restart. The footer's lifecycle controls are built when the workspace is selected, and a
+  # remote overview arriving on the device subscription repaints the sidebar rows without rebuilding
+  # them, so reselect the workspace until the footer is built from the overview that reports it
+  # running. Selecting the already-selected row is a no-op, hence the hop through the sibling row.
+  local stop_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS * 3))
+  while ! ui_identifier_exists "workspace-detail-stop"; do
+    (( SECONDS < stop_deadline )) || fail "timed out waiting for UI identifier: remote workspace stop action (workspace-detail-stop)"
+    ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_DEFAULT_WORKSPACE_ID"
+    ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
+  done
   ui_click_identifier "$remote_web_target_id"
   # The local Caddy router port is profile-scoped (dev/worktree profiles no longer share the
   # well-known 7391), and a remote browser session is served by the LOCAL router. The result JSON's
@@ -1731,7 +1683,7 @@ with open(sys.argv[1]) as fh:
 target = sys.argv[2]
 for process in data.get("runningProcesses", []):
     if process.get("name") == target:
-        print(process.get("terminalNativeID") or process.get("terminalTrackingID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 }
@@ -5177,7 +5129,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5198,7 +5150,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")
@@ -5402,7 +5354,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5421,7 +5373,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     if session_id and session_id not in known:
         print(session_id)
         break
@@ -5447,7 +5399,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 session_id = sys.argv[2]
 for window in data["windows"]:
-    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
+    if (window.get("terminalTrackingID") or "") == session_id:
         print("1")
         break
 else:
@@ -5469,7 +5421,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )"
@@ -5484,7 +5436,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )" "frontend session stable after closing process terminal window"
@@ -5582,7 +5534,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5601,7 +5553,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")

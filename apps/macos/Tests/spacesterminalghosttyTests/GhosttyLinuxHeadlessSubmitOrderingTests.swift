@@ -5,10 +5,12 @@
 
     @testable import spacesterminalghostty
 
-    /// Linux mirror of `GhosttyEmbeddedSubmitOrderingTests`: two submit-style sends arriving within
-    /// the submit-CR delay must reach the child as two separately submitted lines, never as one
-    /// merged line with a stray Enter (the daemon's notification flush delivers queued lines
-    /// back-to-back like this).
+    /// Linux mirror of `GhosttyEmbeddedSubmitOrderingTests`: two submit-style sends enqueued
+    /// back-to-back must reach the child as two separately submitted lines, never as one merged line
+    /// with a stray Enter (the daemon's notification flush delivers queued lines like this). Each
+    /// submit is a paste-encoded text write followed by its carriage return — immediate when the
+    /// receiver enabled bracketed paste, separated when (as with `cat` here) it did not, in which
+    /// case the text also reaches the PTY verbatim.
     ///
     /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops
     /// onto the engine for every core call: the core is created inside a `TerminalEngineActor.run`
@@ -56,13 +58,18 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -90,7 +97,9 @@
 
             let outputPath = paths.outputPath
             let transcript = { (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "" }
-            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+            try await waitAsync(transcriptPath: outputPath) {
+                ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY")
+            }
 
             let firstMarker = "SUBMIT_ORDER_FIRST"
             let secondMarker = "SUBMIT_ORDER_SECOND"
@@ -105,14 +114,90 @@
 
             // Each marker appears once as the PTY echo of the typed line and once as `cat`'s output of the
             // submitted line, so two occurrences of the second marker means both Enters landed.
-            try await waitAsync { Self.occurrences(of: secondMarker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
+            try await waitAsync(transcriptPath: outputPath) {
+                Self.occurrences(of: secondMarker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2
+            }
 
             let output = transcript()
             #expect(
                 !output.contains(firstMarker + secondMarker),
                 "the second submit's text was written before the first submit's carriage return, merging both commands: \(output)")
+            #expect(Self.occurrences(of: firstMarker, in: output) >= 2, "the first submit must be echoed and submitted on its own line")
+        }
+
+        private func startSubmitCore(command: String, paths: TerminalSessionPaths) async throws -> GhosttyEmbeddedSessionCore {
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(
+                    launchConfiguration: TerminalSessionLaunchConfiguration(
+                        sessionID: "submit-framing-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                        workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: command,
+                        createdAt: "2026-07-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+                try core.startIfNeeded()
+                return Box(core)
+            }
+            return coreBox.value
+        }
+
+        /// Linux mirror of the embedded unframed-receiver test: `cat` never enables bracketed paste, so
+        /// the submit's CR must be temporally separated from its unframed text (issue #187) — in canonical
+        /// mode the line discipline delivers the line to `cat` only when the CR lands, so "cat produced
+        /// the line" is exactly "the CR arrived".
+        @Test func submitToUnframedReceiverSeparatesItsCarriageReturn() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+            let core = try await startSubmitCore(command: "echo SUBMIT_READY; cat", paths: paths)
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            let outputPath = paths.outputPath
+            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+            let marker = "SUBMIT_UNFRAMED_MARKER"
+            let response = TerminalEngineActor.runSynchronously {
+                core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
+            }
+            #expect(response.ok, "\(response.message)")
+
+            // Half the 500ms separation in: the text may be echoed, but the CR must not have landed yet —
+            // with an immediate CR, `cat` emits the completed line within milliseconds and this trips.
+            try? await Task.sleep(for: .milliseconds(250))
+            let midway = (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? ""
             #expect(
-                Self.occurrences(of: firstMarker, in: output) >= 2, "the first submit must be echoed and submitted on its own line")
+                Self.occurrences(of: marker, in: midway) < 2,
+                "an unframed submit's CR landed immediately instead of waiting out the separation: \(midway)")
+
+            try await waitAsync { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
+        }
+
+        /// Linux mirror of the embedded framed-receiver test: the child enables DECSET 2004 before
+        /// signaling readiness, so the submit goes out framed and its CR follows immediately with no
+        /// pacing cost (issue #389). The frame's open marker in the transcript proves the framed
+        /// encoding; the line completing well inside the 500ms separation proves the CR was not delayed.
+        @Test func submitToBracketedPasteReceiverSubmitsImmediately() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+            let core = try await startSubmitCore(command: "printf '\\033[?2004h'; echo SUBMIT_READY; cat", paths: paths)
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+            let outputPath = paths.outputPath
+            try await waitAsync { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
+
+            let marker = "SUBMIT_FRAMED_MARKER"
+            let sentAt = ContinuousClock.now
+            let response = TerminalEngineActor.runSynchronously {
+                core.handleControlRequest(TerminalControlRequest(command: "send", text: marker, appendNewline: true))
+            }
+            #expect(response.ok, "\(response.message)")
+
+            try await waitAsync { Self.occurrences(of: marker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
+            let elapsed = sentAt.duration(to: .now)
+            #expect(elapsed < .milliseconds(400), "a framed submit's CR must follow immediately, not after the unframed separation")
+            #expect(
+                ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("\u{1b}[200~"),
+                "the receiver enabled bracketed paste, so the submit's text must have gone out framed")
         }
     }
 #endif

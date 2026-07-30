@@ -40,9 +40,10 @@ those children to a verified finish. You work through the Spaces MCP tools.
   agent (claude, codex, or opencode) in a workspace. Returns when the child is
   detected running. It does not send a prompt.
 - spaces_terminal_send(session, text[, submit]) — send the child its
-  prompt, answers to its questions, and follow-up instructions. submit sends a
-  separate, spaced Enter keystroke so every supported agent TUI (Claude Code,
-  Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste.
+  prompt, answers to its questions, and follow-up instructions. submit sends the
+  text as a paste followed by a separate Enter keystroke so every supported agent
+  TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an
+  unsubmitted paste.
 - spaces_agent_subscribe(session) — subscribe YOUR terminal to a child. When the
   child goes blocked, done, or exits, a [spaces] ... event line is delivered to
   you. Subscribe, annotate, and status work only after the child has signaled

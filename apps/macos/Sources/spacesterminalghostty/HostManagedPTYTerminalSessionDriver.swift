@@ -1,4 +1,5 @@
 import Foundation
+import spacesptyshim
 import spacesterminalcore
 
 #if canImport(Darwin)
@@ -127,30 +128,49 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let command = Self.execCommand(for: launchConfiguration)
         #if os(macOS)
             let terminfoDirectoryPath = try Self.resolvedTerminfoDirectoryPath()
+            let environmentOverrides: [(key: String, value: String)] = [
+                ("TERM", "xterm-ghostty"), ("TERMINFO", terminfoDirectoryPath), ("COLORTERM", "truecolor"),
+            ]
+        #else
+            let environmentOverrides: [(key: String, value: String)] = [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
         #endif
+        // Everything the child needs is materialized here, in the parent: C strings for the
+        // executable, argv, the child's full environment, and the working directory, plus the
+        // fd-close bound. See the child block below for why none of it may be built after the fork.
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
-        var arguments = command.arguments.map { strdup($0) } + [nil]
+        let arguments = command.arguments.map { strdup($0) } + [nil]
+        let childEnvironment = Self.childEnvironmentForExec(overrides: environmentOverrides).map { strdup($0) } + [nil]
+        let workingDirectory = launchConfiguration.workingDirectory.isEmpty ? nil : strdup(launchConfiguration.workingDirectory)
+        let fileDescriptorUpperBound = Self.inheritedFileDescriptorUpperBoundForExec()
+        // Even the argv/envp array-to-pointer bridging is compiled Swift, so it happens
+        // here too: the strdup'd element pointers are copied into plain C arrays the
+        // child can consume without touching a Swift Array again.
+        let argvStorage = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: arguments.count)
+        let envpStorage = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: childEnvironment.count)
+        for index in arguments.indices { argvStorage[index] = arguments[index] }
+        for index in childEnvironment.indices { envpStorage[index] = childEnvironment[index] }
         defer {
             free(executable)
             for argument in arguments { if let argument { free(argument) } }
+            for entry in childEnvironment { if let entry { free(entry) } }
+            if let workingDirectory { free(workingDirectory) }
+            argvStorage.deallocate()
+            envpStorage.deallocate()
         }
 
         let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
-            Self.resetSignalDispositionsForExec()
-            Self.scrubInheritedEnvironmentForExec()
-            Self.closeInheritedFileDescriptorsForExec()
-            if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
-            #if os(macOS)
-                setenv("TERM", "xterm-ghostty", 1)
-                setenv("TERMINFO", terminfoDirectoryPath, 1)
-            #else
-                setenv("TERM", "xterm-256color", 1)
-            #endif
-            setenv("COLORTERM", "truecolor", 1)
-            execv(executable, &arguments)
-            _exit(127)
+            // The forked child of this multithreaded process may not run ANY Swift. Compiled
+            // Swift enters the runtime beneath arbitrary statements — lazy generic-metadata
+            // instantiation, protocol-conformance cache lookups — and those paths take
+            // process-wide locks a parent thread may have held at the fork instant. A debugger
+            // caught exactly that: this child dead in pthread_mutex_lock under
+            // swift_getTypeByMangledName with zero CPU time and a 0-byte transcript, entered
+            // from the first Swift statement after fork. The entire pre-exec body therefore
+            // lives in C (spaces_pty_child_exec, which never returns); everything it needs was
+            // materialized above, in the parent, down to the raw argv/envp arrays.
+            spaces_pty_child_exec(executable, argvStorage, envpStorage, workingDirectory, 3, fileDescriptorUpperBound)
         }
 
         lock.lock()
@@ -701,41 +721,33 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         #endif
     }
 
-    private static func closeInheritedFileDescriptorsForExec() {
+    /// Upper bound for the child's fd-close sweep, resolved in the parent because `sysconf` is not
+    /// async-signal-safe and so must not be called between `forkpty` and `execve`.
+    private static func inheritedFileDescriptorUpperBoundForExec() -> Int32 {
         let rawLimit = sysconf(Int32(_SC_OPEN_MAX))
-        let upperBound = rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
-        guard upperBound > 3 else { return }
-        for fd in Int32(3)..<upperBound { _ = close(fd) }
+        return rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
     }
 
-    private static func scrubInheritedEnvironmentForExec() {
-        var keysToRemove = inheritedEnvironmentKeysRemovedForExec
+    /// The complete `KEY=VALUE` environment the PTY child execs with, built in the parent (the child
+    /// cannot allocate — see `startIfNeeded`). Equivalent to unsetting `inheritedEnvironmentKeysRemovedForExec`
+    /// and then setting `overrides` with overwrite semantics: an inherited entry for an overridden key is
+    /// dropped so the override appears exactly once. Entries with no `=` are passed through untouched,
+    /// matching what an `unsetenv`/`setenv` pass would have left alone.
+    static func childEnvironmentForExec(overrides: [(key: String, value: String)]) -> [String] {
+        var entries: [String] = []
         var cursor = environ
         while let entry = cursor.pointee {
+            defer { cursor = cursor.advanced(by: 1) }
             let line = String(cString: entry)
-            if let separator = line.firstIndex(of: "=") {
-                let key = String(line[..<separator])
-                if shouldRemoveInheritedEnvironmentKey(key) { keysToRemove.insert(key) }
+            guard let separator = line.firstIndex(of: "=") else {
+                entries.append(line)
+                continue
             }
-            cursor = cursor.advanced(by: 1)
+            let key = String(line[..<separator])
+            guard !shouldRemoveInheritedEnvironmentKey(key), !overrides.contains(where: { $0.key == key }) else { continue }
+            entries.append(line)
         }
-        for key in keysToRemove { unsetenv(key) }
-    }
-
-    private static func resetSignalDispositionsForExec() {
-        // Remote daemons may be launched by noninteractive shells or nohup, which can
-        // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
-        // behave like a normal terminal without changing the daemon's handlers.
-        for signalNumber in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU] { _ = signal(signalNumber, SIG_DFL) }
-        // A forked child also inherits the calling THREAD's signal mask, and the daemon starts sessions
-        // on the terminal engine executor — a libdispatch worker thread, which blocks terminal signals so
-        // they are delivered to the main thread instead. A PTY child that inherits SIGHUP/SIGTERM blocked
-        // cannot be gracefully terminated: the signals stay pending and its shell's traps never run, so
-        // `terminate()`'s HUP→TERM escalation is silently ineffective (only the final SIGKILL lands).
-        // Reset the mask to empty so the child starts as if spawned from a normal terminal.
-        var emptyMask = sigset_t()
-        sigemptyset(&emptyMask)
-        sigprocmask(SIG_SETMASK, &emptyMask, nil)
+        return entries + overrides.map { "\($0.key)=\($0.value)" }
     }
 
     private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }

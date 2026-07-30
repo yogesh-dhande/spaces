@@ -41,7 +41,6 @@ REMOTE_RTT_MS=""
 
 SCENARIOS=(ios-input-latency ios-scrollback-latency)
 SELECTED_SCENARIOS=()
-SERVICE_PID=""
 DEVICE_API_PID=""
 
 print_usage() {
@@ -296,11 +295,7 @@ cleanup() {
     kill "$DEVICE_API_PID" >/dev/null 2>&1 || true
     wait "$DEVICE_API_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]]; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
-  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5 "${SERVICE_PID:-}"
   cleanup_remote_e2e_host
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
     printf 'Preserved mobile latency root: %s\n' "$WORK_ROOT" >&2
@@ -339,7 +334,7 @@ measure_remote_rtt_ms
 prepare_remote_workspace
 
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
-SERVICE_PID="$!"
+SERVICE_PID=$!
 
 service_socket="$(terminal_service_socket_path_for_runtime_dir "$RUNTIME_DIR")"
 service_deadline=$((SECONDS + 15))
@@ -469,10 +464,10 @@ render_update_baselines: dict[str, dict] = {}
 socket_path_cache: dict[str, Path] = {}
 
 budgets = {
-    ("ios-input-latency", "local", "local"): {"gross_p95_ms": 1000, "target_p95_ms": 150},
-    ("ios-scrollback-latency", "local", "local"): {"gross_p95_ms": 750, "target_p95_ms": 100},
-    ("ios-input-latency", "ios-constrained", "local"): {"gross_p95_ms": 3000, "target_p95_ms": 600},
-    ("ios-scrollback-latency", "ios-constrained", "local"): {"gross_p95_ms": 2500, "target_p95_ms": None},
+    ("ios-input-latency", "local", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
+    ("ios-scrollback-latency", "local", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
+    ("ios-input-latency", "ios-constrained", "local"): {"gross_p95_ms": 150, "target_p95_ms": 100},
+    ("ios-scrollback-latency", "ios-constrained", "local"): {"gross_p95_ms": 100, "target_p95_ms": 75},
 }
 
 
@@ -763,6 +758,19 @@ def latest_stream_payload(stream: subprocess.Popen) -> tuple[dict, int] | None:
     return reader.latest_payload, reader.latest_received_ns
 
 
+# GhosttyRenderUpdate.currentVersion. Bumped in lockstep with the Swift codec; there is deliberately no
+# compatibility path for older versions, so a mismatch is rejected rather than misread.
+RENDER_UPDATE_VERSION = 4
+
+# The two high bits of a cell's wire flags word are codec-reserved payload markers, not style flags: the
+# cell is followed, in its block's sparse text section, by its grapheme cluster (bit 15) and/or its OSC 8
+# link URL (bit 14). Style flags occupy bits 0-10 and never reach these, so a decoder strips them off the
+# flags value it reports.
+CLUSTER_PAYLOAD_FLAG = 1 << 15
+LINK_PAYLOAD_FLAG = 1 << 14
+PAYLOAD_FLAG_MASK = CLUSTER_PAYLOAD_FLAG | LINK_PAYLOAD_FLAG
+
+
 class RenderUpdateReader:
     nil_revision = (1 << 64) - 1
 
@@ -808,8 +816,8 @@ def decode_render_update(payload: dict) -> dict | None:
     if reader.read(4) != b"GRTU":
         raise ValueError("invalid render update magic")
     version = reader.u8()
-    if version != 2:
-        raise ValueError(f"unsupported render update version {version}")
+    if version != RENDER_UPDATE_VERSION:
+        raise ValueError(f"unsupported render update version {version} (expected {RENDER_UPDATE_VERSION})")
     kind_byte = reader.u8()
     _ = reader.u16()
     session_revision = reader.revision()
@@ -879,13 +887,40 @@ def render_update_metadata(payload: dict, update: dict) -> dict:
     }
 
 
-def read_render_update_cell(reader: RenderUpdateReader) -> dict:
-    return {
-        "codepoint": reader.u32(),
-        "foregroundRGB": reader.u32(),
-        "backgroundRGB": reader.u32(),
-        "flags": reader.u16(),
-    }
+def read_render_update_cell_block(reader: RenderUpdateReader, count: int) -> list[dict]:
+    """Reads one block of `count` 14-byte cells plus the sparse text section that follows it.
+
+    That section holds one entry per payload flag bit the cells set, in cell order and cluster before link,
+    each `(UInt32 offset within the block, UInt16 utf8 byte count, bytes)`; a block whose cells set no
+    payload bits is followed by nothing at all. This harness renders base codepoints only, so the payload
+    text is read purely to keep the reader aligned with the rest of the frame.
+    """
+    cells = []
+    flagged = []
+    for index in range(count):
+        codepoint = reader.u32()
+        foreground_rgb = reader.u32()
+        background_rgb = reader.u32()
+        flags = reader.u16()
+        if flags & PAYLOAD_FLAG_MASK:
+            flagged.append((index, flags))
+        cells.append(
+            {
+                "codepoint": codepoint,
+                "foregroundRGB": foreground_rgb,
+                "backgroundRGB": background_rgb,
+                "flags": flags & ~PAYLOAD_FLAG_MASK,
+            }
+        )
+    for index, flags in flagged:
+        for payload_flag in (CLUSTER_PAYLOAD_FLAG, LINK_PAYLOAD_FLAG):
+            if not flags & payload_flag:
+                continue
+            offset = reader.u32()
+            if offset != index:
+                raise ValueError(f"render update cell payload names offset {offset}, expected {index}")
+            reader.read(reader.u16())
+    return cells
 
 
 def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: int) -> dict:
@@ -894,6 +929,8 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
     cursor_visible = reader.u8() != 0
     default_foreground_rgb = reader.u32()
     default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
     cell_count = reader.u32()
     return {
         "columns": columns,
@@ -903,25 +940,33 @@ def read_render_update_snapshot(reader: RenderUpdateReader, columns: int, rows: 
         "cursorVisible": cursor_visible,
         "defaultForegroundRGB": default_foreground_rgb,
         "defaultBackgroundRGB": default_background_rgb,
-        "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+        "cells": read_render_update_cell_block(reader, cell_count),
     }
 
 
 def read_render_update_delta(
     reader: RenderUpdateReader, base_revision: int | None, target_revision: int | None, owner_epoch: int, columns: int, rows: int
 ) -> dict:
+    cursor_column = reader.u16()
+    cursor_row = reader.u16()
+    cursor_visible = reader.u8() != 0
+    default_foreground_rgb = reader.u32()
+    default_background_rgb = reader.u32()
+    _ = reader.u8()  # mouse reporting active
+    _ = reader.u8()  # mouse shift capture
+    changed_cell_count = reader.u32()
     delta = {
         "baseRevision": base_revision,
         "targetRevision": target_revision,
         "ownerEpoch": owner_epoch,
         "columns": columns,
         "rows": rows,
-        "cursorColumn": reader.u16(),
-        "cursorRow": reader.u16(),
-        "cursorVisible": reader.u8() != 0,
-        "defaultForegroundRGB": reader.u32(),
-        "defaultBackgroundRGB": reader.u32(),
-        "changedCellCount": reader.u32(),
+        "cursorColumn": cursor_column,
+        "cursorRow": cursor_row,
+        "cursorVisible": cursor_visible,
+        "defaultForegroundRGB": default_foreground_rgb,
+        "defaultBackgroundRGB": default_background_rgb,
+        "changedCellCount": changed_cell_count,
         "scrollRects": [],
         "replaceCellRuns": [],
     }
@@ -944,7 +989,7 @@ def read_render_update_delta(
             {
                 "row": row,
                 "column": column,
-                "cells": [read_render_update_cell(reader) for _ in range(cell_count)],
+                "cells": read_render_update_cell_block(reader, cell_count),
             }
         )
     return delta
@@ -1676,8 +1721,7 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
         "visible_render_summary": summarize_visible_render_samples(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
-        "report_only": True,
-        "budget_enforced": False,
+        "budget_enforced": True,
     }
 
 
@@ -1761,10 +1805,16 @@ for result_key, result in scenario_results.items():
     terminal_target = result.get("terminal_target", "local")
     budget = budgets[(name, network_profile, terminal_target)]
     p95 = result["summary"]["p95_ms"]
-    if result.get("budget_enforced", True) and p95 is not None and p95 > budget["gross_p95_ms"]:
-        failures.append(
-            f"{name} {network_profile} {terminal_target} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms"
-        )
+    if result.get("budget_enforced", True):
+        # An enforced budget with no samples is a harness failure, not a pass: a p95 of None means
+        # the metric stopped resolving (or every gesture was a no-op), which is exactly the state a
+        # regression gate must not report as success.
+        if p95 is None:
+            failures.append(f"{name} {network_profile} {terminal_target} collected no latency samples for an enforced budget")
+        elif p95 > budget["gross_p95_ms"]:
+            failures.append(
+                f"{name} {network_profile} {terminal_target} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms"
+            )
 for result_key, input_result in scenario_results.items():
     if not result_key.startswith("ios-input-latency:"):
         continue

@@ -1075,6 +1075,52 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// The launch configuration and runtime state of each named session that has ended, as one query.
+    ///
+    /// The device overview publishes a summary for every session a product record still holds, including
+    /// the ones that have exited, and it rebuilds several times a second. Asking each session for its
+    /// launch configuration and runtime state separately would make that build cost two connection
+    /// round-trips per held-but-ended session — the same per-row shape `listInteractiveSessionRuntimeStates`
+    /// and `sessionIDsWithFinalRender` exist to avoid, and worse than either because those queries share
+    /// the profile database's serialized lane with every mutation. An empty `sessionIDs` issues no query
+    /// at all, which is the steady state on a device whose held sessions are all still running.
+    ///
+    /// Ended means "not interactive", the same rule `TerminalSessionCatalog.listLiveSessions` filters on,
+    /// so a session is returned here if and only if the live catalog excluded it. A row whose runtime
+    /// state cannot be decoded is skipped, matching a per-session read's failure being treated as "no
+    /// runtime state".
+    public static func endedSessionRuntimes(sessionIDs: some Collection<String>) throws -> [KnownTerminalSessionRuntime] {
+        guard !sessionIDs.isEmpty else { return [] }
+        let interactiveStates = TerminalSessionState.allCases.filter(\.isInteractive).map(\.rawValue)
+        let interactiveStatePlaceholders = Array(repeating: "?", count: interactiveStates.count).joined(separator: ", ")
+        let sessionIDList = Array(sessionIDs)
+        let sessionIDPlaceholders = Array(repeating: "?", count: sessionIDList.count).joined(separator: ", ")
+        // The lane returns raw rows only; decoding happens after it releases, as in the sibling batched reads.
+        let rows = try withProfileDatabase { database in
+            try database.queryRows(
+                sql: """
+                    SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), s.root_directory,
+                           r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
+                           COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
+                           COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
+                           COALESCE(r.foreground_executable_name, ''), COALESCE(r.foreground_argv_json, ''),
+                           COALESCE(r.foreground_detected_agent_kind, ''), COALESCE(r.foreground_display_label, ''),
+                           COALESCE(r.foreground_display_command, ''), COALESCE(r.bell_at, '')
+                    FROM terminal_sessions s
+                    JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
+                    WHERE s.session_id IN (\(sessionIDPlaceholders)) AND r.state NOT IN (\(interactiveStatePlaceholders))
+                    ORDER BY s.created_at, s.session_id
+                    """, bindings: sessionIDList + interactiveStates)
+        }
+        return try rows.compactMap { row in
+            guard row.count >= 31 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
+        }
+    }
+
     /// Whether the session's persisted final-render state carries a replayable frame. Reads the stored
     /// answer rather than decoding `payload_json`, which is a ~36 KB base64 grid snapshot.
     public static func hasFinalRender(paths: TerminalSessionPaths) throws -> Bool {

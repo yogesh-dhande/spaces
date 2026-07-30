@@ -74,6 +74,84 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: workspace.id).map(\.name), ["Codex"])
     }
 
+    /// The exit reconcilers run on their own store connection without the workspace lifecycle lock, so a
+    /// pass that snapshotted a configured agent's row can reach its finalization write after a restart
+    /// already deleted that row — the restart's own terminate is what wakes those reconcilers. Finalizing
+    /// the stale snapshot must not re-create the row: a resurrected row keeps the configured launcher's
+    /// slot on a dead terminal session (reported "exited" forever) and, still holding the agent's name,
+    /// pushes the relaunched agent onto a collision-deduplicated "<name>-2" row.
+    func testRestartCodingAgentKeepsItsNameWhenStaleExitReconcileLandsDuringRelaunch() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        let originalRecord = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+            terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
+            status: .idle, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(originalRecord)
+        let interleave = ReconcileInterleave()
+        let orchestrator = makeTestOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in },
+            builtInTerminalSessionLauncher: { configuration in
+                // The relaunch's session launch is the window between the restart's row delete and the
+                // registration of the replacement row, which is where the stale pass lands in practice.
+                interleave.run()
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
+            })
+        // Exactly the call `reconcileExitedSessionBackedAgentRows` makes for a row whose session ended,
+        // carrying the snapshot it read before the restart deleted the row.
+        interleave.action = {
+            try orchestrator.finalizeAgentRow(
+                originalRecord, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+        }
+
+        let relaunched = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
+
+        XCTAssertNil(interleave.thrownError)
+        let rows = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(rows.count, 1, "A restart must leave one agent row, not a stranded original plus its replacement.")
+        XCTAssertEqual(rows.first?.label, "Codex", "The relaunched agent must keep the configured name instead of being deduplicated.")
+        XCTAssertEqual(relaunched.label, "Codex")
+        XCTAssertEqual(rows.first?.terminalTrackingID, relaunched.terminalTrackingID, "The surviving row must be the relaunched agent's row.")
+    }
+
+    /// Same race on the stop path: the stop deletes the row through the finalization chokepoint, and a
+    /// reconcile pass holding a pre-stop snapshot must not bring it back — a resurrected row keeps the
+    /// configured agent reporting "exited" on a dead session instead of returning to "not started".
+    func testStopCodingAgentIsNotUndoneByStaleExitReconcile() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        let originalRecord = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+            terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
+            status: .idle, createdAt: "now", updatedAt: "now")
+        try store.upsertAgentWindow(originalRecord)
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+
+        try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
+        try orchestrator.finalizeAgentRow(
+            originalRecord, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+
+        XCTAssertTrue(
+            try store.agentWindows(workspaceID: workspace.id).isEmpty, "A stopped agent must stay stopped instead of reappearing as an exited row.")
+    }
+
     func testRestartCodingAgentRejectsUnconfiguredAdHocRuntime() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

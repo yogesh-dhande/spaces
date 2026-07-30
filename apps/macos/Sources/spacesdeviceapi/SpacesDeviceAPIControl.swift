@@ -444,6 +444,39 @@ public enum SpacesDeviceAPIControlClient {
             timeout: timeout, send: { try bootstrapLocalClient(clientApp: clientApp, presentedToken: presentedToken, timeout: $0) })
     }
 
+    /// Bootstraps the local client, waiting out a daemon whose Device API listener has not come up yet.
+    ///
+    /// A daemon that was only just started answers its control socket before its Device API supervisor has
+    /// bound the listener, and it answers a bootstrap in that window with `deviceAPINotRunningMessage` — a
+    /// state that resolves itself within that daemon's startup. `bootstrapLocalClientEnsuringCurrentTerminalService`
+    /// reports it straight back whenever the daemon hosts sessions, because its recovery for it is a
+    /// relaunch and a relaunch must never be aimed at a daemon with live sessions. This waits instead: it
+    /// polls the bootstrap until the listener answers, bounded by `timeout`, and relaunches nothing — so
+    /// the live-session gate has nothing to protect and a starting daemon is a wait rather than a failure.
+    /// Used by the client's local-endpoint recovery, which reaches here exactly when the daemon it needs
+    /// may have just been launched underneath it.
+    public static func bootstrapLocalClientAwaitingDeviceAPI(
+        clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5
+    ) throws -> SpacesDeviceAPIControlResponse {
+        try bootstrapAwaitingDeviceAPI(
+            timeout: timeout, ensureRunning: { try TerminalService.ensureRunning(timeout: $0) },
+            send: { try bootstrapLocalClient(clientApp: clientApp, presentedToken: presentedToken, timeout: $0) })
+    }
+
+    /// Seam-injectable body of `bootstrapLocalClientAwaitingDeviceAPI`. The two fixed closures are the
+    /// contract, not defaults a caller may vary: `relaunch` is a no-op because this call never replaces a
+    /// daemon, and with nothing to relaunch `hasLiveTerminalSessions` answers the only question that gate
+    /// asks — whether a relaunch would take something down — with "there is no relaunch". Because the
+    /// no-op relaunch still resets the poll deadline once, the wait is bounded at two `timeout` windows.
+    static func bootstrapAwaitingDeviceAPI(
+        timeout: TimeInterval, ensureRunning: (TimeInterval) throws -> Bool, send: (TimeInterval) throws -> SpacesDeviceAPIControlResponse,
+        retryInterval: TimeInterval = 0.05
+    ) throws -> SpacesDeviceAPIControlResponse {
+        try responseEnsuringCurrentTerminalService(
+            timeout: timeout, ensureRunning: ensureRunning, relaunch: { _ in false }, send: send, hasLiveTerminalSessions: { false },
+            retryInterval: retryInterval)
+    }
+
     public static func isControlEndpointUnavailable(_ error: Error) -> Bool {
         if let posixError = error as? POSIXError { return isUnavailablePOSIXCode(posixError.code) }
         let nsError = error as NSError
