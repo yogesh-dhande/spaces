@@ -4,6 +4,8 @@ Manage parallel coding sessions across all of your devices
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 
+<p align="center"><img src="docs/media/readme-devices.png" width="900" alt="The Spaces macOS app showing projects, workspaces, and a built-in terminal, with the iOS app showing the same workspaces on an iPhone"></p>
+
 ## Features
 
 - **Projects and workspaces** — a project is any directory, Git or not; a workspace is one feature, branch, or experiment inside it, backed by a Git worktree or a separate clone. Keeps parallel work separate instead of stashing and switching branches in one checkout.
@@ -19,6 +21,8 @@ Manage parallel coding sessions across all of your devices
 - **MCP server** — [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, and terminals as tools. A coding agent can inspect and drive Spaces directly.
 - **Keyboard shortcuts** — focus and cycle windows scoped to the current workspace. Navigation stays inside the work you're on.
 - **Global command palette** — `⌘⌥-` jumps to any window in any workspace. One key to reach anything without hunting through Mission Control.
+
+<p align="center"><img src="docs/media/readme-ios.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 
 ## Requirements
 

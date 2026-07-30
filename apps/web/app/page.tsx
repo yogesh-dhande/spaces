@@ -3,6 +3,7 @@ import Link from "next/link";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
 import { PrimaryButton } from "./components/primary-button";
+import { MacFrame, PhoneFrame } from "./components/device-frames";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
@@ -425,7 +426,7 @@ export default function HomePage() {
       <SiteHeader />
 
       {/* ── Hero ── */}
-      <section className="relative">
+      <section className="relative pb-16 sm:pb-24">
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-6 pt-14 md:pt-20 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-10">
           {/* Left: copy */}
           <div className="min-w-0">
@@ -490,12 +491,18 @@ export default function HomePage() {
           </div>
 
           {/* Right: screenshot */}
-          <figure className="relative overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-            <img
+          <figure className="relative">
+            <MacFrame
               src="/media/hero.png"
               alt="The Spaces app showing workspaces, terminals, editors, and live agent status side by side"
-              className="h-auto w-full"
-              fetchPriority="high"
+              priority
+            />
+            {/* Hidden below sm: cramped at that width, and the mobile section
+                further down already shows both phone screenshots framed. */}
+            <PhoneFrame
+              src="/media/ios-sessions.png"
+              alt="The Spaces iOS app showing the same live sessions on a phone"
+              className="absolute -bottom-[7%] -right-[6%] z-10 hidden w-[28%] sm:block"
             />
           </figure>
         </div>
@@ -764,22 +771,14 @@ export default function HomePage() {
             </div>
 
             <div className="mx-auto grid w-full max-w-[34rem] grid-cols-2 gap-4 sm:gap-6">
-              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-                <img
-                  src="/media/ios-sessions.png"
-                  alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
-                  className="h-auto w-full"
-                  loading="lazy"
-                />
-              </figure>
-              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-                <img
-                  src="/media/ios-terminal.png"
-                  alt="A live coding-agent terminal session open in the Spaces iOS app, with a terminal key row for typing into the same shell"
-                  className="h-auto w-full"
-                  loading="lazy"
-                />
-              </figure>
+              <PhoneFrame
+                src="/media/ios-sessions.png"
+                alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
+              />
+              <PhoneFrame
+                src="/media/ios-terminal.png"
+                alt="A live coding-agent terminal session open in the Spaces iOS app, with a terminal key row for typing into the same shell"
+              />
             </div>
           </div>
         </div>

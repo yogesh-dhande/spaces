@@ -788,6 +788,8 @@ npm run dev
 npm run build
 ```
 
+`scripts/make-readme-device-art.py` regenerates the README's device-framed product shots (`docs/media/readme-devices.png`, `docs/media/readme-ios.png`) from the screenshots in `apps/web/public/media/`.
+
 ## Version Metadata
 
 `apps/macos/AppVersion.plist` is the only place a Spaces version is authored. Every consumer is generated from it by `scripts/sync-app-version.sh`:
