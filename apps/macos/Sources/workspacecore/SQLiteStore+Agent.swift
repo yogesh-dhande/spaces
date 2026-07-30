@@ -383,6 +383,13 @@ extension SQLiteStore {
     /// drop nor the row delete can take it back. The queued rows are what the claimant then delivers
     /// (`AgentNotificationEngine.deliverClaimedExitNotices`), and any it cannot deliver yet stay queued
     /// for the subscriber's next idle flush.
+    ///
+    /// Accepted window: the claim commits before the caller applies the row's disposition (the `done`/delete
+    /// that `handleAgentExit` decides), so a daemon death in between leaves a durable `exit` event on a row
+    /// that is still listed as active, which both reconcilers then skip as finalized. A recoverable
+    /// disposition, or a completion marker committed only after it lands, is what closes it — deliberately
+    /// deferred (issue #401) rather than built here, because the window is a few milliseconds wide and the
+    /// stranded row is still removable: `agent kill` destroys unconditionally even when it loses the claim.
     public func claimAgentSessionExitEvent(
         agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String, exitedNoticeTransition: String,
         exitedNoticeMessage: String
