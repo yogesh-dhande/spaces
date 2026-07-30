@@ -39,7 +39,7 @@ extension SpacesDeviceOverviewBuilder {
         let retainedByID = Dictionary(retainedSessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { existing, _ in existing })
         let rows = SpacesDeviceAPIServer.workspaceTerminalRows(
             workspaces: workspaces, sessions: liveSessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender,
-            catalogEntry: { retainedByID[$0] })
+            catalogEntry: { retainedByID[$0] }, endedWindowSessions: retainedByID)
         return build(projects: projects, workspaces: workspaces, workspaceRows: rows, liveSessions: liveSessions, daemonStatus: .testStatus)
     }
 }

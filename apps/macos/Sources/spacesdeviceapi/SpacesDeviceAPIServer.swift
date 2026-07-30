@@ -1732,7 +1732,47 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         Self.workspaceTerminalRows(
             workspaces: workspaces, sessions: sessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender,
-            catalogEntry: { terminalCatalogEntry(sessionID: $0) })
+            catalogEntry: { terminalCatalogEntry(sessionID: $0) },
+            endedWindowSessions: Self.endedTerminalWindowSessions(workspaces: workspaces, liveSessions: sessions))
+    }
+
+    /// The ended sessions still held by a terminal-window record, read in one query for the whole build.
+    ///
+    /// The window walk in `workspaceTerminalRows` needs each such session's persisted launch configuration
+    /// and runtime state, and there is one candidate per terminal window whose session has exited. Reading
+    /// them per row would put two connection round-trips per candidate on a build that runs several times a
+    /// second, on the profile database's serialized lane — the lane every mutation also waits behind. One
+    /// batched read keeps the cost flat, and a device whose held sessions are all still running issues no
+    /// query at all.
+    ///
+    /// An ended session's attachment snapshot is empty by construction: exiting detaches every client, and
+    /// the ended pane a client shows is client-local and holds no attachment. So the entry is built with an
+    /// empty snapshot and no live control/subscription rather than paying a query to read that back — the
+    /// builder forces both availability flags false for a non-interactive session anyway.
+    private static func endedTerminalWindowSessions(
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], liveSessions: [TerminalSessionCatalogEntry]
+    ) -> [String: TerminalSessionCatalogEntry] {
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        var candidates = Set<String>()
+        for descriptor in workspaces {
+            for window in descriptor.windows where window.roleValue == .terminal {
+                guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), !liveSessionIDs.contains(sessionID) else { continue }
+                candidates.insert(sessionID)
+            }
+        }
+        guard let runtimes = try? TerminalSessionPersistence.endedSessionRuntimes(sessionIDs: candidates) else { return [:] }
+        return Dictionary(
+            runtimes.compactMap { runtime -> (String, TerminalSessionCatalogEntry)? in
+                guard let paths = try? TerminalSessionPaths.forStoredSession(id: runtime.sessionID, rootDirectory: runtime.rootDirectory) else {
+                    return nil
+                }
+                return (
+                    runtime.sessionID,
+                    TerminalSessionCatalogEntry(
+                        launchConfiguration: runtime.launchConfiguration, runtimeState: runtime.runtimeState, attachmentSnapshot: .init(),
+                        paths: paths, isControlAvailable: false, isSubscriptionAvailable: false)
+                )
+            }, uniquingKeysWith: { existing, _ in existing })
     }
 
     /// One row per product record that holds a terminal session — a `running_processes`, `agent_sessions`,
@@ -1746,11 +1786,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// (`SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`) holds them — the behavior `docs/spec.md`
     /// describes for an exited target, whichever kind of row backs it.
     ///
-    /// Static and taking the lookup as a parameter so the whole rule is exercisable without a running
+    /// `endedWindowSessions` is the batched counterpart for the terminal-window walk below
+    /// (`endedTerminalWindowSessions`): every candidate it needs is known before the walk starts, so they
+    /// are read together instead of one row at a time.
+    ///
+    /// Static and taking both lookups as parameters so the whole rule is exercisable without a running
     /// daemon or on-disk sessions.
     static func workspaceTerminalRows(
         workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
-        sessionIDsWithFinalRender: Set<String>, catalogEntry: (String) -> TerminalSessionCatalogEntry?
+        sessionIDsWithFinalRender: Set<String>, catalogEntry: (String) -> TerminalSessionCatalogEntry?,
+        endedWindowSessions: [String: TerminalSessionCatalogEntry]
     ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
@@ -1790,7 +1835,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             for window in descriptor.windows where window.roleValue == .terminal {
                 guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), sessionsByID[sessionID] == nil else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = catalogEntry(sessionID) else { continue }
+                guard let entry = endedWindowSessions[sessionID] else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: entry.name, rowKind: .liveSession, rowSourceID: window.id,

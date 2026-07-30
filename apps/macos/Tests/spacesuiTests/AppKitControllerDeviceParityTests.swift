@@ -951,7 +951,7 @@ import workspacecore
             isControlAvailable: false, isSubscriptionAvailable: false)
         let rows = SpacesDeviceAPIServer.workspaceTerminalRows(
             workspaces: [descriptor], sessions: [], sessionIDsWithFinalRender: ["session-ended"],
-            catalogEntry: { $0 == "session-ended" ? endedEntry : nil })
+            catalogEntry: { $0 == "session-ended" ? endedEntry : nil }, endedWindowSessions: ["session-ended": endedEntry])
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [descriptor], workspaceRows: rows, liveSessions: [],
             daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))

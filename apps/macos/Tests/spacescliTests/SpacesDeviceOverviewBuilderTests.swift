@@ -699,6 +699,41 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertFalse(row.canStop)
     }
 
+    /// A configured process that has been stopped reports `notStarted` even though its ended session is
+    /// still held by a terminal-window row and therefore still published. The two describe different
+    /// things — the row describes the configured slot, the session describes the terminal it last ran in —
+    /// so publishing the retained session must not make the slot look occupied, and stopping the process
+    /// must not cost the ended session its `sessions` entry.
+    func testStoppedConfiguredProcessReportsNotStartedWhileItsEndedSessionStaysPublished() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        // The process was stopped, so its `running_processes` row is gone; the terminal window it ran in
+        // still references the ended session, which is what keeps that session retained.
+        let leftoverWindow = WindowRecord(
+            id: "window-parity", workspaceID: workspace.id, app: "Spaces", name: "parity-process", terminalTrackingID: "session-parity",
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
+        let settings = WorkspaceSettings(
+            processes: [ProcessTemplate(id: "template-parity", name: "parity-process", command: "python3 -c pass")])
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
+            project: project, workspace: workspace, settings: settings, runningProcesses: [], windows: [leftoverWindow])
+        let endedSession = makeSessionCatalogEntry(
+            sessionID: "session-parity", title: "parity-process", workingDirectory: "/repo/feature", state: .exited, workspaceID: workspace.id,
+            kind: .process, attachmentSnapshot: .init())
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
+            projects: [project], workspaces: [descriptor], liveSessions: [], retainedSessions: [endedSession])
+
+        // The configured slot is free again: nothing is running in it.
+        let processRow = try XCTUnwrap(overview.workspaces.first?.processRows.first { $0.name == "parity-process" })
+        XCTAssertEqual(processRow.runState, SpacesDeviceRunState.notStarted)
+        XCTAssertNil(processRow.processID)
+        // And the ended session it last ran in is still resolvable, so its pane still opens.
+        XCTAssertTrue(overview.sessions.contains { $0.id == "session-parity" })
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-parity"))
+    }
+
     /// A live terminal-window session stays an ad hoc summary. Only the ad hoc summary carries
     /// `liveTitle`, so publishing a live session from its window record instead would drop what the
     /// program running in it prints.
