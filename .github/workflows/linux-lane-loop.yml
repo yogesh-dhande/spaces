@@ -72,7 +72,9 @@ jobs:
               -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
               swift:6.2-noble \
               bash /workspace/apps/macos/scripts/run_linux_tests.sh >"$log" 2>&1 || status=$?
-            if [ "$status" -eq 124 ]; then
+            # 124 is timeout's SIGTERM path; 137 is the -k SIGKILL follow-up, which is the path a
+            # SIGTERM-immune docker CLI actually takes. Both mean the same wedged iteration.
+            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
               # The wedged container is the evidence: its lane script never reached its own failure
               # dump, so capture the live process table before destroying it. procps may not be
               # installed yet if the stall predates the lane's apt step, hence the /proc fallback.
@@ -88,7 +90,7 @@ jobs:
             if [ "$status" -ne 0 ]; then
               failures=$(( failures + 1 ))
               result="FAIL (exit $status)"
-              if [ "$status" -eq 124 ]; then
+              if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
                 result="FAIL (timed out after ${duration}s)"
               fi
               echo "::group::iteration $i failed — full log"
