@@ -1805,10 +1805,16 @@ for result_key, result in scenario_results.items():
     terminal_target = result.get("terminal_target", "local")
     budget = budgets[(name, network_profile, terminal_target)]
     p95 = result["summary"]["p95_ms"]
-    if result.get("budget_enforced", True) and p95 is not None and p95 > budget["gross_p95_ms"]:
-        failures.append(
-            f"{name} {network_profile} {terminal_target} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms"
-        )
+    if result.get("budget_enforced", True):
+        # An enforced budget with no samples is a harness failure, not a pass: a p95 of None means
+        # the metric stopped resolving (or every gesture was a no-op), which is exactly the state a
+        # regression gate must not report as success.
+        if p95 is None:
+            failures.append(f"{name} {network_profile} {terminal_target} collected no latency samples for an enforced budget")
+        elif p95 > budget["gross_p95_ms"]:
+            failures.append(
+                f"{name} {network_profile} {terminal_target} p95 {p95}ms exceeded gross budget {budget['gross_p95_ms']}ms"
+            )
 for result_key, input_result in scenario_results.items():
     if not result_key.startswith("ios-input-latency:"):
         continue
