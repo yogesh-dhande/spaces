@@ -455,6 +455,14 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        /// Whether the running application currently has bracketed paste (DECSET 2004) enabled — the
+        /// same live mode `sendTextAsPaste`'s encoding is derived from, so the submit path can know
+        /// ahead of the write whether the text will reach the PTY framed.
+        func bracketedPasteActive() -> Bool {
+            guard let surface else { return false }
+            return ghostty_surface_bracketed_paste(surface)
+        }
+
         func foregroundPID() -> Int32? {
             if let pid = hostPTY?.foregroundPID() { return pid }
             guard let session else { return nil }

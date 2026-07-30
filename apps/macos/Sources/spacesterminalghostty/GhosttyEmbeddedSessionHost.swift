@@ -109,6 +109,8 @@
             return true
         }
 
+        func bracketedPasteActive() -> Bool { sessionDriver.bracketedPasteActive() }
+
         func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
         func childPID() -> Int32? { sessionDriver.childPID() }
@@ -1230,22 +1232,25 @@
                 // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
                 // Agent TUIs (Claude Code, Codex, OpenCode) group bytes that arrive in one PTY read burst
                 // into a paste, so text merged with its own carriage return lands in the composer
-                // unsubmitted. The two are therefore separated STRUCTURALLY rather than by a timed gap: the
-                // text (which may itself contain newlines, e.g. a multi-line notification) goes in as a
-                // paste and the CR (0x0D) follows immediately as its own write. Ghostty derives the paste
-                // encoding from the live terminal state, so an application that enabled bracketed paste
-                // (DECSET 2004) receives the text framed by paste markers — which ends the paste before the
-                // CR arrives, making the CR a distinct Enter keystroke no matter how the bytes are batched —
-                // while an application with bracketed paste off receives the plain text unchanged, exactly
-                // as a raw write would deliver it. Enter is a CR because shells and Claude Code accept LF or
-                // CR while Codex and OpenCode submit only on CR. An empty text with appendNewline is a bare
-                // Enter (e.g. answering a TUI dialog): there is nothing to frame, so the CR goes in alone.
-                // Byte payloads are opaque input rather than composer text, so they keep the single inline
-                // write. Both writes funnel through the sequencer, which keeps the text+CR pair adjacent and
-                // ordered against every later input write.
+                // unsubmitted. The text (which may itself contain newlines, e.g. a multi-line notification)
+                // goes in as a paste and the CR (0x0D) follows as its own write. Ghostty derives the paste
+                // encoding from the live terminal state: an application that enabled bracketed paste
+                // (DECSET 2004) receives the text framed by paste markers — the frame closes before the CR
+                // arrives, making the CR a distinct Enter keystroke no matter how the bytes are batched into
+                // read bursts, so the CR follows immediately. An application with bracketed paste OFF — an
+                // agent TUI still initializing right after a detection-based spawn is the case that matters —
+                // receives the text unframed, so only time can keep the CR out of the text's read burst:
+                // that CR goes through the sequencer's separated path instead (issue #187). Enter is a CR
+                // because shells and Claude Code accept LF or CR while Codex and OpenCode submit only on CR.
+                // An empty text with appendNewline is a bare Enter (e.g. answering a TUI dialog): there is
+                // nothing to frame, so the CR goes in alone. Byte payloads are opaque input rather than
+                // composer text, so they keep the single inline write. Both writes funnel through the
+                // sequencer, which keeps the text+CR pair adjacent and ordered against every later input
+                // write.
                 if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
+                    let framed = rendererHostStorage.bracketedPasteActive()
                     enqueueControlInputPaste(text)
-                    enqueueControlInputWrite(Data([0x0D]))
+                    if framed { enqueueControlInputWrite(Data([0x0D])) } else { enqueueSeparatedControlInputCarriageReturn() }
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
@@ -1262,13 +1267,20 @@
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
+        /// The CR of a submit whose text went out unframed (bracketed paste off): spaced from the text
+        /// and from the next write so the receiving composer reads it as a distinct Enter keystroke.
+        private func enqueueSeparatedControlInputCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+            }
+        }
+
         /// Writes text through ghostty's paste encoder, which frames it with bracketed-paste markers when
         /// the running application enabled DECSET 2004 and passes it through verbatim otherwise. Used both
         /// for an explicit paste request and for the text half of a submit, where the framing is what keeps
         /// the following carriage return a distinct Enter keystroke.
         private func enqueueControlInputPaste(_ text: String) {
-            controlInputSequencer.enqueueWrite { [weak self] in
-                await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(text) }
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(text) }
             }
         }
 

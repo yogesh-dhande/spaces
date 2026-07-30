@@ -821,19 +821,28 @@
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
             // Submit-safe two-write split for text payloads: the text goes in paste-encoded (bracketed when
-            // the application enabled DECSET 2004) and the carriage return follows immediately as its own
-            // write, so the framing rather than a timed gap is what makes the CR a distinct Enter. See
-            // GhosttyEmbeddedSessionHost for the full rationale and TerminalControlInputSequencer for the
-            // ordering guarantee. A bare Enter (empty text) and opaque byte payloads keep the single (still
-            // sequenced) write. The paste encoding is resolved before anything is marked or enqueued so an
-            // encode failure leaves no half-applied send.
+            // the application enabled DECSET 2004) and the carriage return follows as its own write. When
+            // the encoding is framed, the frame is what makes the CR a distinct Enter and it follows
+            // immediately; when bracketed paste is off the text goes out unframed, so the CR takes the
+            // sequencer's separated path instead (issue #187). See GhosttyEmbeddedSessionHost for the full
+            // rationale and TerminalControlInputSequencer for the ordering guarantee. A bare Enter (empty
+            // text) and opaque byte payloads keep the single (still sequenced) write. The paste encoding is
+            // resolved before anything is marked or enqueued so an encode failure leaves no half-applied
+            // send.
             if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
                 guard let pastePayload = encodePastePayload(text) else {
                     return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
                 }
+                let framed = bracketedPasteActive()
                 markLocalOwnerCommandInputOutputResyncPending()
                 enqueueControlInputWrite(pastePayload)
-                enqueueControlInputWrite(Data([0x0D]))
+                if framed {
+                    enqueueControlInputWrite(Data([0x0D]))
+                } else {
+                    controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                        await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
+                    }
+                }
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             }
             markLocalOwnerCommandInputOutputResyncPending()
@@ -845,6 +854,16 @@
 
         private func enqueueControlInputWrite(_ bytes: Data) {
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
+        }
+
+        /// Whether the running application currently has bracketed paste (DECSET 2004) enabled — the
+        /// same live mode `encodePastePayload`'s framing is derived from, read from the session's own
+        /// terminal state.
+        private func bracketedPasteActive() -> Bool {
+            guard let vtSession else { return false }
+            var isSet = false
+            guard spaces_ghostty_vt_session_mode_is_set(vtSession, 2004, false, &isSet) else { return false }
+            return isSet
         }
 
         private func encodePastePayload(_ text: String) -> Data? {
