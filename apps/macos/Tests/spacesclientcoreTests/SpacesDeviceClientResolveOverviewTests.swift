@@ -84,6 +84,53 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, Self.livePort)
     }
 
+    /// The harder case, and the one the ended-session-scroll E2E exercises: the local daemon is not
+    /// running at all when the resolve starts, so nothing answers on any port and the request burns its
+    /// whole timeout. The recovery has to bring the daemon back — `defaultLocalRecoveryBootstrapProvider`
+    /// starts it and waits for its Device API listener — and resolve against the endpoint it came up on.
+    /// A recovery that only re-read a stale port would still resolve nothing here.
+    func testLocalDaemonDownAtResolveTimeIsStartedByTheRecoveryAndResolves() throws {
+        let root = try makeTemporaryRoot()
+        let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+        try database.upsert(device: Self.localDevice(port: Self.stalePort))
+        // No daemon is listening anywhere: every dial times out, the way the failing E2E run did, rather
+        // than being refused by a host with a closed port.
+        let probe = LocalEndpointProbe(livePort: Self.livePort, daemonRunning: false)
+
+        let resolution = try SpacesDeviceClient.resolveOverview(
+            device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+            requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
+
+        XCTAssertEqual(resolution.compatibility, .compatible)
+        XCTAssertEqual(resolution.overview?.device.port, Self.livePort)
+        // Bounded: the daemon is started once and the overview is retried once against it.
+        XCTAssertEqual(probe.bootstrapCount, 1)
+        XCTAssertEqual(probe.dialedPorts, [Self.stalePort, Self.livePort])
+        XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, Self.livePort)
+    }
+
+    /// A recovery that cannot bring the daemon back reports it instead of retrying: the error it surfaces
+    /// is the bootstrap's, which `isLocalDaemonUnreachableError` classifies so the local section degrades
+    /// to offline rather than showing a failure the user cannot act on.
+    func testLocalRecoveryStopsWhenTheDaemonCannotBeStarted() throws {
+        let root = try makeTemporaryRoot()
+        let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+        let probe = LocalEndpointProbe(livePort: Self.livePort, daemonRunning: false)
+        probe.failsBootstrap = true
+
+        XCTAssertThrowsError(
+            try SpacesDeviceClient.resolveOverview(
+                device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
+                requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
+        ) { error in
+            XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(error))
+        }
+        XCTAssertEqual(probe.bootstrapCount, 1)
+        // One failed dial, then the recovery stopped — no second overview attempt against a daemon that
+        // could not be started.
+        XCTAssertEqual(probe.dialedPorts, [Self.stalePort])
+    }
+
     func testRemoteDeviceTransportFailureIsNotRecoveredByABootstrap() throws {
         let root = try makeTemporaryRoot()
         let database = try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
@@ -178,17 +225,26 @@ private final class RequestProbe: @unchecked Sendable {
     }
 }
 
-/// Models a daemon that answers on exactly one port: every request to any other port fails the way an
-/// unbound port does (`ECONNREFUSED`), and the control-socket bootstrap reports the live one. Records
-/// the ports dialed and how many bootstraps ran so a test can assert the recovery retried once.
+/// Models this Mac's daemon for the recovery paths. A running daemon answers on exactly one port and
+/// refuses every other the way an unbound port does; a daemon that is not running answers nothing at all,
+/// so every dial times out. The bootstrap stands in for the local control socket: it starts the daemon
+/// (`defaultLocalRecoveryBootstrapProvider`'s job) and reports the port it came up on. Records the ports
+/// dialed and how many bootstraps ran so a test can assert the recovery stayed bounded.
 private final class LocalEndpointProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let livePort: Int
+    private var daemonRunning: Bool
     private var ports: [Int] = []
     private var names: [String] = []
     private var bootstraps = 0
 
-    init(livePort: Int) { self.livePort = livePort }
+    /// Set to model a daemon that cannot be started at all — the local control socket answers nothing.
+    var failsBootstrap = false
+
+    init(livePort: Int, daemonRunning: Bool = true) {
+        self.livePort = livePort
+        self.daemonRunning = daemonRunning
+    }
 
     var dialedPorts: [Int] {
         lock.lock()
@@ -214,7 +270,11 @@ private final class LocalEndpointProbe: @unchecked Sendable {
             self.ports.append(device.port)
             self.names.append(request.command.name)
             let livePort = self.livePort
+            let daemonRunning = self.daemonRunning
             self.lock.unlock()
+            // Nothing is listening, so the dial hangs until the request's own timeout — the shape the
+            // failing E2E run recorded (a full 10s spent before the resolve reported nothing).
+            guard daemonRunning else { throw POSIXError(.ETIMEDOUT) }
             guard device.port == livePort else { throw POSIXError(.ECONNREFUSED) }
             guard request.command.name == "overview" else { throw POSIXError(.EINVAL) }
             return SpacesDeviceAPIResponse(
@@ -232,8 +292,14 @@ private final class LocalEndpointProbe: @unchecked Sendable {
         { _, _ in
             self.lock.lock()
             self.bootstraps += 1
+            let failsBootstrap = self.failsBootstrap
+            // The bootstrap is what starts a daemon that is down, so a successful one leaves it answering.
+            if !failsBootstrap { self.daemonRunning = true }
             let livePort = self.livePort
             self.lock.unlock()
+            // `ENOENT` on the control socket is how an unstartable local daemon presents: the socket the
+            // bootstrap needs is not there. `isLocalDaemonUnreachableError` classifies it as unreachable.
+            if failsBootstrap { throw POSIXError(.ENOENT) }
             return SpacesDeviceAPIControlResponse(
                 ok: true, message: "ok",
                 result: .localClientBootstrap(

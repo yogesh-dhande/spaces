@@ -150,6 +150,52 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         XCTAssertEqual(relaunchCount, 0)
     }
 
+    /// The local-endpoint recovery's bootstrap: the daemon it needs was down and has just been started, so
+    /// it answers its control socket while its Device API listener is still coming up. That window must be
+    /// waited out, not reported as a failure — the ordinary bootstrap reports it (see the test above,
+    /// where a daemon with live sessions gets the not-running response straight back) because its recovery
+    /// for it is a relaunch it must not aim at live sessions. This never relaunches, so it can simply wait.
+    func testBootstrapAwaitingDeviceAPIWaitsForAJustStartedDaemonsListenerInsteadOfFailing() throws {
+        var ensureCount = 0
+        var sendCount = 0
+
+        let response = try SpacesDeviceAPIControlClient.bootstrapAwaitingDeviceAPI(
+            timeout: 1,
+            ensureRunning: { _ in
+                ensureCount += 1
+                return true
+            },
+            send: { _ in
+                sendCount += 1
+                // The daemon is up and answering, but its Device API supervisor has not bound the listener
+                // for the first two polls.
+                if sendCount < 3 { return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Bootstrapped local Device API client.")
+            }, retryInterval: 0)
+
+        XCTAssertTrue(response.ok)
+        // The daemon is started once, and the bootstrap is the readiness signal it polls.
+        XCTAssertEqual(ensureCount, 1)
+        XCTAssertEqual(sendCount, 3)
+    }
+
+    func testBootstrapAwaitingDeviceAPIStopsAtTheDeadlineWhenTheListenerNeverComesUp() throws {
+        var sendCount = 0
+
+        // Bounded: a listener that never binds ends in the truthful not-running response rather than an
+        // endless wait, and the caller reports the local daemon as unreachable.
+        let response = try SpacesDeviceAPIControlClient.bootstrapAwaitingDeviceAPI(
+            timeout: 0.05, ensureRunning: { _ in true },
+            send: { _ in
+                sendCount += 1
+                return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.")
+            }, retryInterval: 0)
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.message, "Device API is not running.")
+        XCTAssertGreaterThan(sendCount, 1)
+    }
+
     func testControlResponseKeepsPollingAfterRelaunchRefusesBusyDaemonUntilDeviceAPIRecovers() throws {
         var relaunchCount = 0
         var sendCount = 0
