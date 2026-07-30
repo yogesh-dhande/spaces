@@ -104,7 +104,7 @@ final class TerminalProfileBindingTests: XCTestCase {
 
         try withEnvironmentValues(["HOME": home.path]) {
             SpacesProfile.resetCacheForTesting()
-            SpacesProfile.withInstalledProfileBindingForTesting {
+            try SpacesProfile.withInstalledProfileBindingForTesting {
                 XCTAssertThrowsError(
                     try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true))
                 XCTAssertThrowsError(try orchestrator.workspaceScriptEnvironment())

@@ -348,6 +348,25 @@ public final class WorkspaceOrchestrator {
         return try loadWorkspaceSettings(project: project, workspace: workspace)
     }
 
+    /// The workspace's settings as STORED, or `nil` when it has none of its own yet — the read that does not
+    /// seed.
+    ///
+    /// `workspaceSettings` funnels through `loadWorkspaceSettings`, which lazily seeds a workspace with no
+    /// settings row from its project's defaults, persisting a stop script, service definitions, processes,
+    /// browser sessions, and agent launchers. That is right for the callers about to act on those settings and
+    /// wrong for a caller that only reports them: `spacese2e dump-workspace` promises to observe a profile
+    /// without changing it, and against a workspace predating settings rows it would instead write
+    /// configuration into the user's profile that they never chose.
+    ///
+    /// `nil` is the honest answer to that read rather than a degraded one — "this workspace has no settings of
+    /// its own" is a fact worth reporting, and a caller that needs the effective values asks
+    /// `workspaceSettings` and accepts the seed that comes with them.
+    public func workspaceSettingsWithoutSeeding(workspaceID: String) throws -> WorkspaceSettings? {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        guard try store.workspaceSettingsExists(workspaceID: workspace.id) else { return nil }
+        return try storedWorkspaceSettings(workspaceID: workspace.id)
+    }
+
     /// Returns the workspace's browser sessions with environment variables (e.g. $PORT) resolved to their
     /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
     /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
@@ -1791,16 +1810,24 @@ public final class WorkspaceOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
+    /// The workspace's settings, SEEDING them from the project's defaults first when it has none yet. Every
+    /// caller that is about to act on the settings goes through here; a caller that only reports them uses
+    /// `workspaceSettingsWithoutSeeding`, which is the same read without the write.
     func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
-        let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
-        let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
-        let processes = try store.workspaceProcesses(workspaceID: workspace.id)
-        let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+        return try storedWorkspaceSettings(workspaceID: workspace.id)
+    }
+
+    /// The five settings tables read back as one value, shared by the seeding and non-seeding reads so they
+    /// cannot report a workspace differently.
+    private func storedWorkspaceSettings(workspaceID: String) throws -> WorkspaceSettings {
+        WorkspaceSettings(
+            stopScript: try store.workspaceStopScript(workspaceID: workspaceID),
+            ports: try store.workspaceServiceDefinitions(workspaceID: workspaceID),
+            processes: try store.workspaceProcesses(workspaceID: workspaceID),
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
+            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
     }
 
     private func runScript(_ script: String, cwd: String) throws {

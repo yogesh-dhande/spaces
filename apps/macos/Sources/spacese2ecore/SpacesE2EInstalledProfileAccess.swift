@@ -8,11 +8,21 @@
 public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
     /// Observes only: reads state, reports it, and writes nothing to the profile.
     ///
-    /// A claim about the PROFILE, not about the filesystem. Several of these take a destination they own
-    /// outright and delete or overwrite — a recording, a dumped snapshot — so the classification holds only
-    /// because a bound invocation may name no path inside the profile root at all; that is enforced for every
-    /// command by `SpacesE2EInstalledProfileSelection.Invocation.refuseArgumentsInside`, not by reading this
-    /// case.
+    /// The hardest case to classify, because "read-only" is a claim about the whole RUN, not about the verb in
+    /// the command's name. Three separate things have had to be established for this set, each after a
+    /// classification that looked obviously safe turned out not to be:
+    ///
+    /// - It is a claim about the profile, not the filesystem. Several of these take a destination they own
+    ///   outright and delete or overwrite it — a recording, a dumped snapshot — so the classification holds
+    ///   only because a bound invocation may name no path inside the profile root at all
+    ///   (`SpacesE2EInstalledProfileSelection.Invocation.refuseArgumentsInside`).
+    /// - A read path that LAZILY INITIALIZES is a write. `dump-workspace` reported settings through a loader
+    ///   that seeds a workspace's stop script, services, processes, browser sessions, and agent launchers from
+    ///   its project when it has none yet; it now reads without seeding. Reaching for the obvious accessor is
+    ///   how that happens, so a new entry here has to be traced to what it actually calls.
+    /// - Resolving a profile at all creates its root and runtime directory, and starting the daemon is
+    ///   permitted for the installed profile. Neither is user state, and both are what any Spaces process does
+    ///   to the profile it serves, so both are inside this case rather than exceptions to it.
     case readOnly
 
     /// Mutates only what a QA sweep can undo or re-do — runtime, window, and session state it created or can
@@ -49,7 +59,6 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
     public static let byCommandName: [String: SpacesE2EInstalledProfileAccess] = [
         // Read-only: the measurements a QA sweep of the installed build is built on.
         "dump-workspace": .readOnly,
-        "dump-terminal-session-window-state": .readOnly,
         "focusable-window-names": .readOnly,
         "lookup-workspace": .readOnly,
         "mac-client-installation-id": .readOnly,
@@ -70,6 +79,12 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
         // the unclassifiable request channels below because the terminal control protocol's command set is
         // closed and every member of it — attach, send, key, resize, scroll, appearance — is something the
         // terminal UI already does; an unrecognised command is rejected as unsupported rather than carried.
+        // `dump-terminal-session-window-state` sits here rather than with the reads despite being a dump: the
+        // app refreshes the pane to answer it, and unless `--viewer` is passed that refresh ATTACHES as the
+        // session's owner, which can take ownership from whatever held it. That is the same act as
+        // `terminal-service-control attach` and the same act as focusing the pane in the UI, so it is
+        // permitted — it is just not the "writes nothing" claim `readOnly` makes.
+        "dump-terminal-session-window-state": .reversible,
         "start-workspace-terminal-session": .reversible,
         "terminate-terminal-session": .reversible,
         "open-workspace-terminal": .reversible,
