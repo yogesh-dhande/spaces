@@ -235,7 +235,7 @@ extension WorkspaceOrchestrator {
     /// profile (`spacese2e --installed-profile`) states which profile it serves on its own command line, so
     /// the overrides in its environment describe a profile it is not serving and forwarding them would export
     /// a `SPACES_DB_PATH` into an installed-profile terminal — the failure above, reached from the other
-    /// side. `SpacesProfile.childProcessEnvironment` is that exception, shared with every other place this
+    /// side. `SpacesProfile.environmentServingThisProfile` is that exception, shared with every other place this
     /// codebase launches a process, so "a bound process hands no override to what it launches" has one
     /// definition rather than one per launch site. Every profile a build owns still forwards exactly what its
     /// own environment carries.
@@ -245,7 +245,7 @@ extension WorkspaceOrchestrator {
         var env = base
         if includeInheritedPath, let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
         if includeProfileEnvironment {
-            let forwardable = try SpacesProfile.current().childProcessEnvironment()
+            let forwardable = try SpacesProfile.current().environmentServingThisProfile()
             for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
                 if let value = forwardable[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { env[key] = value }
             }

@@ -114,6 +114,65 @@ final class SpacesE2EInstalledProfileSelectionTests: XCTestCase {
         }
     }
 
+    /// A permitted classification is a claim about the PROFILE, not about the filesystem: `record-screen`
+    /// deletes and recreates its `--output` and `--ready-file`, and `dump-terminal-session-window-state` has
+    /// the running app overwrite its `--output-path`. Pointed inside the profile root, any of them destroys
+    /// live state under a classification promising it cannot, so a bound invocation may name no path in there
+    /// — and the refusal has to say which path it refused, since the argument that carried it is often one of
+    /// several.
+    func testBoundInvocationIsRefusedADestinationInsideTheInstalledProfile() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces", isDirectory: true).path
+        let destination = "\(profileRoot)/spaces.db"
+        let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: ["--installed-profile", "record-screen", "--output", destination])
+
+        XCTAssertThrowsError(try invocation.refuseArgumentsInside(profileRoot: profileRoot, currentDirectoryPath: tempHomeURL.path)) { error in
+            guard case SpacesE2EInstalledProfileRefusal.argumentNamesPathInsideProfile(let argument, let path, _) = error else {
+                return XCTFail("Expected argumentNamesPathInsideProfile, got \(error).")
+            }
+            XCTAssertEqual(argument, destination)
+            XCTAssertEqual(path, destination)
+            XCTAssertTrue(String(describing: error).contains(destination), "The refusal must name the path it refused: \(error)")
+            XCTAssertTrue(String(describing: error).contains(profileRoot), "The refusal must name the root that made it one: \(error)")
+        }
+    }
+
+    /// The refusal reads every argument rather than the destination options of the commands that have them
+    /// today, so it covers an `--option=value` token and a relative path resolved from a working directory
+    /// inside the profile — both of which name the same destination by another spelling.
+    func testBoundInvocationIsRefusedADestinationSpelledAsAnAttachedOrRelativePath() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces", isDirectory: true).path
+        let attached = try SpacesE2EInstalledProfileSelection.parse(
+            arguments: ["--installed-profile", "record-screen", "--output=\(profileRoot)/capture.mov"])
+        let relative = try SpacesE2EInstalledProfileSelection.parse(
+            arguments: ["--installed-profile", "record-screen", "--output", "capture.mov"])
+
+        XCTAssertThrowsError(try attached.refuseArgumentsInside(profileRoot: profileRoot, currentDirectoryPath: tempHomeURL.path))
+        XCTAssertThrowsError(
+            try relative.refuseArgumentsInside(profileRoot: profileRoot, currentDirectoryPath: profileRoot),
+            "A relative destination resolves where the command would resolve it.")
+    }
+
+    /// The ordinary QA destination — a scratch path outside the profile — is permitted, and so is every
+    /// argument that is not a path at all. The refusal exists to keep a bound run off the profile's own
+    /// files, not to narrow what a permitted command can be asked to do.
+    func testBoundInvocationIsPermittedADestinationOutsideTheInstalledProfile() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces", isDirectory: true).path
+        let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: [
+            "--installed-profile", "record-screen", "--output", tempHomeURL.appendingPathComponent("capture.mov").path, "--fps", "15",
+        ])
+
+        XCTAssertNoThrow(try invocation.refuseArgumentsInside(profileRoot: profileRoot, currentDirectoryPath: tempHomeURL.path))
+    }
+
+    /// An invocation that never asked for the installed profile is not this refusal's business: it acts on
+    /// the development profile of the checkout it was built in, where its own paths are its own to write.
+    func testUnboundInvocationIsNotCheckedForDestinations() throws {
+        let profileRoot = tempHomeURL.appendingPathComponent(".spaces", isDirectory: true).path
+        let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: ["record-screen", "--output", "\(profileRoot)/capture.mov"])
+
+        XCTAssertNoThrow(try invocation.refuseArgumentsInside(profileRoot: profileRoot, currentDirectoryPath: tempHomeURL.path))
+    }
+
     /// A command with no classification is refused rather than assumed safe, so a command added later cannot
     /// reach a live profile by omission. The message points at the one place a classification is declared.
     func testUnclassifiedCommandFailsClosed() throws {

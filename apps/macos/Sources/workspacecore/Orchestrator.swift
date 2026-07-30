@@ -1812,13 +1812,13 @@ public final class WorkspaceOrchestrator {
     /// shell that commonly calls `spaces`, so a `SPACES_DB_PATH` inherited from the shell that started
     /// `spacese2e --installed-profile stop-workspace` would point those calls at a profile this run is not
     /// serving. Shared with the terminal-session and daemon launch paths through
-    /// `SpacesProfile.childProcessEnvironment`, so the exception is defined once.
+    /// `SpacesProfile.environmentServingThisProfile`, so the exception is defined once.
     ///
     /// The base is `Shell.currentProcessEnvironment()` rather than the raw process environment because that
     /// is what a script launched through `Shell` gets today: PATH merged with the login shell's and Homebrew's
     /// directories, which the version-manager shims a stop script relies on live in.
     func workspaceScriptEnvironment() throws -> [String: String] {
-        try SpacesProfile.current().childProcessEnvironment(inheriting: Shell.currentProcessEnvironment())
+        try SpacesProfile.current().environmentServingThisProfile(Shell.currentProcessEnvironment())
     }
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {

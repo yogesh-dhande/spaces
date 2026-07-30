@@ -1,3 +1,6 @@
+import Foundation
+import spacesterminalcore
+
 /// How a `spacese2e` invocation says it targets the installed profile (`~/.spaces`) instead of the profile
 /// the binary resolves from where it sits.
 ///
@@ -19,6 +22,58 @@ public enum SpacesE2EInstalledProfileSelection {
         public init(commandArguments: [String], targetsInstalledProfile: Bool) {
             self.commandArguments = commandArguments
             self.targetsInstalledProfile = targetsInstalledProfile
+        }
+
+        /// Refuses this invocation if any of its arguments names a path inside `profileRoot`.
+        ///
+        /// A `readOnly` classification is a claim about the PROFILE, not about the filesystem: several
+        /// permitted commands take a destination they own outright — `record-screen` deletes and recreates
+        /// both its `--output` and its `--ready-file`, and `dump-terminal-session-window-state` has the
+        /// running app atomically overwrite its `--output-path`. Pointed at `~/.spaces/spaces.db` any of them
+        /// destroys live state under a classification promising it cannot, so a bound invocation may name no
+        /// path inside the profile it borrowed.
+        ///
+        /// Every argument is tested rather than the destination options of the commands that have them today.
+        /// Recognising destinations by option name would mean a second argument parser beside ArgumentParser's,
+        /// kept in step by hand, and a destination option added later would be unguarded until someone
+        /// remembered it. Nothing a permitted command legitimately takes points inside the profile root — the
+        /// paths it reads there it derives itself — so "no argument names a path in there" costs nothing and
+        /// covers every command, including ones not written yet.
+        ///
+        /// A relative argument is resolved against `currentDirectoryPath`, which is what the command itself
+        /// would do with it, so a destination is caught whether it was spelled absolutely or reached by
+        /// running from inside the profile root. That does mean a bound invocation started with the profile
+        /// root as its working directory is refused on almost any argument, since every relative one resolves
+        /// in there — the right answer for a working directory nothing should be run from, arrived at by
+        /// failing closed rather than by a rule of its own.
+        public func refuseArgumentsInside(
+            profileRoot: String, currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+        ) throws {
+            guard targetsInstalledProfile else { return }
+            let profileRootURL = URL(fileURLWithPath: profileRoot, isDirectory: true)
+            for argument in commandArguments {
+                for candidate in Self.pathCandidates(in: argument, currentDirectoryPath: currentDirectoryPath)
+                where SpacesProfile.isPath(candidate, atOrUnder: profileRootURL) {
+                    throw SpacesE2EInstalledProfileRefusal.argumentNamesPathInsideProfile(
+                        argument: argument, path: candidate, profileRoot: profileRoot)
+                }
+            }
+        }
+
+        /// The absolute paths one argument could name. An option written `--output=<path>` carries its value
+        /// in the same token, so the part after the first `=` is tested as well — that is reading the one
+        /// spelling ArgumentParser also accepts, not interpreting which option it belongs to.
+        private static func pathCandidates(in argument: String, currentDirectoryPath: String) -> [String] {
+            var tokens = [argument]
+            if argument.hasPrefix("-"), let separatorIndex = argument.firstIndex(of: "=") {
+                tokens.append(String(argument[argument.index(after: separatorIndex)...]))
+            }
+            return tokens.compactMap { token in
+                let expanded = (token as NSString).expandingTildeInPath
+                guard !expanded.isEmpty else { return nil }
+                if expanded.hasPrefix("/") { return expanded }
+                return URL(fileURLWithPath: currentDirectoryPath, isDirectory: true).appendingPathComponent(expanded).path
+            }
         }
     }
 
@@ -58,6 +113,11 @@ public enum SpacesE2EInstalledProfileRefusal: Error, CustomStringConvertible {
     /// The selector was passed without a command to apply it to.
     case noCommandNamed
 
+    /// An argument named a path inside the installed profile root. Permitted commands own the destinations
+    /// they are given — they delete and overwrite them — so one pointed there destroys the live state the
+    /// classification promises it cannot touch.
+    case argumentNamesPathInsideProfile(argument: String, path: String, profileRoot: String)
+
     public var description: String {
         switch self {
         case .commandRefused(let commandName, let reason):
@@ -70,6 +130,11 @@ public enum SpacesE2EInstalledProfileRefusal: Error, CustomStringConvertible {
         case .noCommandNamed:
             return "spacese2e: \(SpacesE2EInstalledProfileSelection.selector) names no command. Pass it alongside a command that is classified "
                 + "as safe on the installed profile."
+        case .argumentNamesPathInsideProfile(let argument, let path, let profileRoot):
+            return "spacese2e: the argument `\(argument)` names \(path), which is inside the installed profile root \(profileRoot). A command "
+                + "that takes a destination deletes and overwrites it, so a path in there would destroy live profile state that this command's "
+                + "classification promises it cannot touch. Point it somewhere outside \(profileRoot) — the system temporary directory — and "
+                + "retry."
         }
     }
 }

@@ -220,24 +220,47 @@ import XCTest
             XCTAssertEqual(resolved.path, layout.installedDaemon.path)
         }
 
-        // With no installed daemon to serve it, a bound profile fails rather than falling back to the daemon
-        // beside the running executable, and the searched paths show that daemon was never a candidate.
+        // `SPACESD_EXECUTABLE` is a redirection like any other, and a bound process does not act on the
+        // redirections it inherited. Every terminal E2E lane exports it, so a QA sweep run from one of those
+        // shells is the ordinary case rather than a contrived one: honouring it would start that checkout's
+        // spacesd against `~/.spaces` and let it migrate the installed daemon's database.
+        func testResolveExecutableURLIgnoresTheDaemonOverrideForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path, SpacesProfile.daemonExecutableEnvironmentVariable: overrideDaemon.path],
+                fileManager: layout.fileManager, profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile),
+                installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, layout.installedDaemon.path)
+        }
+
+        // With no installed daemon to serve it, a bound profile fails rather than falling back to ANY other
+        // binary it can see — the daemon beside the running executable, or the one the environment pins — and
+        // the searched paths show neither was ever a candidate.
         func testResolveExecutableURLFailsRatherThanBorrowingADaemonForABoundInstalledProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }
             let siblingDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
             try makeExecutableFile(at: siblingDaemon)
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
             let absentInstalledLink = layout.root.appendingPathComponent("absent-installed-spacesd", isDirectory: false)
 
             XCTAssertThrowsError(
                 try TerminalService.resolveExecutableURL(
-                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
-                    profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile), installedLinkURLs: [absentInstalledLink])
+                    environment: ["_": layout.buildCLI.path, SpacesProfile.daemonExecutableEnvironmentVariable: overrideDaemon.path],
+                    fileManager: layout.fileManager, profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile),
+                    installedLinkURLs: [absentInstalledLink])
             ) { error in
                 guard case TerminalServiceError.daemonNotFound(_, let searchedPaths) = error else {
                     return XCTFail("Expected daemonNotFound, got \(error)")
                 }
                 XCTAssertFalse(searchedPaths.contains(siblingDaemon.path))
+                XCTAssertFalse(searchedPaths.contains(overrideDaemon.path))
                 XCTAssertTrue(searchedPaths.contains(absentInstalledLink.path))
             }
         }
@@ -247,32 +270,37 @@ import XCTest
         // inherited `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` would be the only thing reaching it — and the
         // daemon would come up on a scratch database, or with its socket and instance lock under another
         // profile's runtime root, while the parent waited on the installed profile's socket.
-        func testDaemonSpawnEnvironmentDropsBothProfileOverridesForABoundInstalledProfile() {
+        func testDaemonSpawnEnvironmentDropsEveryRedirectingVariableForABoundInstalledProfile() {
             let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
 
-            let environment = profile.childProcessEnvironment(inheriting: [
+            let environment = profile.environmentServingThisProfile([
                 SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
-                SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime", "PATH": "/usr/bin",
+                SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
+                SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "PATH": "/usr/bin",
             ])
 
             XCTAssertNil(environment[SpacesProfile.databasePathEnvironmentVariable])
             XCTAssertNil(environment[SpacesProfile.runtimeDirectoryEnvironmentVariable])
-            XCTAssertEqual(environment["PATH"], "/usr/bin", "Only the two profile overrides are dropped; the rest of the environment is inherited.")
+            XCTAssertNil(
+                environment[SpacesProfile.daemonExecutableEnvironmentVariable],
+                "A child that autostarts a daemon must not be handed the pin this process refused to honour.")
+            XCTAssertEqual(environment["PATH"], "/usr/bin", "Only the redirecting variables are dropped; the rest of the environment is inherited.")
         }
 
         // The companion direction: every profile a process reached by belonging to it passes its environment
-        // to the daemon untouched, including the ephemeral scratch root that only the override can describe.
-        // Dropping it there would leave the daemon serving a different profile from its parent — the very
-        // failure the bound case above exists to prevent, in reverse.
-        func testDaemonSpawnEnvironmentForwardsProfileOverridesForAProfileTheBuildOwns() {
+        // to the daemon untouched, including the ephemeral scratch root that only the override can describe
+        // and the daemon the terminal E2E lanes pin. Dropping either there would leave the daemon serving a
+        // different profile from its parent, or a different binary than the lane chose — the very failure the
+        // bound case above exists to prevent, in reverse.
+        func testDaemonSpawnEnvironmentForwardsRedirectingVariablesForAProfileTheBuildOwns() {
             for source: SpacesProfileSource in [.explicitDatabasePath, .developmentWorktree, .deployedDevelopmentProfile, .installedFallback] {
                 let inherited = [
                     SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
                     SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
+                    SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd",
                 ]
 
-                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).childProcessEnvironment(
-                    inheriting: inherited)
+                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).environmentServingThisProfile(inherited)
 
                 XCTAssertEqual(environment, inherited, "A \(source.rawValue) profile's daemon inherits the environment that describes it.")
             }
@@ -307,7 +335,9 @@ import XCTest
         }
 
         // The override outranks the installed links for the installed profile too, so an operator can
-        // point the installed profile at a specific daemon without reinstalling.
+        // point the installed profile at a specific daemon without reinstalling. The profile here was
+        // REACHED by the build that is asking (it fell through to `~/.spaces`), which is what separates this
+        // from the bound case above — the same root, the opposite answer.
         func testResolveExecutableURLHonorsExplicitOverrideForInstalledProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }

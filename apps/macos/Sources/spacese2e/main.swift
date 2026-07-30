@@ -3575,7 +3575,14 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
 // gate is that the refused command never reaches a profile a user relies on.
 do {
     let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: Array(CommandLine.arguments.dropFirst()))
-    if invocation.targetsInstalledProfile { SpacesProfile.bindToInstalledProfile() }
+    if invocation.targetsInstalledProfile {
+        SpacesProfile.bindToInstalledProfile()
+        // Checked against the root the binding actually resolved, rather than a second spelling of
+        // `~/.spaces` that could disagree with it — which is why it runs after the binding rather than
+        // inside the classification call above. Binding writes nothing beyond the profile directories
+        // resolution always creates, so a refusal here still precedes every command's own side effects.
+        try invocation.refuseArgumentsInside(profileRoot: try SpacesProfile.current().rootDirectory)
+    }
     SpacesE2ECommand.main(invocation.commandArguments)
 } catch {
     FileHandle.standardError.write(Data("\(error)\n".utf8))

@@ -75,8 +75,10 @@ let macAppTargets: [Target] = [
 ]
 let macExecutableTargets: [Target] = [
     // The installed-profile policy `spacese2e` applies before it dispatches a command. It is a library so the
-    // classification and its refusals are unit-testable without an executable to drive.
-    .target(name: "spacese2ecore"),
+    // classification and its refusals are unit-testable without an executable to drive. It depends on
+    // `spacesterminalcore` for the profile root's one spelling and the path-containment test its destination
+    // refusal shares with profile resolution.
+    .target(name: "spacese2ecore", dependencies: ["spacesterminalcore"]),
     .executableTarget(
         name: "spacese2e",
         dependencies: [

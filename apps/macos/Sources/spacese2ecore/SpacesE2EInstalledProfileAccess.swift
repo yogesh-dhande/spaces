@@ -7,6 +7,12 @@
 /// classification has to be argued against.
 public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
     /// Observes only: reads state, reports it, and writes nothing to the profile.
+    ///
+    /// A claim about the PROFILE, not about the filesystem. Several of these take a destination they own
+    /// outright and delete or overwrite — a recording, a dumped snapshot — so the classification holds only
+    /// because a bound invocation may name no path inside the profile root at all; that is enforced for every
+    /// command by `SpacesE2EInstalledProfileSelection.Invocation.refuseArgumentsInside`, not by reading this
+    /// case.
     case readOnly
 
     /// Mutates only what a QA sweep can undo or re-do — runtime, window, and session state it created or can
