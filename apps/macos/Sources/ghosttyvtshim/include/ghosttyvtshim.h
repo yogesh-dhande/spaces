@@ -289,11 +289,12 @@ bool spaces_ghostty_vt_session_format_plain(
 );
 
 // Serializes the session's current persistent terminal state as a self-contained escape-sequence
-// preamble, so a from-zero replay of a head-trimmed transcript restores the terminal state that the
-// dropped head had established (alt-screen, mouse reporting, bracketed paste, DECCKM, Kitty keyboard
-// flags, cursor position) and repaints the active screen's visible grid (cell text, colors, and style
-// flags) so cells the retained tail never redraws are not lost. The buffer is malloc'd and must be
-// freed with `spaces_ghostty_vt_free_buffer`. Returns false (and leaves `*out_ptr` NULL) on failure.
+// preamble, so a replay that begins at the preamble restores the terminal state the bytes before it had
+// established (alt-screen, mouse reporting, bracketed paste, DECCKM, Kitty keyboard flags, scrolling
+// region, charset designations, cursor position) and repaints the active screen's visible grid (cell
+// text, colors, and style flags) so cells the following bytes never redraw are not lost. The buffer is
+// malloc'd and must be freed with `spaces_ghostty_vt_free_buffer`. Returns false (and leaves `*out_ptr`
+// NULL) on failure.
 bool spaces_ghostty_vt_session_state_preamble(
     SpacesGhosttyVtSession *session,
     char **out_ptr,

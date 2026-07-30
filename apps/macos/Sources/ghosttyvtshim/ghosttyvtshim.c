@@ -1561,6 +1561,7 @@ static const SpacesGhosttyVtPreambleMode kSpacesGhosttyVtPreambleModes[] = {
     {25, false},   // CURSOR_VISIBLE (DECTCEM)
     {47, false},   // ALT_SCREEN_LEGACY
     {66, false},   // KEYPAD_KEYS application keypad
+    {69, false},   // ENABLE_LEFT_RIGHT_MARGIN (DECLRMM); DECSLRM below is inert without it
     {1000, false}, // NORMAL_MOUSE
     {1002, false}, // BUTTON_MOUSE
     {1003, false}, // ANY_MOUSE
@@ -1970,34 +1971,198 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
     return ok && buf->ok;
 }
 
+// Formats the session's terminal with the given options into a library-allocated buffer. The caller
+// owns the buffer and must release it with `symbols->ghostty_free(NULL, ptr, len)`.
+static bool spaces_ghostty_vt_format_terminal(
+    SpacesGhosttyVtSession *session,
+    GhosttyFormatterTerminalOptions options,
+    uint8_t **out_ptr,
+    size_t *out_len
+) {
+    *out_ptr = NULL;
+    *out_len = 0;
+
+    GhosttyFormatter formatter = NULL;
+    if (session->symbols.formatter_terminal_new(NULL, &formatter, session->terminal, options) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    bool ok = session->symbols.formatter_format_alloc(formatter, NULL, out_ptr, out_len) == GHOSTTY_SUCCESS;
+    session->symbols.formatter_free(formatter);
+    return ok;
+}
+
+// Copies out the state components a replay ROOT needs that `ghostty_terminal_get` cannot report: the
+// scrolling region (DECSTBM/DECSLRM) and the charset designations and invocations (G0-G3 plus the GL/GR
+// locking shifts). `*out_ptr` is malloc'd and owned by the caller; it is NULL with `*out_len` 0 when the
+// terminal holds none of that state (the common case).
+//
+// Both are sticky state a program establishes once and then relies on forever — a TUI sets its region
+// at startup and afterwards only feeds lines into it; ncurses designates the line-drawing charset once
+// (`enacs`) and afterwards only toggles it with SO/SI. A preamble that omitted them would be replayed
+// into a terminal that has neither, so every following line feed scrolls the whole screen instead of
+// the region and every following SO invokes the wrong charset: a WRONG screen, not merely an
+// incomplete one.
+//
+// libghostty-vt exposes neither through `ghostty_terminal_get`; the formatter's `scrolling_region` and
+// screen `charsets` extras are the only public path to them, and the formatter always emits screen
+// CONTENT ahead of its extras with no C-level option to suppress it. They are therefore isolated by
+// formatting the same terminal twice with identical options — once with the extras off, once on — and
+// keeping the bytes the second run appended. Formatting only reads terminal state, so the two runs
+// produce byte-identical content and the delta is exactly the extras, with no assumption made about
+// their grammar or their order. The content each run formats is bounded by the caller's session, which
+// is created with flat scrollback for exactly this reason.
+static bool spaces_ghostty_vt_copy_replay_root_state(SpacesGhosttyVtSession *session, uint8_t **out_ptr, size_t *out_len) {
+    if (session == NULL || session->terminal == NULL || out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+
+    GhosttyFormatterTerminalOptions content_only = GHOSTTY_INIT_SIZED(GhosttyFormatterTerminalOptions);
+    content_only.emit = GHOSTTY_FORMATTER_FORMAT_VT;
+    content_only.extra.size = sizeof(content_only.extra);
+    content_only.extra.screen.size = sizeof(content_only.extra.screen);
+    GhosttyFormatterTerminalOptions content_and_state = content_only;
+    content_and_state.extra.scrolling_region = true;
+    content_and_state.extra.screen.charsets = true;
+
+    uint8_t *content = NULL;
+    size_t content_len = 0;
+    if (!spaces_ghostty_vt_format_terminal(session, content_only, &content, &content_len)) return false;
+
+    uint8_t *content_with_state = NULL;
+    size_t content_with_state_len = 0;
+    if (!spaces_ghostty_vt_format_terminal(session, content_and_state, &content_with_state, &content_with_state_len)) {
+        session->symbols.ghostty_free(NULL, content, content_len);
+        return false;
+    }
+
+    // The extras are additive, so the state-bearing run must begin with the content-only run's bytes.
+    // Anything else means the two runs disagree about the content and the tail cannot be attributed to
+    // the extras; fail rather than emit bytes of unknown meaning.
+    bool ok = content_with_state_len >= content_len && (content_len == 0 || memcmp(content, content_with_state, content_len) == 0);
+    size_t state_len = ok ? content_with_state_len - content_len : 0;
+    if (ok && state_len > 0) {
+        uint8_t *state = (uint8_t *)malloc(state_len);
+        if (state == NULL) {
+            ok = false;
+        } else {
+            memcpy(state, content_with_state + content_len, state_len);
+            *out_ptr = state;
+            *out_len = state_len;
+        }
+    }
+
+    session->symbols.ghostty_free(NULL, content, content_len);
+    session->symbols.ghostty_free(NULL, content_with_state, content_with_state_len);
+    return ok;
+}
+
+// Measures the cursor origin the preamble's final CUP will be interpreted against when origin mode
+// (DECOM) is set: with DECOM on, CUP coordinates are relative to the scrolling region's top-left corner,
+// while `GHOSTTY_TERMINAL_DATA_CURSOR_X/Y` report absolute ones.
+//
+// The origin is MEASURED rather than parsed back out of `state`: the reference terminal is fed the exact
+// bytes the preamble emits for the region and then homed under origin mode, so the cursor lands on
+// whatever corner those bytes established and its absolute position IS the offset. Parsing DECSTBM and
+// DECSLRM out of `state` would reproduce the formatter's encoding in a second place and could silently
+// disagree with it; feeding the bytes to a terminal cannot. DECLRMM is enabled on the reference so a
+// DECSLRM in `state` is honored there exactly as the live terminal honored it (a terminal without the
+// mode has full-width margins, and then the formatter emits no DECSLRM at all).
+//
+// The reference terminal is the same throwaway the mode diff used; that diff is read-only and complete
+// before this runs, so mutating it here is safe.
+static bool spaces_ghostty_vt_measure_cursor_origin(
+    SpacesGhosttyVtSession *session,
+    GhosttyTerminal reference,
+    const uint8_t *state,
+    size_t state_len,
+    uint16_t *out_row,
+    uint16_t *out_column
+) {
+    static const char kOriginAndMargins[] = "\x1b[?6h\x1b[?69h";
+    static const char kHome[] = "\x1b[1;1H";
+    session->symbols.terminal_vt_write(reference, (const uint8_t *)kOriginAndMargins, sizeof(kOriginAndMargins) - 1);
+    if (state != NULL && state_len > 0) session->symbols.terminal_vt_write(reference, state, state_len);
+    session->symbols.terminal_vt_write(reference, (const uint8_t *)kHome, sizeof(kHome) - 1);
+
+    uint16_t column = 0;
+    uint16_t row = 0;
+    if (
+        session->symbols.terminal_get(reference, GHOSTTY_TERMINAL_DATA_CURSOR_X, &column) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(reference, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &row) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    *out_row = row;
+    *out_column = column;
+    return true;
+}
+
 // Serializes the session's current persistent terminal state as escape sequences, diffed against a
 // fresh reference terminal created at the same cols/rows via the already-loaded symbols. Only state
 // that differs from a brand-new terminal is emitted, so the library's own defaults define "emit
 // nothing" and there is no hardcoded mode-default table to drift from the library.
 //
-// Emission order:
-//   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen modes.
+// A preamble is written at the head of a trimmed transcript, so it is replayed into a BLANK terminal —
+// and it must also be able to run against one already carrying the state it restores, since the trim
+// that produces the NEXT preamble replays the retained file from byte 0 and passes through this one. It
+// has to produce the same terminal either way. The order below is what makes that true, and every step of
+// it is load-bearing. The constraints, each with the failure it prevents:
+//
+//   C1. Modes before everything else. Alt-screen entry must precede the grid repaint and the cursor, or
+//       both land on the wrong screen. DECLRMM (69) must precede any DECSLRM, which the library ignores
+//       while the mode is off. DECOM (6) must precede the cursor because ENABLING it homes the cursor,
+//       so it cannot be turned on afterwards to fix up an absolute position.
+//   C2. Paint-neutral margins and charset invocation before the grid repaint. The repaint is a top-down
+//       flow paint, so a scrolling region left on the target terminal would make its line feeds scroll
+//       that region instead of stepping to the next row; and a non-default charset left invoked on GL
+//       would map the repaint's own bytes (Ghostty translates ASCII through the DEC table and renders
+//       anything above U+00FF as a space), corrupting the screen it is supposed to restore. Full-extent
+//       margins also make the repaint's opening home unambiguous under the DECOM step 1 may just have
+//       restored: with the region spanning the screen, region-relative and absolute coincide. "Full
+//       extent" must be expressed with the sequences' DEFAULT extent parameters, never with this
+//       session's measured size: a preamble is replayed at whatever size the terminal has then, and a
+//       pinned width or height would constrain everything drawn after it to the size it was captured at.
+//   C3. Grid repaint before the region and charset restore. The repaint must run under C2's neutral
+//       state; restoring first would re-arm exactly what C2 exists to neutralize.
+//   C4. Region and charset restore before the cursor. DECSTBM and DECSLRM home the cursor, so a cursor
+//       emitted before them is discarded.
+//   C5. Cursor last among the positioning steps, and region-relative when DECOM is set (C1) — CUP is
+//       interpreted against the region's top-left corner then, while the cursor getters are absolute.
+//       Positioning with origin mode temporarily off is NOT an option: re-enabling it homes the cursor
+//       again, so the relative form is the only one that survives C1 and C4 together.
+//   C6. SGR reset last. It moves nothing and clears no cells, so it is safe anywhere after the repaint;
+//       it sits at the end so the pen is deterministic whatever the steps above emitted.
+//
+// Emission order following from those:
+//   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen, DECOM and DECLRMM.
 //   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
-//   3. Grid repaint of the active screen (top-down flow paint, per `spaces_ghostty_vt_preamble_append_grid`).
-//      Emitted after the modes so it lands on the active (possibly alt) screen, and before the CUP so
-//      the final cursor position wins over wherever painting left the cursor.
-//   4. Cursor position (CSI <y+1> ; <x+1> H), after all mode/screen/grid changes so it lands on the
-//      active screen.
-//   5. SGR reset (CSI 0 m) so pen state is deterministic.
+//   3. Paint-neutral state: full-extent margins in their width- and height-independent form
+//      (CSI r, CSI 1 ; 0 s) and a normalized charset invocation (ESC ( B, SI). Emitted unconditionally —
+//      all four are no-ops on a terminal that is already neutral, which is every from-blank replay.
+//   4. Grid repaint of the active screen (top-down flow paint, per `spaces_ghostty_vt_preamble_append_grid`).
+//   5. Scrolling region and charset designations/shifts (`spaces_ghostty_vt_copy_replay_root_state`).
+//   6. Cursor position (CSI <y+1> ; <x+1> H), region-relative under DECOM.
+//   7. SGR reset (CSI 0 m).
 //
 // RESTORED beyond modes/cursor: the ACTIVE screen's visible grid (cell text, colors, and style flags)
-// via the grid repaint, so cells drawn before the cut that the retained tail never redraws survive a
-// from-zero replay.
+// via the grid repaint, so cells drawn before the preamble that the following bytes never redraw
+// survive a replay that starts here, plus the scrolling region and charset designations, without which
+// the bytes that follow the preamble would be interpreted against the wrong terminal and render a wrong
+// screen rather than an incomplete one.
 //
 // ACCEPTED GAPS (intentionally NOT restored): the INACTIVE screen's grid (render state exposes only
 // the active screen) and scrollback content above the grid (inherent to trimming — those bytes are
-// dropped). Also not restored: scroll region, tab stops, charset designations, saved-cursor (DECSC),
-// pending-wrap at the bottom-right corner (unrestorable — painting cannot re-arm it without
-// scrolling), OSC color/title overrides, and the live pen's SGR (reset to default). In addition, the
-// pinned libghostty-vt exposes no cursor-SHAPE getter (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the
-// pen SGR style, not a block/underline/bar shape), so DECSCUSR is not emitted. These are acceptable
-// because from-zero handoff replay only needs the mode/cursor/grid state that determines how the
-// retained tail's bytes render.
+// dropped). Also not restored: tab stops, saved-cursor (DECSC), pending-wrap at the bottom-right corner
+// (unrestorable — painting cannot re-arm it without scrolling), OSC color/title overrides, a pending
+// single shift (SS2/SS3 applies to the next printed cell only, and a preamble can only land between one
+// and its character if a PTY read ended inside a two-byte sequence), and the live pen's SGR (reset to
+// default). A slot that held UTF-8 also ends up designated ASCII by step 3, since the library has no
+// per-slot UTF-8 designator; the two are the same charset to its print path, which uses both unmapped.
+// In addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
+// (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the pen SGR style, not a block/underline/bar shape), so
+// DECSCUSR is not emitted. These are acceptable because they cannot change how the bytes following the
+// preamble lay out on the screen: a program that depends on one of them re-establishes it as part of
+// the drawing that follows.
 bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
     if (out_ptr == NULL || out_len == NULL) return false;
     *out_ptr = NULL;
@@ -2050,27 +2215,69 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         spaces_ghostty_vt_preamble_append(&buf, "\x1b[=%u;1u", (unsigned)kitty_flags);
     }
 
-    // 3. Grid repaint of the active screen. Emitted after the modes (so alt-screen entry has already
-    //    happened) and before the cursor position (so the CUP below wins). A snapshot-read failure
-    //    fails the whole preamble rather than emitting a partially painted grid.
+    // 3. Paint-neutral state (C2): full-extent margins, then G0 designated ASCII and GL locked to it, so
+    //    the repaint's line feeds cannot scroll a region and its bytes cannot be charset-mapped.
+    //
+    //    Both margins use the sequences' DEFAULT extent parameters rather than this session's measured
+    //    size, which is what keeps them correct when the preamble is replayed at another width or height
+    //    (a handoff or tail after the terminal was resized past the last trim). DECSTBM with no params
+    //    and DECSLRM with a 0 right param both resolve against the REPLAYING terminal's own bounds; an
+    //    explicit column count would pin the captured width, and since step 5 emits no DECSLRM at all
+    //    when the captured margins were already full, nothing later would widen it back out.
+    //
+    //    DECSTBM can be written bare, DECSLRM cannot: `CSI s` with no parameters is ambiguous — the
+    //    library reads it as DECSLRM only while DECLRMM is set and as save-cursor otherwise, which would
+    //    clobber a saved cursor the transcript's own bytes established. `CSI 1 ; 0 s` is unambiguous at
+    //    every width.
+    spaces_ghostty_vt_preamble_append(&buf, "\x1b[r\x1b[1;0s\x1b(B\x0f");
+
+    // 4. Grid repaint of the active screen (C3). A snapshot-read failure fails the whole preamble rather
+    //    than emitting a partially painted grid.
     if (!spaces_ghostty_vt_preamble_append_grid(session, &buf)) {
         buf.ok = false;
     }
 
-    // 4. Cursor position (0-indexed getters, 1-indexed CUP). Always emitted so the retained tail
-    //    begins with a deterministic cursor location.
+    // 5. Scrolling region and charsets (C4). A failed read fails the whole preamble rather than emitting
+    //    a replay root that cannot interpret the bytes following it.
+    uint8_t *replay_root_state = NULL;
+    size_t replay_root_state_len = 0;
+    if (spaces_ghostty_vt_copy_replay_root_state(session, &replay_root_state, &replay_root_state_len)) {
+        if (replay_root_state_len > 0) {
+            spaces_ghostty_vt_preamble_append(&buf, "%.*s", (int)replay_root_state_len, (const char *)replay_root_state);
+        }
+    } else {
+        buf.ok = false;
+    }
+
+    // 6. Cursor position (C5). The getters are absolute and 0-indexed; CUP is 1-indexed, and relative to
+    //    the region's top-left corner whenever DECOM is set, so subtract the origin step 5's bytes
+    //    establish. A cursor outside the region cannot be expressed at all (CUP clamps into it), so it is
+    //    placed on the region's first row/column — the same cell the terminal itself would clamp to.
+    bool origin_mode = false;
+    uint16_t origin_row = 0;
+    uint16_t origin_column = 0;
+    if (session->symbols.terminal_mode_get(session->terminal, ghostty_mode_new(6, false), &origin_mode) != GHOSTTY_SUCCESS) {
+        buf.ok = false;
+    } else if (origin_mode && !spaces_ghostty_vt_measure_cursor_origin(
+                   session, reference, replay_root_state, replay_root_state_len, &origin_row, &origin_column)) {
+        buf.ok = false;
+    }
+
     uint16_t cursor_x = 0;
     uint16_t cursor_y = 0;
     if (
         session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cursor_x) == GHOSTTY_SUCCESS &&
         session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y) == GHOSTTY_SUCCESS
     ) {
-        spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", (unsigned)cursor_y + 1, (unsigned)cursor_x + 1);
+        unsigned row = cursor_y > origin_row ? (unsigned)(cursor_y - origin_row) : 0;
+        unsigned column = cursor_x > origin_column ? (unsigned)(cursor_x - origin_column) : 0;
+        spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", row + 1, column + 1);
     }
 
-    // 5. SGR reset.
+    // 7. SGR reset (C6).
     spaces_ghostty_vt_preamble_append(&buf, "\x1b[0m");
 
+    free(replay_root_state);
     session->symbols.terminal_free(reference);
 
     if (!buf.ok) {
