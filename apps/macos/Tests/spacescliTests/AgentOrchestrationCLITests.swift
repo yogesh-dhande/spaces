@@ -373,6 +373,38 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertEqual(outcome, .timedOut)
     }
 
+    // MARK: - Absent runtime-state row (spawnedSessionSnapshot's unknown-session race)
+
+    private struct UnexpectedSnapshotReadError: Error {}
+
+    /// The daemon's session-start response can return before the `terminal_runtime_states` row's write
+    /// commits, so the very first poll can see `TerminalSessionPersistenceError.unknownSession`. That must
+    /// not fail the spawn: `snapshotOrPending` (the policy `spawnedSessionSnapshot` applies to its read)
+    /// turns it into a pending snapshot, so the poll loop reads again and resolves once the row appears —
+    /// no throw ever reaches `awaitReadiness`'s caller.
+    func testAwaitReadinessResolvesDetectedAfterAnUnknownSessionReadOnTheFirstPoll() throws {
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
+        ) {
+            reads += 1
+            return try snapshotOrPending {
+                if reads == 1 { throw TerminalSessionPersistenceError.unknownSession("session-race") }
+                return .init(detectedKind: .codex, state: .running)
+            }
+        }
+        XCTAssertEqual(outcome, .detected(.codex))
+        XCTAssertEqual(reads, 2)
+    }
+
+    /// Only the specific unknown-session case is swallowed. A genuinely broken read (a corrupt profile
+    /// database, for instance) must still fail loudly rather than being polled away forever.
+    func testSnapshotOrPendingPropagatesAnyErrorOtherThanUnknownSession() {
+        XCTAssertThrowsError(try snapshotOrPending { throw UnexpectedSnapshotReadError() }) { error in
+            XCTAssertTrue(error is UnexpectedSnapshotReadError, "\(error)")
+        }
+    }
+
     // MARK: - Spawn failure reporting
 
     func testSpawnChildExitedErrorNamesTheChildExitAndItsLastOutput() {
@@ -393,7 +425,19 @@ final class AgentOrchestrationCLITests: XCTestCase {
             .errorDescription
         XCTAssertEqual(
             message,
-            "Agent session session-2 failed before it was detected as a running coding agent: `codex` did not stay running. It produced no output. Inspect with: spaces terminal tail session-2 --device studio"
+            "Agent session session-2 failed before it was detected as a running coding agent: `codex` did not stay running. It produced no output. Inspect with: spaces terminal tail session-2 --device 'studio'"
+        )
+    }
+
+    /// A device name containing a space (e.g. "Mac Studio") must not split into two shell arguments when
+    /// the hint is pasted, and any shell metacharacters in the name must not be interpreted either.
+    func testSpawnChildExitedErrorShellQuotesADeviceNameContainingASpace() {
+        let message = AgentSpawnChildExitedError(
+            sessionID: "session-4", command: "claude", state: .exited, lastOutputLines: [], deviceName: "Mac Studio"
+        ).errorDescription
+        XCTAssertEqual(
+            message,
+            "Agent session session-4 exited before it was detected as a running coding agent: `claude` did not stay running. It produced no output. Inspect with: spaces terminal tail session-4 --device 'Mac Studio'"
         )
     }
 

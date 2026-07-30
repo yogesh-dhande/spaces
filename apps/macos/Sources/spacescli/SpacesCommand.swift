@@ -350,11 +350,18 @@ struct AgentSpawnChildExitedError: LocalizedError {
 
     var errorDescription: String? {
         let output = lastOutputLines.isEmpty ? "It produced no output." : "Last output: \(lastOutputLines.joined(separator: " / "))."
-        let deviceSuffix = deviceName.map { " --device \($0)" } ?? ""
+        let deviceSuffix = deviceName.map { " --device \(shellQuotedArgument($0))" } ?? ""
         return
             "Agent session \(sessionID) \(state.rawValue) before it was detected as a running coding agent: `\(command)` did not stay running. \(output) Inspect with: spaces terminal tail \(sessionID)\(deviceSuffix)"
     }
 }
+
+/// Single-quotes a value for use as one shell argument in a pasteable command hint (e.g. the `--device`
+/// selector above). No shell-quoting helper is reachable from this target: the existing ones
+/// (`AgentHookCommand.shellQuoted` in `spacesterminalcore`, `Orchestrator.shellQuoted` in `workspacecore`)
+/// are non-public or instance-scoped, so this is a small local copy of the same escaping rule rather than
+/// a cross-module dependency for one call site.
+private func shellQuotedArgument(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
 /// Result of a `spaces agent spawn`: the terminal session the daemon started and which coding agent
 /// foreground detection identified. `deviceID` is nil for a local spawn and the paired device's id for a
@@ -446,9 +453,30 @@ func performAgentSpawn(
 /// It is read directly rather than through `.terminalList`, which lists only live interactive sessions:
 /// a child that died is exactly the case spawn has to detect, and it drops out of that listing instead of
 /// reporting that it ended.
+///
+/// A `terminal_runtime_states` row that does not exist yet reads as no snapshot rather than a thrown
+/// error: the daemon's session-start response can return before that row's write commits, since the two
+/// are not ordered against each other, so the very first poll can race an absent row for an agent that is
+/// in fact starting up fine. Throwing there would abort the spawn on nothing but a timing accident —
+/// exactly the failure class fail-fast-on-child-exit was added to fix. This matches
+/// `remoteSpawnedSessionSnapshot`, which already returns a no-state snapshot for a session the device
+/// overview does not carry yet. Do not "harden" this back into an unconditional throw; only the specific
+/// unknown-session case is swallowed, and any other read failure still propagates — see `snapshotOrPending`.
 private func spawnedSessionSnapshot(childSessionID: String) throws -> AgentSpawnReadiness.SessionSnapshot {
-    let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: try TerminalSessionPaths.forSession(id: childSessionID))
-    return .init(detectedKind: runtimeState.foregroundDetectedAgentKind, state: runtimeState.state)
+    try snapshotOrPending {
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: try TerminalSessionPaths.forSession(id: childSessionID))
+        return .init(detectedKind: runtimeState.foregroundDetectedAgentKind, state: runtimeState.state)
+    }
+}
+
+/// Runs one runtime-state `read`, treating an absent row (`TerminalSessionPersistenceError.unknownSession`)
+/// as "nothing to report yet" instead of a failure, so a poll racing the row's write keeps going rather
+/// than aborting the spawn. Any other error propagates unchanged: a genuinely broken read (a corrupt
+/// profile database, for instance) must still fail loudly rather than being swallowed into an infinite
+/// poll. Factored out of `spawnedSessionSnapshot` so this catching policy is directly testable with an
+/// injected `read` closure, the same way `AgentSpawnReadiness.awaitReadiness` takes an injected `snapshot`.
+func snapshotOrPending(catching read: () throws -> AgentSpawnReadiness.SessionSnapshot) throws -> AgentSpawnReadiness.SessionSnapshot {
+    do { return try read() } catch TerminalSessionPersistenceError.unknownSession { return .init(detectedKind: nil, state: nil) }
 }
 
 /// The last lines a spawned session wrote, for the failure message. Best effort: a child that died
