@@ -949,14 +949,24 @@ extension WorkspaceOrchestrator {
     /// The notice is rendered unconditionally rather than only when the row has subscribers, because the
     /// subscriber set is read inside the claim's transaction: a watcher that attached between a check here
     /// and the claim would otherwise be owed a notice that was never rendered.
+    ///
+    /// It is rendered from the row as the DATABASE holds it, never from `record`. Callers reach this
+    /// chokepoint holding a pre-exit snapshot — the two reconcile loops each read their own, passes apart —
+    /// and the row can have learned facts since, above all its detected agent kind, which the foreground
+    /// reconciler persists the moment classification lands. Rendering a stale snapshot would name the
+    /// anonymous "coding agent" for an agent the database can name, and nothing downstream could repair it:
+    /// live foreground state is cleared by the very exit being announced, so it is nil exactly here. A row
+    /// that is already gone has no exit left to claim (the claim's own condition), so it is reported
+    /// unclaimed rather than announced from stale state.
     private func claimAgentExit(
         _ record: AgentWindowRecord, eventType: String, eventSource: String, environmentKeys: [String]?, engine: AgentNotificationEngine
     ) throws -> Bool {
-        let exitedNotice = try engine.renderLine(agent: record, transition: .exited)
+        guard let current = try store.agentWindow(id: record.id) else { return false }
+        let exitedNotice = try engine.renderLine(agent: current, transition: .exited)
         return try store.claimAgentSessionExitEvent(
-            agentSessionID: record.id, eventType: eventType, source: eventSource,
+            agentSessionID: current.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
+                provider: current.provider, label: current.label, terminalTrackingID: current.terminalTrackingID, sessionKey: current.sessionKey,
                 environmentKeys: environmentKeys), createdAt: nowISO8601(),
             exitedNoticeTransition: AgentNotificationEngine.ChildTransition.exited.word, exitedNoticeMessage: exitedNotice)
     }
@@ -1114,7 +1124,9 @@ extension WorkspaceOrchestrator {
     /// so it still names the agent at exit, when the live foreground state has already reverted to a plain
     /// shell (or vanished with the session) and would report nothing. Live state is read only for a row
     /// that has no persisted kind yet. Nil when no kind was ever detected, which renders honestly as
-    /// "coding agent" downstream.
+    /// "coding agent" downstream. It answers for the record it is HANDED, so a caller holding a snapshot
+    /// taken before the kind was persisted must re-read the row first — see `claimAgentExit`, the one
+    /// caller that reaches this across such a gap.
     public func resolvedAgentKind(_ agent: AgentWindowRecord) -> String? {
         agent.detectedAgentKind ?? liveDetectedAgentKind(terminalSessionID: agent.terminalTrackingID)
     }

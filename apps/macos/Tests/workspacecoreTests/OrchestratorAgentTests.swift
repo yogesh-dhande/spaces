@@ -2241,6 +2241,95 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: working.id), firstSignalAt)
     }
 
+    /// Two drains reach the same queued exit notice: the claimant's own delivery pass and the subscriber's
+    /// idle flush, each on its own daemon connection. The queue row is the unit of delivery, so exactly one
+    /// of them may hand it to the terminal — listing the rows and deleting each only after it is delivered
+    /// would let both read the same row and inject the block twice, moving the duplicate the exit claim
+    /// removed one layer down into the queue.
+    ///
+    /// Built at the consume boundary rather than with threads: the claimant's candidate listing is taken
+    /// first (what its delivery pass reads before it delivers anything), the idle flush then runs to
+    /// completion on the other connection, and the claimant resumes against the candidate it still holds.
+    func testConcurrentDrainsOfOneQueuedExitNoticeDeliverItExactlyOnce() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let flushConnection = try SQLiteStore(path: dbPath)
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        let claimantEngine = AgentNotificationEngine(store: store, deliver: { try recorder.submit($0, $1) }, logError: { _ in })
+        let flushEngine = AgentNotificationEngine(store: flushConnection, deliver: { try recorder.submit($0, $1) }, logError: { _ in })
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+
+        let notice = "[spaces] Codex (codex) is exited"
+        XCTAssertTrue(
+            try store.claimAgentSessionExitEvent(
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: notice))
+
+        // The claimant reads its candidates and is descheduled before delivering any of them.
+        let claimantCandidates = try store.pendingAgentNotifications(agentSessionID: child.id)
+        XCTAssertEqual(claimantCandidates.map(\.message), [notice])
+        let heldCandidate = try XCTUnwrap(claimantCandidates.first)
+
+        // The subscriber's idle flush runs to completion in that window, on its own connection.
+        try flushEngine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "watcher-session")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertEqual(recorder.delivered.map(\.line), [notice])
+
+        // The claimant resumes holding a row that is no longer in the queue, so it delivers nothing and
+        // its whole pass is a no-op.
+        XCTAssertNil(try store.claimPendingAgentNotification(id: heldCandidate.id), "a row another drain already consumed is never handed out again")
+        try claimantEngine.deliverClaimedExitNotices(agentSessionID: child.id)
+        XCTAssertEqual(recorder.delivered.count, 1, "one queued exit notice is injected exactly once across concurrent drains")
+    }
+
+    /// Overlapping reconcile passes each hold their own pre-exit snapshot of the agent row, and one pass
+    /// can persist the detected kind while another still holds a copy taken before it. If that older copy
+    /// wins the exit claim, the block it renders is the only one anyone receives — and nothing downstream
+    /// can repair it, because live foreground state is cleared by the very exit being announced. So the
+    /// notice must be rendered from the row as the database holds it, or a child whose agent Spaces
+    /// identified is announced as an anonymous "coding agent".
+    func testExitClaimedFromAStaleSnapshotStillNamesThePersistedAgentKind() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+
+        // The snapshot a reconcile pass read before classification landed.
+        let stale = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        XCTAssertNil(stale.detectedAgentKind, "the snapshot predates classification")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: stale.id, createdAt: "t")
+
+        // Another pass classifies the session and persists the kind. There is no live session behind this
+        // row, so live foreground state reports nothing — the row is the only place the kind now exists.
+        try store.setAgentSessionDetectedKind(id: stale.id, kind: "codex")
+        XCTAssertNil(orchestrator.resolvedAgentKind(stale), "the stale snapshot alone cannot name the agent")
+
+        try orchestrator.finalizeAgentRow(stale, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        let line = try XCTUnwrap(recorder.delivered.first?.line)
+        XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the kind the row carries, got: \(line)")
+    }
+
     private func agentSessionEventCount(store: SQLiteStore, agentSessionID: String) throws -> Int {
         let row = try store.queryRows(sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ?", bindings: [agentSessionID])
         return Int(row.first?.first ?? "") ?? -1

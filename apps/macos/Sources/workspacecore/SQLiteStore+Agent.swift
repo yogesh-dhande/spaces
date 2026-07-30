@@ -640,20 +640,48 @@ extension SQLiteStore {
         ).compactMap(decodePendingAgentNotification)
     }
 
-    public func deletePendingAgentNotification(id: String) throws {
-        try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+    /// Takes one queued notification out of the queue for delivery, returning it only to the caller that
+    /// removed it. A nil result means another drain already took the row and this caller owes nothing.
+    ///
+    /// THE CONSUME INVARIANT, shared by every path that drains this queue: a row is READ AND DELETED in
+    /// one `BEGIN IMMEDIATE` transaction, and only then delivered. `BEGIN IMMEDIATE` takes the database's
+    /// write lock before the SELECT runs, so two drains on separate connections — the exit claimant's
+    /// `deliverClaimedExitNotices`, a subscriber's idle flush, and the MCP piggyback drain all run on
+    /// their own — cannot both observe the same row: the second one blocks, then finds it gone. Reading
+    /// first and deleting after delivery would reopen exactly the duplicate the exit claim was built to
+    /// close, one layer down, since the delivery in between is a terminal round-trip.
+    ///
+    /// Consuming BEFORE delivering rather than after is deliberate. A delivery that throws means one
+    /// thing here — the subscriber terminal is gone — and every caller answers it with
+    /// `subscriberDidExit`, which discards that subscriber's whole queue anyway, so the consumed row was
+    /// never going to be delivered to anyone. What the ordering costs is a block lost if the process dies
+    /// between the commit and the send; what it buys is that a block can never be injected twice, which
+    /// would make an orchestrating agent act twice on one child exit. At-most-once is the deliberate
+    /// choice for a notice whose whole purpose is to prompt an action.
+    public func claimPendingAgentNotification(id: String) throws -> AgentPendingNotificationRecord? {
+        try withImmediateTransaction {
+            guard
+                let row = try queryRow(
+                    sql: """
+                        SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                        FROM agent_pending_notifications
+                        WHERE id = ?
+                        """, bindings: [id]), let record = decodePendingAgentNotification(row: row)
+            else { return nil }
+            try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+            return record
+        }
     }
 
     /// Atomically drains a subscriber terminal's held notifications: reads its pending rows in `created_at`
     /// order and deletes them in one `BEGIN IMMEDIATE` transaction, returning the rendered messages. This is
     /// the MCP piggyback path — a busy orchestrator (whose idle-flush has therefore not run) picks its
-    /// watched children's held events up on the response of its next tool call. Reusing the same
-    /// `pendingAgentNotifications` SELECT the idle-flush path (`AgentNotificationEngine.subscriberDidBecomeIdle`)
-    /// reads, then deleting the whole set inside the transaction on the store's single connection, is what
-    /// keeps the two delivery paths from ever handing out the same row twice: whichever runs first removes
-    /// the rows atomically before the other can observe them, and both delete as they deliver.
+    /// watched children's held events up on the response of its next tool call. It is the whole-queue form
+    /// of the consume invariant on `claimPendingAgentNotification`: the write lock is held across the read
+    /// and the delete, so the rows this returns are rows no other drain can also return, and the caller
+    /// owns delivering them.
     public func consumePendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [String] {
-        try withTransaction {
+        try withImmediateTransaction {
             let pending = try pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
             guard !pending.isEmpty else { return [] }
             try deletePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
