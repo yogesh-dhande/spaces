@@ -59,8 +59,11 @@ jobs:
             # partial log is kept as a failed iteration instead of wedging the whole loop.
             # --sig-proxy=false: on timeout, SIGTERM must kill only the docker CLI, not be forwarded
             # into the container — a forwarded signal ends the wedged process and --rm deletes the
-            # container before the live capture below can inspect it.
-            timeout 900 docker run --rm --init --platform linux/amd64 --sig-proxy=false \
+            # container before the live capture below can inspect it. The CLI ignores SIGTERM in this
+            # mode (observed: a wedged iteration sat for hours past its bound), so timeout must
+            # follow up with SIGKILL; the container survives the killed CLI either way, which is
+            # exactly what the capture wants, and rm -f below remains the cleanup.
+            timeout -k 15 900 docker run --rm --init --platform linux/amd64 --sig-proxy=false \
               --name "lane-iteration-$i" \
               -v "$PWD":/workspace \
               -v spaces-linux-src:/root/src \

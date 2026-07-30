@@ -228,6 +228,7 @@ let executableTargets: [Target] = [
             sources: [
                 "GhosttyLinuxHeadlessHangDiagnostics.swift",
                 "GhosttyLinuxHeadlessKeyEncodingTests.swift",
+                "GhosttyLinuxHeadlessSpawnStressTests.swift",
                 "GhosttyLinuxHeadlessSessionHandoffTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",

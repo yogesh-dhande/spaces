@@ -69,7 +69,8 @@ for suite in \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \
-  GhosttyLinuxHeadlessSubmitOrderingTests; do
+  GhosttyLinuxHeadlessSubmitOrderingTests \
+  GhosttyLinuxHeadlessSpawnStressTests; do
   suite_started="$(date +%s)"
   echo "==> $suite start $(date -Is)"
   # `set -e` would abandon the run before the state dump, so the invocation's status is captured
