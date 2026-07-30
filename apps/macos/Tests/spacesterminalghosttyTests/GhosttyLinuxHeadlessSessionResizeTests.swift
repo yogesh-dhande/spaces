@@ -77,13 +77,18 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
+                transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -180,7 +185,7 @@
             }
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
-            try await waitAsync { Self.renderedScreenText(of: core)?.contains("END") == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: core)?.contains("END") == true }
 
             // The default 80-column grid wraps the 123-column line across at least two physical rows,
             // yet the reconstructed logical line is intact.
@@ -223,7 +228,7 @@
             }
             let core = coreBox.value
             defer { TerminalEngineActor.runSynchronously { core.terminate() } }
-            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: core)?.contains(marker) == true }
 
             // Remove the durable transcript. The live session still holds the rendered marker.
             try FileManager.default.removeItem(atPath: paths.outputPath)

@@ -593,6 +593,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("PATH"))
     }
 
+    /// The child of `forkpty` cannot safely allocate, so its environment is assembled in the parent.
+    /// What the shell ends up with must still be exactly what the old post-fork `unsetenv`/`setenv`
+    /// pass produced: daemon-only keys gone, terminal overrides present exactly once, everything else
+    /// carried through untouched.
+    func testHostManagedPTYBuildsChildEnvironmentBeforeForking() {
+        let inheritedTerm = ProcessInfo.processInfo.environment["TERM"]
+        setenv("NOTIFY_SOCKET", "/run/systemd/notify", 1)
+        setenv("SPACES_CHILD_ENVIRONMENT_PROBE", "carried", 1)
+        setenv("TERM", "dumb", 1)
+        defer {
+            unsetenv("NOTIFY_SOCKET")
+            unsetenv("SPACES_CHILD_ENVIRONMENT_PROBE")
+            if let inheritedTerm { setenv("TERM", inheritedTerm, 1) } else { unsetenv("TERM") }
+        }
+
+        let entries = HostManagedPTYTerminalSessionDriver.childEnvironmentForExec(overrides: [("TERM", "xterm-ghostty"), ("COLORTERM", "truecolor")])
+
+        XCTAssertFalse(entries.contains { $0.hasPrefix("NOTIFY_SOCKET=") })
+        XCTAssertTrue(entries.contains("SPACES_CHILD_ENVIRONMENT_PROBE=carried"))
+        XCTAssertEqual(entries.filter { $0.hasPrefix("TERM=") }, ["TERM=xterm-ghostty"])
+        XCTAssertEqual(entries.filter { $0.hasPrefix("COLORTERM=") }, ["COLORTERM=truecolor"])
+    }
+
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
         let direct = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(

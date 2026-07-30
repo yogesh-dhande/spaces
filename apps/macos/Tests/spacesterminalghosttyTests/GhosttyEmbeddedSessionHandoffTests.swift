@@ -113,12 +113,23 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let slave = open(slaveName, O_RDWR | O_NOCTTY)
         XCTAssertGreaterThanOrEqual(slave, 0, "opening the PTY slave failed")
 
+        // Spawn `/bin/sleep` itself rather than `sh -c "sleep 120"`: `tearDown` kills exactly the pid
+        // reported here, and a shell layer can fork the real `sleep` instead of exec'ing it, leaving that
+        // grandchild running after the shell is killed. Redirect the child's stdio to /dev/null so it never
+        // inherits the test runner's stdout/stderr: a surviving child holding SwiftPM's output pipe blocks
+        // `swift test` on pipe EOF long after the test binary itself has exited.
         var childPID: pid_t = 0
-        let path = "/bin/sh"
-        let arguments = [path, "-c", "sleep 120"]
+        let path = "/bin/sleep"
+        let arguments = ["sleep", "120"]
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
         defer { for argument in argv where argument != nil { free(argument) } }
-        XCTAssertEqual(posix_spawn(&childPID, path, nil, nil, &argv, environ), 0, "posix_spawn of the liveness child failed")
+        var fileActions: posix_spawn_file_actions_t?
+        XCTAssertEqual(posix_spawn_file_actions_init(&fileActions), 0, "posix_spawn_file_actions_init failed")
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0), 0, "redirecting child stdin failed")
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0), 0, "redirecting child stdout failed")
+        XCTAssertEqual(posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0), 0, "redirecting child stderr failed")
+        XCTAssertEqual(posix_spawn(&childPID, path, &fileActions, nil, &argv, environ), 0, "posix_spawn of the liveness child failed")
 
         return AdoptablePTY(master: master, slave: slave, childPID: childPID)
     }

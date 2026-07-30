@@ -126,6 +126,7 @@ let supportTargets: [Target] = ghosttyKitSupportTargets + [
     ),
     .target(name: "systembridge"),
     .target(name: "spacesruntimecore"),
+    .target(name: "spacesptyshim"),
 ]
 
 let baseTerminalTargets: [Target] = [
@@ -158,6 +159,7 @@ let baseTerminalTargets: [Target] = [
             "spacesterminalcore",
             "spacesdevicecore",
             "ghosttyvtshim",
+            "spacesptyshim",
         ] + ghosttyKitTargetDependencies,
         linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]
     ),
@@ -224,6 +226,7 @@ let executableTargets: [Target] = [
             name: "spacesterminalghosttyTests",
             dependencies: ["spacesterminalghostty"],
             sources: [
+                "GhosttyLinuxHeadlessHangDiagnostics.swift",
                 "GhosttyLinuxHeadlessKeyEncodingTests.swift",
                 "GhosttyLinuxHeadlessMouseEncodingTests.swift",
                 "GhosttyLinuxHeadlessSessionBellTests.swift",
@@ -234,6 +237,7 @@ let executableTargets: [Target] = [
                 "GhosttyLinuxHeadlessSessionQueryResponseTests.swift",
                 "GhosttyLinuxHeadlessSessionResizeTests.swift",
                 "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
+                "GhosttyLinuxHeadlessSpawnStressTests.swift",
                 "GhosttyLinuxHeadlessSubmitOrderingTests.swift",
             ]
         ),
