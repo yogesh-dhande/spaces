@@ -74,6 +74,9 @@ let macAppTargets: [Target] = [
     )
 ]
 let macExecutableTargets: [Target] = [
+    // The installed-profile policy `spacese2e` applies before it dispatches a command. It is a library so the
+    // classification and its refusals are unit-testable without an executable to drive.
+    .target(name: "spacese2ecore"),
     .executableTarget(
         name: "spacese2e",
         dependencies: [
@@ -82,6 +85,7 @@ let macExecutableTargets: [Target] = [
             "spacesclientcore",
             "spacesdeviceapi",
             "spacesdevicecore",
+            "spacese2ecore",
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ],
         path: "Sources/spacese2e"
@@ -253,6 +257,7 @@ let executableTargets: [Target] = [
         .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
         .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
         .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore"]),
+        .testTarget(name: "spacese2ecoreTests", dependencies: ["spacese2ecore", "spacesterminalcore"]),
         .testTarget(
             name: "spacescliTests",
             dependencies: [

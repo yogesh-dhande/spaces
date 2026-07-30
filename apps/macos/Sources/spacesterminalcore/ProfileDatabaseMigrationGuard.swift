@@ -56,6 +56,7 @@ public enum ProfileDatabaseMigrationGuard {
 
         let profile = try SpacesProfile.current()
         guard SpacesProfile.canonicalPath(databasePath) == SpacesProfile.canonicalPath(profile.databasePath) else { return try migration() }
+        if let refusal = boundProfileMigrationRefusal(profileSource: profile.source, databasePath: databasePath) { throw refusal }
 
         let lockPath = try TerminalServicePaths.instanceLockPath()
         if try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath) == ProcessInfo.processInfo.processIdentifier {
@@ -89,6 +90,23 @@ public enum ProfileDatabaseMigrationGuard {
         // lock or settle on one owner to wait for.
         throw ownerStillWorkingError(
             databasePath: databasePath, owner: try TerminalServiceInstanceLock.activeOwner(path: lockPath), ceiling: ownerWaitCeiling)
+    }
+
+    /// The refusal for a process that BOUND itself to a profile instead of belonging to it —
+    /// `spacese2e --installed-profile`, whose whole purpose is to read and drive the installed build's own
+    /// profile. Schema work belongs to the build that owns the profile: a repo-local helper is normally ahead
+    /// of the installed release, and letting it upgrade `~/.spaces/spaces.db` would leave the installed daemon
+    /// unable to open its own database, with no way back. The instance-lock authority below does not cover
+    /// this, because it protects a profile whose daemon is RUNNING and the sweeps that need this most are the
+    /// ones that stopped that daemon on purpose.
+    ///
+    /// `nil` for every process that owns its profile, which is every process other than that helper.
+    static func boundProfileMigrationRefusal(profileSource: SpacesProfileSource, databasePath: String) -> SpacesDatabaseError? {
+        guard profileSource == .explicitInstalledProfile else { return nil }
+        return .migrationFailed(
+            message: "Cannot upgrade the Spaces database at \(databasePath) from a process bound to the installed profile. That profile's schema "
+                + "belongs to the installed build, and this one needs schema version \(DatabaseSchema.currentVersion). Start the installed Spaces "
+                + "app or its daemon so it performs the upgrade, then retry.")
     }
 
     private enum ReservationOutcome<T> {

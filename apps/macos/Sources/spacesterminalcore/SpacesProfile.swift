@@ -11,6 +11,7 @@ public enum SpacesProfileSource: String, Sendable, Codable, Equatable {
     case developmentWorktree = "development-worktree"
     case deployedDevelopmentProfile = "deployed-dev-profile"
     case installedFallback = "installed-fallback"
+    case explicitInstalledProfile = "explicit-installed-profile"
 }
 
 public struct SpacesDevelopmentContext: Sendable, Equatable {
@@ -29,8 +30,9 @@ public struct SpacesProfile: Sendable, Equatable {
 
     /// How this profile was DISCOVERED. Provenance only — diagnostics and error text. Nothing decides what
     /// a profile *is* from this, because the same profile is reachable through several routes: the installed
-    /// profile is normally reached by falling through to `~/.spaces`, but an explicit `SPACES_DB_PATH` or a
-    /// deployed binary can name the very same root. `isInstalledProfile` answers identity instead.
+    /// profile is normally reached by falling through to `~/.spaces`, but an explicit `SPACES_DB_PATH`, a
+    /// deployed binary, or a `spacese2e` installed-profile binding can name the very same root.
+    /// `isInstalledProfile` answers identity instead.
     public let source: SpacesProfileSource
     public let databasePath: String
     public let rootDirectory: String
@@ -62,18 +64,20 @@ public struct SpacesProfile: Sendable, Equatable {
     }
 
     /// The process's resolved profile, cached behind a fingerprint of every input that can change
-    /// while the process runs: the two profile environment overrides, `HOME`, and the working
-    /// directory (which resolves relative overrides and a relative `argv[0]`). The fingerprint is
+    /// while the process runs: the two profile environment overrides, `HOME`, the working
+    /// directory (which resolves relative overrides and a relative `argv[0]`), and whether the process bound
+    /// itself to the installed profile. The fingerprint is
     /// built from `getenv` and a single `getcwd` because `current()` is on hot paths — every
     /// terminal-session path lookup goes through it — and reading the whole process environment
     /// dictionary cost more than the `resolve()` work the cache exists to avoid.
     public static func current() throws -> SpacesProfile {
         let currentDirectoryPath = FileManager.default.currentDirectoryPath
+        let bindsInstalledProfile = isBoundToInstalledProfile()
         let fingerprint = cacheFingerprint(
             databasePathOverride: currentEnvironmentValue(for: databasePathEnvironmentVariable),
             runtimeDirectoryOverride: currentEnvironmentValue(for: runtimeDirectoryEnvironmentVariable),
             homeDirectory: currentEnvironmentValue(for: homeEnvironmentVariable), currentDirectoryPath: currentDirectoryPath,
-            executablePath: processExecutablePath)
+            executablePath: processExecutablePath, bindsInstalledProfile: bindsInstalledProfile)
 
         cachedProfileLock.lock()
         if let cachedProfile, cachedProfileFingerprint == fingerprint {
@@ -86,7 +90,8 @@ public struct SpacesProfile: Sendable, Equatable {
         // rather than a subset the fingerprint happens to cover today.
         let environment = currentProcessEnvironment()
         let resolved = try resolve(
-            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment), currentDirectoryPath: currentDirectoryPath)
+            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment), currentDirectoryPath: currentDirectoryPath,
+            bindsInstalledProfile: bindsInstalledProfile)
 
         cachedProfileLock.lock()
         cachedProfile = resolved
@@ -100,6 +105,36 @@ public struct SpacesProfile: Sendable, Equatable {
         cachedProfile = nil
         cachedProfileFingerprint = nil
         cachedProfileLock.unlock()
+    }
+
+    /// Binds THIS process to the installed profile (`~/.spaces`) instead of the profile its own executable
+    /// location implies.
+    ///
+    /// `spacese2e` is the only caller. It never ships to users, and QA of the installed build has no other
+    /// scripted route to most of the product, because the QA-shaped commands exist nowhere else — the `spaces`
+    /// CLI is deliberately a small user-facing surface. It calls this once, at startup, only for its own
+    /// `--installed-profile` selector, and only for a command whose classification declares it safe against a
+    /// profile a user relies on.
+    ///
+    /// The binding is deliberately unreachable from the environment. Every environment route into a live
+    /// profile stays refused — that is what stops an inherited binding making one profile's process serve
+    /// another's state — so the installed profile becomes reachable because a COMMAND was classified as safe,
+    /// never because a variable pointed there.
+    ///
+    /// Clearing the cache keeps `current()` honest for anything that resolved before the binding was made;
+    /// `spacese2e` binds before it runs any command, so in practice there is nothing to clear.
+    public static func bindToInstalledProfile() {
+        cachedProfileLock.lock()
+        installedProfileBound = true
+        cachedProfile = nil
+        cachedProfileFingerprint = nil
+        cachedProfileLock.unlock()
+    }
+
+    private static func isBoundToInstalledProfile() -> Bool {
+        cachedProfileLock.lock()
+        defer { cachedProfileLock.unlock() }
+        return installedProfileBound
     }
 
     /// `current()`, except a genuine "no profile could be resolved" collapses to `nil` instead of
@@ -162,8 +197,23 @@ public struct SpacesProfile: Sendable, Equatable {
 
     public static func resolve(
         environment: [String: String], homeDirectoryURL: URL, currentDirectoryPath: String, executablePath: String? = nil,
-        fileManager: FileManager = .default, gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe()
+        fileManager: FileManager = .default, gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe(), bindsInstalledProfile: Bool = false
     ) throws -> SpacesProfile {
+        // An explicit installed-profile binding (see `bindToInstalledProfile()`) states WHICH profile this
+        // process serves, so it precedes every discovery branch — including `SPACES_DB_PATH`, which names an
+        // ephemeral throwaway profile and can therefore only contradict it. Both profile overrides are dropped
+        // rather than merged for the same reason: honouring an inherited `SPACES_RUNTIME_DIR` would leave the
+        // process reading the installed database while its sockets, session directories, and instance lock sat
+        // under some other profile's runtime root — the half-attached state the runtime refusal exists to stop.
+        if bindsInstalledProfile {
+            let profileRoot = installedRootDirectory(homeDirectoryURL: homeDirectoryURL)
+            return try makeProfile(
+                source: .explicitInstalledProfile, profileRoot: profileRoot,
+                databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path,
+                environment: environment.filter { !profileOverrideEnvironmentVariables.contains($0.key) }, homeDirectoryURL: homeDirectoryURL,
+                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
+        }
+
         if let overridePath = trimmed(environment[databasePathEnvironmentVariable]), !overridePath.isEmpty {
             let databaseURL = absoluteFileURL(path: overridePath, currentDirectoryPath: currentDirectoryPath)
             return try makeProfile(
@@ -402,9 +452,19 @@ public struct SpacesProfile: Sendable, Equatable {
 
     private static let homeEnvironmentVariable = "HOME"
 
+    /// The two variables that override a resolved profile's halves, as the set an installed-profile binding
+    /// drops. Taken from the variables themselves so the set cannot drift from them.
+    private static let profileOverrideEnvironmentVariables: Set<String> = [
+        SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
+    ]
+
     private static let cachedProfileLock = NSLock()
     private nonisolated(unsafe) static var cachedProfile: SpacesProfile?
     private nonisolated(unsafe) static var cachedProfileFingerprint: String?
+
+    /// Whether `bindToInstalledProfile()` was called. Guarded by `cachedProfileLock`, which also guards the
+    /// cache the binding invalidates, so the flag and the cached profile can never disagree.
+    private nonisolated(unsafe) static var installedProfileBound = false
 
     /// Resolved once per process: the executable backing a running process cannot be swapped under
     /// it, and resolving it costs a symlink resolution that `current()` would otherwise repeat on
@@ -414,10 +474,12 @@ public struct SpacesProfile: Sendable, Equatable {
 
     private static func cacheFingerprint(
         databasePathOverride: String?, runtimeDirectoryOverride: String?, homeDirectory: String?, currentDirectoryPath: String,
-        executablePath: String?
+        executablePath: String?, bindsInstalledProfile: Bool
     ) -> String {
-        [databasePathOverride ?? "", runtimeDirectoryOverride ?? "", homeDirectory ?? "", currentDirectoryPath, executablePath ?? ""].joined(
-            separator: "\u{1f}")
+        [
+            databasePathOverride ?? "", runtimeDirectoryOverride ?? "", homeDirectory ?? "", currentDirectoryPath, executablePath ?? "",
+            bindsInstalledProfile ? "installed" : "",
+        ].joined(separator: "\u{1f}")
     }
 
     /// The process environment with every key the cache fingerprint watches re-read from the C-level

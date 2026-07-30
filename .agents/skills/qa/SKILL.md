@@ -23,7 +23,7 @@ Every defect worth reporting here lives in one of these blind spots. If a findin
 
 ## Ground rules
 
-1. **Target the installed build**: `/Applications/Spaces.app/Contents/MacOS/SpacesApp`, `~/.spaces/bin/spacesd`, and the app's `caddy`. Match daemons with an anchored pattern (`pgrep -f "^$HOME/.spaces/bin/spacesd"`) so other worktrees' daemons never match. Never kill them.
+1. **Target the installed build**: `/Applications/Spaces.app/Contents/MacOS/SpacesApp`, `~/.spaces/bin/spacesd`, and the app's `caddy`. Match daemons with an anchored pattern (`pgrep -f "^$HOME/.spaces/bin/spacesd"`) so other worktrees' daemons never match. Never kill them. Drive it with `apps/macos/.build/debug/spacese2e --installed-profile <command>`, which reaches the installed profile for the read-only snapshots and the reversible session, pane, process, and focus commands; anything that creates or removes projects, workspaces, or pairings is refused there (`docs/dev.md`).
 2. **Establish what you are testing.** Compare the installed binary against the repo: `git log --oneline HEAD..v<version>` and `HEAD..origin/main`. The installed build can be *ahead* of your checkout, not only behind. Confirm each finding's code path still exists at `HEAD`.
 3. **Never create projects or workspaces.** `spaces workspace` exposes only list/create/start/restart and `spaces project` only `list` — there is no stop, remove, delete, or archive. A workspace created here cannot be removed programmatically and permanently pollutes the user's list. Do lifecycle work on a disposable dev profile.
 4. **Every load generator is deadline-bound and self-terminating** — bound by volume (`head -c N`) or an internal deadline (`end=$((SECONDS+N))`). Never background an unbounded `yes`/`while true`.

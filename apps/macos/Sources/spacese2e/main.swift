@@ -9,6 +9,7 @@ import Security
 import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
+import spacese2ecore
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -18,6 +19,12 @@ import workspacecore
 struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
+        discussion: """
+            Commands act on the profile this binary resolves from where it sits — the development profile of \
+            the checkout it was built in. Pass --installed-profile before a command to act on the installed \
+            profile (~/.spaces) instead, for QA of the shipped build. Commands that create or remove \
+            projects, workspaces, or pairings there are refused.
+            """,
         subcommands: [
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
             LookupWorkspaceCommand.self, ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self,
@@ -3561,4 +3568,15 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
         firstScrollEventUptimeNanoseconds: firstScrollEventUptimeNanoseconds, lastScrollEventUptimeNanoseconds: lastScrollEventUptimeNanoseconds)
 }
 
-SpacesE2ECommand.main()
+// Which profile this process serves has to be settled before any command runs, so the `--installed-profile`
+// selector is consumed here rather than declared as an option on every command. A selector that names a
+// command the classification does not permit ends the run before ArgumentParser sees it: the point of the
+// gate is that the refused command never reaches a profile a user relies on.
+do {
+    let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: Array(CommandLine.arguments.dropFirst()))
+    if invocation.targetsInstalledProfile { SpacesProfile.bindToInstalledProfile() }
+    SpacesE2ECommand.main(invocation.commandArguments)
+} catch {
+    FileHandle.standardError.write(Data("\(error)\n".utf8))
+    exit(EXIT_FAILURE)
+}

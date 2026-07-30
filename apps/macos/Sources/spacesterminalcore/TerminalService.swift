@@ -588,8 +588,9 @@ import Foundation
         ///   deliberate choice rather than a silent substitution, and the terminal E2E scripts pin their
         ///   daemon with it.
         /// - Candidates derived from the running executable — its sibling, its symlink-resolved sibling,
-        ///   and its bundle's resources — apply to every profile, because they necessarily belong to the
-        ///   build that is asking.
+        ///   and its bundle's resources — apply to every profile the asking build owns, because they
+        ///   necessarily belong to that build. They do NOT apply to a profile the process merely bound
+        ///   itself to (`spacese2e --installed-profile`), where the asking build owns nothing.
         /// - The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) apply only to the
         ///   installed profile. They are location-fixed and always point at whatever
         ///   `/Applications/Spaces.app` last installed, which is an unrelated release from a repo-local
@@ -630,10 +631,21 @@ import Foundation
             }
 
             appendCandidate(environment["SPACESD_EXECUTABLE"])
-            appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            // Candidates derived from the RUNNING executable belong to the build that is asking, which is why
+            // they serve every profile that build owns. A process that BOUND itself to the installed profile
+            // (`spacese2e --installed-profile`) owns nothing here: it borrowed a profile that belongs to the
+            // installed build, so its own sibling and bundled daemons are as foreign to that profile as a
+            // checkout's `.build` products are. Only the installed layout's own daemon may serve it. Without
+            // this split a repo-built QA helper whose installed daemon happened to be down would start a
+            // development spacesd on `~/.spaces` and let it migrate the installed daemon's database.
+            // This reads the discovery ROUTE, which is the question being asked — how this process arrived at
+            // the profile — rather than using the route to decide what the profile is.
+            if profile.source != .explicitInstalledProfile {
+                appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            }
             // Split by what the profile IS — the installed profile, or any development one — rather than by
             // which resolution branch produced it, since the installed profile is reachable through more
             // than one branch.
@@ -807,7 +819,7 @@ import Foundation
                 switch profile.source {
                 case .deployedDevelopmentProfile:
                     return "spacesd@\(URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).lastPathComponent).service"
-                case .installedFallback, .developmentWorktree, .explicitDatabasePath: return nil
+                case .installedFallback, .developmentWorktree, .explicitDatabasePath, .explicitInstalledProfile: return nil
                 }
             }
 

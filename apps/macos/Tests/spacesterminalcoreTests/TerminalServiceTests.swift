@@ -203,6 +203,45 @@ import XCTest
             }
         }
 
+        // A repo-built helper that bound itself to the installed profile (`spacese2e --installed-profile`)
+        // does not belong to that profile's build, so its own sibling daemon is as foreign to it as a
+        // checkout's build products are. Starting that sibling would put a development spacesd on
+        // `~/.spaces`, where it would migrate the installed daemon's database out from under it.
+        func testResolveExecutableURLRefusesTheAskingBuildsDaemonForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let siblingDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: siblingDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile), installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, layout.installedDaemon.path)
+        }
+
+        // With no installed daemon to serve it, a bound profile fails rather than falling back to the daemon
+        // beside the running executable, and the searched paths show that daemon was never a candidate.
+        func testResolveExecutableURLFailsRatherThanBorrowingADaemonForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let siblingDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: siblingDaemon)
+            let absentInstalledLink = layout.root.appendingPathComponent("absent-installed-spacesd", isDirectory: false)
+
+            XCTAssertThrowsError(
+                try TerminalService.resolveExecutableURL(
+                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                    profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile), installedLinkURLs: [absentInstalledLink])
+            ) { error in
+                guard case TerminalServiceError.daemonNotFound(_, let searchedPaths) = error else {
+                    return XCTFail("Expected daemonNotFound, got \(error)")
+                }
+                XCTAssertFalse(searchedPaths.contains(siblingDaemon.path))
+                XCTAssertTrue(searchedPaths.contains(absentInstalledLink.path))
+            }
+        }
+
         func testResolveExecutableURLUsesDevelopmentBuildDaemonForDevelopmentProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }
