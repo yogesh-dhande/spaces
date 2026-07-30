@@ -530,6 +530,7 @@ enum SpacesDaemonProfileCommandRouting {
     }
 
     private var shutdownTask: Task<Void, Never>?
+    private var handoffCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Single entry point for every termination path — the SIGTERM/SIGINT handler, AppKit's
     /// `applicationWillTerminate`, and the control socket's `shutdownAndExit`. Any of them can fire
@@ -538,14 +539,47 @@ enum SpacesDaemonProfileCommandRouting {
     /// cores. Main-actor isolation makes the check-and-store atomic (no suspension between them), and
     /// a late caller AWAITS the in-flight task rather than returning early — otherwise a signal
     /// handler's `exit(0)` could fire out from under a teardown still flushing transcripts.
+    ///
+    /// The handoff wait lives INSIDE the stored task, not before it: a suspension between the
+    /// `shutdownTask` read and its store would let two callers each start a teardown.
     func shutdownOnce() async {
         if let shutdownTask {
             await shutdownTask.value
             return
         }
-        let task = Task { @MainActor in await self.shutdown() }
+        let task = Task { @MainActor in
+            await self.awaitHandoffCompletion()
+            await self.shutdown()
+        }
         shutdownTask = task
         await task.value
+    }
+
+    /// Suspends until no exec-in-place handoff is in flight, so a termination signal cannot interleave
+    /// teardown with one. `performExecHandoff` suspends at every quiesce and drain, so without this a
+    /// signal-handler task lands between them and `terminateAllSessions()` closes a master descriptor
+    /// the handoff is still about to hand to `prepareDescriptorForHandoff` — the quiesce-versus-
+    /// terminate exclusion `HostManagedPTYTerminalSessionDriver.terminate()` documents as an invariant
+    /// its callers uphold. The handoff's own keep-running failure path is the second reason: it calls
+    /// `startSharedServices()`, which would relaunch the router and reopen the socket a moment before
+    /// `exit(0)` — orphaning exactly the Caddy the graceful shutdown exists to reap.
+    ///
+    /// Waiting rather than refusing is what keeps the signal honest: a handoff that succeeds replaces
+    /// the image (nothing here runs again), and one that fails leaves the daemon running, so a refused
+    /// signal would strand a `launchctl stop` against a daemon that never goes away. `while` rather
+    /// than `if` because a fresh handoff can start between the waiters being resumed and this task
+    /// being scheduled; each iteration suspends, so it cannot spin.
+    private func awaitHandoffCompletion() async {
+        while handoffInProgress {
+            await withCheckedContinuation { continuation in handoffCompletionWaiters.append(continuation) }
+        }
+    }
+
+    /// Called from `performExecHandoff`'s `defer` — see `awaitHandoffCompletion()`.
+    private func resumeHandoffCompletionWaiters() {
+        let waiters = handoffCompletionWaiters
+        handoffCompletionWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Stops everything except the per-session cores: the lifecycle timer, database-change
@@ -808,7 +842,12 @@ enum SpacesDaemonProfileCommandRouting {
             return
         }
         handoffInProgress = true
-        defer { handoffInProgress = false }
+        // Registered after the refusal guard above, so a refused second trigger neither clears the flag
+        // nor releases waiters belonging to the handoff that is actually running.
+        defer {
+            handoffInProgress = false
+            resumeHandoffCompletionWaiters()
+        }
 
         let currentUptime = ProcessInfo.processInfo.systemUptime
         let elapsedSinceLastHandoff = lastHandoffResumeUptime.map { Swift.max(0, currentUptime - $0) }
