@@ -1094,12 +1094,17 @@ extension OrchestratorTests {
                     foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
                     foregroundDisplayCommand: "codex --model gpt-5"), paths: try TerminalSessionPaths.forSession(id: sessionID))
 
-            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            // The sample now classifies the foreground, which the row learns — but that is a kind, not a
+            // re-classification: the signaled row keeps its own id, label, status, and bare terminal detail.
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             let stickyAgents = try store.agentWindows(workspaceID: workspace.id)
             XCTAssertEqual(stickyAgents.map(\.id), [signalAgent.id])
             XCTAssertEqual(stickyAgents.first?.label, "Custom Hook Agent")
             XCTAssertEqual(stickyAgents.first?.status, .spinning)
+            XCTAssertEqual(stickyAgents.first?.detectedAgentKind, "codex", "a classification arriving after registration is persisted")
+            XCTAssertEqual(stickyAgents.first?.updatedAt, signalAgent.updatedAt, "learning the kind is not a lifecycle transition")
             XCTAssertNil(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail)
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications(), "and is not rewritten on every later pass")
         }
     }
 
@@ -1997,10 +2002,12 @@ extension OrchestratorTests {
 
         XCTAssertTrue(
             try store.claimAgentSessionExitEvent(
-                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1"))
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"))
         XCTAssertFalse(
             try otherConnection.claimAgentSessionExitEvent(
-                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1"),
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"),
             "a second pass observing the same exit claims nothing, on any connection")
 
         // A fresh agent inits in the same terminal, reusing the row: its exit is a new fact to claim.
@@ -2009,7 +2016,8 @@ extension OrchestratorTests {
             eventSource: "spaces_agent_signal")
         XCTAssertTrue(
             try otherConnection.claimAgentSessionExitEvent(
-                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t2"),
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t2",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"),
             "the reincarnated agent's exit is claimable again")
 
         // A row that is gone (stopped or restarted out from under the pass) has no exit left to claim.
@@ -2017,7 +2025,8 @@ extension OrchestratorTests {
         try store.deleteAgentWindow(id: child.id)
         XCTAssertFalse(
             try store.claimAgentSessionExitEvent(
-                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t3"))
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t3",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: "[spaces] Codex (codex) is exited"))
     }
 
     /// The issue's whole scenario: a coding agent that emits no session-end hook (codex, opencode) quits in
@@ -2081,5 +2090,159 @@ extension OrchestratorTests {
                 try orchestrator.agentSessionRows(sessionID: sessionID).first?.agent, "codex",
                 "the exited row still reports its coding agent to orchestration listings")
         }
+    }
+
+    /// A teardown that lands in the window between an exit claim committing and the claimant delivering
+    /// its notice. The claim publishes the finalized fact, so the teardown correctly announces nothing —
+    /// and then drops the row's watch edges and deletes it. If the exited notice only came into existence
+    /// after the claim committed, the claimant would come back to no subscribers and the child's exit
+    /// would reach NOBODY, which is worse than the duplicate this branch set out to fix. The notice is
+    /// queued inside the claim's own transaction instead, so it exists the instant the finalized fact does
+    /// and outlives the teardown.
+    ///
+    /// The interleaving is built at the commit boundary rather than with threads: the store call below is
+    /// exactly the transaction `finalizeAgentRow(.exited)` runs before it delivers anything, so every line
+    /// after it is what a concurrent teardown does while the claimant is still between COMMIT and delivery.
+    func testTeardownDuringAClaimedExitStillDeliversTheNoticeExactlyOnce() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+
+        let claimedNotice = "[spaces] Codex (codex) is exited"
+        XCTAssertTrue(
+            try store.claimAgentSessionExitEvent(
+                agentSessionID: child.id, eventType: "exit", source: "foreground_reconciler", message: nil, createdAt: "t1",
+                exitedNoticeTransition: "exited", exitedNoticeMessage: claimedNotice))
+
+        try orchestrator.finalizeAgentRow(child, reason: .destroyed(terminateTerminalSession: false))
+
+        XCTAssertNil(try store.agentWindow(id: child.id), "the teardown deletes the row")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "the teardown drops the watch edge")
+        XCTAssertTrue(recorder.delivered.isEmpty, "a teardown announces nothing for an exit another caller already claimed")
+
+        // The claimed notice survived the teardown and is still owed to the watcher, which receives it on
+        // its next drain — one exit, one block, and never a second one.
+        XCTAssertEqual(try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "watcher-session"), [claimedNotice])
+        XCTAssertTrue(try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "watcher-session").isEmpty)
+    }
+
+    /// A configured coding agent registers its row the moment Spaces launches its terminal, which is
+    /// before the agent command is running and therefore before foreground detection can classify it — so
+    /// the kind sampled at registration is nil. Nothing else refreshes it: the foreground reconciler skips
+    /// a session with a configured owner, and a repeated `working` signal is a deliberate no-op. Detection
+    /// arriving later must still be persisted, or the child's exit block names an anonymous "coding agent"
+    /// for an agent live listings had identified all along.
+    func testConfiguredAgentKindDetectedAfterRegistrationNamesTheAgentInItsExitBlock() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "configured-agent-late-detection"
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            // The launch instant: the wrapper shell is up, the configured command has not started, so
+            // foreground detection has nothing to classify yet.
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .agent,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]))
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+
+            let child = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .idle,
+                claimedLauncherName: "Codex")
+            XCTAssertNil(child.detectedAgentKind, "registration precedes classification, so the row starts with no kind")
+            try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-subscriber", agentSessionID: child.id, createdAt: "t")
+
+            // Detection lands: the configured command is now the foreground process.
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:05Z", title: "Codex", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "codex", foregroundDisplayCommand: "codex"), paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications(), "the pass persists the newly detected kind")
+            let classified = try XCTUnwrap(store.agentWindow(id: child.id))
+            XCTAssertEqual(classified.detectedAgentKind, "codex")
+            XCTAssertEqual(classified.updatedAt, child.updatedAt, "learning the kind is not a lifecycle transition and must not re-date the row")
+            XCTAssertNil(try store.lastAgentSignalAt(agentSessionID: child.id), "and records no lifecycle signal of its own")
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications(), "a settled kind is not rewritten on every pass")
+
+            // The agent's terminal ends without any session-end hook, so the sweep is what finalizes it.
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .exited,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "Codex", workingDirectory: workspace.dir), paths: paths)
+            try FileManager.default.removeItem(atPath: paths.controlSocketPath)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-subscriber"])
+            let line = try XCTUnwrap(recorder.delivered.first?.line)
+            XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the agent detection identified, got: \(line)")
+        }
+    }
+
+    /// Per-tool hooks make a working agent signal `working` on every tool call. That repetition is not a
+    /// lifecycle transition: it must append no event to the agent's history and must leave `updated_at`
+    /// reading the time the agent ENTERED working, which clients render as the event's time. This is the
+    /// contract that makes a live agent's kind unrefreshable through the signal path, so it is asserted
+    /// alongside the reconciler-side kind refresh rather than left implicit.
+    func testRepeatedWorkingSignalsRecordNothingAndLeaveTheRowUntouched() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        let working = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", label: "Codex", status: .spinning,
+            eventType: "working", eventSource: "spaces_agent_signal")
+        let firstSignalAt = try store.lastAgentSignalAt(agentSessionID: working.id)
+        let signalledEventCount = try agentSessionEventCount(store: store, agentSessionID: working.id)
+
+        for _ in 0..<3 {
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", label: "Codex", status: .spinning,
+                eventType: "working", eventSource: "spaces_agent_signal")
+        }
+
+        let settled = try XCTUnwrap(store.agentWindow(id: working.id))
+        XCTAssertEqual(settled.updatedAt, working.updatedAt, "updated_at stays the time the agent entered working, not tool-call recency")
+        XCTAssertEqual(
+            try agentSessionEventCount(store: store, agentSessionID: working.id), signalledEventCount,
+            "a repeated working signal appends no lifecycle event")
+        XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: working.id), firstSignalAt)
+    }
+
+    private func agentSessionEventCount(store: SQLiteStore, agentSessionID: String) throws -> Int {
+        let row = try store.queryRows(sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ?", bindings: [agentSessionID])
+        return Int(row.first?.first ?? "") ?? -1
     }
 }

@@ -57,9 +57,11 @@ public struct AgentNotificationEngine {
 
     /// A watched child agent transitioned to blocked/done/exited. For every subscriber of that agent,
     /// render one notification block and deliver it now if the subscriber is idle, else coalesce it into that
-    /// subscriber's pending queue. For an `exited` child the caller MUST invoke this before deleting the
-    /// agent row, since row deletion cascades the subscription edges away; the rendered pending line has
-    /// no FK and survives that deletion.
+    /// subscriber's pending queue. The local `exited` transition does NOT come through here: an exit is
+    /// enqueued inside the finalization claim and delivered by `deliverClaimedExitNotices`, because the
+    /// exit's queue rows must exist before any other termination path can see the row as finalized and
+    /// drop its subscription edges. Everything else — including a paired device's watched child exiting,
+    /// whose edges no local termination touches — renders and queues here.
     public func childDidTransition(agent: AgentWindowRecord, transition: ChildTransition) throws {
         let subscriptions = try store.agentSubscriptions(agentSessionID: agent.id)
         guard !subscriptions.isEmpty else { return }
@@ -67,6 +69,30 @@ public struct AgentNotificationEngine {
         for subscription in subscriptions {
             try deliverOrQueue(
                 subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agent.id, transition: transition, line: line)
+        }
+    }
+
+    /// Delivers the `exited` notices that the finalization claim already queued for a watched child's
+    /// subscribers (`SQLiteStore.claimAgentSessionExitEvent`). Exit is the one transition whose notice is
+    /// enqueued before it is delivered rather than the other way round: the claim commits the queue rows
+    /// in the same transaction as the `exit` event, so the obligation is durable from the instant any
+    /// other path can observe the row as finalized and start tearing its subscription edges down. This
+    /// pass therefore only decides WHEN each queued row lands — immediately for an idle subscriber
+    /// (deleting the row as it is delivered, so it is delivered exactly once), or left queued for a busy
+    /// subscriber's next idle flush, the same gate `deliverOrQueue` applies to every other transition. A
+    /// failed delivery means that subscriber terminal is gone, handled by `subscriberDidExit` exactly as
+    /// on the other delivery paths — it purges the row that just failed, so this loop never deletes it.
+    public func deliverClaimedExitNotices(agentSessionID: String) throws {
+        for pending in try store.pendingAgentNotifications(agentSessionID: agentSessionID) {
+            guard try subscriberIsIdle(terminalSessionID: pending.subscriberTerminalSessionID) else { continue }
+            guard
+                attemptDelivery(
+                    subscriberTerminalSessionID: pending.subscriberTerminalSessionID, agentSessionID: agentSessionID, line: pending.message)
+            else {
+                try? subscriberDidExit(subscriberTerminalSessionID: pending.subscriberTerminalSessionID)
+                continue
+            }
+            try store.deletePendingAgentNotification(id: pending.id)
         }
     }
 

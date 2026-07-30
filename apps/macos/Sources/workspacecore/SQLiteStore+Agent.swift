@@ -241,6 +241,17 @@ extension SQLiteStore {
         try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
     }
 
+    /// Records the coding-agent kind foreground detection classified for an agent session, writing that
+    /// column and nothing else — for the same reason `setAgentSessionNote` writes directly rather than
+    /// through `upsertAgentWindow`: `updated_at` tracks when the row entered its current lifecycle state
+    /// (clients read it as the alert's event time), and learning which agent is running is not a lifecycle
+    /// transition, so bumping it would re-date a stale blocked/finished alert to now. Takes a non-optional
+    /// kind because a nil observation must never erase a kind the row already learned — the same rule both
+    /// upserts enforce with `COALESCE`.
+    public func setAgentSessionDetectedKind(id: String, kind: String) throws {
+        try execute(sql: "UPDATE agent_sessions SET detected_agent_kind = ? WHERE id = ?", bindings: [kind, id])
+    }
+
     /// Whether an agent session row with this id exists in any workspace. Used to validate a
     /// subscription target before persisting the edge, since the subscriber references an agent row by
     /// id rather than by a workspace-scoped lookup.
@@ -348,8 +359,9 @@ extension SQLiteStore {
     }
 
     /// Claims the one exit finalization an agent session's current life is allowed, recording its `exit`
-    /// lifecycle event in the same statement. Returns whether THIS caller claimed it; a false result means
-    /// the exit was already recorded (or the row is gone) and the caller must do nothing further.
+    /// lifecycle event AND queueing the already-rendered exited notice for every current subscriber in the
+    /// same transaction. Returns whether THIS caller claimed it; a false result means the exit was already
+    /// recorded (or the row is gone) and the caller must do nothing further.
     ///
     /// The check and the record are one conditional INSERT inside an immediate transaction, so two
     /// reconcile passes observing the same transition on their own connections cannot both pass a
@@ -360,9 +372,21 @@ extension SQLiteStore {
     /// last `init` (which is what scopes the fact to the row's CURRENT life, so a fresh agent reusing the
     /// row is finalizable again). `eventType` binds both the recorded event and the condition, so the
     /// claim is self-consistent for whatever event type the termination reason carries.
-    public func claimAgentSessionExitEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) throws
-        -> Bool
-    {
+    ///
+    /// Queueing the notice INSIDE the same transaction is what makes the claim safe to observe. The
+    /// recorded `exit` event is the finalized fact every other termination path reads, and a path that
+    /// reads it suppresses its own notice and drops the row's `agent_subscriptions` edges. Enqueueing
+    /// afterwards would expose a window in which the exit is finalized but nothing is owed to anyone: a
+    /// teardown landing in it would delete the edges, and the claimant would then find no subscribers and
+    /// deliver nothing at all. Committed together, the delivery obligation exists the instant the
+    /// finalized fact does; `agent_pending_notifications` carries no foreign key, so neither the edge
+    /// drop nor the row delete can take it back. The queued rows are what the claimant then delivers
+    /// (`AgentNotificationEngine.deliverClaimedExitNotices`), and any it cannot deliver yet stay queued
+    /// for the subscriber's next idle flush.
+    public func claimAgentSessionExitEvent(
+        agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String, exitedNoticeTransition: String,
+        exitedNoticeMessage: String
+    ) throws -> Bool {
         try withImmediateTransaction {
             try execute(
                 sql: """
@@ -378,8 +402,15 @@ extension SQLiteStore {
                     UUID().uuidString, agentSessionID, eventType, source, message ?? "", createdAt, agentSessionID, AgentWindowStatus.exited.rawValue,
                     eventType, agentSessionID, agentSessionID,
                 ])
-            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
-            return changed > 0
+            // Read immediately after the conditional INSERT: `changes()` reports the most recently
+            // completed write, and the enqueue below would otherwise overwrite the answer.
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? ""), changed > 0 else { return false }
+            for subscription in try agentSubscriptions(agentSessionID: agentSessionID) {
+                try upsertPendingAgentNotification(
+                    subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agentSessionID,
+                    transition: exitedNoticeTransition, message: exitedNoticeMessage, createdAt: createdAt)
+            }
+            return true
         }
     }
 
@@ -591,6 +622,21 @@ extension SQLiteStore {
                 WHERE subscriber_terminal_session_id = ?
                 ORDER BY created_at, rowid
                 """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodePendingAgentNotification)
+    }
+
+    /// Every subscriber's pending notification for ONE watched agent, in enqueue order — the rows the
+    /// exit claim (`claimAgentSessionExitEvent`) just wrote. The claimant reads them straight back to
+    /// deliver the ones whose subscriber is idle; it keys on the agent rather than the subscriber so it
+    /// touches only the notice it owes, leaving other children's held lines for their own idle flush.
+    public func pendingAgentNotifications(agentSessionID: String) throws -> [AgentPendingNotificationRecord] {
+        try queryRows(
+            sql: """
+                SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                FROM agent_pending_notifications
+                WHERE agent_session_id = ?
+                ORDER BY created_at, rowid
+                """, bindings: [agentSessionID]
         ).compactMap(decodePendingAgentNotification)
     }
 

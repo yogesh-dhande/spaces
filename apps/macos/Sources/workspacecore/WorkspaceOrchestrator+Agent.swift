@@ -9,6 +9,15 @@ extension WorkspaceOrchestrator {
         var didMutate = false
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
+            // Runs for EVERY live session, ahead of the configured-owner skip below, because this pass is
+            // the only place that sees live foreground state for a session Spaces launched itself. A
+            // configured `.agent` launch registers its row the moment the terminal starts, before the
+            // agent process has been classified, so the kind sampled at registration is nil; the row is
+            // then skipped by the rest of this loop, and repeated `working` signals are a deliberate no-op
+            // that never refreshes it. Without this the row could reach its exit still carrying no kind
+            // and the exit block would name an anonymous "coding agent" for an agent listings had
+            // identified all along.
+            if try refreshPersistedDetectedAgentKind(sessionID: sessionID, runtimeState: session.runtimeState) { didMutate = true }
             let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
@@ -43,6 +52,27 @@ extension WorkspaceOrchestrator {
         }
         if try reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
+    }
+
+    /// Persists the coding-agent kind a live session's foreground state reports onto the agent row bound
+    /// to that terminal, when the row does not already carry it. Returns whether anything was written.
+    ///
+    /// The kind is what the exit notification's `(<kind>)` parenthetical and an orchestration row's
+    /// `agent:` field name, and live foreground state goes nil the moment the agent process ends — so the
+    /// kind has to be captured on the row while the agent runs, and the observation can land after the row
+    /// already exists (`registerAgentWindow` samples it, but a configured `.agent` launch registers before
+    /// its command is even running). Writes the kind column alone: no lifecycle event, and no `updated_at`
+    /// bump, so learning which agent is running is never mistaken for a state transition (clients read
+    /// `updated_at` as an alert's event time). A session whose foreground reports no kind writes nothing —
+    /// an unclassified sample must not erase a kind the row already learned, the same rule both upserts
+    /// enforce with `COALESCE`.
+    @discardableResult func refreshPersistedDetectedAgentKind(sessionID: String, runtimeState: TerminalSessionRuntimeState) throws -> Bool {
+        guard let kind = runtimeState.foregroundDetectedAgentKind?.displayLabel else { return false }
+        guard let record = try store.agentWindowByTerminalSession(terminalSessionID: sessionID), record.detectedAgentKind != kind else {
+            return false
+        }
+        try store.setAgentSessionDetectedKind(id: record.id, kind: kind)
+        return true
     }
 
     /// True only when a live session's foreground process is confirmed to be its own configured
@@ -147,9 +177,11 @@ extension WorkspaceOrchestrator {
     /// terminal reuses the row id): the status half because that reset moves `.exited` back to `.idle`, and
     /// the event half because `agentSessionHasRecordedExitEvent` discounts an `exit` event once a later
     /// `init` event lands — so a reincarnated live agent is finalizable again and its kill/sweep delivers a
-    /// fresh exited notice. This is the Swift reading of that fact, used by both reconciler gates and by the
-    /// chokepoint's `.destroyed` reason; an `.exited` reason evaluates the identical fact inside
-    /// `claimAgentSessionExitEvent`, where the check and the exit record are one atomic statement.
+    /// fresh exited notice. This is the read-only Swift reading of that fact, used by the reconciler gates
+    /// to skip a settled row cheaply before it reaches the chokepoint. It is deliberately NOT what the
+    /// chokepoint itself decides on: finalization evaluates the identical fact inside
+    /// `claimAgentSessionExitEvent`, where the check, the exit record, and the subscribers' queued notice
+    /// are one atomic statement — a separate read here would let two callers pass it at once.
     func agentRowIsFinalized(_ record: AgentWindowRecord) throws -> Bool {
         if record.status == .exited { return true }
         return try store.agentSessionHasRecordedExitEvent(agentSessionID: record.id)
@@ -821,17 +853,21 @@ extension WorkspaceOrchestrator {
     /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
     /// a watched child's subscribers are always told it exited before the row goes away and that the
     /// terminated terminal's own watch state is always torn down. In order it:
-    ///  1. gates on the finalized fact for idempotency (status `.exited`, or a recorded `exit` event) — an
-    ///     already-finalized row is never re-notified (a `.destroyed` reason still deletes it and tears
-    ///     down watch state; an `.exited` reason is a complete no-op that records nothing and notifies
-    ///     nobody). An `.exited` reason evaluates that fact and records the exit event in ONE atomic
-    ///     claim (`claimAgentSessionExitEvent`), not a read followed by a write: the two reconcile loops
-    ///     that observe a terminal runtime-state change run on their own connections and both see the same
-    ///     transition, so a plain read-then-write gate let both pass it and deliver the notice twice.
-    ///     Keying on the recorded exit event, not `.done` status, is what lets killing a live agent that is
-    ///     merely resting `.done` between turns still deliver its one exited notice;
-    ///  2. renders/enqueues the `exited` notice to the row's subscribers (`childDidTransition`) while its
-    ///     inbound edges still exist — a no-op when it has no subscribers;
+    ///  1. claims the agent life's single exit through ONE atomic conditional INSERT (`claimAgentExit` →
+    ///     `SQLiteStore.claimAgentSessionExitEvent`), which records the `exit` event and queues the
+    ///     rendered exited notice for the row's current subscribers in the same transaction. BOTH reasons
+    ///     claim: the two reconcile loops that observe a terminal runtime-state change run on their own
+    ///     connections and see the same transition, and a destroy (kill, stop, teardown) can observe the
+    ///     same dying agent, so a read-then-write gate let more than one caller through and every
+    ///     subscriber was prompted twice for one exit. Losing the claim means the exit was already
+    ///     announced: an `.exited` reason then does nothing at all, while a `.destroyed` reason still
+    ///     deletes the row and tears down watch state, which is what a destroy is for. Keying on the
+    ///     recorded exit event, not `.done` status, is what lets killing a live agent that is merely
+    ///     resting `.done` between turns still deliver its one exited notice;
+    ///  2. delivers the queued notice to every subscriber that is idle (`deliverClaimedExitNotices`),
+    ///     leaving a busy subscriber's row for its next idle flush — a no-op when the row has no
+    ///     subscribers. Delivery deliberately comes AFTER the queueing rather than instead of it: see
+    ///     `claimAgentExit` for why the obligation must be durable before the finalized fact is visible;
     ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
     ///     or delete — the delete branch drops the inbound edges explicitly), while `.destroyed`
     ///     unconditionally drops the inbound edges and deletes the row (terminating the terminal first when
@@ -842,7 +878,7 @@ extension WorkspaceOrchestrator {
     /// Because `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, the inbound edges must be
     /// dropped explicitly here; a delete that bypasses this chokepoint leaves them in place and fails
     /// loudly. The never-signaled ad-hoc demote is a documented variant of the same door: it notifies
-    /// nothing (a never-signaled row has no subscribers — `childDidTransition` is a no-op, and per the
+    /// nothing (a never-signaled row has no subscribers, so the claim queues nothing, and per the
     /// subscribe contract no watcher can even attach) and does NOT drop inbound edges, so a leftover edge
     /// on such a row makes the delete throw under RESTRICT — the enforcement working. The engine is built
     /// inside via `makeAgentNotificationEngine`; with no submitter installed (non-daemon callers, tests
@@ -851,15 +887,23 @@ extension WorkspaceOrchestrator {
         let engine = makeAgentNotificationEngine()
         switch reason {
         case .destroyed(let terminateTerminalSession):
-            let alreadyFinalized = try agentRowIsFinalized(record)
             // Destroys delete the row and (usually) terminate the backing terminal. During a daemon
             // handoff the terminal side becomes a silent no-op (`terminateBuiltInTerminalSession` defers to
             // the successor daemon), so proceeding would delete rows for a terminal that survives the
             // handoff. Veto at the chokepoint so every destroy path — workspace stop, agent kill, stale-slot
             // eviction — either does both or neither. `.exited` stays admitted: it records an observed exit
-            // and performs no terminal-side work that a handoff could split.
+            // and performs no terminal-side work that a handoff could split. The veto runs BEFORE the claim
+            // so a vetoed destroy consumes nothing.
             guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-            if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
+            // A destroy claims the exit through the same atomic door an `.exited` reason uses rather than
+            // reading the finalized fact separately, so a destroy and a reconciler that observe the same
+            // dying agent cannot both be admitted to notify. Losing the claim means the exit was already
+            // announced (or the row is gone); the destroy still deletes unconditionally, which is what it
+            // is for. Its recorded `exit` event is transient — `agent_session_events` cascades with the row
+            // delete below — but for the instant it exists it is exactly what excludes the other caller.
+            if try claimAgentExit(record, eventType: "exit", eventSource: "orchestrator", environmentKeys: nil, engine: engine) {
+                try engine.deliverClaimedExitNotices(agentSessionID: record.id)
+            }
             if terminateTerminalSession, let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
             try store.deleteAgentSubscriptions(agentSessionID: record.id)
             try store.deleteAgentWindow(id: record.id)
@@ -868,26 +912,53 @@ extension WorkspaceOrchestrator {
             if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
             return nil
         case .exited(let eventType, let eventSource, let environmentKeys):
-            // Claim the row's single exit finalization and record its `exit` event atomically, BEFORE
-            // anything is notified. Every step below — the exited notice to subscribers, the disposition,
-            // the terminal's own subscriber teardown — belongs to the caller that won the claim, so a
-            // second observer of the same transition does nothing at all. Two reconcile loops observe
-            // terminal runtime-state changes on their own connections and both see the transition, so a
-            // read-then-write gate here let both notify and both record; the losing claim also covers a
-            // row a stop/restart already deleted (its destroy delivered the notice before deleting) and a
-            // row already finalized on an earlier pass. Returning the row as it now stands — nil once it
-            // is gone — reports that settled state to the caller.
-            let claimedExit = try store.claimAgentSessionExitEvent(
-                agentSessionID: record.id, eventType: eventType, source: eventSource,
-                message: agentSessionEventMessage(
-                    provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
-                    environmentKeys: environmentKeys), createdAt: nowISO8601())
-            guard claimedExit else { return try store.agentWindow(id: record.id) }
-            try engine.childDidTransition(agent: record, transition: .exited)
+            // Every step below — delivering the claimed notice, the disposition, the terminal's own
+            // subscriber teardown — belongs to the caller that won the claim, so a second observer of the
+            // same transition does nothing at all. The losing claim also covers a row a stop/restart
+            // already deleted (its destroy announced the exit before deleting) and a row already finalized
+            // on an earlier pass. Returning the row as it now stands — nil once it is gone — reports that
+            // settled state to the caller.
+            guard try claimAgentExit(record, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys, engine: engine) else {
+                return try store.agentWindow(id: record.id)
+            }
+            try engine.deliverClaimedExitNotices(agentSessionID: record.id)
             let result = try handleAgentExit(record)
             if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
             return result
         }
+    }
+
+    /// Claims this agent life's single exit finalization, and returns whether THIS caller won it. The
+    /// exited notice is RENDERED here but queued by the claim itself, inside the claim's transaction —
+    /// this ordering is the whole point and must not be "simplified" back into notify-after-claim:
+    ///
+    ///  - The claim's committed `exit` event IS the finalized fact every other path reads. A `.destroyed`
+    ///    teardown that loses this claim — or a reconciler pass whose `agentRowIsFinalized` gate now sees
+    ///    it — announces nothing and goes straight on to drop the row's inbound `agent_subscriptions`
+    ///    edges and delete it. If the notice were queued after the claim committed, a teardown landing in
+    ///    that window would delete the edges first and the winner would then find no subscribers — a
+    ///    concurrent teardown would produce ZERO exit blocks, the exact failure this chokepoint exists to
+    ///    prevent.
+    ///  - Committing the queue rows with the event closes that window: the delivery obligation exists the
+    ///    instant the finalized fact does, and `agent_pending_notifications` has no foreign key, so
+    ///    neither the edge drop nor the row delete can take it back.
+    ///  - It cannot duplicate either, because the conditional INSERT admits exactly one caller per agent
+    ///    life, so exactly one set of queue rows is ever written, and each queue row is deleted as it is
+    ///    delivered.
+    ///
+    /// The notice is rendered unconditionally rather than only when the row has subscribers, because the
+    /// subscriber set is read inside the claim's transaction: a watcher that attached between a check here
+    /// and the claim would otherwise be owed a notice that was never rendered.
+    private func claimAgentExit(
+        _ record: AgentWindowRecord, eventType: String, eventSource: String, environmentKeys: [String]?, engine: AgentNotificationEngine
+    ) throws -> Bool {
+        let exitedNotice = try engine.renderLine(agent: record, transition: .exited)
+        return try store.claimAgentSessionExitEvent(
+            agentSessionID: record.id, eventType: eventType, source: eventSource,
+            message: agentSessionEventMessage(
+                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
+                environmentKeys: environmentKeys), createdAt: nowISO8601(),
+            exitedNoticeTransition: AgentNotificationEngine.ChildTransition.exited.word, exitedNoticeMessage: exitedNotice)
     }
 
     /// Terminates a coding-agent record through the finalization chokepoint. A stop is a hard destroy: it
