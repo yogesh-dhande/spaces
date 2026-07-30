@@ -234,8 +234,41 @@ public enum DatabaseSchema {
         // cleared by the exit, and the exit notification the child's subscribers receive names the kind.
         // Existing rows carry NULL, which renders honestly as "coding agent" until a detection lands —
         // the same reading a row whose foreground was never classified has always had.
+        //
+        // The frozen pre-v10 shape is created first for the same reason the v7→v8 and v8→v9 steps create
+        // theirs, and it is load-bearing rather than defensive: NO migration step has ever created
+        // `agent_sessions`. The table is defined only in the fresh-schema SQL, and the v1→v2 step already
+        // assumes it, so an upgrade chain that reaches here without it has no table to alter and the whole
+        // migration fails. Creating it — rather than making the ALTER conditional — is what guarantees a
+        // v10 database always HAS `agent_sessions`; skipping the ALTER on a missing table would leave the
+        // profile at v10 with no agent table at all, which is worse than failing. The shape frozen here is
+        // the one v2 through v9 held (`note` present, `detected_agent_kind` absent), so the ALTER below
+        // lands the same v10 shape whichever way the table arrived; on a database that already has it —
+        // every profile created from the fresh schema, and every v1-origin profile carried up the chain —
+        // the CREATE is a no-op and every existing row is preserved.
         DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "Add agent_sessions.detected_agent_kind", requiresBackup: true) { handle in
-            try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_sessions ADD COLUMN detected_agent_kind TEXT;")
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      claimed_launcher_id TEXT,
+                      claimed_launcher_name TEXT,
+                      note TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    ALTER TABLE agent_sessions ADD COLUMN detected_agent_kind TEXT;
+                    """)
         },
     ]
 
