@@ -74,8 +74,10 @@ temp_root=""
 spaces_db_path=""
 spaces_runtime_dir=""
 demo_worktree_root=""
-# Profile environment assignments for demo child processes; empty for a `user`-mode run. See run_demo_env.
+# Profile environment assignments for demo child processes; empty for a `user`-mode run. See build_demo_env_command.
 demo_profile_env=()
+# The `env` invocation build_demo_env_command last assembled.
+demo_env_command=()
 spaces_client_db_path=""
 spaces_client_secret_dir=""
 project_dir=""
@@ -109,14 +111,20 @@ performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
 
-# Runs a demo child process with the demo's environment.
+# Builds the `env` invocation for a demo child process into `demo_env_command`.
 #
 # The profile environment is decided HERE and nowhere else, because the two profile modes need opposite
 # answers. An isolated run's profile is an ephemeral root under the demo temp directory, which nothing
 # can derive from a binary's location, so it has to be named. A `user` run's profile is the developer's
 # own worktree profile, which every repo-local binary resolves from where it sits -- and naming it would
 # be refused outright, since SPACES_DB_PATH may not point inside a live profile root.
-run_demo_env() {
+#
+# Callers that background a child must expand this array themselves rather than backgrounding
+# `run_demo_env`: a backgrounded shell function runs in a forked subshell that stays alive as the
+# child's parent, so `$!` names the subshell and killing it orphans the child. Expanding the array
+# backgrounds a simple command, which bash replaces with the child itself, so `$!` is the pid the
+# caller must later reap.
+build_demo_env_command() {
   local -a env_args=(
     -u NO_COLOR \
     -u CLICOLOR \
@@ -139,7 +147,13 @@ run_demo_env() {
   if [[ -n "$spaces_client_secret_dir" ]]; then
     env_args+=(SPACES_CLIENT_SECRET_DIR="$spaces_client_secret_dir")
   fi
-  env "${env_args[@]}" "$@"
+  demo_env_command=(env "${env_args[@]}" "$@")
+}
+
+# Runs a demo child process in the foreground with the demo's environment.
+run_demo_env() {
+  build_demo_env_command "$@"
+  "${demo_env_command[@]}"
 }
 
 json_get() {
@@ -639,20 +653,28 @@ wait_for_pid() {
   exit 1
 }
 
+# Waits until SpacesApp can service the demo's terminal open requests.
+#
+# The gate is the applied first sidebar snapshot, not the registered IPC observers: the app resolves a
+# terminal open request's panel from the snapshot's workspace-to-device map, so an
+# `openTerminalSessionWindow` IPC posted between "observers ready" (~60ms) and "snapshot applied"
+# (~800ms) is refused for want of a panel scope and never retried. Gating on the observers left the
+# demo's `spaces terminal show` racing that ~700ms window, and losing it meant no owner attachment
+# ever appeared for the session.
 wait_for_spaces_app_ready() {
   local deadline=$((SECONDS + 30))
   while [[ $SECONDS -lt $deadline ]]; do
     if ! ps -p "$app_pid" >/dev/null 2>&1; then
-      echo "SpacesApp exited before Device UI IPC observers were ready." >&2
+      echo "SpacesApp exited before its first sidebar snapshot was applied." >&2
       tail -n 120 "$app_log" >&2 || true
       exit 1
     fi
-    if grep -q 'spaces: startup stage=ipc_observers_ready' "$app_log" 2>/dev/null; then
+    if grep -q 'spaces: startup stage=sidebar_snapshot_applied' "$app_log" 2>/dev/null; then
       return
     fi
     sleep 0.2
   done
-  echo "Timed out waiting for SpacesApp Device UI IPC observers." >&2
+  echo "Timed out waiting for SpacesApp to apply its first sidebar snapshot." >&2
   tail -n 160 "$app_log" >&2 || true
   exit 1
 }
@@ -1602,7 +1624,7 @@ spaces_ios_simulator_boot_if_needed "$ipad_udid"
 spaces_ios_simulator_boot_if_needed "$iphone_udid"
 open_simulator_app
 
-run_demo_env \
+build_demo_env_command \
   HOME="$demo_home" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
@@ -1612,7 +1634,11 @@ run_demo_env \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
   SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
-  "$spaces_app" >"$app_log" 2>&1 &
+  "$spaces_app"
+# Backgrounded as an expanded command rather than through run_demo_env so `app_pid` is SpacesApp
+# itself; see build_demo_env_command. Killing a wrapper subshell instead left the app running with
+# the desktop-global control lease every time a run ended.
+"${demo_env_command[@]}" >"$app_log" 2>&1 &
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
 wait_for_spaces_app_ready
