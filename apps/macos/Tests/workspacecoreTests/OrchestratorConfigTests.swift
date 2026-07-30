@@ -267,6 +267,9 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.kind, .shell)
         XCTAssertEqual(launchConfiguration.title, "shell-1")
         XCTAssertTrue(launchConfiguration.command?.contains("echo hello") == true)
+        // An ad-hoc command runs under an interactive login shell, the same form a spawned coding agent
+        // gets, so both resolve the tools a user's own terminal resolves.
+        XCTAssertTrue(launchConfiguration.command?.contains(" -l -i -c ") == true)
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
         XCTAssertEqual(terminalWindow.name, "shell-1")
@@ -279,6 +282,34 @@ extension OrchestratorTests {
         XCTAssertEqual(terminateCapture.sessionIDs, [session.id])
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+    }
+
+    /// With no command the session IS the user's shell — a bare interactive login shell on the PTY — so
+    /// it is launched directly instead of being wrapped in another `-i -c` shell.
+    func testCreateWorkspaceTerminalSessionWithoutCommandLaunchesABareLoginShell() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        _ = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil)
+
+        let command = try XCTUnwrap(launchCapture.snapshot().first?.command)
+        XCTAssertTrue(command.hasSuffix(" -l"), "a bare terminal session launches its login shell directly: \(command)")
+        XCTAssertFalse(command.contains(" -l -i -c "))
     }
 
     func testStopWorkspaceTerminatesLaunchOwnedAdHocTerminalSessionWithoutWindowRow() throws {

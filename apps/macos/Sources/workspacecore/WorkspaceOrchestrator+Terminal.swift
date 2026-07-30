@@ -208,6 +208,20 @@ extension WorkspaceOrchestrator {
 
     func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
+    /// Runs `command` through an interactive login shell (`-l -i -c`), the single shell form every
+    /// command Spaces launches into a terminal goes through — workspace processes, ad-hoc
+    /// `terminal command` sessions, and spawned coding agents.
+    ///
+    /// `-l` alone sources only the profile files (`~/.zshenv`, `~/.zprofile`). The PATH entries and
+    /// version-manager shims that put a user's tools on PATH — `~/.local/bin`, nvm/fnm/asdf/volta —
+    /// live in `~/.zshrc`, which a shell reads only when it is interactive. Without `-i`, `claude`
+    /// (installed to `~/.local/bin`), an fnm-managed `codex`, or `nvm use 24 && npm run dev` fails
+    /// with `command not found` even though the same command works typed into a Spaces terminal —
+    /// whose shell is a bare `exec <shell> -l` on a PTY, and therefore interactive.
+    func interactiveLoginShellCommand(_ command: String, shellPath: String? = nil) -> String {
+        "exec \(shellQuoted(shellPath ?? terminalLoginShellPath())) -l -i -c \(shellQuoted(command))"
+    }
+
     /// Builds the environment a Spaces terminal session launches with.
     ///
     /// `SPACES_DB_PATH` is FORWARDED from this daemon's own environment, never synthesized from the resolved
@@ -311,13 +325,7 @@ extension WorkspaceOrchestrator {
         let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
         let runtimeEnv = try terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
-        let resolvedShellPath = shellPath ?? terminalLoginShellPath()
-        // Run managed processes through an interactive login shell (`-l -i -c`), matching the ad-hoc
-        // terminal experience. `-l` alone sources only the profile files; the version-manager shims
-        // developers rely on (nvm, asdf, volta) live in `~/.bashrc`/`~/.zshrc`, which is guarded to
-        // interactive shells. Without `-i`, a command like `nvm use 24 && npm run dev` fails with
-        // `nvm: command not found` even though the same command works when typed into a terminal.
-        return commandPrefixedWithShellEnvironment("exec \(shellQuoted(resolvedShellPath)) -l -i -c \(shellQuoted(command))", env: runtimeEnv)
+        return commandPrefixedWithShellEnvironment(interactiveLoginShellCommand(command, shellPath: shellPath), env: runtimeEnv)
     }
 
     func logTerminalPerfMetric(_ metric: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
