@@ -95,6 +95,36 @@ import ghosttyvtshim
 
     private func marker(_ index: Int) -> String { "RMK\(String(format: "%03d", index))X" }
 
+    // MARK: - Paint-neutral margins across a resize
+
+    /// A preamble is replayed at whatever size the terminal has then, which is not necessarily the size
+    /// it was captured at: a handoff or a tail after the terminal was resized past the last trim replays
+    /// it wider or narrower. Its paint-neutral margins therefore have to mean "this terminal's full
+    /// extent", which is what the sequences' default extent parameters give — an explicit column count
+    /// would pin the captured width, and since the region restore emits no DECSLRM at all when the
+    /// captured margins were already full, nothing after it would widen the margin back out.
+    ///
+    /// The source enables DECLRMM because left/right margins are only installed while it is set; that is
+    /// the state in which a pinned width is not silently ignored. The assertion is on output written
+    /// AFTER the preamble, since a stale right margin shows up as that output wrapping early.
+    @Test func paintNeutralMarginsFollowTheReplayWidthRatherThanTheCapturedOne() throws {
+        let source = try makeSession(columns: 60, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B}[?69h")  // DECLRMM: left/right margins can be installed at all.
+        write(source, "\u{1B}[3;1H\(marker(1))")
+        write(source, "\u{1B}[1;1H")
+
+        let bytes = try preamble(source)
+        let replayed = try replay(bytes, columns: 100, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        let run = String(repeating: "X", count: 90)
+        write(replayed, run)
+
+        let rows = visibleRows(replayed)
+        #expect(rows.first?.hasPrefix(run) == true, "output after the preamble must reach the replay terminal's right edge: \(rows.first ?? "")")
+        #expect(rows.count > 2 && rows[2].hasPrefix(marker(1)), "the repaint must still land where it did: \(rows)")
+    }
+
     // MARK: - Charset restoration
 
     /// A preamble is not only replayed into a blank terminal: a from-zero replay of a trimmed transcript

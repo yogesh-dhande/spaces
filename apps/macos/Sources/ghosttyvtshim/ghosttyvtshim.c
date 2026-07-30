@@ -2118,7 +2118,10 @@ static bool spaces_ghostty_vt_measure_cursor_origin(
 //       would map the repaint's own bytes (Ghostty translates ASCII through the DEC table and renders
 //       anything above U+00FF as a space), corrupting the screen it is supposed to restore. Full-extent
 //       margins also make the repaint's opening home unambiguous under the DECOM step 1 may just have
-//       restored: with the region spanning the screen, region-relative and absolute coincide.
+//       restored: with the region spanning the screen, region-relative and absolute coincide. "Full
+//       extent" must be expressed with the sequences' DEFAULT extent parameters, never with this
+//       session's measured size: a preamble is replayed at whatever size the terminal has then, and a
+//       pinned width or height would constrain everything drawn after it to the size it was captured at.
 //   C3. Grid repaint before the region and charset restore. The repaint must run under C2's neutral
 //       state; restoring first would re-arm exactly what C2 exists to neutralize.
 //   C4. Region and charset restore before the cursor. DECSTBM and DECSLRM home the cursor, so a cursor
@@ -2133,9 +2136,9 @@ static bool spaces_ghostty_vt_measure_cursor_origin(
 // Emission order following from those:
 //   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen, DECOM and DECLRMM.
 //   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
-//   3. Paint-neutral state: full-extent margins (CSI r, CSI 1 ; <cols> s) and a normalized charset
-//      invocation (ESC ( B, SI). Emitted unconditionally — all four are no-ops on a terminal that is
-//      already neutral, which is every from-blank replay.
+//   3. Paint-neutral state: full-extent margins in their width- and height-independent form
+//      (CSI r, CSI 1 ; 0 s) and a normalized charset invocation (ESC ( B, SI). Emitted unconditionally —
+//      all four are no-ops on a terminal that is already neutral, which is every from-blank replay.
 //   4. Grid repaint of the active screen (top-down flow paint, per `spaces_ghostty_vt_preamble_append_grid`).
 //   5. Scrolling region and charset designations/shifts (`spaces_ghostty_vt_copy_replay_root_state`).
 //   6. Cursor position (CSI <y+1> ; <x+1> H), region-relative under DECOM.
@@ -2214,7 +2217,19 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
 
     // 3. Paint-neutral state (C2): full-extent margins, then G0 designated ASCII and GL locked to it, so
     //    the repaint's line feeds cannot scroll a region and its bytes cannot be charset-mapped.
-    spaces_ghostty_vt_preamble_append(&buf, "\x1b[r\x1b[1;%us\x1b(B\x0f", (unsigned)columns);
+    //
+    //    Both margins use the sequences' DEFAULT extent parameters rather than this session's measured
+    //    size, which is what keeps them correct when the preamble is replayed at another width or height
+    //    (a handoff or tail after the terminal was resized past the last trim). DECSTBM with no params
+    //    and DECSLRM with a 0 right param both resolve against the REPLAYING terminal's own bounds; an
+    //    explicit column count would pin the captured width, and since step 5 emits no DECSLRM at all
+    //    when the captured margins were already full, nothing later would widen it back out.
+    //
+    //    DECSTBM can be written bare, DECSLRM cannot: `CSI s` with no parameters is ambiguous — the
+    //    library reads it as DECSLRM only while DECLRMM is set and as save-cursor otherwise, which would
+    //    clobber a saved cursor the transcript's own bytes established. `CSI 1 ; 0 s` is unambiguous at
+    //    every width.
+    spaces_ghostty_vt_preamble_append(&buf, "\x1b[r\x1b[1;0s\x1b(B\x0f");
 
     // 4. Grid repaint of the active screen (C3). A snapshot-read failure fails the whole preamble rather
     //    than emitting a partially painted grid.
