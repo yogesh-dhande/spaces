@@ -311,24 +311,100 @@ final class AgentOrchestrationCLITests: XCTestCase {
         }
     }
 
-    func testAwaitForegroundDetectionReturnsKindOncePresent() throws {
+    func testAwaitReadinessReturnsDetectedKindOncePresent() throws {
         let clock = FakeClock()
         var reads = 0
-        let detected = try AgentSpawnReadiness.awaitForegroundDetection(
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: clock.now, sleep: { _ in }
         ) {
             reads += 1
-            return reads >= 3 ? .codex : nil
+            return .init(detectedKind: reads >= 3 ? .codex : nil, state: .running)
         }
-        XCTAssertEqual(detected, .codex)
+        XCTAssertEqual(outcome, .detected(.codex))
         XCTAssertEqual(reads, 3)
     }
 
-    func testAwaitForegroundDetectionTimesOutToNil() throws {
+    func testAwaitReadinessTimesOutWhileTheChildKeepsRunningUndetected() throws {
         let clock = FakeClock(step: 40)
-        let detected = try AgentSpawnReadiness.awaitForegroundDetection(
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
             deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
-        ) { nil }
-        XCTAssertNil(detected)
+        ) { .init(detectedKind: nil, state: .running) }
+        XCTAssertEqual(outcome, .timedOut)
+    }
+
+    /// The fail-fast: a child that dies is reported on the very poll that sees it, instead of costing the
+    /// whole detection budget (the failure `spaces agent spawn` hits for an unresolvable command).
+    func testAwaitReadinessEndsAsSoonAsTheChildExitsWithoutWaitingOutTheDeadline() throws {
+        let clock = FakeClock()
+        var reads = 0
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) {
+            reads += 1
+            return .init(detectedKind: nil, state: reads >= 2 ? .exited : .starting)
+        }
+        XCTAssertEqual(outcome, .ended(.exited))
+        XCTAssertEqual(reads, 2)
+    }
+
+    func testAwaitReadinessReportsAFailedChildAsEnded() throws {
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
+        ) { .init(detectedKind: nil, state: .failed) }
+        XCTAssertEqual(outcome, .ended(.failed))
+    }
+
+    /// A classification read in the same poll as an ended child is stale — the session cannot be
+    /// prompted — so the exit wins and spawn fails rather than returning a dead session as ready.
+    func testAwaitReadinessPrefersTheChildExitOverAStaleClassification() throws {
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: FakeClock().now, sleep: { _ in }
+        ) { .init(detectedKind: .claude, state: .exited) }
+        XCTAssertEqual(outcome, .ended(.exited))
+    }
+
+    /// A session that is not reported at all keeps the wait polling: only a state that says the child
+    /// ended ends it early.
+    func testAwaitReadinessKeepsPollingWhileTheSessionReportsNoState() throws {
+        let clock = FakeClock(step: 40)
+        let outcome = try AgentSpawnReadiness.awaitReadiness(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) { .init(detectedKind: nil, state: nil) }
+        XCTAssertEqual(outcome, .timedOut)
+    }
+
+    // MARK: - Spawn failure reporting
+
+    func testSpawnChildExitedErrorNamesTheChildExitAndItsLastOutput() {
+        let message = AgentSpawnChildExitedError(
+            sessionID: "session-1", command: "claude --model haiku", state: .exited, lastOutputLines: ["zsh:1: command not found: claude"],
+            deviceName: nil
+        ).errorDescription
+        XCTAssertEqual(
+            message,
+            "Agent session session-1 exited before it was detected as a running coding agent: `claude --model haiku` did not stay running. Last output: zsh:1: command not found: claude. Inspect with: spaces terminal tail session-1"
+        )
+        // The cause is the child's exit, not the classifier that never got to see it.
+        XCTAssertFalse(message?.contains("foreground classification") == true)
+    }
+
+    func testSpawnChildExitedErrorReportsNoOutputAndQualifiesARemoteInspectHint() {
+        let message = AgentSpawnChildExitedError(sessionID: "session-2", command: "codex", state: .failed, lastOutputLines: [], deviceName: "studio")
+            .errorDescription
+        XCTAssertEqual(
+            message,
+            "Agent session session-2 failed before it was detected as a running coding agent: `codex` did not stay running. It produced no output. Inspect with: spaces terminal tail session-2 --device studio"
+        )
+    }
+
+    func testLastNonBlankLinesDropsTheBlankPaddingOfARenderedTail() {
+        let tail = "\n$ claude\nzsh:1: command not found: claude\n   \n\n"
+        XCTAssertEqual(AgentSpawnReadiness.lastNonBlankLines(inTail: tail), ["$ claude", "zsh:1: command not found: claude"])
+    }
+
+    func testLastNonBlankLinesKeepsOnlyTheTrailingLinesUpToTheLimit() {
+        let tail = (1...10).map { "line \($0)" }.joined(separator: "\n")
+        XCTAssertEqual(AgentSpawnReadiness.lastNonBlankLines(inTail: tail, limit: 2), ["line 9", "line 10"])
+        XCTAssertEqual(AgentSpawnReadiness.lastNonBlankLines(inTail: ""), [])
     }
 }

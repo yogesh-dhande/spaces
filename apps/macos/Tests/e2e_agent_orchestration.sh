@@ -8,11 +8,12 @@
 # another profile's daemon or app.
 #
 # Part A (always runnable, no real coding agents): the orchestration lifecycle is driven with explicit
-# `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). It does
-# not use `agent spawn` — spawn readiness is foreground detection of a real coding agent, which is not
-# hermetic, and these flows (list/annotate/status, subscribe + notification injection, busy-subscriber
-# queue/flush, cycle rejection, kill) need deterministic signal control that real agents
-# cannot give. Spawn's detection readiness is covered by unit tests and the opt-in Part B matrix.
+# `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). Those
+# flows (list/annotate/status, subscribe + notification injection, busy-subscriber queue/flush, cycle
+# rejection, kill) need deterministic signal control that real agents cannot give. It then covers the two
+# `agent spawn` behaviors that are deterministic without a real coding agent — failing as soon as the
+# child exits, and running the command through the interactive login shell — with a fixture binary named
+# after a supported agent. Detection of the real providers stays in the opt-in Part B matrix.
 #
 # Part B (opt-in, real coding agents; SPACES_E2E_AGENT_MATRIX=1): for each provider whose binary is on
 # PATH, spawn the agent (detection-only — spawn delivers no prompt), then drive the real orchestrator
@@ -264,7 +265,104 @@ part_a() {
   printf '%s' "$bogus_err" | grep -Fqi "no agent session" || fail "bogus kill lacked the expected error: $bogus_err"
   pass "step 5b: killing a nonexistent session errored loudly"
 
+  spawn_fails_fast_when_the_child_exits
+  spawn_runs_the_command_through_the_login_environment
+
   printf '=== Part A passed ===\n'
+}
+
+# Step 6: a spawn whose command cannot run must fail as soon as the daemon records the child's exit,
+# naming that exit — not the foreground classifier, which never had anything to classify. The command
+# passes spawn's supported-agent gate (the gate reads the executable basename) but names a path that does
+# not exist, so the child dies within a second while the detection budget is 90s.
+spawn_fails_fast_when_the_child_exits() {
+  local missing_command start_ms elapsed_ms spawn_out spawn_status session_id
+  missing_command="$FIXTURE_DIR/no-such-bin/claude"
+  start_ms="$(now_ms)"
+  set +e
+  spawn_out="$("$SPACES_CLI" agent spawn --workspace "$FIXTURE_WORKSPACE_ID" --command "$missing_command" 2>&1)"
+  spawn_status=$?
+  set -e
+  elapsed_ms=$(( "$(now_ms)" - start_ms ))
+  # The failed spawn leaves its session record behind; record it so cleanup tears it down.
+  session_id="$(printf '%s' "$spawn_out" | sed -nE 's/.*Agent session ([0-9A-F-]{36}).*/\1/p' | head -n 1)"
+  if [[ -n "$session_id" ]]; then
+    CREATED_SESSIONS+=("$session_id")
+  fi
+
+  (( spawn_status != 0 )) || fail "spawning a command that cannot run unexpectedly succeeded: $spawn_out"
+  (( elapsed_ms < 10000 )) || fail "spawn took ${elapsed_ms}ms to report a child that exited immediately (detection budget is 90s): $spawn_out"
+  printf '%s' "$spawn_out" | grep -Fq "before it was detected as a running coding agent" \
+    || fail "spawn failure did not name the child's exit: $spawn_out"
+  if printf '%s' "$spawn_out" | grep -Fq "foreground classification"; then
+    fail "spawn failure blamed foreground classification for a child that never ran: $spawn_out"
+  fi
+  pass "step 6: spawn of an unrunnable command failed in ${elapsed_ms}ms naming the child's exit"
+}
+
+# Step 7: a spawned command runs through the interactive login shell, so it resolves whatever the user's
+# own terminal resolves — `claude` in `~/.local/bin`, an fnm/nvm/asdf-managed runtime — instead of only
+# what the profile files put on PATH.
+#
+# The fixture agent is a symlink to zsh named `opencode`: the name is what spawn's supported-agent gate
+# and the daemon's foreground classifier match on (the classifier reads argv[0], which carries the
+# symlink path), and a symlink runs the real signed zsh, which a copy of a system binary would not. It
+# runs a probe script that counts the PATH entries it was given that a NON-interactive login shell would
+# not have produced, then blocks on the `read` builtin so it stays the terminal's foreground process for
+# detection to identify.
+#
+# That count is the regression guard: it is zero for a `-l`-only shell and non-zero once `~/.zshrc` runs.
+# The same probe is run locally under a scrubbed interactive login shell first; when it finds nothing
+# there, this machine's shell setup has nothing to assert and the step says so instead of pretending to
+# cover it.
+spawn_runs_the_command_through_the_login_environment() {
+  local bin_dir agent_path probe_script spawn_out child detected tail_text baseline_extra
+  bin_dir="$FIXTURE_DIR/login-path-bin"
+  agent_path="$bin_dir/opencode"
+  probe_script="$FIXTURE_DIR/login-path-probe.zsh"
+  mkdir -p "$bin_dir"
+  rm -f "$agent_path"
+  ln -s /bin/zsh "$agent_path"
+  cat > "$probe_script" <<'PROBE'
+baseline=("${(@f)$(env -i HOME=$HOME /bin/zsh -l -c 'print -rl -- $path')}")
+extra=(${path:|baseline})
+print -r -- "spawnpathextra=${#extra}"
+read
+PROBE
+
+  baseline_extra="$(env -i HOME="$HOME" TERM=dumb /bin/zsh -l -i "$probe_script" </dev/null 2>/dev/null \
+    | sed -nE 's/^spawnpathextra=([0-9]+)$/\1/p' | tail -n 1)"
+  if [[ -z "$baseline_extra" || "$baseline_extra" == "0" ]]; then
+    printf '[agent-e2e] step 7 skipped: this machine'"'"'s interactive login shell adds no PATH entries a login shell alone lacks.\n'
+    return 0
+  fi
+
+  spawn_out="$("$SPACES_CLI" agent spawn --workspace "$FIXTURE_WORKSPACE_ID" --json --command "$agent_path -f $probe_script")" \
+    || fail "spawning the fixture agent failed: $spawn_out"
+  child="$(json_field "$spawn_out" 'd.get("terminalSessionID")')"
+  [[ -n "$child" ]] || fail "fixture agent spawn returned no session: $spawn_out"
+  CREATED_SESSIONS+=("$child")
+  detected="$(json_field "$spawn_out" 'd.get("detectedAgent") or "?"')"
+  [[ "$detected" == "opencode" ]] || fail "fixture agent was detected as '$detected', expected opencode"
+  pass "step 7a: spawn detected the fixture coding agent and returned"
+
+  # The rendered tail wraps at the terminal width, so newlines are stripped before matching. The probe
+  # prints before the agent is detectable, so this is a short settle poll rather than a real wait.
+  local start_ms
+  start_ms="$(now_ms)"
+  while true; do
+    tail_text="$("$SPACES_CLI" terminal tail "$child" --lines 120 | tr -d '\n')"
+    if printf '%s' "$tail_text" | grep -Eq 'spawnpathextra=[0-9]'; then
+      break
+    fi
+    if (( "$(now_ms)" - start_ms >= 10000 )); then
+      fail "fixture agent never reported its PATH entry count: $tail_text"
+    fi
+    sleep 0.2
+  done
+  printf '%s' "$tail_text" | grep -Eq 'spawnpathextra=[1-9]' \
+    || fail "spawned command did not get the interactive-login PATH (local shell adds $baseline_extra entries): $tail_text"
+  pass "step 7b: spawned command ran with the interactive-login PATH"
 }
 
 # ---------------------------------------------------------------------------
