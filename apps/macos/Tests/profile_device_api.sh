@@ -31,7 +31,7 @@ mkdir -p "$SPACES_RUNTIME_DIR"
 service_log="$temp_root/terminal-service.log"
 device_api_log="$temp_root/device-api.log"
 metrics_path="${METRICS_PATH:-$temp_root/metrics.json}"
-trap 'pkill -P $$ >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
+trap 'stop_terminal_service_for_runtime_dir "$SPACES_RUNTIME_DIR"; pkill -P $$ >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
 
 "$terminal_service" >"$service_log" 2>&1 &
 service_pid=$!
@@ -702,6 +702,6 @@ print(json.dumps(metrics, indent=2, sort_keys=True))
 PY
 
 kill "$device_api_pid" >/dev/null 2>&1 || true
-kill "$service_pid" >/dev/null 2>&1 || true
 wait "$device_api_pid" >/dev/null 2>&1 || true
+stop_terminal_service_for_runtime_dir "$SPACES_RUNTIME_DIR"
 wait "$service_pid" >/dev/null 2>&1 || true

@@ -41,7 +41,6 @@ REMOTE_RTT_MS=""
 
 SCENARIOS=(ios-input-latency ios-scrollback-latency)
 SELECTED_SCENARIOS=()
-SERVICE_PID=""
 DEVICE_API_PID=""
 
 print_usage() {
@@ -296,10 +295,6 @@ cleanup() {
     kill "$DEVICE_API_PID" >/dev/null 2>&1 || true
     wait "$DEVICE_API_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]]; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
   stop_terminal_service_for_runtime_dir "$RUNTIME_DIR" 5
   cleanup_remote_e2e_host
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then
@@ -339,7 +334,6 @@ measure_remote_rtt_ms
 prepare_remote_workspace
 
 "$TERMINAL_SERVICE" >"$SERVICE_LOG" 2>&1 &
-SERVICE_PID="$!"
 
 service_socket="$(terminal_service_socket_path_for_runtime_dir "$RUNTIME_DIR")"
 service_deadline=$((SECONDS + 15))

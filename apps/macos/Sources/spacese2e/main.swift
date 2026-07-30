@@ -2552,6 +2552,11 @@ private struct ProfileSocketPathsPayload: Codable {
     let serviceSocketPath: String
     let serviceLockPath: String
     let serviceLogPath: String
+    /// Admin socket of the Caddy router this profile's daemon owns. Harness cleanup needs it to
+    /// recognize a router that outlived its daemon: the path embeds a hash of the runtime directory,
+    /// so resolving it here — through the same profile logic that produced it — is what keeps a
+    /// harness from ever reaching another profile's (or the installed profile's) router.
+    let routerAdminSocketPath: String
     let sessionID: String?
     let sessionRootDirectory: String?
     let sessionControlSocketPath: String?
@@ -2564,6 +2569,7 @@ private struct ProfileSocketPathsPayload: Codable {
         serviceSocketPath = try TerminalServicePaths.socketPath()
         serviceLockPath = try TerminalServicePaths.instanceLockPath()
         serviceLogPath = try TerminalServicePaths.logPath()
+        routerAdminSocketPath = try CaddyService.adminSocketPath()
 
         let trimmedSessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedSessionID, !trimmedSessionID.isEmpty {

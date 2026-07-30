@@ -72,10 +72,6 @@ parse_args() {
 
 cleanup() {
   local exit_code=$?
-  if [[ -n "$LOCAL_SERVICE_PID" ]]; then
-    kill "$LOCAL_SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$LOCAL_SERVICE_PID" >/dev/null 2>&1 || true
-  fi
   stop_terminal_service_for_runtime_dir "$LOCAL_RUNTIME_DIR" 5
   release_terminal_harness_lock
   if [[ "$KEEP_ROOT" == "1" || $exit_code -ne 0 ]]; then

@@ -22,7 +22,6 @@ APP_LOG="$WORK_ROOT/spaces-app.log"
 DUMP_PATH="$WORK_ROOT/terminal-window.json"
 SESSION_TITLE="terminal-edit-shortcuts"
 APP_PID=""
-SERVICE_PID=""
 session_id=""
 
 cleanup() {
@@ -34,10 +33,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -54,27 +50,6 @@ require_binary() {
 extract_session_id() {
   local output="$1"
   printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
-}
-
-terminal_service_pid() {
-  local target_session_id="$1"
-  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$target_session_id" <<'PY'
-import os
-import sqlite3
-import sys
-
-db_path = sys.argv[1]
-root_directory = os.path.normpath(sys.argv[2])
-with sqlite3.connect(db_path) as db:
-    row = db.execute(
-        "SELECT service_pid FROM terminal_runtime_states WHERE root_directory = ?",
-        (root_directory,),
-    ).fetchone()
-if row:
-    print(row[0])
-else:
-    raise SystemExit("missing terminal runtime state")
-PY
 }
 
 wait_for_spaces_frontmost_ready() {
@@ -283,7 +258,6 @@ sleep 3
 command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command cat --title "$SESSION_TITLE")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
-SERVICE_PID="$(terminal_service_pid "$session_id")"
 
 focus_terminal_window_for_input
 wait_for_terminal_window_ready
