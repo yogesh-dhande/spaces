@@ -27,6 +27,10 @@ import workspacecore
     typealias WindowFocusRequest = AppKitController.WindowFocusRequest
 
     var dismissedAlertsAttentionItemIDs: Set<String> = []
+    /// The focused session and when it took focus, refreshed on every alerts rebuild (the rebuild funnel
+    /// is where this client reads keyboard focus). Bounds which of that session's bells count as rung in
+    /// front of the user — see `consumeFocusedSessionBellAlerts`.
+    private var focusedBellWatch: FocusedBellWatch?
     var alertsShortcutSpec: HotkeySpec?
     /// Maps sequential window shortcut numbers (1-10, shown as 1-0) to focus targets for the current Alerts view.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
@@ -36,8 +40,14 @@ import workspacecore
     // MARK: - Alerts content
 
     private func buildAlertsGroups() -> [AlertsGroup] {
-        host.alertsGroups.compactMap { group -> AlertsGroup? in
-            let items = group.items.filter { !dismissedAlertsAttentionItemIDs.contains($0.attentionID) }
+        Self.visibleAlertsGroups(in: host.alertsGroups, dismissedAttentionItemIDs: dismissedAlertsAttentionItemIDs)
+    }
+
+    /// The groups the user sees: everything derived from the overviews minus what has been dismissed —
+    /// by a click, or by the user having watched the session a bell rang in.
+    nonisolated static func visibleAlertsGroups(in groups: [AlertsGroup], dismissedAttentionItemIDs: Set<String>) -> [AlertsGroup] {
+        groups.compactMap { group -> AlertsGroup? in
+            let items = group.items.filter { !dismissedAttentionItemIDs.contains($0.attentionID) }
             guard !items.isEmpty else { return nil }
             return AlertsGroup(
                 projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
@@ -50,11 +60,86 @@ import workspacecore
     func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs() }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
-        let activeIDs = Set(host.alertsGroups.flatMap { $0.items.map(\.attentionID) })
-        let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
+        let prunedIDs = Self.retainedDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs, in: host.alertsGroups)
         guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
         dismissedAlertsAttentionItemIDs = prunedIDs
         do { try host.storeDismissedAlertsAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
+    }
+
+    /// Dismissals worth keeping: a dismissal is only meaningful while its alert is still derived, so the
+    /// set is trimmed to the identities the current groups carry. A bell consumed because its session was
+    /// focused survives this the same way a clicked-away one does — the entry stays derived for as long as
+    /// the session reports that `bellAt`.
+    nonisolated static func retainedDismissedAttentionItemIDs(_ dismissed: Set<String>, in groups: [AlertsGroup]) -> Set<String> {
+        dismissed.intersection(Set(groups.flatMap { $0.items.map(\.attentionID) }))
+    }
+
+    /// Marks the bell of the session the user is typing in as already seen, every time the alerts are
+    /// rebuilt from a fresh overview.
+    ///
+    /// The daemon records a bell for every session because it cannot see which one has keyboard focus on
+    /// a given client, so this client owns the decision — and it has to consume the alert rather than
+    /// omit it from the derivation: `bellAt` stays on the session, so a bell merely filtered out would
+    /// come back the moment focus moved to another pane or the app relaunched. Consumption writes the
+    /// bell's identity into the same persisted dismissal set a click writes to, which is also what keeps
+    /// it alive: `pruneDismissedAlertsAttentionItemIDsIfNeeded` drops dismissals whose alert is no longer
+    /// derived, and the entry stays derived for as long as `bellAt` holds that value. A later bell in the
+    /// same session carries a new `bellAt`, hence a new identity, and alerts normally.
+    ///
+    /// Consuming it is the whole response: the focused session's bell produces no alert, and no sound or
+    /// flash either, because the terminal views render no bell feedback (see the `.ringBell` case in
+    /// `GhosttyMirrorTerminalView`). That is the decided behavior — a bell you are watching happen needs
+    /// no notification — not a missing piece to fill in.
+    ///
+    /// Only bells rung *since* focus arrived are consumed. Focusing a session is not a way to clear its
+    /// alerts — nothing else in the alerts model clears on focus — so a bell the session rang while the
+    /// user was elsewhere stays an alert for them to dismiss, exactly as iOS's watch windows leave it.
+    func consumeFocusedSessionBellAlerts() {
+        focusedBellWatch = Self.updatedFocusedBellWatch(focusedBellWatch, focusedSessionID: host.panelCoordinator.focusedSessionID(), now: Date())
+        guard let focusedBellWatch else { return }
+        let consumed = Self.bellAttentionIDs(in: host.alertsGroups, watch: focusedBellWatch).subtracting(dismissedAlertsAttentionItemIDs)
+        guard !consumed.isEmpty else { return }
+        dismissedAlertsAttentionItemIDs.formUnion(consumed)
+        do { try host.storeDismissedAlertsAttentionItemIDs(dismissedAlertsAttentionItemIDs) } catch { host.showError(error) }
+    }
+
+    /// The session that currently holds keyboard focus, and when this client first saw it take focus.
+    struct FocusedBellWatch: Equatable {
+        let sessionID: String
+        let since: Date
+    }
+
+    /// Restarts the focus clock whenever the focused session changes, so every arrival at a session gets
+    /// its own "bells from here on are yours" boundary; focus leaving every pane clears it.
+    ///
+    /// The boundary is observed at rebuild time, not at the pane-focus event, so it can trail actual
+    /// focus by up to one refresh: a bell landing in that sliver alerts instead of being consumed.
+    /// Accepted — the error direction is an extra visible alert, never a silently eaten one, and a
+    /// pane-focus hook into this controller is plumbing a benign sliver does not justify.
+    nonisolated static func updatedFocusedBellWatch(_ current: FocusedBellWatch?, focusedSessionID: String?, now: Date) -> FocusedBellWatch? {
+        guard let focusedSessionID else { return nil }
+        guard current?.sessionID == focusedSessionID else { return FocusedBellWatch(sessionID: focusedSessionID, since: now) }
+        return current
+    }
+
+    /// Slack allowed around the focus boundary. `bellAt` is stamped by the daemon's clock (possibly a
+    /// remote Linux one) while the focus time comes from this Mac's, so a bell rung just after focus
+    /// arrived can carry a slightly earlier timestamp; without the tolerance it would alert for a session
+    /// the user is already looking at. It matches iOS's `watchedBellSkewTolerance` for the same reason.
+    nonisolated static let focusedBellSkewTolerance: TimeInterval = 2
+
+    /// Identities of the focused session's bell alerts that rang at or after focus arrived. A bell is the
+    /// only alert that focuses a terminal session directly — every other row focuses a process, an agent,
+    /// or a window — so the focus request identifies it without matching on presentation text. An entry
+    /// whose timestamp did not parse carries no date to compare and is left alerting.
+    nonisolated static func bellAttentionIDs(in groups: [AlertsGroup], watch: FocusedBellWatch) -> Set<String> {
+        let boundary = watch.since.addingTimeInterval(-focusedBellSkewTolerance)
+        return Set(
+            groups.lazy.flatMap(\.items).filter { item in
+                guard case .terminalSession(_, let itemSessionID) = item.focusRequest, itemSessionID == watch.sessionID else { return false }
+                guard let eventDate = item.eventDate else { return false }
+                return eventDate >= boundary
+            }.map(\.attentionID))
     }
 
     func dismissAlertsAttentionItem(_ attentionID: String) {
@@ -230,8 +315,7 @@ import workspacecore
     /// unreachable, and nil while it is loaded — the alerts pane's only piece of device context, shown
     /// because a stale alert is otherwise indistinguishable from a live one.
     private func unreachableDeviceName(workspaceID: String) -> String? {
-        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID), let section = host.deviceSection(id: deviceID),
-            section.loadState.isOffline
+        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID), let section = host.deviceSection(id: deviceID), section.loadState.isOffline
         else { return nil }
         return section.displayName
     }

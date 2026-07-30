@@ -34,7 +34,8 @@ struct SpacesE2ECommand: ParsableCommand {
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
             ProfileCommand.self, ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -84,6 +85,34 @@ private struct ScrollApplicationWindowCommand: ParsableCommand {
                 executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y, deltaY: deltaY, repetitions: repetitions,
                 firstScrollEventUptimeNanoseconds: timing.firstScrollEventUptimeNanoseconds,
                 lastScrollEventUptimeNanoseconds: timing.lastScrollEventUptimeNanoseconds, success: true))
+    }
+}
+
+private struct ClickApplicationWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "click-application-window")
+
+    @Option(name: .long) var executableName: String
+    @Option(name: .long) var windowTitleContains: String?
+    @Option(name: .long) var normalizedX = 0.5
+    @Option(name: .long) var normalizedY = 0.5
+
+    func run() throws {
+        guard (0...1).contains(normalizedX), (0...1).contains(normalizedY) else {
+            throw ValidationError("Normalized coordinates must be between 0 and 1.")
+        }
+        let target = try targetApplicationWindow(executableName: executableName, windowTitleContains: windowTitleContains)
+
+        target.application.activate(options: [])
+        axPerformAction(target.window, action: kAXRaiseAction as String)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let point = CGPoint(x: target.frame.minX + target.frame.width * normalizedX, y: target.frame.minY + target.frame.height * normalizedY)
+        let timing = try postClickEvent(at: point)
+        try emitJSON(
+            ClickApplicationWindowPayload(
+                executableName: executableName, windowTitle: target.title, pointX: point.x, pointY: point.y,
+                mouseDownUptimeNanoseconds: timing.mouseDownUptimeNanoseconds, mouseUpUptimeNanoseconds: timing.mouseUpUptimeNanoseconds,
+                success: true))
     }
 }
 
@@ -380,18 +409,17 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
 private struct ProfileShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "profile-show", abstract: "Show resolved Spaces profile paths for harnesses.")
 
-    @Flag(name: .long, help: "Emit shell exports for the repo-local Spaces profile.") var shell = false
     @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
 
+    /// Reports the profile this binary resolves; it never emits a binding for a caller to export. A
+    /// repo-local binary resolves its own profile from where it sits in the checkout, so a shell binding is
+    /// redundant for the binary that owns the profile and wrong for any other worktree's binary that later
+    /// runs in the same shell — and `SPACES_DB_PATH`, which names an ephemeral throwaway profile only, is
+    /// refused inside a live profile root, so a binding could not name a real profile at all. A harness that
+    /// needs the concrete database or runtime path reads it from this output.
     func run() throws {
         let profile = try SpacesProfile.current()
         let payload = ProfilePayload(profile: profile)
-        if shell {
-            print("export \(SpacesProfile.databasePathEnvironmentVariable)=\(profileShellQuoted(profile.databasePath))")
-            print("export \(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(profileShellQuoted(profile.runtimeDirectory))")
-            print("export \(SpacesDeviceAPIDefaults.portEnvironmentVariable)=0")
-            return
-        }
         if json {
             try emitJSON(payload)
             return
@@ -670,14 +698,20 @@ private func listProfilesScript() -> String {
         root="$2"
         cli="$3"
         unit="$4"
-        port="$(tr -d ' \\n' < "$root/runtime/terminal/device-api.json" 2>/dev/null | sed -n 's/.*"port":\\([0-9][0-9]*\\).*/\\1/p')"
-        [ -n "$port" ] || port='-'
-        # A development profile still recording the canonical port has never assigned itself one, so that
-        # value is not a port it would ever bind: it assigns a development-range port the next time its
-        # daemon starts. Reporting it verbatim would name the installed daemon's port for a profile that
-        # cannot use it, so it reads as unassigned instead.
-        if [ "$name" != '\(installedProfileLabel)' ] && [ "$port" = '\(SpacesDeviceAPIDefaults.port)' ]; then
-            port='-'
+        # The installed profile's port is the canonical constant computed from its identity — it records
+        # nothing — so it is reported as that rather than read from a file it does not write.
+        if [ "$name" = '\(installedProfileLabel)' ]; then
+            port='\(SpacesDeviceAPIDefaults.port)'
+        else
+            port="$(tr -d ' \\n' < "$root/runtime/terminal/device-api.json" 2>/dev/null | sed -n 's/.*"port":\\([0-9][0-9]*\\).*/\\1/p')"
+            [ -n "$port" ] || port='-'
+            # A development profile still recording the canonical port has never assigned itself one, so that
+            # value is not a port it would ever bind: it assigns a development-range port the next time its
+            # daemon starts. Reporting it verbatim would name the installed daemon's port for a profile that
+            # cannot use it, so it reads as unassigned instead.
+            if [ "$port" = '\(SpacesDeviceAPIDefaults.port)' ]; then
+                port='-'
+            fi
         fi
         daemon='down'
         sessions='-'
@@ -836,13 +870,15 @@ private func localProfileRows() throws -> [[String]] {
             at: developmentProfilesRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []).filter {
             (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-    return [[installedProfileLabel, recordedDeviceAPIPort(profileRoot: installedRoot), lastTouchedDate(profileRoot: installedRoot)]]
+    // The installed profile's port is the canonical constant, not a recorded assignment: it records nothing,
+    // so it is reported from identity the same way its daemon computes it.
+    return [[installedProfileLabel, String(SpacesDeviceAPIDefaults.port), lastTouchedDate(profileRoot: installedRoot)]]
         + developmentRoots.map { [$0.lastPathComponent, recordedDeviceAPIPort(profileRoot: $0), lastTouchedDate(profileRoot: $0)] }
 }
 
-/// The Device API port a profile has recorded for itself, or `-` when it has never recorded one (a profile
-/// whose daemon has not started yet). This is the profile's assignment, which is what a daemon started for
-/// it binds unless an environment override names another port.
+/// The Device API port a development profile has recorded for itself, or `-` when it has never recorded one
+/// (a profile whose daemon has not started yet). This is the profile's assignment, which is what a daemon
+/// started for it binds unless an environment override names another port.
 private func recordedDeviceAPIPort(profileRoot: URL) -> String {
     let settingsURL = profileRoot.appendingPathComponent("runtime/terminal/device-api.json", isDirectory: false)
     guard let data = try? Data(contentsOf: settingsURL), let settings = try? JSONDecoder().decode(SpacesDeviceAPISettings.self, from: data) else {
@@ -1084,12 +1120,13 @@ private struct RenderUpdateTextCommand: ParsableCommand {
 
                 response = RenderUpdateTextLine(
                     ok: true, hasRenderUpdate: payload.renderUpdate != nil, appliedRenderUpdate: appliedRenderUpdate, updateKind: updateKind,
-                    text: baseline.map { GhosttyTerminalSnapshotLayout.plainText(for: $0.snapshot) }, reason: payload.reason,
-                    outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision, error: applyError)
+                    text: baseline.map { GhosttyTerminalSnapshotLayout.plainText(for: $0.snapshot) }, columns: baseline?.snapshot.columns,
+                    rows: baseline?.snapshot.rows, reason: payload.reason, outputByteCount: payload.outputByteCount,
+                    screenStateRevision: payload.screenStateRevision, error: applyError)
             } catch {
                 response = RenderUpdateTextLine(
-                    ok: false, hasRenderUpdate: nil, appliedRenderUpdate: nil, updateKind: nil, text: nil, reason: nil, outputByteCount: nil,
-                    screenStateRevision: nil, error: String(describing: error))
+                    ok: false, hasRenderUpdate: nil, appliedRenderUpdate: nil, updateKind: nil, text: nil, columns: nil, rows: nil, reason: nil,
+                    outputByteCount: nil, screenStateRevision: nil, error: String(describing: error))
             }
 
             var data = try encoder.encode(response)
@@ -1106,6 +1143,8 @@ private struct RenderUpdateTextLine: Encodable {
     let appliedRenderUpdate: Bool?
     let updateKind: String?
     let text: String?
+    let columns: Int?
+    let rows: Int?
     let reason: String?
     let outputByteCount: Int?
     let screenStateRevision: UInt64?
@@ -1352,11 +1391,31 @@ private struct DemoRecorder {
                     action: .resize, sessionID: sessionID, clientID: recorderClientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch,
                     resizeSerial: 1))
             guard resizeResponse.ok else { throw ValidationError("resize failed for \(plan.slug): \(resizeResponse.message)") }
+            // An accepted resize applies and broadcasts asynchronously; a subscription opened in that
+            // window can serve a pre-resize frame and then settle on an idle session, recording the
+            // whole capture at the wrong grid. Poll until the daemon serves the target grid so the
+            // subscription below can only ever start from a post-resize frame.
+            try waitUntilSessionServesGrid(sessionID: sessionID, columns: columns, rows: rows, slug: plan.slug)
             let payload = try collectSteadyState(sessionID: sessionID)
             _ = try? sendControl(SpacesDeviceTerminalControlRequest(action: .detach, sessionID: sessionID, clientID: recorderClientID))
             return payload
         }
         return try collectSteadyState(sessionID: sessionID)
+    }
+
+    private func waitUntilSessionServesGrid(sessionID: String, columns: Int, rows: Int, slug: String) throws {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if let state = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState,
+                let update = state.decodedRenderUpdate,
+                let applied = try? GhosttyRenderUpdateApplier.apply(update, to: nil),
+                applied.snapshot.columns == columns, applied.snapshot.rows == rows
+            {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw ValidationError("session \(slug) never served a \(columns)x\(rows) frame after its accepted resize")
     }
 
     private func collectSteadyState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
@@ -1441,6 +1500,9 @@ private struct DemoRecordingTransform {
     private static let strippedKeys: Set<String> = [
         "browserSessions", "resolvedBrowserSessions", "assignedPorts", "environment", "foregroundArgv", "foregroundExecutablePath",
         "foregroundExecutableName",
+        // The recorder Mac's live LAN/Tailscale addresses: machine-specific and irrelevant to a
+        // deterministic demo bundle.
+        "deviceAPIAddresses",
     ]
     private static let clearedArrayKeys: Set<String> = ["attachments"]
 
@@ -2432,6 +2494,16 @@ private struct ScrollApplicationWindowPayload: Codable {
     let success: Bool
 }
 
+private struct ClickApplicationWindowPayload: Codable {
+    let executableName: String
+    let windowTitle: String?
+    let pointX: CGFloat
+    let pointY: CGFloat
+    let mouseDownUptimeNanoseconds: UInt64
+    let mouseUpUptimeNanoseconds: UInt64
+    let success: Bool
+}
+
 private struct TypeApplicationWindowPayload: Codable {
     let executableName: String
     let windowTitle: String?
@@ -2535,6 +2607,11 @@ private struct KeyEventTiming {
 private struct ScrollEventTiming {
     let firstScrollEventUptimeNanoseconds: UInt64
     let lastScrollEventUptimeNanoseconds: UInt64
+}
+
+private struct ClickEventTiming {
+    let mouseDownUptimeNanoseconds: UInt64
+    let mouseUpUptimeNanoseconds: UInt64
 }
 
 /// Looks up one workspace by project directory and display name, matching the GUI's
@@ -3335,6 +3412,18 @@ private func postMouseClick(at point: CGPoint) throws {
     downEvent.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.02)
     upEvent.post(tap: .cghidEventTap)
+}
+
+private func postClickEvent(at point: CGPoint) throws -> ClickEventTiming {
+    guard let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+        let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+    else { throw ValidationError("Unable to create mouse click event.") }
+    let mouseDownUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    downEvent.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.02)
+    let mouseUpUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    upEvent.post(tap: .cghidEventTap)
+    return ClickEventTiming(mouseDownUptimeNanoseconds: mouseDownUptimeNanoseconds, mouseUpUptimeNanoseconds: mouseUpUptimeNanoseconds)
 }
 
 private func postMouseDrag(from startPoint: CGPoint, to endPoint: CGPoint, durationMS: Int, steps: Int) throws {

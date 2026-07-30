@@ -287,7 +287,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }()
     /// Distributed IPC notifications observed while the app is running, paired with their `@objc` handlers.
     /// `self` is the observer for every one, so registration and teardown are uniform loops.
-    private static let distributedIPCObservers: [(name: Notification.Name, selector: Selector)] = [
+    static let distributedIPCObservers: [(name: Notification.Name, selector: Selector)] = [
         (IPCNotification.agentEventFired, #selector(handleAgentEventIPC(_:))),
         (IPCNotification.showMainWindow, #selector(handleShowMainWindowIPC(_:))),
         (IPCNotification.hideMainWindow, #selector(handleHideMainWindowIPC(_:))),
@@ -308,6 +308,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
         (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
+        (TerminalOverviewSignal.name, #selector(handleTerminalOverviewSignalIPC(_:))),
         (IPCNotification.deliverUserNotification, #selector(handleDeliverUserNotificationIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
@@ -426,11 +427,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
         case workspaceAgentLauncher(workspaceID: String, name: String)
         case agentWindow(AgentWindowRecord)
+        case terminalSession(workspaceID: String, sessionID: String)
 
         var workspaceID: String {
             switch self {
             case .workspaceBrowserSession(let workspaceID, _), .workspaceWindow(let workspaceID, _), .workspaceProcess(let workspaceID, _),
-                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _):
+                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _),
+                .terminalSession(let workspaceID, _):
                 return workspaceID
             case .agentWindow(let record): return record.workspaceID
             }
@@ -632,6 +635,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let object = notification.object as? String
         Task { @MainActor [weak self, object] in
             guard let self, self.didStartBackgroundServices, self.matchesProfileIPCObject(object) else { return }
+            self.sidebar.handleDatabaseDidChange()
+        }
+    }
+
+    /// Reloads the sidebar when a terminal session's overview-affecting state changes (a bell, an exit,
+    /// a title or runtime-state change). Terminal runtime state lives outside the database and so raises
+    /// no `databaseDidChange`; this signal is its equivalent, and it takes the same reload path so the
+    /// mid-edit deferral and reload coalescing are identical. The app and the daemon hosting the session
+    /// are separate processes, so the signal arrives here through its distributed half.
+    @objc private nonisolated func handleTerminalOverviewSignalIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self,
+                Self.shouldReloadSidebarForTerminalOverviewSignal(
+                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object, profileObject: self.ipcNotificationObject
+                )
+            else { return }
             self.sidebar.handleDatabaseDidChange()
         }
     }
@@ -1677,7 +1697,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         TerminalSessionRuntimeState(
             sessionID: sessionID, backend: summary.backend, servicePID: summary.servicePID, childPID: summary.childPID, state: summary.state,
-            updatedAt: summary.updatedAt, title: summary.title, workingDirectory: summary.workingDirectory)
+            updatedAt: summary.updatedAt, title: summary.title, workingDirectory: summary.workingDirectory, bellAt: summary.bellAt)
     }
 
     /// Reads a session's real launch configuration straight from its owning device when the
@@ -2028,7 +2048,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-                detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                detachClientAction: detachClientAction,
                 onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
@@ -2145,8 +2165,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
             scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
-            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
-            appearance: request.appearance)
+            scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
+            mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
+            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2557,8 +2578,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
-        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]],
-        workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus], alertsGroups: [AlertsGroup]
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
+        alertsGroups: [AlertsGroup]
     ) {
         var mergedProjects: [ProjectSummary] = []
         var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
@@ -2885,6 +2906,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                                 claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
                                 updatedAt: agent.updatedAt ?? ""))))
             }
+            // Every session with a bell gets an entry, including one the user is looking at right now:
+            // suppressing the focused session's bell is a consumption, not a filter (see
+            // `AlertsController.consumeFocusedSessionBellAlerts`), and consumption needs the entry to
+            // exist so its identity can be recorded and kept alive by the dismissal pruning rule.
+            for session in overview.sessions where session.workspaceID == workspace.id {
+                guard let bellAt = session.bellAt else { continue }
+                // Not `iso8601Formatter`: a Linux daemon stamps runtime state with fractional seconds,
+                // which the framework's default format rejects, and the age is the only recency this row
+                // carries.
+                let eventDate = GhosttyRemoteSessionStateTimestamp.date(from: bellAt)
+                items.append(
+                    AlertsAttentionEntry(
+                        attentionID: "alert:\(deviceID):session:\(session.id):bell:\(bellAt)", icon: "terminal", iconTint: .terminal,
+                        // The row reads exactly as the session's sidebar row does — name, then what the
+                        // program is doing — because its presence under Alerts is what says the bell rang.
+                        label: session.title, detail: session.liveTitle, shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true,
+                        eventDate: eventDate, focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
+            }
             guard !items.isEmpty else { continue }
             items.sort {
                 switch ($0.eventDate, $1.eventDate) {
@@ -3188,8 +3227,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = staticISO8601Formatter.string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
-                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,
-                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.liveTitle, terminalTrackingID: row.sessionID,
+                role: "terminal", orderIndex: index, lastSeenAt: now)
         }
     }
 
@@ -4143,6 +4182,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func alertsAttentionCount() -> Int { alerts.alertsAttentionCount() }
     func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
+    func consumeFocusedSessionBellAlerts() { alerts.consumeFocusedSessionBellAlerts() }
     func showAlertsDetail() { alerts.showAlertsDetail() }
 
     private func makeRightPane() -> NSView {
@@ -4498,9 +4538,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the line between "already here" and "go get it" is directly testable.
     nonisolated static func canRefocusTerminalPaneWithoutReattaching(
         paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
-    ) -> Bool {
-        paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface
-    }
+    ) -> Bool { paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface }
 
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
@@ -4559,8 +4597,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             domain: "Spaces", code: 1003,
             userInfo: [
                 NSLocalizedDescriptionKey: "\(deviceName) is offline.",
-                NSLocalizedRecoverySuggestionErrorKey: isLocal
-                    ? "Restart the local daemon and try again." : "Reconnect it and try again.",
+                NSLocalizedRecoverySuggestionErrorKey: isLocal ? "Restart the local daemon and try again." : "Reconnect it and try again.",
             ])
     }
 
@@ -4763,8 +4800,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // failure backoff — it repeats every 0.75s for the whole duration of the setup,
         // and clearing backoff on every tick would redial every unrelated offline
         // device that fast, defeating the backoff entirely (see `startRemoteOverviewPull`).
-        requestSidebarReload(
-            forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
+        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
@@ -6208,6 +6244,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
+        // Sized before it joins the window: a terminal pane inside rebuilds its evicted mirror surface
+        // during `addSubview` and forces a layout pass from there, which is ahead of the edge
+        // constraints below. Without a plausible frame that pass solves the panel to its fitting size
+        // and the pane measures a grid a fraction of the real one.
+        panelView.frame = detailContainer.bounds
         detailContainer.addSubview(panelView)
         NSLayoutConstraint.activate([
             panelView.topAnchor.constraint(equalTo: detailContainer.topAnchor),
@@ -6933,6 +6974,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    /// Row text for a terminal row: its stable name, described by the live title its program reported
+    /// (nothing when it reported none). Both arrive stripped of the `*`/`-` prefixes tracked window
+    /// names historically carried.
     nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
             of: #"^[*-]\s*"#, with: "", options: .regularExpression)
@@ -9969,6 +10013,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return openTerminalResolution(
                 workspaceID: record.workspaceID, sessionID: sessionID, fallbackTitle: row.name, fallbackDir: detail.dir, fallbackKind: .agent,
                 overview: overview)
+        case .terminalSession(let workspaceID, let sessionID):
+            guard let session = overview.sessions.first(where: { $0.id == sessionID }) else { return .noMatch }
+            return openTerminalResolution(
+                workspaceID: workspaceID, sessionID: sessionID, fallbackTitle: session.title, fallbackDir: session.workingDirectory,
+                fallbackKind: terminalSessionKind(rowKind: session.rowKind), overview: overview)
         }
     }
 
@@ -9989,6 +10038,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .workspaceAgentLauncher(_, let name):
             target = targets.first { $0.kind == .agentLauncher && normalizedRunRowName($0.launcherName ?? "") == normalizedRunRowName(name) }
         case .agentWindow(let record): target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
+        // A bell alert's session isn't one of the workspace's numbered run-shortcut targets, so it
+        // has no run-shortcut target to resolve.
+        case .terminalSession: target = nil
         }
         guard let target else { return nil }
         return (target, detail)
@@ -10970,6 +11022,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.id)"
+        case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
 
@@ -11012,6 +11065,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
+        case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
 }
@@ -11331,6 +11385,7 @@ extension AppKitController {
         case .workspaceMissingConfiguredProcess: return .missingConfiguredProcess
         case .workspaceAgentLauncher: return .agentLauncher
         case .agentWindow: return .agent
+        case .terminalSession: return .window
         case nil:
             if agentStatus != nil { return .agent }
             if processStatus != nil {
@@ -11427,25 +11482,18 @@ extension AppKitController {
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                        let window = windows[windowListIndex]
-                        let label: String
-                        let detail: String?
-                        if window.roleValue == .terminal {
-                            let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-                            label = fallback.label
-                            detail = fallback.detail
-                        } else {
-                            label = window.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Window"
-                            detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                        }
+                        let rowText = terminalFallbackRowText(
+                            name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: label, detail: detail, status: .none,
+                                kind: target.kind, label: rowText.label, detail: rowText.detail, status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
+                                // Recency is keyed off the row's name: which row was last focused must not
+                                // turn on what its program happens to be printing.
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
-                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
+                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: rowText.label)))
                     case .missingConfiguredProcess:
                         guard let processKey = target.processKey else { continue }
                         items.append(

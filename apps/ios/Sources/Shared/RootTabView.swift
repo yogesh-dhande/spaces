@@ -75,9 +75,14 @@ struct RootTabView: View {
                 // leaves any open terminal viewer's own stream alone — see its doc comment.
                 SpacesMobileDeviceStore.clearActiveHosts()
                 model.resetActiveConnectionEndpoint()
+                model.resumeTerminalWatch()
             case .background:
                 model.browserProxyStop()
                 model.noteConnectionMonitoringPaused()
+                // An open terminal detail survives backgrounding, so watching has to be ended here or the
+                // app would go on treating a session the user cannot see as the one they are looking at
+                // and swallow the bells it rings while away.
+                model.suspendTerminalWatch()
             case .inactive: break
             @unknown default: break
             }

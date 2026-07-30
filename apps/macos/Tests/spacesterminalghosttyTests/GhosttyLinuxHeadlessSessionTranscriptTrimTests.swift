@@ -218,7 +218,7 @@
             }
             let record = DaemonHandoffSessionRecord(
                 sessionID: configuration.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: 80, rows: 24, ownerEpoch: 0,
-                screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue)
+                screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue, transcriptOffsetAtQuiesce: nil)
             try await core.resumeFromHandoff(record)
             try await TerminalEngineActor.run { Self.attachRemoteOwner(to: core, id: "remote-owner") }
 

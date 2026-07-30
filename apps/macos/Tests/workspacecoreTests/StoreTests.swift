@@ -220,6 +220,66 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // Upgrading a profile that already holds live terminal sessions must carry each session forward
+    // whole, and a session that predates bell tracking must report no bell: the bell timestamp is what
+    // raises an alert, so a synthesized one would greet the user with an alert they never earned.
+    func testUpgradeKeepsRuntimeSessionsAndReportsNoBell() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let sessionRoot = URL(fileURLWithPath: root.appendingPathComponent("sessions/legacy", isDirectory: true).path, isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (8);
+                CREATE TABLE terminal_runtime_states (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  backend TEXT NOT NULL,
+                  service_pid INTEGER NOT NULL,
+                  child_pid INTEGER,
+                  title TEXT,
+                  working_directory TEXT,
+                  columns INTEGER,
+                  rows INTEGER,
+                  state TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  exited_at TEXT,
+                  foreground_pid INTEGER,
+                  foreground_executable_path TEXT,
+                  foreground_executable_name TEXT,
+                  foreground_argv_json TEXT,
+                  foreground_detected_agent_kind TEXT,
+                  foreground_display_label TEXT,
+                  foreground_display_command TEXT
+                );
+                INSERT INTO terminal_runtime_states(
+                  session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at
+                ) VALUES (
+                  'legacy-session', '\(sessionRoot.path)', 'ghostty-embedded', 4242, 99, 'legacy title', '/tmp/legacy', 100, 40, 'running',
+                  '2026-07-19T00:00:00Z'
+                );
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: TerminalSessionPaths(rootDirectory: sessionRoot.path))
+            XCTAssertEqual(runtimeState.sessionID, "legacy-session")
+            XCTAssertEqual(runtimeState.title, "legacy title")
+            XCTAssertEqual(runtimeState.workingDirectory, "/tmp/legacy")
+            XCTAssertEqual(runtimeState.childPID, 99)
+            XCTAssertEqual(runtimeState.state, .running)
+            XCTAssertNil(runtimeState.bellAt)
+        }
+    }
+
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
     func testOpeningCurrentVersionDoesNotCreateMigrationBackup() throws {
         let root = try makeTempDirectory()

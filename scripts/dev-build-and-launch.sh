@@ -57,19 +57,20 @@ print_failure_diagnostics() {
   /usr/bin/log show --style compact --last 2m --predicate 'process == "SpacesApp" OR process == "Spaces"' | tail -n 120 || true
 }
 
+# The app inherits this shell's environment and nothing profile-shaped is added to it: the repo-local
+# SpacesApp resolves its own worktree profile from where it sits in the checkout. Only an explicit
+# SPACES_DEV_DB_PATH throwaway profile, exported below, reaches it — as an inherited SPACES_DB_PATH.
 launch_app_detached() {
-  python3 - "$APP" "$LOG_FILE" "$SPACES_DB_PATH" "$SPACES_RUNTIME_DIR" <<'PY'
+  python3 - "$APP" "$LOG_FILE" <<'PY'
 import os
 import subprocess
 import sys
 
-app_path, log_path, db_path, runtime_dir = sys.argv[1:]
+app_path, log_path = sys.argv[1:]
 log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 try:
     env = os.environ.copy()
     env.pop("SPACES_DEVICE_API_DISABLED", None)
-    env["SPACES_DB_PATH"] = db_path
-    env["SPACES_RUNTIME_DIR"] = runtime_dir
     env["SPACES_DEVICE_API_PORT"] = "0"
     process = subprocess.Popen(
         [app_path],
@@ -114,7 +115,7 @@ deploy_remote_linux_spacesd_if_configured() (
   # exactly one remote daemon and the app's own remote pairing derives the same profile without being
   # handed a path. The installer needs the name and nothing else: no database, runtime, host, or port
   # environment reaches it, because a profile-rooted binary resolves all of that from its own path.
-  remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")"
+  remote_profile_name="$(basename "${PROFILE_ROOT:?}")"
   # On the device the name is both a path component under ~/.spaces-dev/profiles/spaces/ and the
   # systemd instance name in spacesd@<name>.service, so the installer accepts only characters that
   # are literal in both. A branch name with a non-ASCII letter slugifies into a profile name that is
@@ -197,13 +198,27 @@ if [[ -n "$dev_codesign_identity" ]]; then
   codesign --force --preserve-metadata=entitlements --sign "$dev_codesign_identity" "$APP"
 fi
 
-spaces_profile_eval_shell_env "$CLI"
+# Drop any binding this shell was started with, before anything resolves a profile. See
+# spaces_profile_clear_inherited_binding.
+spaces_profile_clear_inherited_binding
+
+# SPACES_DEV_DB_PATH launches this build against a one-off throwaway profile instead of the worktree's
+# own, and is applied AFTER the clear so a deliberate request still works while an inherited one cannot.
+# It must name a database outside ~/.spaces and ~/.spaces-dev/profiles; profile resolution refuses a live
+# profile root, which is never something this variable should be pointing at. Naming the database binds
+# the whole profile, so the runtime root derives from it and is deliberately not set here too. It is set
+# before the lookups below so those report the profile this run actually uses.
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"
-  if [[ -z "${SPACES_RUNTIME_DIR:-}" ]]; then
-    export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
-  fi
 fi
+
+# The paths below are looked up from the profile the binaries themselves resolve, not exported into the
+# shell: the app, CLI, and E2E helper all derive their profile from where they sit in this checkout, and
+# a shell binding would only be able to point them somewhere that is not their own.
+PROFILE_ROOT="$(spaces_profile_field "$CLI" profileRoot)"
+PROFILE_DB_PATH="$(spaces_profile_field "$CLI" databasePath)"
+PROFILE_RUNTIME_DIR="$(spaces_profile_field "$CLI" runtimeDirectory)"
+
 if [[ "$LOCAL_ONLY" == "0" ]]; then
   deploy_remote_linux_spacesd_if_configured
 fi
@@ -211,7 +226,6 @@ spaces_profile_stop_running_app "$CLI"
 spaces_profile_stop_terminal_service_if_idle "$CLI"
 
 # Relaunch detached and keep logs so launch failures are visible.
-mkdir -p "$(dirname "$SPACES_DB_PATH")"
 app_pid="$(launch_app_detached)"
 
 # Bring app to front when possible.
@@ -231,8 +245,9 @@ fi
 osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $app_pid to true" >/dev/null 2>&1 || true
 
 echo "Spaces relaunched (pid $app_pid)"
-echo "Using profile database: $SPACES_DB_PATH"
-echo "Using runtime root: $SPACES_RUNTIME_DIR"
+echo "Using profile root: $PROFILE_ROOT"
+echo "Using profile database: $PROFILE_DB_PATH"
+echo "Using runtime root: $PROFILE_RUNTIME_DIR"
 
 if [ "$POST_LAUNCH_MONITOR_SECONDS" -gt 0 ]; then
   echo "Monitoring launch stability for ${POST_LAUNCH_MONITOR_SECONDS}s..."

@@ -53,9 +53,7 @@
         func openSessionStream(
             request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
             onDisconnect: @escaping @MainActor (Error?) -> Void
-        ) async throws -> SpacesDeviceAPIStreamHandle {
-            throw SpacesDeviceAPIClientError.invalidEndpoint
-        }
+        ) async throws -> SpacesDeviceAPIStreamHandle { throw SpacesDeviceAPIClientError.invalidEndpoint }
 
         func currentResolvedHost() async -> String? { resolvedHost }
     }
@@ -71,8 +69,16 @@
     private final class TestClock: @unchecked Sendable {
         private let lock = NSLock()
         private var instant = ContinuousClock.now
-        var now: ContinuousClock.Instant { lock.lock(); defer { lock.unlock() }; return instant }
-        func advance(by duration: Duration) { lock.lock(); defer { lock.unlock() }; instant = instant.advanced(by: duration) }
+        var now: ContinuousClock.Instant {
+            lock.lock()
+            defer { lock.unlock() }
+            return instant
+        }
+        func advance(by duration: Duration) {
+            lock.lock()
+            defer { lock.unlock() }
+            instant = instant.advanced(by: duration)
+        }
     }
 
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
@@ -134,6 +140,21 @@
             XCTAssertEqual(browserRow?.canRun, false)
             XCTAssertEqual(browserRow?.canStop, false)
             XCTAssertEqual(browserRow?.canRestart, false)
+        }
+
+        /// A shell is searchable by what its program is doing, not only by what it is called — the two
+        /// halves of its row both match.
+        func testSearchMatchesAShellsLiveTitle() {
+            let model = makeModel()
+            model.overview = makeOverview(featureTerminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "terminal-shell", workspaceID: "workspace-feature", title: "shell-1", workingDirectory: "/repo/feature",
+                    sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift")
+            ])
+
+            model.searchText = "vim"
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertEqual(rows.map(\.title), ["shell-1"])
         }
 
         /// Runtime rows group by family in the Mac sidebar's order: browser sessions, configured processes,
@@ -296,6 +317,30 @@
             XCTAssertEqual(payload.workspaceID, "workspace-docs")
             XCTAssertEqual(payload.sessionID, "session-shell")
             XCTAssertFalse(model.isMutating)
+        }
+
+        /// A shell row is named by the session and described by what its program reported — nothing until
+        /// it reports something. A configured row says what it runs instead.
+        func testRuntimeRowSecondaryTextIsTheShellsLiveTitle() {
+            func terminalRow(liveTitle: String?) -> SpacesMobileWorkspaceRuntimeRow {
+                SpacesMobileWorkspaceRuntimeRow(
+                    source: .terminal(
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-docs", title: "shell-1", workingDirectory: "/repo/docs",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: liveTitle)))
+            }
+
+            XCTAssertEqual(terminalRow(liveTitle: nil).title, "shell-1")
+            XCTAssertEqual(terminalRow(liveTitle: nil).detail, "")
+            XCTAssertEqual(terminalRow(liveTitle: "vim main.swift").title, "shell-1", "what the program prints never renames the row")
+            XCTAssertEqual(terminalRow(liveTitle: "vim main.swift").detail, "vim main.swift")
+
+            let processRow = SpacesMobileWorkspaceRuntimeRow(
+                source: .process(
+                    SpacesDeviceWorkspaceProcessRow(
+                        id: "template-api", workspaceID: "workspace-docs", name: "api", command: "npm run dev", templateID: "template-api",
+                        processID: nil, sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false)))
+            XCTAssertEqual(processRow.detail, "npm run dev")
         }
 
         func testRunRowWithExistingSessionSendsRunMutation() async {
@@ -812,9 +857,8 @@
             model.activeDeviceID = deviceID
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
-                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port,
-                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
-                    updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
             ]
 
             await model.refresh()
@@ -848,9 +892,8 @@
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.activeDeviceID = "device-1"
             let unchangedRecord = SpacesMobilePairedDeviceRecord(
-                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
-                certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
-                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
             model.pairedDevices = [unchangedRecord]
 
             await model.refresh()
@@ -880,8 +923,8 @@
         func testFailuresThatPersistPastTheDelaySurfaceConnectionError() async {
             let clock = TestClock()
             let model = makeModel(
-                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
-                refreshFailureAlertDelay: .milliseconds(50), clock: clock)
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
 
             await model.refresh()
             XCTAssertNil(model.errorMessage, "the alert must not appear while the failures could still be a blip")
@@ -946,8 +989,8 @@
         func testFailureRunEndsWhenConnectionMonitoringPauses() async {
             let clock = TestClock()
             let model = makeModel(
-                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
-                refreshFailureAlertDelay: .milliseconds(50), clock: clock)
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"), refreshFailureAlertDelay: .milliseconds(50),
+                clock: clock)
 
             await model.refresh()
             clock.advance(by: .milliseconds(60))
@@ -994,9 +1037,7 @@
             let settings = SpacesMobileConnectionSettings()
             let overview = makeOverview()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
-                guard request.commandName == "runWorkspaceProcess" else {
-                    throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
-                }
+                guard request.commandName == "runWorkspaceProcess" else { throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
             }
             let clock = TestClock()
@@ -1023,9 +1064,7 @@
             // refresh fail on the spot (`invalidEndpoint`) instead of dialing anything.
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = []
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
             let clock = TestClock()
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50), now: { clock.now })
@@ -1490,6 +1529,27 @@
             XCTAssertNil(model.errorMessage)
         }
 
+        /// Submitting an empty name clears an ad hoc terminal's rename — the only way back to the live title
+        /// once a row has been named — so the empty title travels to the daemon instead of being discarded.
+        func testEmptyRenameOnAnAdHocTerminalRowClearsItsName() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(featureTerminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-shell", workspaceID: "workspace-feature", title: "build log", workingDirectory: "/repo/feature",
+                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                ]))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "build log" })
+
+            await model.rename(row: row, to: "   ")
+
+            guard case .renameTerminalSession(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected a renameTerminalSession command.")
+            }
+            XCTAssertEqual(request.sessionID, "session-shell")
+            XCTAssertEqual(request.title, "")
+            XCTAssertNil(model.errorMessage)
+        }
+
         /// A configured process is named by its workspace config, not by its session, so the rename edits the
         /// config entry — echoing every other configured field back unchanged.
         func testRenameConfiguredProcessRowEditsItsConfigEntry() async throws {
@@ -1585,6 +1645,8 @@
             XCTAssertEqual(commandNames, [])
         }
 
+        /// A configured row renames its config entry, which must keep a name, so an empty submission there
+        /// is discarded rather than clearing anything.
         func testRenameIgnoresEmptyAndUnchangedTitles() async throws {
             let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
@@ -1701,9 +1763,9 @@
 
         /// A model whose device is unreachable: every request — the overview fetch and the frozen-core
         /// handshake it falls back to — throws.
-        private func makeModel(
-            refreshFailure: any Error, refreshFailureAlertDelay: Duration = .seconds(5), clock: TestClock? = nil
-        ) -> SpacesMobileAppModel {
+        private func makeModel(refreshFailure: any Error, refreshFailureAlertDelay: Duration = .seconds(5), clock: TestClock? = nil)
+            -> SpacesMobileAppModel
+        {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in throw refreshFailure }
             if let clock {

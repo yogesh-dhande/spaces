@@ -164,6 +164,10 @@
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
         ) -> Bool { sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
 
+        @discardableResult public func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            sessionDriver.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+        }
+
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
@@ -306,6 +310,9 @@
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        /// When the running program last rang the bell, coalesced by `bellCoalescer`.
+        private var currentBellAt: String?
+        var bellCoalescer = TerminalBellCoalescer()
         private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
@@ -419,6 +426,7 @@
             sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
             self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [sessionDriver] in sessionDriver.requestSurfaceRefresh() }
             sessionDriver.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+            sessionDriver.onClipboardWrite = { [weak self] text in self?.forwardClipboardWriteToOwner(text) }
             sessionDriver.onSessionStateChanged = { [weak self] change in self?.applySessionStateChange(change) }
             sessionDriver.onSurfaceCellSizeChanged = { [weak self] columns, rows in
                 guard let self else { return }
@@ -556,8 +564,8 @@
             started = false
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
-                state: .exited, updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
+                state: .exited, updatedAt: now, exitedAt: now, title: currentTitle, workingDirectory: effectiveWorkingDirectory,
+                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows, bellAt: currentBellAt)
             // All three terminal writes are enqueued (not written inline) so teardown never blocks the engine
             // on the DB lock; FIFO ordering on the serial persistence queue lands them after every pending
             // mirror write and in this order: exited runtime state, detach-all, terminated payload. They
@@ -800,7 +808,7 @@
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: size.columns,
                 rows: size.rows, ownerEpoch: ownerEpoch, screenStateRevision: lastScreenStateRevision ?? 0,
-                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue)
+                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue, transcriptOffsetAtQuiesce: handoffTranscriptReplayOffset)
         }
 
         /// Holds the PTY sink boundary while the daemon performs its final persistence
@@ -847,6 +855,18 @@
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             // Preserve output.log: adoptFromHandoff replays it to rebuild the screen.
             try openOutputHandlePreservingTranscript()
+
+            // Seed the bell from the row the pre-exec image wrote, before anything in this resume writes
+            // runtime state from this core's (empty) state — the first such write would put NULL over the
+            // bell and silently retract an alert the user has not dealt with. Title and cwd are
+            // deliberately not seeded (the surface replay re-establishes them), but no replay can
+            // re-establish a bell: it is an event, not screen state, and a trimmed transcript may not even
+            // carry the BEL. The coalescing window is restored with it, so a bell moments after the
+            // handoff — including one the replayed transcript re-rings through the live action handler —
+            // is absorbed into the alert the user already has instead of minting a second one.
+            let persistedBellAt = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt
+            currentBellAt = persistedBellAt
+            bellCoalescer.seedLastAdvanced(at: persistedBellAt.flatMap(TerminalSessionTimestamp.date(from:)))
 
             // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
             // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
@@ -974,6 +994,7 @@
             case .takeover: controlResponseForTakeoverRequest(request)
             case .resize: controlResponseForResizeRequest(request)
             case .scroll: controlResponseForScrollRequest(request)
+            case .mouseButton: controlResponseForMouseButtonRequest(request)
             case .setAppearance: controlResponseForSetAppearanceRequest(request)
             case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
@@ -1054,6 +1075,19 @@
                 // The upsert rewrote this client's durable lease, so any coalesced-write record from an
                 // earlier attachment of the same client id is void; the first touch of this attachment writes.
                 leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
+                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner
+                // in the same mode, which advances no epoch and changes no attachment — while its host
+                // counts serials from zero again. Carrying the previous attachment's high-water mark across
+                // that would reject every serial the reconnected client sends and pin the session to the
+                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+                // so a resize still in flight from the PREVIOUS host of this same id could land after the
+                // reset and outrank the new host's early serials. That needs a same-process host swap with
+                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+                // stale mark and every state payload re-announces the viewport), and the alternative —
+                // carrying an attachment incarnation in every resize request — is a wire change this
+                // corner does not justify.
+                lastResizeSerialByClientID.removeValue(forKey: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
                 let attachmentChanged = currentAttachment?.mode != mode
@@ -1294,17 +1328,9 @@
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
             let pointerPosition: TerminalScrollPointerPosition?
-            switch (request.scrollPointerX, request.scrollPointerY, request.scrollPointerMods) {
-            case (nil, nil, nil): pointerPosition = nil
-            case (let x?, let y?, let mods):
-                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
-                guard position.isValid else {
-                    return TerminalControlResponse(ok: false, message: "Invalid terminal scroll pointer position.", errorCode: .invalidArgument)
-                }
-                pointerPosition = position
-            default:
-                return TerminalControlResponse(
-                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+            switch resolvedPointerPosition(x: request.scrollPointerX, y: request.scrollPointerY, mods: request.scrollPointerMods, command: "scroll") {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
             }
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
                 return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
@@ -1321,6 +1347,69 @@
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
             return TerminalControlResponse(ok: scrolled, message: scrolled ? "Scrolled terminal." : "Unable to scroll terminal.")
+        }
+
+        /// Resolves a control request's normalized pointer fields. Absent coordinates leave the daemon's
+        /// pointer where it is; a partial or out-of-range pair is a malformed request, not a no-op.
+        private enum PointerPositionResolution {
+            case resolved(TerminalScrollPointerPosition?)
+            case rejected(TerminalControlResponse)
+        }
+
+        private func resolvedPointerPosition(x: Double?, y: Double?, mods: UInt32?, command: String) -> PointerPositionResolution {
+            switch (x, y, mods) {
+            case (nil, nil, nil): return .resolved(nil)
+            case (let x?, let y?, let mods):
+                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
+                guard position.isValid else {
+                    return .rejected(
+                        TerminalControlResponse(ok: false, message: "Invalid terminal \(command) pointer position.", errorCode: .invalidArgument))
+                }
+                return .resolved(position)
+            default:
+                return .rejected(
+                    TerminalControlResponse(
+                        ok: false, message: "Terminal \(command) pointer coordinates must be provided together.", errorCode: .invalidArgument))
+            }
+        }
+
+        private func controlResponseForMouseButtonRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "mouseButton", startedAt: startedAt) { return rejection }
+            guard let button = request.mouseButton, let pressed = request.mousePressed else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse button.", errorCode: .invalidArgument)
+            }
+            guard button >= TerminalControlMouseButtonPayload.minimumButton, button <= TerminalControlMouseButtonPayload.maximumButton else {
+                return TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument)
+            }
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch resolvedPointerPosition(
+                x: request.mousePointerX, y: request.mousePointerY, mods: request.mousePointerMods, command: "mouse button")
+            {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
+            }
+            // A click carries its own position: unlike a scroll, which can legitimately ride whatever the
+            // pointer was last moved to, a button with no position names no cell.
+            guard let pointerPosition else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            if let ownerClient = activeOwnerClient() {
+                logMobileTakeoverPerformance(
+                    name: "owner_input_activity",
+                    attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "mouse_button"])
+            }
+            // No state broadcast, unlike scroll: a button press changes nothing on its own. Whatever the
+            // application draws in response arrives as terminal output and is broadcast with that output.
+            let delivered = rendererHostStorage.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+            TerminalPerformance.logMetric(
+                "terminal_control_mouse_button", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: delivered)
+            return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse button." : "Unable to deliver mouse button.")
         }
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1438,11 +1527,14 @@
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now),
-                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
+                // The raw reported title, not `effectiveTitle`: the runtime state records what the program
+                // said, and folding the launch title in would leave every reader unable to tell an untitled
+                // session from one that titled itself after its own name.
+                title: currentTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
                 rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
             // Advance the in-memory authoritative state first so broadcasts show live truth immediately,
             // independent of when (or whether) the enqueued durable write lands.
             latestRuntimeState = state
@@ -1724,6 +1816,26 @@
             switch event {
             case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
+            case .ringBell:
+                // A bell changes no metadata a title is derived from, so it skips the metadata
+                // announcement below and only forces the runtime-state write the clients read the
+                // timestamp from. `ring` returning nil is the coalescing window absorbing this bell.
+                //
+                // A daemon handoff replays the transcript through this same surface, so every bell the
+                // scrollback ever carried is re-emitted here and stamps a fresh timestamp. The window
+                // collapses that whole replay into a single alert, which is the bound accepted for it:
+                // GhosttyKit delivers surface actions asynchronously, so nothing at this layer can tell
+                // a replayed bell from a live one.
+                //
+                // One timestamp per session is the alert model: a later bell REPLACES the identity, so a
+                // bell a client suppresses as watched can supersede an earlier unwatched one that never
+                // alerted (two rings over 30s apart straddling a client's watch window with no refresh
+                // between). Accepted: closing it means per-session bell history on the wire, and the
+                // user is already looking at this terminal when the superseding bell rings.
+                guard let bellAt = bellCoalescer.ring() else { return }
+                currentBellAt = TerminalSessionTimestamp.string(from: bellAt)
+                refreshRuntimeState(force: true)
+                return
             case .openURL(_, let value):
                 // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
                 // this is effectively a no-op there, but keep it correct via an async engine→main hop
@@ -1734,6 +1846,23 @@
             }
             postSessionMetadataDidChange()
             refreshRuntimeState(force: true)
+        }
+
+        /// Sends a program's OSC 52 copy to the client that owns the session, so the text lands on the
+        /// machine the user is typing on rather than on this daemon's host.
+        ///
+        /// Dropped when nothing owns the session: a copy is a one-shot with no destination then, and
+        /// queueing it for a future owner would paste text the user copied in a session they had walked
+        /// away from. Replayed writes never reach here — the driver's replay bracket refuses them at
+        /// the runtime callback, where a replayed write is still distinguishable from a live one.
+        ///
+        /// The copy rides the state stream and touches no runtime state, so this deliberately does not
+        /// force a runtime-state write the way the metadata and bell paths do.
+        private func forwardClipboardWriteToOwner(_ text: String) {
+            guard let ownerClientID = activeOwnerClientID() else { return }
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite,
+                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
         }
 
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
@@ -2037,7 +2166,7 @@
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
         }
 
         private static func isProcessAlive(pid: Int32) -> Bool {
@@ -2090,7 +2219,9 @@
                 markNextBroadcastFullWhenMissingRenderUpdate: true)
         }
 
-        private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
+        private func broadcastCurrentState(
+            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+        ) {
             guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
             let ownerClient = activeOwnerClient()
@@ -2100,7 +2231,8 @@
             )
             guard stateStreamServer != nil,
                 let payload = currentRemoteSessionState(
-                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed)
+                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed,
+                    clipboardWrite: clipboardWrite)
             else { return }
             broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
         }
@@ -2145,7 +2277,8 @@
 
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
+            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
+            clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2208,7 +2341,7 @@
                     sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                     screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                     title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate)
+                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
             }
             if markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
             return GhosttyRemoteSessionStatePayload(
@@ -2216,7 +2349,7 @@
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                outputEndByteOffset: bootstrapOutputEndByteOffset)
+                outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite)
         }
 
         private func makeRenderUpdate(

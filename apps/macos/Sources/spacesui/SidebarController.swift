@@ -301,9 +301,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             device: snapshot.localPairedDevice, projects: retainedContent?.projects ?? snapshot.projects,
             workspacesByProject: retainedContent?.workspacesByProject ?? snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: retainedContent?.workspaceRuntimeStatusByID ?? snapshot.workspaceRuntimeStatusByID,
-            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups,
-            overview: retainedContent?.overview ?? snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus,
-            compatibility: snapshot.localCompatibility)
+            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups, overview: retainedContent?.overview ?? snapshot.localDeviceOverview,
+            daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
         // Compare against the section actually being installed, not the raw snapshot: an outage installs
         // the retained rows, so comparing with the placeholder would reload the outline on every poll of
         // a daemon that stays down and collapse the user's expanded projects each time.
@@ -345,8 +344,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
-        rebuildFlatSidebarData()
+        // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
+        // session's bell into that same set and writes it back, so a consume that ran against a not-yet
+        // loaded (empty) set would persist itself over everything the user had dismissed.
         host.loadAlertsDismissedAttentionItemIDs()
+        rebuildFlatSidebarData()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         if !localOutlineUnchanged {
             host.outlineView.reloadData()
@@ -905,12 +907,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// including the ones that are not loaded: an unreachable device keeps its rows listed for the whole
     /// outage, and id-based lookups resolve through this merged data, so excluding it would both erase
     /// its subtree and make every workspace under it unresolvable.
+    ///
+    /// Every path that installs a device overview funnels through here — the local snapshot, the remote
+    /// pull/subscription, and a mutation response — so this is also where surfaces that read those
+    /// overviews but are re-derived by nothing else get refreshed. Global panel windows are the one such
+    /// surface: a rename reaches this client only in an overview, and no overview update re-renders a
+    /// global panel window (see `PanelCoordinator.refreshGlobalPanelTitles`).
     func rebuildFlatSidebarData() {
         let merged = AppKitController.mergedSidebarData(sections: host.deviceSections)
         host.projects = merged.projects
         host.workspacesByProject = merged.workspacesByProject
         host.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
         host.alertsGroups = merged.alertsGroups
+        // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
+        // is typing in gets consumed — before anything reads the groups for the badge or the list.
+        host.consumeFocusedSessionBellAlerts()
+        host.panelCoordinator.refreshGlobalPanelTitles()
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
@@ -1576,12 +1588,27 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
-            titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            // Name then secondary text, the two-part shape a process row already uses (see
+            // `AppKitController.windowRow`): the name goes semibold once something trails it, so the
+            // two halves stay tellable apart at the sidebar's one type size.
+            titleLabel.font = .systemFont(ofSize: 11, weight: item.detail == nil ? .regular : .semibold)
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
+
+            // Ad hoc shells trail the title their program reported as dimmed secondary text. It
+            // compresses before the name does, so a long title never squeezes out what the row is.
+            if let detail = item.detail {
+                let detailLabel = NSTextField(labelWithString: detail)
+                detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                detailLabel.textColor = sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
+                detailLabel.lineBreakMode = .byTruncatingTail
+                detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+                detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                row.addArrangedSubview(detailLabel)
+            }
         }
 
         row.addArrangedSubview(NSView())

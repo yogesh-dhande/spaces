@@ -353,8 +353,7 @@ import Foundation
                 // short-timeout ping probe on `socketPath`), plus the ok-pong early exit described above.
                 let response =
                     FileManager.default.fileExists(atPath: socketPath)
-                    ? try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2)
-                    : nil
+                    ? try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2) : nil
                 if let response, response.ok { return }
                 if !isProcessAlive(pid: Int(ownerPID)) && response == nil { return }
                 Thread.sleep(forTimeInterval: 0.05)
@@ -537,8 +536,7 @@ import Foundation
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(
                     sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil,
-                    state: .running, updatedAt: TerminalSessionTimestamp.string(from: Date()), title: launchConfiguration.title,
-                    workingDirectory: launchConfiguration.workingDirectory)
+                    state: .running, updatedAt: TerminalSessionTimestamp.string(from: Date()), workingDirectory: launchConfiguration.workingDirectory)
             try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             return TerminalServiceSessionSummary(
                 id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
@@ -555,12 +553,12 @@ import Foundation
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited, updatedAt: now,
-                    exitedAt: now, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
+                    exitedAt: now, workingDirectory: launchConfiguration.workingDirectory)
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID, childPID: runtimeState.childPID,
-                state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title ?? launchConfiguration.title,
+                state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                rows: runtimeState.rows)
+                rows: runtimeState.rows, bellAt: runtimeState.bellAt)
             try TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
         }
@@ -636,9 +634,12 @@ import Foundation
             appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            switch profile.source {
-            case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
-            case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath:
+            // Split by what the profile IS — the installed profile, or any development one — rather than by
+            // which resolution branch produced it, since the installed profile is reachable through more
+            // than one branch.
+            if profile.isInstalledProfile {
+                for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
+            } else {
                 for relativePath in [
                     "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
                 ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
@@ -648,7 +649,7 @@ import Foundation
                 return URL(fileURLWithPath: candidate, isDirectory: false)
             }
 
-            throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
+            throw TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: candidates)
         }
 
         private static func isProcessAlive(pid: Int) -> Bool {
@@ -664,32 +665,31 @@ import Foundation
         /// only decides which half of the excluded candidates has to be explained: an installed profile
         /// never starts a development build from the current directory, and a development profile never
         /// starts the installed daemon.
-        case daemonNotFound(profileSource: SpacesProfileSource, profileRoot: String, searchedPaths: [String])
+        case daemonNotFound(profile: SpacesProfile, searchedPaths: [String])
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
-            case .daemonNotFound(let profileSource, let profileRoot, let searchedPaths):
+            case .daemonNotFound(let profile, let searchedPaths):
                 let described: (kind: String, explanation: String) =
-                    switch profileSource {
-                    case .installedFallback:
-                        (
-                            "installed",
-                            "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
-                                + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
-                        )
-                    case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath:
-                        (
-                            "development",
-                            "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
-                                + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
-                                + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
-                        )
-                    }
-                return "No spacesd was found for the \(described.kind) profile at \(profileRoot). \(described.explanation) Searched: "
-                    + searchedPaths.joined(separator: ", ")
+                    profile.isInstalledProfile
+                    ? (
+                        "installed",
+                        "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
+                            + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
+                    )
+                    : (
+                        "development",
+                        "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
+                            + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
+                            + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
+                    )
+                // The discovery route is carried as provenance only: it explains how a surprising profile was
+                // arrived at without being what decided anything above.
+                return "No spacesd was found for the \(described.kind) profile at \(profile.rootDirectory) "
+                    + "(resolved via \(profile.source.rawValue)). \(described.explanation) Searched: " + searchedPaths.joined(separator: ", ")
             case .daemonWireIncompatible(let incompatibility): return incompatibility.message
             case .requestFailed(let message): return message
             case .serviceStartupTimedOut(let path): return "Timed out waiting for spacesd to start from \(path)."
@@ -792,17 +792,22 @@ import Foundation
         #if os(Linux)
             /// The user systemd unit that owns this profile's daemon on a Linux device.
             ///
+            /// The installed profile is recognised by its root rather than by the branch that resolved it, so a
+            /// daemon that reached `~/.spaces` by any route asks systemd for the one unit that serves it.
+            ///
             /// `nil` means no unit exists for the profile, so there is nothing to start and a missing daemon stays
-            /// the caller's error. That is the honest answer for a repo-built worktree profile or an explicit
-            /// database path: both belong to a developer-driven process on a machine with a Spaces checkout, where
-            /// the daemon is started by whatever launched the build, and inventing a unit name for them would only
-            /// ask systemd to start something that was never installed.
+            /// the caller's error. That is the honest answer for a repo-built worktree profile or an ephemeral
+            /// explicit database path: both belong to a developer-driven process on a machine with a Spaces
+            /// checkout, where the daemon is started by whatever launched the build, and inventing a unit name for
+            /// them would only ask systemd to start something that was never installed. A profile that fell
+            /// through to `<home>/.spaces` without that being the installed root — a redirected `HOME` — has no
+            /// unit either, for the same reason.
             static func systemdUnitName(for profile: SpacesProfile) -> String? {
+                if profile.isInstalledProfile { return "spacesd.service" }
                 switch profile.source {
-                case .installedFallback: return "spacesd.service"
                 case .deployedDevelopmentProfile:
                     return "spacesd@\(URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).lastPathComponent).service"
-                case .developmentWorktree, .explicitDatabasePath: return nil
+                case .installedFallback, .developmentWorktree, .explicitDatabasePath: return nil
                 }
             }
 

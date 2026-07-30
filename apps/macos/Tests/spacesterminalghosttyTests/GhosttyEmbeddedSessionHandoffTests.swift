@@ -146,7 +146,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
     private static func handoffRecord(from record: DaemonHandoffSessionRecord, adopting pty: AdoptablePTY) -> DaemonHandoffSessionRecord {
         DaemonHandoffSessionRecord(
             sessionID: record.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: record.columns, rows: record.rows,
-            ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance)
+            ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance,
+            transcriptOffsetAtQuiesce: record.transcriptOffsetAtQuiesce)
     }
 
     /// Engine-isolated; call from inside a `TerminalEngineActor.run`/`runSynchronously` bridge.
@@ -244,6 +245,67 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let transcript = try String(contentsOfFile: paths.outputPath)
         XCTAssertEqual(Self.occurrences(of: marker, in: transcript), 1, "replay must not re-append the original transcript to output.log")
         XCTAssertEqual(Self.occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
+    }
+
+    /// A daemon update must not retract an alert the user has not dealt with. The bell timestamp is that
+    /// alert's identity; the staged image's core is built with no bell of its own and rewrites runtime
+    /// state as it resumes, so without seeding from the persisted row that write lands NULL over the bell
+    /// and the alert disappears from every client.
+    ///
+    /// The transcript is trimmed to bytes that carry no BEL, which is both a real case (a trimmed
+    /// transcript's preamble restores no bell — a bell is an event, not screen state) and the only way to
+    /// observe the retraction: with the BEL still in the transcript the replay re-rings it through the
+    /// live action handler, and in-process the re-mint lands in the same second as the original, so a
+    /// retracted bell would be indistinguishable from a preserved one.
+    func testResumeKeepsThePersistedBellWhenTheTranscriptNoLongerCarriesIt() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let configuration = Self.makeConfiguration(sessionID: "handoff-bell-\(UUID().uuidString)", command: "stty -echo; printf '\\007'; cat")
+        let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try sourceCore.startIfNeeded()
+            return Box(sourceCore)
+        }
+        let sourceCore = sourceCoreBox.value
+        try await waitAsync { (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt != nil }
+        let stateBeforeHandoff = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        let bellAt = try XCTUnwrap(stateBeforeHandoff.bellAt)
+
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
+        TerminalEngineActor.runSynchronously { sourceCore.terminate() }
+
+        try Data("TRIMMED\r\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+
+        let pty = try Self.makeAdoptablePTY()
+        let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let resumedCore = resumedCoreBox.value
+        defer {
+            Self.tearDown(pty)
+            TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+        }
+        // updatedAt is second-granular, and after the resume write nothing else ever writes this row
+        // (the child sits silent), so the resumed core's write is observable below only if it lands in
+        // a later second than the pre-handoff row. Crossing the boundary here makes that deterministic;
+        // without it the whole quiesce-terminate-resume sequence can complete inside one second and the
+        // wait times out on a write that DID land.
+        try await Task.sleep(for: .milliseconds(1_100))
+        try await resumedCore.resumeFromHandoff(Self.handoffRecord(from: record, adopting: pty))
+
+        // Wait for a runtime-state write the resumed core produced, so the assertion cannot pass by
+        // reading the row the pre-exec image left behind. The failure message carries the row so a
+        // timeout distinguishes "no write ever landed" (updatedAt still the pre-handoff value —
+        // a starved persistence queue) from a write that landed without moving the second-granular
+        // timestamp (an updatedAt collision).
+        try await waitAsync { (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.updatedAt != stateBeforeHandoff.updatedAt }
+        let rowAfterTimeoutWindow = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertNotEqual(
+            rowAfterTimeoutWindow?.updatedAt, stateBeforeHandoff.updatedAt,
+            "row: state=\(String(describing: rowAfterTimeoutWindow?.state)) bellAt=\(String(describing: rowAfterTimeoutWindow?.bellAt)) updatedAt=\(String(describing: rowAfterTimeoutWindow?.updatedAt))")
+        XCTAssertEqual(rowAfterTimeoutWindow?.bellAt, bellAt)
     }
 
     /// Pins the teardown ordering the daemon's resume-failure path (`resumeHandoffSession`) relies on: a

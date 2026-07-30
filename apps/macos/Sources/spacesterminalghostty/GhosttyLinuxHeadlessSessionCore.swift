@@ -8,12 +8,14 @@
     enum GhosttyLinuxHeadlessSessionError: LocalizedError {
         case vtSessionUnavailable
         case vtReplayFailed
+        case eventRegistrationFailed
         case snapshotUnavailable
 
         var errorDescription: String? {
             switch self {
             case .vtSessionUnavailable: "libghostty-vt is not available for the headless terminal session."
             case .vtReplayFailed: "libghostty-vt could not replay the terminal transcript."
+            case .eventRegistrationFailed: "libghostty-vt could not register the headless terminal session's event callbacks."
             case .snapshotUnavailable: "Unable to export a headless terminal render frame."
             }
         }
@@ -116,12 +118,31 @@
         /// DB-reading consumers (the overview) observe a change only once it is durable.
         private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
         private var lastKnownChildPID: Int32?
+        /// The title the running program last set with OSC 0/2, and the working directory it last
+        /// reported with OSC 7, refreshed from the vt session as output arrives. Nil until the program
+        /// sets one (or after it clears one), which is when the runtime state falls back to the
+        /// launch configuration's values. Cached on the core rather than read from the vt session at
+        /// every echo site because the cache must outlive the vt session itself: a handoff rebuilds
+        /// the session and replays the transcript, and a trimmed transcript's state preamble
+        /// deliberately does not restore titles.
+        private var currentTitle: String?
+        private var currentWorkingDirectory: String?
+        /// When the running program last rang the bell, coalesced by `bellCoalescer`. Cached on the core
+        /// for the same reason the title is: a handoff rebuilds the vt session, and the replay carries no
+        /// bell at all, so the value has to come from the row the pre-exec image wrote.
+        private var currentBellAt: String?
+        var bellCoalescer = TerminalBellCoalescer()
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
         // The Spaces theme appearance the vt session is currently themed for. The headless daemon
         // cannot read the client's OS appearance, so it defaults to dark and adopts the attaching
         // client's appearance on attach.
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
+        /// The newest resize serial accepted from each client. Resize requests travel off the client's
+        /// serialized input path, so two sizes measured in order can arrive out of order; a size older
+        /// than the one already applied would otherwise pin the session to a grid the client has left.
+        /// Cleared when the owner epoch advances, since serials are per-ownership.
+        private var lastResizeSerialByClientID: [String: UInt64] = [:]
         /// Rate-limits the durable client lease writes this core performs inline on the engine (see
         /// `touchClientLeaseIfDue`). Reset for a client on attach and detach — the only ways this core
         /// changes that client's durable row — and wholesale on termination's detach-all.
@@ -139,6 +160,9 @@
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
         private var scrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+        /// Pending precise horizontal delta for wheel reports. Only consulted while an application
+        /// tracks the mouse — the viewport itself never scrolls horizontally.
+        private var pendingPreciseHorizontalDelta: Double = 0
         private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -165,6 +189,12 @@
             try ensureOutputHandle()
             guard let vtSession = makeVTSession(columns: terminalSize.columns, rows: terminalSize.rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
+            }
+            // A fresh session replays nothing, so every event it raises from here on belongs to live
+            // output the user is watching.
+            guard spaces_ghostty_vt_session_enable_events(vtSession) else {
+                spaces_ghostty_vt_session_free(vtSession)
+                throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
             }
             self.vtSession = vtSession
             started = true
@@ -354,6 +384,14 @@
             // every registered persistence task completed without relying on timing.
             await outputDeliveryFence.waitUntilDrained()
 
+            // Second write-queue drain, after the output fence: a handleOutput turn that finished
+            // between the first drain and the fence may have enqueued query replies. Its query bytes
+            // land before the boundary recorded below — the resume replay treats them as already
+            // answered — so the replies must reach the PTY before execv destroys the queue, or they
+            // are lost on both sides. No enqueue can race this drain: the control server is stopped,
+            // the sequencer is drained, and the fence proved every output handler completed.
+            await ptyDriver.drainPendingWrites()
+
             if let outputHandle {
                 do {
                     try outputHandle.synchronize()
@@ -378,7 +416,8 @@
 
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
-                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
+                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue,
+                transcriptOffsetAtQuiesce: handoffTranscriptReplayOffset)
         }
 
         /// Holds the PTY sink boundary while the daemon performs its final persistence
@@ -399,6 +438,14 @@
                 do {
                     _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
                 } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8)) }
+                // The replayed suffix is output this still-live (and still events-enabled) vt session
+                // never saw, so it may carry a title or pwd newer than the cache, and queries the
+                // program is still blocked on. Those are applied and answered. The bells and clipboard
+                // writes the same suffix raised are dropped: they are as old as the handoff window, so
+                // alerting on them would be alerting on output the user already scrolled past.
+                let events = drainSessionEvents()
+                applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+                sendQueryResponses(events.ptyResponse)
             }
             do { try openOutputHandlePreservingTranscript() } catch {
                 FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8))
@@ -444,14 +491,49 @@
             installOutputHandler()
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
 
+            // Seed the title/cwd cache from the row the pre-exec image wrote: this core is a fresh
+            // object, and the replay below cannot always recover them (a trimmed transcript's state
+            // preamble deliberately restores no title). The replay's own refresh overwrites these when
+            // it sees newer escape sequences. Accepted (user-approved): a row written by a pre-change
+            // binary stored the launch-title fallback here, so an untitled session surviving that one
+            // upgrade seeds its own name as a reported title and shows it duplicated until the program
+            // titles itself or the session restarts. Normalizing it away would permanently drop a title
+            // that legitimately equals the session's name — compat shims are deliberately not kept.
+            if let persisted = try? TerminalSessionPersistence.readRuntimeState(paths: paths) {
+                currentTitle = persisted.title
+                currentWorkingDirectory = persisted.workingDirectory
+                // The bell timestamp is the identity of an alert a client may not have dismissed yet, so
+                // the resumed core must republish exactly the one the pre-exec image did rather than let
+                // the handoff silently retract it. The coalescing window is restored with it: a fresh
+                // coalescer would let the first bell after the handoff advance the timestamp and raise a
+                // second alert for a bell the user has already been shown.
+                currentBellAt = persisted.bellAt
+                bellCoalescer.seedLastAdvanced(at: persisted.bellAt.flatMap(GhosttyRemoteSessionStateTimestamp.date(from:)))
+            }
+
             // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
             // synchronously into a replacement VT session, then swaps it in and arms the
             // full-frame flag.
-            try recreateVTRenderer(columns: record.columns, rows: record.rows)
+            try recreateVTRenderer(columns: record.columns, rows: record.rows, eventsLiveFromTranscriptOffset: record.transcriptOffsetAtQuiesce)
 
             // Adopt the inherited PTY only AFTER replay so no live byte races ahead of the
             // replayed transcript. The read loop starts here.
             ptyDriver.adopt(masterFD: record.masterFD, childPID: record.childPID)
+
+            // The handoff-window suffix replayed above with events live, so this drain carries exactly
+            // what those bytes raised. Nothing ever parsed them — the old image buffered them straight
+            // to output.log — so the program may still be blocked on a query, and its title or pwd may
+            // be newer than the row this core seeded from; both are settled here. The replies need the
+            // adopted PTY, which is why the drain sits after `adopt` rather than inside the rebuild;
+            // everything between the two is synchronous on the engine actor, so no live output can
+            // interleave. The same suffix's bells and clipboard writes are dropped: they are as old as
+            // the handoff window, so alerting on them would be alerting on output the user already
+            // scrolled past. The macOS core needs none of this — its replay runs through the GhosttyKit
+            // surface, which answers queries itself through its runtime write callback — so the record's
+            // offset is written there for truthfulness and consumed only here.
+            let events = drainSessionEvents()
+            applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+            sendQueryResponses(events.ptyResponse)
 
             ownerEpoch = record.ownerEpoch
             // Advance past the recorded revision and force the first broadcast to a full
@@ -487,9 +569,32 @@
                 attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
             _ = appendTranscript(data)
             writeVTRenderer(data)
+            let events = drainSessionEvents()
+            let metadataChanged = applyMetadataEvents(titleChanged: events.titleChanged, pwdChanged: events.pwdChanged)
+            sendQueryResponses(events.ptyResponse)
+            applyBellEvents(count: events.bellCount)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
+            // After the output broadcast: that payload carries the screen frame, this one carries no
+            // screen state at all, so the frame keeps the delta chain and the metadata reason only
+            // drives the client's title refresh.
+            if metadataChanged { postSessionMetadataDidChange() }
+            if let clipboardText = events.clipboardText { forwardClipboardWriteToOwner(clipboardText) }
             scheduleInputOutputResyncIfNeeded()
+        }
+
+        /// Sends a program's OSC 52 copy to the client that owns the session, so the text lands on the
+        /// machine the user is typing on rather than on this daemon's host.
+        ///
+        /// Dropped when nothing owns the session: a copy is a one-shot with no destination then, and
+        /// queueing it for a future owner would paste text the user copied in a session they had walked
+        /// away from. Broadcast after the output payload so the frame that carried the escape sequence
+        /// is already on the wire.
+        private func forwardClipboardWriteToOwner(_ text: String) {
+            guard let ownerClientID = activeOwnerClientID() else { return }
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite,
+                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
         }
 
         @discardableResult private func appendTranscript(_ data: Data) -> Bool {
@@ -581,6 +686,7 @@
             case "clearScreen": response = clearScreen(request)
             case "resize": response = resize(request)
             case "scroll": response = scroll(request)
+            case "mouseButton": response = mouseButton(request)
             case "setAppearance": response = setAppearance(request)
             default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
@@ -608,6 +714,19 @@
                 // The attach wrote this client's lease and revived its durable row, so any coalescing record
                 // from an earlier attachment of the same client id is void.
                 leaseTouchCoalescer.forget(clientID: client.id)
+                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner,
+                // which leaves the owner unchanged and so does not advance the epoch — while its host
+                // counts serials from zero again. Carrying the previous attachment's high-water mark across
+                // that would reject every serial the reconnected client sends and pin the session to the
+                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+                // so a resize still in flight from the PREVIOUS host of this same id could land after the
+                // reset and outrank the new host's early serials. That needs a same-process host swap with
+                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+                // stale mark and every state payload re-announces the viewport), and the alternative —
+                // carrying an attachment incarnation in every resize request — is a wire change this
+                // corner does not justify.
+                lastResizeSerialByClientID.removeValue(forKey: client.id)
                 if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -782,10 +901,18 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.", errorCode: .ownershipRejected)
             }
+            if let rejection = staleResizeSerialRejection(for: request) { return rejection }
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
             guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // Resizing to the grid the session already has is a no-op, not a reflow: reflowing would
+            // rewrite every row, bump the screen revision and push a full frame to every subscriber for
+            // a screen that did not change.
+            guard terminalSize.columns != columns || terminalSize.rows != rows else {
+                recordAcceptedResizeSerial(from: request)
+                return TerminalControlResponse(ok: true, message: "Terminal already matches the requested size.")
+            }
             // Resize transforms the LIVE renderer in place (libghostty reflow), never by
             // replaying output.log at the new size: the session already holds the accumulated
             // state, and the transcript's bytes (including any trim-time state preamble) are
@@ -801,6 +928,7 @@
             forceNextBroadcastFullRenderUpdate = true
             screenStateRevision &+= 1
             terminalSize = (columns, rows)
+            recordAcceptedResizeSerial(from: request)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
@@ -815,6 +943,14 @@
             let vertical = request.scrollVertical ?? 0
             let scrollMods = request.scrollMods ?? 0
             let deltaRows = scrollDeltaNormalizer.terminalViewportDeltaRows(vertical: vertical, scrollMods: scrollMods)
+            // A wheel event belongs to the application once it tracks the mouse: ghostty's surface reports
+            // one button-four/five press per row of delta (six/seven per column of horizontal delta) and
+            // leaves the viewport alone, and this is the same behavior on the vt-only host.
+            if GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession) {
+                let deltaColumns = horizontalWheelReportDelta(horizontal: request.scrollHorizontal ?? 0, scrollMods: scrollMods)
+                guard deltaRows != 0 || deltaColumns != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
+                return reportWheel(request, deltaRows: deltaRows, deltaColumns: deltaColumns, session: vtSession)
+            }
             guard deltaRows != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
             var attributes = [
                 "action": request.command, "client_id": request.clientID ?? "nil", "delta_rows": String(deltaRows),
@@ -842,6 +978,96 @@
                 name: "scroll_broadcast_end", elapsedMS: TerminalPerformance.elapsedMS(since: broadcastStartedAt), attributes: attributes)
             return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
         }
+
+        /// Converts a horizontal scroll delta into wheel-report columns with ghostty's own x-axis
+        /// semantics, which differ from the vertical axis on purpose: a non-precise notch maps to
+        /// exactly one report (ghostty rounds the offset directly, with no discrete multiplier),
+        /// and precise deltas accumulate against the cell width. Returns ghostty's sign: positive
+        /// is rightward.
+        private func horizontalWheelReportDelta(horizontal: Double, scrollMods: Int32) -> Int {
+            guard horizontal != 0 else { return 0 }
+            guard TerminalScrollModifiers.hasPreciseDeltas(scrollMods) else { return Int(horizontal.rounded()) }
+            let pending = pendingPreciseHorizontalDelta + horizontal
+            guard abs(pending) >= Self.approximateCellWidth else {
+                pendingPreciseHorizontalDelta = pending
+                return 0
+            }
+            let delta = Int((pending / Self.approximateCellWidth).rounded(.towardZero))
+            pendingPreciseHorizontalDelta = pending - Double(delta) * Self.approximateCellWidth
+            return delta
+        }
+
+        /// A headless session has no font metrics to take a real cell width from; the vertical
+        /// axis' default cell height with a typical monospace aspect ratio stands in for one.
+        private static let approximateCellWidth: Double = TerminalScrollDeltaNormalizer.defaultCellHeight / 2
+
+        private func reportWheel(_ request: TerminalControlRequest, deltaRows: Int, deltaColumns: Int, session: OpaquePointer)
+            -> TerminalControlResponse
+        {
+            let cell = pointerCell(x: request.scrollPointerX, y: request.scrollPointerY)
+            // The vertical normalizer negates raw deltas (negative rows = scrolled up = button four);
+            // horizontal deltas keep ghostty's sign (positive = right = button six).
+            let verticalButton = deltaRows < 0 ? Self.wheelUpButton : Self.wheelDownButton
+            let horizontalButton = deltaColumns > 0 ? Self.wheelRightButton : Self.wheelLeftButton
+            for (button, magnitude) in [(verticalButton, abs(deltaRows)), (horizontalButton, abs(deltaColumns))] {
+                for _ in 0..<magnitude {
+                    guard
+                        let bytes = GhosttyLinuxMouseEncoder.encode(
+                            button: button, pressed: true, cellColumn: cell.column, cellRow: cell.row, mods: request.scrollPointerMods ?? 0,
+                            session: session)
+                    else {
+                        return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable)
+                    }
+                    if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+                }
+            }
+            return TerminalControlResponse(ok: true, message: "Reported terminal scroll.")
+        }
+
+        private func mouseButton(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+            }
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            guard let button = request.mouseButton, let pressed = request.mousePressed else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse button.", errorCode: .invalidArgument)
+            }
+            guard button >= TerminalControlMouseButtonPayload.minimumButton, button <= TerminalControlMouseButtonPayload.maximumButton else {
+                return TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument)
+            }
+            guard let pointerX = request.mousePointerX, let pointerY = request.mousePointerY else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            let position = TerminalScrollPointerPosition(x: pointerX, y: pointerY, mods: request.mousePointerMods ?? 0)
+            guard position.isValid else {
+                return TerminalControlResponse(ok: false, message: "Invalid terminal mouse button pointer position.", errorCode: .invalidArgument)
+            }
+            let cell = pointerCell(x: pointerX, y: pointerY)
+            guard
+                let bytes = GhosttyLinuxMouseEncoder.encode(
+                    button: button, pressed: pressed, cellColumn: cell.column, cellRow: cell.row, mods: position.mods, session: vtSession)
+            else { return TerminalControlResponse(ok: false, message: "Unable to encode terminal mouse report.", errorCode: .sessionNotAvailable) }
+            // A button the terminal's current tracking mode does not report encodes to nothing; that is a
+            // successful no-op, not a failure.
+            if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+            return TerminalControlResponse(ok: true, message: "Delivered mouse button.")
+        }
+
+        /// Resolves a client's normalized pointer against this session's own grid. Raw client pixels are
+        /// never transported because client and daemon cell geometry differ; absent coordinates resolve to
+        /// the origin, which is the only position a host with no rendered pointer can name.
+        private func pointerCell(x: Double?, y: Double?) -> (column: Int, row: Int) {
+            let columns = max(terminalSize.columns, 1)
+            let rows = max(terminalSize.rows, 1)
+            let column = Int((min(max(x ?? 0, 0), 1) * Double(columns)).rounded(.down))
+            let row = Int((min(max(y ?? 0, 0), 1) * Double(rows)).rounded(.down))
+            return (column: min(column, columns - 1), row: min(row, rows - 1))
+        }
+
+        private static let wheelUpButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_FOUR.rawValue)
+        private static let wheelDownButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_FIVE.rawValue)
+        private static let wheelRightButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_SIX.rawValue)
+        private static let wheelLeftButton = UInt8(SPACES_GHOSTTY_VT_MOUSE_BUTTON_SEVEN.rawValue)
 
         private func setAppearance(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard let appearance = request.appearance else {
@@ -889,7 +1115,23 @@
             return snapshot.clients.first { $0.id == ownerID }
         }
 
-        private func advanceOwnerEpoch() { ownerEpoch &+= 1 }
+        private func advanceOwnerEpoch() {
+            ownerEpoch &+= 1
+            lastResizeSerialByClientID.removeAll(keepingCapacity: true)
+        }
+
+        private func staleResizeSerialRejection(for request: TerminalControlRequest) -> TerminalControlResponse? {
+            guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return nil }
+            guard let lastResizeSerial = lastResizeSerialByClientID[clientID], resizeSerial <= lastResizeSerial else { return nil }
+            return TerminalControlResponse(
+                ok: false, message: "Ignoring stale resize serial \(resizeSerial); latest accepted serial is \(lastResizeSerial).",
+                errorCode: .ownershipRejected)
+        }
+
+        private func recordAcceptedResizeSerial(from request: TerminalControlRequest) {
+            guard let clientID = request.clientID, let resizeSerial = request.resizeSerial else { return }
+            lastResizeSerialByClientID[clientID] = resizeSerial
+        }
 
         private func markLocalOwnerCommandInputOutputResyncPending() {
             guard activeOwnerClient()?.kind == .localWindow else { return }
@@ -916,6 +1158,153 @@
             screenStateRevision &+= 1
         }
 
+        /// One output turn's terminal events, drained from the vt session's event sink.
+        private struct SessionEvents {
+            var titleChanged = false
+            var pwdChanged = false
+            var bellCount: UInt32 = 0
+            var ptyResponse = Data()
+            /// The turn's OSC 52 write, `nil` when the program performed none. An EMPTY string is a
+            /// clear (the program asked for the destination to be emptied), which is a real
+            /// instruction the owner applies — hence the optional rather than an empty-means-none
+            /// sentinel. Over-cap and non-standard-destination writes never reach here: the shim
+            /// drops them at capture.
+            var clipboardText: String?
+        }
+
+        /// Takes the events the vt session accumulated during the writes since the last drain. The C
+        /// sink hands over ownership of its buffers, which are released once copied into Swift values.
+        private func drainSessionEvents() -> SessionEvents {
+            guard let vtSession else { return SessionEvents() }
+            var raw = SpacesGhosttyVtSessionEvents()
+            spaces_ghostty_vt_session_drain_events(vtSession, &raw)
+            defer { spaces_ghostty_vt_session_events_free(&raw) }
+            var events = SessionEvents(titleChanged: raw.title_changed, pwdChanged: raw.pwd_changed, bellCount: raw.bell_count)
+            if let response = raw.pty_response, raw.pty_response_len > 0 { events.ptyResponse = Data(bytes: response, count: raw.pty_response_len) }
+            // Copy the clipboard bytes into a Swift value before the `defer` above frees the C buffer.
+            // A cleared write carries no buffer, so it becomes the empty string the owner clears with.
+            if let clipboard = raw.clipboard_text, raw.clipboard_len > 0 {
+                events.clipboardText = String(decoding: UnsafeRawBufferPointer(start: clipboard, count: raw.clipboard_len), as: UTF8.self)
+            } else if raw.clipboard_cleared {
+                events.clipboardText = ""
+            }
+            return events
+        }
+
+        /// Folds this turn's bells into the timestamp the runtime state publishes. The whole turn's bells
+        /// are one ring: the count says how many arrived, and the coalescer decides whether that ring is
+        /// new enough to move the timestamp. The caller writes and broadcasts the runtime state right
+        /// after, so the bell rides the same output-turn write the rest of the metadata does.
+        ///
+        /// One timestamp per session is the alert model: a later bell REPLACES the identity, so a bell
+        /// a client suppresses as watched can supersede an earlier unwatched one that never alerted
+        /// (two rings over 30s apart straddling a client's watch window with no refresh between).
+        /// Accepted: closing it means per-session bell history on the wire, and the user is already
+        /// looking at this terminal when the superseding bell rings.
+        private func applyBellEvents(count: UInt32) {
+            guard count > 0, let bellAt = bellCoalescer.ring() else { return }
+            currentBellAt = GhosttyRemoteSessionStateTimestamp.string(from: bellAt)
+        }
+
+        /// Writes the terminal's own replies to the program's queries (cursor position, mode reports,
+        /// color reports, XTVERSION) back to the PTY. These go straight to the driver rather than
+        /// through `controlInputSequencer`: that sequencer exists to order USER input against submits,
+        /// and a reply the program is synchronously blocked reading must not queue behind typing.
+        private func sendQueryResponses(_ bytes: Data) {
+            guard !bytes.isEmpty else { return }
+            ptyDriver.sendRawBytes(bytes)
+        }
+
+        /// Folds the title (OSC 0/2) and working directory (OSC 7) the just-written bytes reported into
+        /// the cached metadata every runtime state and state payload echoes, and reports whether either
+        /// changed. Called right after the bytes reach the vt session so the runtime state the caller
+        /// then writes and broadcasts already carries the new values.
+        ///
+        /// Each getter is read only when its event fired, which is what makes an absent value
+        /// unambiguous: the program emitted an empty payload, so the cache clears and the session falls
+        /// back to its launch-configuration value. Without the event, absent would equally mean "never
+        /// set", which is what a session rebuilt from a trimmed transcript reports.
+        ///
+        /// A reported OSC 7 payload that fails the decode (foreign host, unknown scheme, not a URI) is
+        /// ignored outright and the previously accepted directory stands, matching the surface path,
+        /// where a rejected OSC 7 never reaches the app.
+        ///
+        /// The event says a value was reported, not what it was — the value is read back from the vt
+        /// session — so several reports of the same kind inside one write collapse to the last one.
+        @discardableResult private func applyMetadataEvents(titleChanged: Bool, pwdChanged: Bool) -> Bool {
+            guard let vtSession else { return false }
+            var changed = false
+
+            if titleChanged {
+                // A whitespace-only payload normalizes to nil and clears, same as an empty one — the
+                // macOS host also treats a whitespace-only title as cleared.
+                let title = Self.normalizedSessionMetadataValue(Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) })
+                if currentTitle != title {
+                    currentTitle = title
+                    changed = true
+                }
+            }
+
+            if pwdChanged {
+                if let rawWorkingDirectory = Self.copyShimString({ spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }) {
+                    if let workingDirectory = Self.normalizedSessionMetadataValue(
+                        TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory)), currentWorkingDirectory != workingDirectory
+                    {
+                        currentWorkingDirectory = workingDirectory
+                        changed = true
+                    }
+                } else if currentWorkingDirectory != nil {
+                    currentWorkingDirectory = nil
+                    changed = true
+                }
+            }
+            return changed
+        }
+
+        /// Rebuild path: adopts whatever title and working directory the replacement session's replay
+        /// re-established. Never clears — a replay that does not re-emit an escape sequence says nothing
+        /// about the value, and the cache it would erase is exactly the one the rebuild preserves.
+        private func seedMetadataFromVTSession() {
+            guard let vtSession else { return }
+            if let title = Self.normalizedSessionMetadataValue(Self.copyShimString { spaces_ghostty_vt_session_title(vtSession, $0, $1) }) {
+                currentTitle = title
+            }
+            if let rawWorkingDirectory = Self.copyShimString({ spaces_ghostty_vt_session_pwd(vtSession, $0, $1) }),
+                let workingDirectory = Self.normalizedSessionMetadataValue(TerminalWorkingDirectoryURI.decodedPath(fromOSC7: rawWorkingDirectory))
+            {
+                currentWorkingDirectory = workingDirectory
+            }
+        }
+
+        /// Announces a title/working-directory change under its own reason. `TerminalRemoteSessionStateNotificationRouting`
+        /// routes the screen-content reasons (`output` and friends) to an output-shaped refresh that never
+        /// re-derives pane and tab titles, so a metadata change carried only by the output broadcast would
+        /// reach a mirroring client's cache without ever being displayed. Platform parity with the macOS
+        /// host's `postSessionMetadataDidChange`.
+        private func postSessionMetadataDidChange() {
+            TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+        }
+
+        /// Reads one of the shim's malloc'd string getters into a Swift `String`. The shim reports an
+        /// unset value as `false`, which surfaces here as nil.
+        private static func copyShimString(_ read: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>, UnsafeMutablePointer<Int>) -> Bool) -> String?
+        {
+            var pointer: UnsafeMutablePointer<CChar>?
+            var length = 0
+            guard read(&pointer, &length), let pointer, length > 0 else { return nil }
+            defer { spaces_ghostty_vt_free_buffer(pointer) }
+            return pointer.withMemoryRebound(to: UInt8.self, capacity: length) {
+                String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
+            }
+        }
+
+        private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
         /// Rebuilds the VT renderer from the append-only transcript without ever
         /// materializing the whole file in memory. Replay happens into a replacement
         /// session first, so a read or VT-write failure leaves the current renderer
@@ -923,19 +1312,55 @@
         /// Only the handoff resume paths use this — renderer memory did not survive the
         /// exec there, so the transcript is the sole source of truth. A live resize never
         /// comes here: it resizes the existing vt session in place (reflow) instead.
-        private func recreateVTRenderer(columns: Int, rows: Int) throws {
+        ///
+        /// `eventsLiveFromTranscriptOffset` splits the replay: bytes before it are replayed with events
+        /// off (they were already parsed once, by the pre-exec image), bytes from it onward with events
+        /// live, so the caller's drain sees exactly what the unparsed handoff-window suffix raised. Nil
+        /// (or an offset at/past the end of the file) replays the whole transcript with events off and
+        /// enables them at the tail.
+        private func recreateVTRenderer(columns: Int, rows: Int, eventsLiveFromTranscriptOffset: UInt64?) throws {
             guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            do {
-                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
-                    let succeeded = chunk.withUnsafeBytes { rawBuffer in
-                        spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
-                    }
-                    guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+            func writeReplay(_ bytes: Data) throws {
+                guard !bytes.isEmpty else { return }
+                let succeeded = bytes.withUnsafeBytes { rawBuffer in
+                    spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
                 }
+                guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+            }
+            func enableEvents() throws {
+                guard spaces_ghostty_vt_session_enable_events(replacementSession) else {
+                    throw GhosttyLinuxHeadlessSessionError.eventRegistrationFailed
+                }
+            }
+            do {
+                var replayedByteCount: UInt64 = 0
+                var eventsEnabled = false
+                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
+                    let chunkStart = replayedByteCount
+                    replayedByteCount &+= UInt64(chunk.count)
+                    guard !eventsEnabled, let boundary = eventsLiveFromTranscriptOffset, boundary < replayedByteCount else {
+                        try writeReplay(chunk)
+                        return
+                    }
+                    // The boundary falls at or inside this chunk: write the already-parsed head, turn
+                    // events on, then let the rest of the chunk replay under them.
+                    let headCount = boundary > chunkStart ? Int(boundary - chunkStart) : 0
+                    try writeReplay(chunk.prefix(headCount))
+                    try enableEvents()
+                    eventsEnabled = true
+                    try writeReplay(chunk.dropFirst(headCount))
+                }
+                // Events are enabled only AFTER the replay above, so the historical bells and clipboard
+                // writes the transcript carries do not fire a second time. Still before the swap, so a
+                // failure here unwinds into the catch below with the current session untouched.
+                if !eventsEnabled { try enableEvents() }
                 if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
                 vtSession = replacementSession
+                // The replayed transcript may carry a newer title/pwd than the cache; adopt those, but
+                // keep the cached values when the replay never re-emits the escape sequences.
+                seedMetadataFromVTSession()
                 renderUpdateBaseline = nil
                 forceNextBroadcastFullRenderUpdate = true
                 if replayedOutput { screenStateRevision &+= 1 }
@@ -1002,12 +1427,14 @@
             return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
-                exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
-                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows,
-                foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
+                // The raw reported title, not a launch-title fallback: the runtime state records what the
+                // program said, and a reader that needs a name applies its own fallback.
+                exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
+                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
+                rows: terminalSize.rows, foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
         }
 
         /// Advances the in-memory authoritative state immediately (so broadcasts show live truth regardless of
@@ -1044,11 +1471,11 @@
             TerminalOverviewSignal.post()
         }
 
-        private func broadcastCurrentState(reason: String) {
+        private func broadcastCurrentState(reason: String, clipboardWrite: TerminalClipboardWritePayload? = nil) {
             guard !suppressBroadcastsForHandoff else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let startedAt = performanceLoggingEnabled ? Date() : nil
-            guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
+            guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed, clipboardWrite: clipboardWrite) else { return }
             stateStreamServer?.broadcast(payload)
             guard performanceLoggingEnabled, let startedAt else { return }
             let decodedUpdate = payload.decodedRenderUpdate
@@ -1071,7 +1498,7 @@
 
         private func makeStatePayload(
             reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false
+            markNextBroadcastFull: Bool = false, clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
@@ -1120,8 +1547,9 @@
             return GhosttyRemoteSessionStatePayload(
                 sessionID: launchConfiguration.sessionID, reason: reason, emittedAt: nowISO8601(), sessionStateRevision: nil, sessionStateFlags: nil,
                 screenStateRevision: screenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
-                title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
-                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate)
+                title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, outputByteCount: outputByteCount,
+                outputEndByteOffset: outputByteCount, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
         }
 
         private func makeRenderUpdate(for frame: GhosttyRenderFrame, reason: String, exportMode: RenderStateExportMode) -> GhosttyRenderUpdate {
@@ -1164,19 +1592,21 @@
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-            let snapshot = GhosttyVtSessionBridge.snapshot(from: rawSnapshot)
+            let snapshot = GhosttyVtSessionBridge.snapshot(
+                from: rawSnapshot, mouseReportingActive: GhosttyLinuxMouseEncoder.trackingIsActive(session: vtSession))
             return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
         }
 
         private func fallbackRuntimeState(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
-                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
-                workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows)
+                state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: currentTitle,
+                workingDirectory: currentWorkingDirectory ?? launchConfiguration.workingDirectory, columns: terminalSize.columns,
+                rows: terminalSize.rows, bellAt: currentBellAt)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }

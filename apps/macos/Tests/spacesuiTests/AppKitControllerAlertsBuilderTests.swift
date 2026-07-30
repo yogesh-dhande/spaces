@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import spacesclientcore
 import spacesdevicecore
@@ -40,8 +41,28 @@ struct AppKitControllerAlertsBuilderTests {
             runState: .running, activityState: activityState, updatedAt: updatedAt, canRun: false, canStop: true, canRestart: true)
     }
 
-    private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary]) -> SpacesDeviceOverviewPayload {
-        SpacesDeviceOverviewPayload(projects: [], workspaces: workspaces, sessions: [])
+    private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [])
+        -> SpacesDeviceOverviewPayload
+    { SpacesDeviceOverviewPayload(projects: [], workspaces: workspaces, sessions: sessions) }
+
+    /// A focus boundary dated the same way the daemon dates a bell, so tests can place a bell either side
+    /// of the moment the session took focus.
+    private func focusedSince(_ sessionID: String, _ timestamp: String) -> AlertsController.FocusedBellWatch {
+        guard let since = GhosttyRemoteSessionStateTimestamp.date(from: timestamp) else {
+            Issue.record("unparseable focus timestamp \(timestamp)")
+            return AlertsController.FocusedBellWatch(sessionID: sessionID, since: .distantPast)
+        }
+        return AlertsController.FocusedBellWatch(sessionID: sessionID, since: since)
+    }
+
+    private func session(id: String, workspaceID: String = "ws", title: String = "shell-1", liveTitle: String? = nil, bellAt: String? = nil)
+        -> SpacesDeviceTerminalSessionSummary
+    {
+        SpacesDeviceTerminalSessionSummary(
+            id: id, title: title, liveTitle: liveTitle, workingDirectory: "/device/ws", shell: "/bin/zsh", command: nil, state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: workspaceID, workspaceTitle: nil,
+            projectID: nil, projectName: nil, createdAt: "2026-06-28T09:00:00Z", updatedAt: "2026-06-28T09:00:00Z", isControlAvailable: true,
+            isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession, bellAt: bellAt)
     }
 
     @Test func exitedProcessOnRunningWorkspaceProducesProcessAlert() {
@@ -139,5 +160,185 @@ struct AppKitControllerAlertsBuilderTests {
         let remote = AppKitController.buildOverviewAlertsGroups(from: overview([ws]), deviceID: "remote-device")
         #expect(local[0].items[0].attentionID == "alert:local:process:run-1:t")
         #expect(remote[0].items[0].attentionID == "alert:remote-device:process:run-1:t")
+    }
+
+    @Test func sessionWithBellProducesBellAlert() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+
+        #expect(groups.count == 1)
+        #expect(groups[0].items.count == 1)
+        let item = groups[0].items[0]
+        #expect(item.icon == "terminal")
+        #expect(item.iconTint == .terminal)
+        #expect(item.label == "shell-1")
+        #expect(item.detail == nil, "a shell that has reported no title has nothing to say beside its name")
+        #expect(item.attentionID == "alert:local:session:s1:bell:2026-06-28T09:00:00Z")
+        if case .terminalSession(let workspaceID, let sessionID)? = item.focusRequest {
+            #expect(workspaceID == "ws")
+            #expect(sessionID == "s1")
+        } else {
+            Issue.record("expected a terminalSession focus request")
+        }
+    }
+
+    /// A bell row reads exactly as the session's sidebar row does — its name, then what its program is
+    /// doing. Its presence under Alerts is what says the bell rang, so it never spends the row on
+    /// saying so.
+    @Test func bellAlertRowIsNamedAndDescribedLikeItsSessionRow() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", isRunning: false)],
+                sessions: [session(id: "s1", title: "build box", liveTitle: "vim main.swift", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+
+        #expect(groups[0].items[0].label == "build box")
+        #expect(groups[0].items[0].detail == "vim main.swift")
+    }
+
+    @Test func bellAlertIdentityIsStableAcrossBuildsAndChangesWithBellAt() {
+        let firstBuild = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+        let secondBuild = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+        #expect(firstBuild[0].items[0].attentionID == secondBuild[0].items[0].attentionID)
+
+        let laterBell = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
+        #expect(laterBell[0].items[0].attentionID != firstBuild[0].items[0].attentionID)
+    }
+
+    /// A Linux daemon stamps its runtime state with fractional seconds, so a remote workspace's bell has
+    /// to date the row the same way a local one does — the age is the only recency a bell row carries.
+    @Test func bellAlertFromALinuxDaemonIsDated() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00.123Z")]),
+            deviceID: "remote-device")
+        #expect(groups[0].items[0].eventDate != nil)
+    }
+
+    /// The bell of the session the user is typing in is consumed, not filtered: only the focused
+    /// session's identity is taken, and the alert disappears from what the user sees.
+    @Test func focusedSessionsBellIsConsumedAndOtherSessionsStillAlert() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(
+                [workspace(id: "ws", isRunning: false)],
+                sessions: [
+                    session(id: "s1", title: "focused", bellAt: "2026-06-28T09:00:00Z"),
+                    session(id: "s2", title: "background", bellAt: "2026-06-28T09:00:01Z"),
+                ]), deviceID: "local")
+
+        let consumed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
+
+        #expect(consumed == ["alert:local:session:s1:bell:2026-06-28T09:00:00Z"])
+        let visible = AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: consumed)
+        #expect(visible.flatMap(\.items).map(\.label) == ["background"])
+    }
+
+    /// A consumed bell must stay consumed once the user moves focus to another pane — the daemon keeps
+    /// reporting the same `bellAt`, so a suppression that only held while the session was focused would
+    /// raise the alert the moment focus moved. The identity is what survives, and a later bell in the
+    /// same session carries a new one and alerts.
+    @Test func consumedBellStaysGoneAfterFocusMovesAndALaterBellAlerts() {
+        let workspaces = [workspace(id: "ws", isRunning: false)]
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
+
+        // Focus has moved elsewhere: the same overview is rebuilt with nothing focused.
+        let afterFocusMoved = AppKitController.buildOverviewAlertsGroups(
+            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+        #expect(AlertsController.visibleAlertsGroups(in: afterFocusMoved, dismissedAttentionItemIDs: dismissed).isEmpty)
+
+        let laterBell = AppKitController.buildOverviewAlertsGroups(
+            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
+        #expect(AlertsController.visibleAlertsGroups(in: laterBell, dismissedAttentionItemIDs: dismissed).flatMap(\.items).count == 1)
+    }
+
+    /// Consumption is only durable if the pruning pass keeps it: dismissals are trimmed to the alerts
+    /// currently derived, and a consumed bell is still derived (that is why the builder emits it for the
+    /// focused session too). Once its `bellAt` is superseded, the stale identity is dropped.
+    @Test func consumedBellIdentitySurvivesPruningUntilItsBellAtIsSuperseded() {
+        let workspaces = [workspace(id: "ws", isRunning: false)]
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")]), deviceID: "local")
+        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
+
+        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: groups) == dismissed)
+
+        let laterBell = AppKitController.buildOverviewAlertsGroups(
+            from: overview(workspaces, sessions: [session(id: "s1", bellAt: "2026-06-28T09:05:00Z")]), deviceID: "local")
+        #expect(AlertsController.retainedDismissedAttentionItemIDs(dismissed, in: laterBell).isEmpty)
+    }
+
+    /// Focusing a session is not a way to clear its alerts. A bell it rang while the user was elsewhere is
+    /// a legitimate alert, and it survives every rebuild that happens while the session holds focus —
+    /// only the user dismissing it takes it away.
+    @Test func aBellRungBeforeFocusArrivedSurvivesRebuildsWhileFocused() {
+        let payload = overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")])
+        let watch = focusedSince("s1", "2026-06-28T09:10:00Z")
+
+        for _ in 0..<2 {
+            let groups = AppKitController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+            #expect(AlertsController.bellAttentionIDs(in: groups, watch: watch).isEmpty)
+            #expect(AlertsController.visibleAlertsGroups(in: groups, dismissedAttentionItemIDs: []).flatMap(\.items).count == 1)
+        }
+    }
+
+    /// The bell rung after the user arrived is the one happening in front of them, and it is consumed even
+    /// though the same session's earlier bell was not. The boundary carries a little skew tolerance
+    /// because `bellAt` comes from the daemon's clock and the focus time from this Mac's.
+    @Test func aBellRungAfterFocusArrivedIsConsumedIncludingJustInsideTheSkewTolerance() {
+        let watch = focusedSince("s1", "2026-06-28T09:00:00Z")
+
+        let afterFocus = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:05Z")]), deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: afterFocus, watch: watch).count == 1)
+
+        let justBeforeFocus = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T08:59:59Z")]), deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: justBeforeFocus, watch: watch).count == 1)
+
+        let wellBeforeFocus = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T08:59:00Z")]), deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: wellBeforeFocus, watch: watch).isEmpty)
+    }
+
+    /// Every arrival at a session starts its own boundary, and leaving every pane clears it — otherwise a
+    /// session focused hours ago would keep consuming bells rung long after the user walked away.
+    @Test func theFocusBoundaryRestartsOnEachArrivalAndClearsWhenNothingIsFocused() {
+        let firstArrival = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let watch = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: firstArrival)
+        #expect(watch == AlertsController.FocusedBellWatch(sessionID: "s1", since: firstArrival))
+
+        // A rebuild that sees the same session focused keeps the original arrival time.
+        let unchanged = AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: "s1", now: firstArrival.addingTimeInterval(60))
+        #expect(unchanged == watch)
+
+        #expect(AlertsController.updatedFocusedBellWatch(watch, focusedSessionID: nil, now: firstArrival.addingTimeInterval(120)) == nil)
+
+        let secondArrival = firstArrival.addingTimeInterval(180)
+        let returned = AlertsController.updatedFocusedBellWatch(nil, focusedSessionID: "s1", now: secondArrival)
+        #expect(returned == AlertsController.FocusedBellWatch(sessionID: "s1", since: secondArrival))
+    }
+
+    /// Focus leaving and coming back must not resurrect what was already consumed: the identity stays in
+    /// the dismissed set, and the fresh boundary only governs which *new* bells get consumed.
+    @Test func focusReturningDoesNotResurrectAConsumedBell() {
+        let payload = overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: "2026-06-28T09:00:00Z")])
+        let groups = AppKitController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+        let dismissed = AlertsController.bellAttentionIDs(in: groups, watch: focusedSince("s1", "2026-06-28T08:59:00Z"))
+        #expect(!dismissed.isEmpty)
+
+        // Focus left and came back later, so the boundary is now after that bell — it is not re-consumed,
+        // and it is not shown either, because consuming it once was a dismissal.
+        let afterReturning = AppKitController.buildOverviewAlertsGroups(from: payload, deviceID: "local")
+        #expect(AlertsController.bellAttentionIDs(in: afterReturning, watch: focusedSince("s1", "2026-06-28T09:30:00Z")).isEmpty)
+        #expect(AlertsController.visibleAlertsGroups(in: afterReturning, dismissedAttentionItemIDs: dismissed).isEmpty)
+    }
+
+    @Test func sessionWithoutBellProducesNoAlert() {
+        let groups = AppKitController.buildOverviewAlertsGroups(
+            from: overview([workspace(id: "ws", isRunning: false)], sessions: [session(id: "s1", bellAt: nil)]), deviceID: "local")
+        #expect(groups.isEmpty)
     }
 }

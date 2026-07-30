@@ -81,6 +81,40 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.resizeSerial, 8)
     }
 
+    func testMouseButtonRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(
+            command: .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: "owner-1", ownerEpoch: 11, button: 1, pressed: true, pointerX: 0.25, pointerY: 0.75, pointerMods: 3)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "mouseButton")
+        XCTAssertEqual(decoded.commandValue.name, "mouseButton")
+        // A click mutates the session's terminal, so it is owner-gated exactly like a keystroke.
+        XCTAssertTrue(decoded.commandValue.requiresOwnerClientID)
+        XCTAssertTrue(TerminalControlCommand.isMobileTerminalControlName("mouseButton"))
+        guard case .mouseButton(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a mouseButton command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "owner-1")
+        XCTAssertEqual(payload.ownerEpoch, 11)
+        XCTAssertEqual(payload.button, 1)
+        XCTAssertEqual(payload.pressed, true)
+        XCTAssertEqual(payload.pointerX, 0.25)
+        XCTAssertEqual(payload.pointerY, 0.75)
+        XCTAssertEqual(payload.pointerMods, 3)
+    }
+
+    func testMouseButtonWithoutButtonOrPointerReportsMissingPayload() throws {
+        let noButton = try TerminalControlCodec.decodeRequest(#"{"command":"mouseButton","clientID":"owner-1","asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(noButton.commandValue.requiredPayloadFailureMessage, "Missing mouse button.")
+
+        let noPointer = try TerminalControlCodec.decodeRequest(
+            #"{"command":"mouseButton","clientID":"owner-1","mouseButton":1,"mousePressed":true,"asPaste":false}"#.data(using: .utf8)!)
+        XCTAssertEqual(noPointer.commandValue.requiredPayloadFailureMessage, "Missing mouse pointer position.")
+    }
+
     func testSetAppearanceRequestRoundTripsThroughCodec() throws {
         let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
 
@@ -146,16 +180,14 @@ final class TerminalControlProtocolTests: XCTestCase {
     /// this one property to decide what to load, so it is the whole contract.
     func testAttachmentChangingControlsCarrySessionState() {
         for command in [
-            TerminalControlCommand.attach(.init(client: nil, attachmentMode: .owner, appearance: nil)),
-            .detach(.init(clientID: "client-1")), .takeover(.init(clientID: "client-1")),
-        ] {
-            XCTAssertTrue(command.includesSessionStateOnSuccess, "\(command.name) changes attachments and must echo session state")
-        }
+            TerminalControlCommand.attach(.init(client: nil, attachmentMode: .owner, appearance: nil)), .detach(.init(clientID: "client-1")),
+            .takeover(.init(clientID: "client-1")),
+        ] { XCTAssertTrue(command.includesSessionStateOnSuccess, "\(command.name) changes attachments and must echo session state") }
         for command in [
             TerminalControlCommand.send(.init(text: "ls", bytes: nil, clientID: "client-1", ownerEpoch: nil, appendNewline: true, asPaste: false)),
             .key(.init(key: "enter", clientID: "client-1", ownerEpoch: nil)),
-            .resize(.init(clientID: "client-1", columns: 80, rows: 24, ownerEpoch: nil, resizeSerial: nil)),
-            .heartbeat(.init(clientID: "client-1")), .setAppearance(.init(clientID: "client-1", appearance: .dark)),
+            .resize(.init(clientID: "client-1", columns: 80, rows: 24, ownerEpoch: nil, resizeSerial: nil)), .heartbeat(.init(clientID: "client-1")),
+            .setAppearance(.init(clientID: "client-1", appearance: .dark)),
         ] {
             XCTAssertFalse(
                 command.includesSessionStateOnSuccess, "\(command.name) changes no attachment; its effect reaches clients on the next broadcast")

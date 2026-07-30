@@ -236,9 +236,7 @@ enum TerminalTranscriptTrim {
                 var remaining = deltaByteCount
                 while remaining > 0 {
                     let toRead = Int(min(remaining, UInt64(replayChunkBytes)))
-                    guard let chunk = try readHandle.read(upToCount: toRead), !chunk.isEmpty else {
-                        throw TrimError.transcriptShrankDuringStaging
-                    }
+                    guard let chunk = try readHandle.read(upToCount: toRead), !chunk.isEmpty else { throw TrimError.transcriptShrankDuringStaging }
                     try staged.handle.write(contentsOf: chunk)
                     committedByteCount += UInt64(chunk.count)
                     remaining -= UInt64(chunk.count)

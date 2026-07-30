@@ -185,7 +185,7 @@ enum SpacesDaemonProfileCommandRouting {
 }
 
 @MainActor private final class SpacesDaemonController {
-    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
+    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll", "mouseButton"]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
 
     private struct TerminalLinkTransferAuthorization {
@@ -2094,17 +2094,18 @@ enum SpacesDaemonProfileCommandRouting {
                     (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                     ?? TerminalSessionRuntimeState(
                         sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited,
-                        updatedAt: now, exitedAt: now, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
+                        updatedAt: now, exitedAt: now, workingDirectory: launchConfiguration.workingDirectory)
                 if runtimeState.servicePID != getpid(), Self.isLive(runtimeState), Self.isProcessAlive(pid: Int(runtimeState.servicePID)) {
                     return TerminalServiceResponse(
                         ok: false, message: "Terminal session \(sessionID) is owned by another process and was not stopped by spacesd.")
                 }
+                // `bellAt` carries forward: a session ending does not answer the bell it rang, and the
+                // client's alert (whose identity is that timestamp) must survive the exit write.
                 let exitedState = TerminalSessionRuntimeState(
                     sessionID: runtimeState.sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID,
-                    childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now,
-                    title: runtimeState.title ?? launchConfiguration.title,
+                    childPID: runtimeState.childPID, state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title,
                     workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                    rows: runtimeState.rows)
+                    rows: runtimeState.rows, bellAt: runtimeState.bellAt)
                 try? TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
                 try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
                 try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)

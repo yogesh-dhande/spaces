@@ -65,7 +65,14 @@ for suite in \
   SpacesTestHostDetectionTests \
   TerminalServiceSystemdUnitTests \
   TerminalServiceSystemdStartDeadlineTests \
+  GhosttyVtSessionEventSinkTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
+  GhosttyLinuxHeadlessMouseEncodingTests \
+  GhosttyLinuxHeadlessSessionBellTests \
+  GhosttyLinuxHeadlessSessionClipboardTests \
+  GhosttyLinuxHeadlessSessionGraphemeTests \
+  GhosttyLinuxHeadlessSessionMetadataTests \
+  GhosttyLinuxHeadlessSessionQueryResponseTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \
   GhosttyLinuxHeadlessSessionHandoffTests \

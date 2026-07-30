@@ -53,11 +53,45 @@ enum {
     SPACES_GHOSTTY_VT_MODS_SUPER = 1 << 3,
 };
 
+// The mouse buttons `spaces_ghostty_vt_session_encode_mouse` can name, and the press/release actions
+// it accepts. Spaces-owned for the same reason as the key enum above: ghostty's ordinals are free to
+// shift across a libghostty upgrade. The values match `ghostty_input_mouse_button_e` on the macOS
+// side so one wire value describes a button for both cores.
+typedef enum {
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT = 1,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_RIGHT = 2,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_MIDDLE = 3,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_FOUR = 4,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_FIVE = 5,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_SIX = 6,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_SEVEN = 7,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_EIGHT = 8,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_NINE = 9,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_TEN = 10,
+    SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN = 11,
+} SpacesGhosttyVtMouseButton;
+
+typedef enum {
+    SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS = 0,
+    SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE = 1,
+} SpacesGhosttyVtMouseAction;
+
+// The most codepoints a snapshot cell's grapheme cluster can carry, base included. A cell whose
+// cluster is longer (combining-mark spam, which no legitimate glyph needs) is exported as its base
+// codepoint alone, which bounds both the copy the snapshot makes and the payload the render wire
+// format accepts.
+#define SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS 16
+
 typedef struct {
     uint32_t codepoint;
     uint32_t foreground_rgb;
     uint32_t background_rgb;
     uint16_t flags;
+    // The cluster's codepoints beyond `codepoint` (combining marks, ZWJ members, variation selectors,
+    // regional indicators). Zero and NULL for the overwhelming majority of cells, which hold a single
+    // codepoint. Owned by the snapshot and released by `spaces_ghostty_vt_snapshot_free`.
+    uint16_t grapheme_extra_len;
+    uint32_t *grapheme_extras;
 } SpacesGhosttyVtSnapshotCell;
 
 typedef struct {
@@ -88,6 +122,55 @@ typedef struct {
     uint32_t cursor_rgb;
     uint32_t palette_rgb[16];
 } SpacesGhosttyVtTheme;
+
+// Upper bound on one turn's buffered OSC 52 payload. A clipboard write larger than this is dropped
+// rather than buffered, so a runaway program cannot make the session's event sink grow without bound.
+enum {
+    SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES = 1 * 1024 * 1024,
+};
+
+// What the terminal's effect callbacks observed since the last drain. libghostty-vt invokes those
+// callbacks synchronously inside `ghostty_terminal_vt_write`, so they only record here; the caller
+// drains once per write turn and acts on the engine.
+typedef struct {
+    // TITLE_CHANGED fired this turn; the value is read back via `spaces_ghostty_vt_session_title`.
+    // The flag is what distinguishes an explicit clear (the getter reports absent BECAUSE the program
+    // emitted an empty OSC 2) from a value that was never set — the getter alone cannot say which.
+    bool title_changed;
+    // PWD_CHANGED fired this turn; the value is read back via `spaces_ghostty_vt_session_pwd`. Same
+    // explicit-clear semantics as `title_changed`.
+    bool pwd_changed;
+    uint32_t bell_count;
+    // The last standard-location `text/plain` write of this turn, malloc'd, NULL when none arrived.
+    char *clipboard_text;
+    size_t clipboard_len;
+    // The program asked for the destination to be cleared (a write carrying no representations).
+    bool clipboard_cleared;
+    // A write was refused: over the byte cap, a non-standard destination, or no `text/plain`
+    // representation.
+    bool clipboard_dropped;
+    // Query responses (DSR, DECRQM, color reports, XTVERSION) concatenated in emission order, malloc'd.
+    char *pty_response;
+    size_t pty_response_len;
+} SpacesGhosttyVtSessionEvents;
+
+// Registers the terminal's effect callbacks against this session, so subsequent writes accumulate
+// events into the session's sink. Returns false when the library predates the option API or when any
+// one of the registrations is refused — a session with only some of its callbacks installed silently
+// loses whichever half of the contract below it did not get, so callers must treat false as fatal.
+//
+// Opt-in on purpose. A session that replays historical bytes — transcript rendering, scrollback for an
+// ended run, trim preambles — must NEVER enable events: every bell and clipboard write the transcript
+// ever carried would fire again, alerting on output the user already saw. Only a session driving a
+// live PTY enables them, and only once its startup replay is complete.
+bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session);
+
+// Moves the accumulated events out of the session and resets its sink. The caller takes ownership of
+// the malloc'd buffers and must release them with `spaces_ghostty_vt_session_events_free`.
+void spaces_ghostty_vt_session_drain_events(SpacesGhosttyVtSession *session, SpacesGhosttyVtSessionEvents *out_events);
+
+// Releases the buffers a drained event record owns and zeroes it.
+void spaces_ghostty_vt_session_events_free(SpacesGhosttyVtSessionEvents *events);
 
 // `theme` is optional: pass NULL to keep libghostty-vt's built-in default palette.
 SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
@@ -149,6 +232,33 @@ bool spaces_ghostty_vt_session_encode_key(
     size_t *out_len
 );
 
+// Encodes one mouse button press or release with ghostty's own mouse encoder, configured from this
+// session's live terminal state, so the bytes match the tracking mode and format the running program
+// asked for (X10 through any-event tracking; X10, UTF-8, SGR, urxvt, or SGR-pixels output). `action`
+// is a `SpacesGhosttyVtMouseAction`, `button` a `SpacesGhosttyVtMouseButton`, and `mods` a
+// `SPACES_GHOSTTY_VT_MODS_*` bitmask. The position is given in cells rather than pixels because a
+// headless session has no rendered geometry; SGR-pixels consequently reports cell-granular pixel
+// coordinates. The buffer is malloc'd and must be freed with `spaces_ghostty_vt_free_buffer`. An
+// event the terminal's current mode does not report succeeds with `*out_len == 0` and a NULL
+// `*out_ptr`.
+bool spaces_ghostty_vt_session_encode_mouse(
+    SpacesGhosttyVtSession *session,
+    uint8_t action,
+    uint8_t button,
+    uint16_t mods,
+    uint16_t cell_column,
+    uint16_t cell_row,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Reports whether the session's terminal currently has any mouse tracking mode enabled. Returns
+// false if the underlying query fails.
+bool spaces_ghostty_vt_session_mouse_tracking_active(
+    SpacesGhosttyVtSession *session,
+    bool *out_active
+);
+
 bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtSnapshot *out_snapshot
@@ -198,6 +308,26 @@ bool spaces_ghostty_vt_session_mode_is_set(
     uint16_t mode_value,
     bool ansi,
     bool *out_set
+);
+
+// Copies the terminal title the session's escape sequences last set (OSC 0/2) into a malloc'd
+// buffer that must be freed with `spaces_ghostty_vt_free_buffer`. Returns false (and leaves
+// `*out_ptr` NULL) when no title is set — the VT layer reports an unset and an explicitly cleared
+// title identically, as an empty string.
+bool spaces_ghostty_vt_session_title(
+    SpacesGhosttyVtSession *session,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Copies the working directory the session's escape sequences last reported (OSC 7) into a malloc'd
+// buffer that must be freed with `spaces_ghostty_vt_free_buffer`. The value is the RAW OSC 7
+// payload (e.g. `file://host/path`); the VT layer stores it without parsing, so the caller decodes
+// and host-validates the URI. Returns false (and leaves `*out_ptr` NULL) when none is set.
+bool spaces_ghostty_vt_session_pwd(
+    SpacesGhosttyVtSession *session,
+    char **out_ptr,
+    size_t *out_len
 );
 
 // Test-support: reports the session's current Kitty keyboard protocol flags. Returns false if the

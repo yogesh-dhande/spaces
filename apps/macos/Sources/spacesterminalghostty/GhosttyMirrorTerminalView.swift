@@ -24,6 +24,7 @@
         typealias SendTextHandler = @MainActor (String, Bool) -> Void
         typealias SendKeyHandler = @MainActor (String) -> Void
         typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32, TerminalScrollPointerPosition?) -> Void
+        typealias SendMouseButtonHandler = @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
 
         private struct SurfaceGeometry: Equatable {
@@ -88,6 +89,9 @@
         var debugBindingActionHandler: (@MainActor (String) -> Bool)?
         private(set) var debugRecordedBindingActions: [String] = []
         var debugMouseEventHandler: (@MainActor (String) -> Bool)?
+        /// Stands in for the live mirror surface's mouse-capture state, which only exists once a real
+        /// surface has applied a frame.
+        var debugMouseCapturedForTesting: Bool?
         private(set) var debugRecordedMouseEvents: [String] = []
         var debugRenderFrameApplyHandler: (@MainActor (GhosttyRenderFrame, String) -> Bool)?
         private(set) var debugRenderFrameApplyCount = 0
@@ -103,6 +107,7 @@
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
         var onSendScroll: SendScrollHandler?
+        var onSendMouseButton: SendMouseButtonHandler?
         var onViewportSizeChanged: ViewportSizeHandler?
         /// Counts mirror surfaces built for this pane. A surface negotiates its own grid when it is
         /// created, so a consumer that told the daemon a viewport size against an earlier surface can tell
@@ -323,6 +328,20 @@
             return false
         }
 
+        /// False once the session's runtime state stops being interactive. A process that exits or
+        /// crashes with mouse tracking enabled leaves its final frame carrying live tracking flags,
+        /// and applying those to the mirror would keep consuming clicks (suppressing local text
+        /// selection) with no application left to receive them. Flipping this re-applies the latest
+        /// frame with the capture flags stripped.
+        var sessionPermitsMouseCapture = true {
+            didSet {
+                guard sessionPermitsMouseCapture != oldValue else { return }
+                guard latestFrame?.snapshot.mouseReportingActive == true else { return }
+                lastAppliedRenderFrameIdentity = nil
+                applyLatestFrameIfPossible()
+            }
+        }
+
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
             if self.renderStateKey != renderStateKey { renderedText = "" }
             self.renderStateKey = renderStateKey
@@ -412,7 +431,15 @@
                 guard acceptsSearchResultEvent else { return }
                 searchSelected = selected
                 updateSearchStatusLabel()
-            case .setTitle, .setWorkingDirectory: break
+            // A mirrored frame is display only: the daemon that owns the session records its bell, its
+            // title, and its working directory, and this view reads them back from the session state.
+            //
+            // Dropping `.ringBell` here also means a bell in the terminal the user is typing in produces
+            // nothing at all — no sound, no flash — because the alert it raises is consumed as seen (see
+            // `AlertsController.consumeFocusedSessionBellAlerts`). That is the decided behavior, not a gap:
+            // a bell you are watching happen needs no notification, and Spaces renders no in-terminal bell
+            // feedback by choice. Do not add one here.
+            case .setTitle, .setWorkingDirectory, .ringBell: break
             }
         }
 
@@ -624,6 +651,13 @@
                 config.surface.platform = host.platform
                 config.surface.scale_factor = host.scale_factor
                 config.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+                // Host-managed with no receive_buffer on purpose: the fork's HostManaged write path
+                // drops writes with no callback, so mouse reports the mirror encodes locally (its
+                // restored tracking flags collapse every mode to normal/X10) can never reach any
+                // consumer — only the on/off capture bit changes mirror behavior. Likewise the
+                // exported flag reads the application-requested mode, not the surface's effective
+                // policy: daemon sessions run Spaces-generated config that never sets
+                // mouse-reporting=false or binds toggle_mouse_reporting, so the two cannot diverge.
                 config.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
                 config.parked_host = host
                 mirror = ghostty_mirror_new(app, &host, &config)
@@ -655,6 +689,18 @@
         @discardableResult private func sendMouseButton(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent)
             -> Bool
         {
+            // The mirror sees the button first: it carries the session terminal's mouse-tracking flags,
+            // so it performs Ghostty's own selection-versus-report arbitration (clearing the selection
+            // and resetting the click gesture while an application tracks the mouse) before the same
+            // click is forwarded to the session that can actually deliver it.
+            let consumed = deliverMouseButtonToMirror(state: state, button: button, event: event)
+            forwardMouseButtonIfReported(state: state, button: button, event: event)
+            return consumed
+        }
+
+        @discardableResult private func deliverMouseButtonToMirror(
+            state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent
+        ) -> Bool {
             if let debugMouseEventHandler {
                 let stateDescription = state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue ? "press" : "release"
                 let description = "button:\(stateDescription):\(button.rawValue)"
@@ -665,6 +711,34 @@
             let consumed = ghostty_surface_mouse_button(surface, state, button, Self.ghosttyMouseModifiers(for: event.modifierFlags))
             ghostty_surface_refresh(surface)
             return consumed
+        }
+
+        /// Sends the click on to the session's own terminal when a mouse-aware application there is
+        /// tracking the mouse. This repeats the condition Ghostty's surface uses to decide it should
+        /// emit a mouse report, which is the same decision the mirror just made locally.
+        private func forwardMouseButtonIfReported(state: ghostty_input_mouse_state_e, button: ghostty_input_mouse_button_e, event: NSEvent) {
+            guard let onSendMouseButton, mouseButtonBelongsToSession(modifierFlags: event.modifierFlags) else { return }
+            let mods = Self.ghosttyMouseModifiers(for: event.modifierFlags)
+            let pointerPosition = Self.scrollPointerPosition(for: event.locationInWindow, in: self, mods: mods.rawValue)
+            onSendMouseButton(UInt8(clamping: button.rawValue), state.rawValue == GHOSTTY_MOUSE_PRESS.rawValue, pointerPosition)
+        }
+
+        /// True when the application on the other end owns this click. Shift is the local escape hatch:
+        /// Spaces leaves Ghostty's `mouse-shift-capture` at its `false` default, so shift keeps the
+        /// click for selection unless the terminal itself asked for shift to be captured.
+        private func mouseButtonBelongsToSession(modifierFlags: NSEvent.ModifierFlags) -> Bool {
+            // Checked here as well as at frame apply so the decision is right even for a final
+            // frame that raced ahead of the runtime-state update that ended the session.
+            guard sessionPermitsMouseCapture else { return false }
+            guard mirrorCapturesMouse else { return false }
+            guard modifierFlags.contains(.shift) else { return true }
+            return latestFrame?.snapshot.mouseShiftCapture == GhosttyTerminalSnapshot.mouseShiftCaptureEnabled
+        }
+
+        private var mirrorCapturesMouse: Bool {
+            if let debugMouseCapturedForTesting { return debugMouseCapturedForTesting }
+            guard let surface = mirrorSurface() else { return false }
+            return ghostty_surface_mouse_captured(surface)
         }
 
         private func sendMousePosition(_ event: NSEvent) {
@@ -803,30 +877,48 @@
             guard frame.version == GhosttyRenderFrame.currentVersion else { return false }
             let snapshot = frame.snapshot
             guard snapshot.columns > 0, snapshot.rows > 0, snapshot.columns <= Int(UInt16.max), snapshot.rows <= Int(UInt16.max) else { return false }
+            // The C cell's link fields are export-only — applying a snapshot ignores them — so they
+            // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
+            // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
+            // itself a URL renders as plain text (#373 tracks hit-testing or surface apply).
             var cells = snapshot.cells.map { cell in
                 ghostty_terminal_snapshot_cell_s(
-                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags)
+                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags,
+                    grapheme_extra_len: 0, grapheme_extras: nil, link_index: 0)
             }
-            return cells.withUnsafeMutableBufferPointer { buffer in
-                var cSnapshot = ghostty_terminal_snapshot_s()
-                cSnapshot.columns = UInt16(snapshot.columns)
-                cSnapshot.rows = UInt16(snapshot.rows)
-                cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                cSnapshot.cursor_visible = snapshot.cursorVisible
-                cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                cSnapshot.cell_count = buffer.count
-                cSnapshot.cells = buffer.baseAddress
+            // The frame's clusters live in one buffer the cells point into, so they stay alive for
+            // exactly the span of the C call and no cell owns memory Ghostty would have to free.
+            var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
+            return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
+                if let base = extras.baseAddress {
+                    for placement in clusterExtras.placements {
+                        cells[placement.cellIndex].grapheme_extra_len = UInt16(placement.count)
+                        cells[placement.cellIndex].grapheme_extras = base + placement.offset
+                    }
+                }
+                return cells.withUnsafeMutableBufferPointer { buffer in
+                    var cSnapshot = ghostty_terminal_snapshot_s()
+                    cSnapshot.columns = UInt16(snapshot.columns)
+                    cSnapshot.rows = UInt16(snapshot.rows)
+                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                    cSnapshot.cursor_visible = snapshot.cursorVisible
+                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                    cSnapshot.mouse_reporting_active = sessionPermitsMouseCapture && snapshot.mouseReportingActive
+                    cSnapshot.mouse_shift_capture = sessionPermitsMouseCapture ? snapshot.mouseShiftCapture : 0
+                    cSnapshot.cell_count = buffer.count
+                    cSnapshot.cells = buffer.baseAddress
 
-                var cFrame = ghostty_render_frame_s()
-                cFrame.version = UInt32(frame.version)
-                cFrame.session_revision = frame.sessionRevision ?? 0
-                cFrame.owner_epoch = frame.ownerEpoch
-                cFrame.columns = UInt16(snapshot.columns)
-                cFrame.rows = UInt16(snapshot.rows)
-                cFrame.snapshot = cSnapshot
-                return withUnsafePointer(to: &cFrame, body)
+                    var cFrame = ghostty_render_frame_s()
+                    cFrame.version = UInt32(frame.version)
+                    cFrame.session_revision = frame.sessionRevision ?? 0
+                    cFrame.owner_epoch = frame.ownerEpoch
+                    cFrame.columns = UInt16(snapshot.columns)
+                    cFrame.rows = UInt16(snapshot.rows)
+                    cFrame.snapshot = cSnapshot
+                    return withUnsafePointer(to: &cFrame, body)
+                }
             }
         }
 
@@ -992,6 +1084,9 @@
         /// Text read back from the live mirror surface, ignoring the retained frame and text cache, so
         /// a test can tell an actually repainted surface from a remembered one. Nil with no mirror.
         var debugMirrorSurfaceText: String? { GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()) }
+        /// The snapshot the live mirror surface exports, so a test can read back the cell state the
+        /// surface actually holds rather than the frame that was handed to it. Nil with no mirror.
+        var debugMirrorSurfaceSnapshot: GhosttyTerminalSnapshot? { GhosttyTerminalSnapshotCapture.captureFromSurface(mirrorSurface()) }
         /// Whether the live surface holds a selection. Selection lives in the surface and cannot
         /// outlive it, so a test can tell a pane that kept its surface from one whose surface was
         /// freed and rebuilt underneath it.

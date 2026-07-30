@@ -3,15 +3,13 @@ import Testing
 @testable import spacesterminalcore
 
 @Suite struct TerminalFontSizeTests {
-    @Test func defaultsToEleven() { #expect(TerminalFontSize.default == .eleven) }
+    @Test func defaultsToTen() { #expect(TerminalFontSize.default == .ten) }
 
-    @Test func allCasesAreOrderedNineToTwelve() {
-        #expect(TerminalFontSize.allCases.map(\.rawValue) == [9, 10, 11, 12])
-    }
+    @Test func allCasesAreOrderedNineToTwelve() { #expect(TerminalFontSize.allCases.map(\.rawValue) == [9, 10, 11, 12]) }
 
-    @Test func missingPersistedValueResolvesToEleven() { #expect(TerminalFontSize(persistedRawValue: nil) == .eleven) }
+    @Test func missingPersistedValueResolvesToTen() { #expect(TerminalFontSize(persistedRawValue: nil) == .ten) }
 
-    @Test func outOfRangePersistedValueResolvesToEleven() { #expect(TerminalFontSize(persistedRawValue: 20) == .eleven) }
+    @Test func outOfRangePersistedValueResolvesToTen() { #expect(TerminalFontSize(persistedRawValue: 20) == .ten) }
 
     @Test func knownPersistedValuesRoundTrip() {
         for size in TerminalFontSize.allCases { #expect(TerminalFontSize(persistedRawValue: size.rawValue) == size) }

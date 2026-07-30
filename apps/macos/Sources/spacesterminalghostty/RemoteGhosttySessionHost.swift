@@ -66,12 +66,28 @@
         private var lastRenderUpdateResyncAt: Date?
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
+        /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
+        /// touches the developer's real clipboard. Nil in the app, where the write goes to
+        /// `NSPasteboard.general`.
+        var clipboardPasteboardOverrideForTesting: NSPasteboard?
         private var lastRequestedViewportSize: (columns: Int, rows: Int)?
         /// The mirror surface generation the last owner attach measured its viewport against. An attach
         /// that finds a different generation is looking at a rebuilt surface and re-sends the viewport.
         private var lastAttachedSurfaceGeneration: UInt64?
         private var pendingViewportResizeSize: (columns: Int, rows: Int)?
         private var pendingViewportResizeTask: Task<Void, Never>?
+        /// The one-turn deferral every measured viewport size waits out before it is sent (see
+        /// `handleViewportSizeChange`). A measurement of a *different* size replaces the pending one, so
+        /// only the size the layout settled on is ever sent; a measurement of the same size leaves it
+        /// alone, so a busy state stream cannot keep postponing it.
+        private var pendingViewportSettleTask: Task<Void, Never>?
+        /// The size `pendingViewportSettleTask` is waiting to send. Non-nil exactly while that task is
+        /// pending — both are cleared together when it fires or is abandoned.
+        private var pendingViewportSettleSize: (columns: Int, rows: Int)?
+        /// Whether any measurement folded into the pending settle turn asked to be announced even when
+        /// it matches the size the daemon last accepted. Sticky across replacement: a forced
+        /// measurement superseded by a later one still forces the send of that later size.
+        private var pendingViewportSettleForce = false
         private var resizeSerial: UInt64 = 0
         private let inputQueue = TerminalInputSerialQueue()
         /// Lazy state for scrolling an ended pane's scrollback: `idle` until the first scroll, `loading`
@@ -132,6 +148,7 @@
             MainActor.assumeIsolated {
                 stateStreamClient?.stop()
                 directStateStreamClient?.stop()
+                pendingViewportSettleTask?.cancel()
                 pendingViewportResizeTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
@@ -142,20 +159,26 @@
             attachedClient = client
             let isInteractive = isInteractiveRuntimeStateForControl()
             attachedMode = isInteractive ? mode : .viewer
-            if mode != .owner {
-                pendingViewportResizeTask?.cancel()
-                pendingViewportResizeTask = nil
-                pendingViewportResizeSize = nil
-            } else {
-                pendingViewportResizeTask?.cancel()
-                pendingViewportResizeTask = nil
-                pendingViewportResizeSize = nil
-            }
+            // Any viewport size measured before this attach belongs to the previous attachment's
+            // ownership and epoch; the attach below re-announces the current one.
+            pendingViewportSettleTask?.cancel()
+            pendingViewportSettleTask = nil
+            pendingViewportSettleSize = nil
+            pendingViewportSettleForce = false
+            pendingViewportResizeTask?.cancel()
+            pendingViewportResizeTask = nil
+            pendingViewportResizeSize = nil
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
+            // Viewers keep the session's real capture flags (their clicks are never forwarded, but the
+            // mirror should arbitrate like the session it shows); only an ended session strips them.
+            terminalView.sessionPermitsMouseCapture = isInteractive
             terminalView.onSendText = { [weak self] text, asPaste in self?.sendRemoteInput(text, asPaste: asPaste) }
             terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
             terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods, pointerPosition in
                 self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
+            }
+            terminalView.onSendMouseButton = { [weak self] button, pressed, pointerPosition in
+                self?.sendRemoteMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
@@ -218,6 +241,14 @@
 
         public func activeOwnerClientID() -> String? {
             ensureStateStreamStartedIfNeeded()
+            return currentOwnerClientID()
+        }
+
+        /// Who owns the session according to the state this host currently holds — the one notion of live
+        /// ownership, shared with `activeOwnerClientID()`, which only adds the subscription kick callers
+        /// coming from outside need. Split out so a caller already inside the payload-apply path can ask
+        /// the same question without re-entering the subscription machinery on every event.
+        private func currentOwnerClientID() -> String? {
             guard isInteractiveRuntimeStateForControl() else { return nil }
             return latestState?.attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         }
@@ -301,10 +332,20 @@
         /// guessing how long that takes.
         func drainInputQueueForTesting() async { await inputQueue.drain() }
 
-        /// Awaits the in-flight viewport resize task, if any — resize runs off `inputQueue` in its own
-        /// detached task, so a test needs this rather than `drainInputQueueForTesting` to observe its
+        /// How many settle turns have been started (see `handleViewportSizeChange`). A re-measurement of
+        /// the size already waiting must not start another one, and that is otherwise invisible: both
+        /// behaviors send the same size on a quiet stream, and the difference only shows as a resize held
+        /// back across a busy one.
+        private(set) var debugViewportSettleScheduleCount = 0
+
+        /// Awaits the pending viewport resize, if any — first the settle turn a measured size waits out
+        /// (`handleViewportSizeChange`), then the send task it starts. Resize runs off `inputQueue` in its
+        /// own detached task, so a test needs this rather than `drainInputQueueForTesting` to observe its
         /// outcome (including its `reportInputFailure` call) instead of guessing how long it takes.
-        func drainPendingResizeForTesting() async { await pendingViewportResizeTask?.value }
+        func drainPendingResizeForTesting() async {
+            await pendingViewportSettleTask?.value
+            await pendingViewportResizeTask?.value
+        }
 
         public var effectiveTitle: String {
             ensureStateStreamStartedIfNeeded()
@@ -452,6 +493,15 @@
         }
 
         private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
+            // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
+            // whichever route delivered it may have done so out of order with respect to the state
+            // payloads around it (see `DeviceTerminalSessionStateModel.apply`).
+            applyClipboardWrite(from: incomingPayload)
+            // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen
+            // state, and its runtime/attachment snapshot is a repeat of the output turn that carried the
+            // escape sequence — so reducing it is skipped rather than risking an out-of-order payload
+            // regressing the cached title, runtime state, or ownership.
+            guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
             let decodeStartedAt = Date()
             let reduction = stateReducer.reduce(
                 incomingPayload: incomingPayload, previousPayload: latestState,
@@ -523,6 +573,26 @@
             if postNotifications { postLocalNotifications(for: payload) }
         }
 
+        /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
+        /// session and the write is addressed to it.
+        ///
+        /// The payload fans out to every subscriber, so the target check is what makes it the owner's
+        /// clipboard and nobody else's. Read from the incoming payload rather than `latestState`: the
+        /// merge deliberately drops the field, so the write is applied exactly once, on arrival — and on
+        /// arrival is before any state reduction, so no ordering rule can swallow it.
+        private func applyClipboardWrite(from payload: GhosttyRemoteSessionStatePayload) {
+            guard let clipboardWrite = payload.clipboardWrite else { return }
+            // Ownership comes from the state this host currently holds, never from `attachedMode`: that is
+            // the mode this pane last REQUESTED, and it still reads `.owner` after a takeover elsewhere
+            // demoted this one (the demotion releases the surface without re-attaching as a viewer) and
+            // after the session ended. Because the copy deliberately bypasses timestamp ordering, a delayed
+            // event addressed to the former owner would otherwise overwrite this Mac's clipboard while
+            // another device owns the session.
+            guard let attachedClientID = attachedClient?.id, currentOwnerClientID() == attachedClientID else { return }
+            guard clipboardWrite.targetClientID == attachedClientID else { return }
+            GhosttyClipboardBridge.writePlainText(clipboardWrite.text, to: clipboardPasteboardOverrideForTesting ?? .general)
+        }
+
         private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
             for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: payload.reason) {
                 TerminalSessionNotification.post(name, sessionID: payload.sessionID)
@@ -590,8 +660,7 @@
                                 .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
                         sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteKey(_ key: String) {
@@ -623,8 +692,37 @@
                         TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+        }
+
+        /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
+        /// discrete event whose press/release ordering the application depends on, so it rides the same
+        /// user-initiated input queue as a key, flushing any pending scroll batch first so the
+        /// application sees the two in the order the user produced them.
+        private func sendRemoteMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
+            guard isInteractiveRuntimeStateForControl() else { return }
+            guard let client = attachedClient, attachedMode == .owner else { return }
+            scrollCoalescer.flush()
+            let socketPath = paths.controlSocketPath
+            let clientID = client.id
+            let ownerEpoch = latestState?.renderOwnerEpoch
+            let sessionID = launchConfiguration.sessionID
+            let requestSender = terminalServiceRequestSender
+            let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .mouseButton(
+                                .init(
+                                    clientID: clientID, ownerEpoch: ownerEpoch, button: button, pressed: pressed, pointerX: pointerPosition?.x,
+                                    pointerY: pointerPosition?.y, pointerMods: pointerPosition?.mods))), sessionID: sessionID, socketPath: socketPath,
+                        requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "mouse_button") } }
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteClearScreenAndScrollback() {
@@ -646,8 +744,7 @@
                         TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
@@ -835,11 +932,10 @@
                                 .init(
                                     clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
                                     scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods, scrollPointerX: batch.pointerPosition?.x,
-                                    scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))),
-                        sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                                    scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
-                },
-                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
+                }, onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendCurrentViewportResizeIfNeeded(force: Bool) {
@@ -850,6 +946,8 @@
         /// The owner attach's viewport send. It forces the request past the dedup's stale-state skips only
         /// when the mirror surface was rebuilt since the last attach — a rebuilt surface negotiated its own
         /// grid, so the size the daemon last heard was measured against a surface that no longer exists.
+        /// The force is about the dedup, not the timing: like every other measurement it is announced only
+        /// once the layout settles, so the attach cannot publish a pre-layout grid.
         /// Re-attaching to the same live surface sends nothing: the daemon would answer that resize by
         /// early-outing as a no-op, after a control hop onto the queue that carries every session's
         /// keystrokes, and every refocus of an already-open pane re-attaches. The force cannot revive a
@@ -866,8 +964,52 @@
             handleViewportSizeChange(columns: size.columns, rows: size.rows, force: surfaceWasRebuilt)
         }
 
+        /// The single point where a measured viewport size leaves for the daemon, and the point that
+        /// holds it for one main-actor turn before it does.
+        ///
+        /// A pane reports its grid from the middle of layout, not only once layout is done. Re-showing a
+        /// workspace adds the panel to the detail container before the panel's edge constraints are
+        /// active, and rebuilding an evicted mirror surface inside that `addSubview` forces a window-level
+        /// layout pass — so the pane momentarily solves to its fitting size and reports that tiny grid,
+        /// then reports the real one microseconds later when the constraints activate. Both land while the
+        /// main actor is still inside the same synchronous switch, so deferring by a turn lets the second
+        /// replace the first and only the settled size is ever sent. The daemon is spared a resize pair
+        /// that costs the shell two SIGWINCHes (whose prompt redraw destroys a line of scrollback per
+        /// switch) and a remote session a full reflowed frame at the tiny grid; a switch back to unchanged
+        /// bounds sends nothing at all, because `shouldSendViewportResize` drops the unchanged size.
+        ///
+        /// A user dragging the window resizes across many turns and keeps flowing: each turn's final size
+        /// is sent on the next one.
         private func handleViewportSizeChange(columns: Int, rows: Int, force: Bool = false) {
+            pendingViewportSettleForce = pendingViewportSettleForce || force
+            // A measurement identical to the one already waiting keeps that wait rather than restarting
+            // it. Every state payload re-measures the viewport, and a session under steady output
+            // delivers them continuously: restarting the turn on each one would hold a genuinely pending
+            // resize back for as long as the stream stays busy.
+            if pendingViewportSettleSize?.columns == columns, pendingViewportSettleSize?.rows == rows { return }
+            pendingViewportSettleTask?.cancel()
+            pendingViewportSettleSize = (columns, rows)
+            debugViewportSettleScheduleCount &+= 1
+            pendingViewportSettleTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !Task.isCancelled else { return }
+                self.pendingViewportSettleTask = nil
+                self.pendingViewportSettleSize = nil
+                let force = self.pendingViewportSettleForce
+                self.pendingViewportSettleForce = false
+                self.sendViewportResize(columns: columns, rows: rows, force: force)
+            }
+        }
+
+        private func sendViewportResize(columns: Int, rows: Int, force: Bool) {
             guard isInteractiveRuntimeStateForControl(), attachedMode == .owner, let client = attachedClient else { return }
+            // The size was measured a turn ago, and in that turn the pane can have left the screen and had
+            // its surface freed by `GhosttyMirrorSurfaceMRU` — which frees it on the view itself, with
+            // nothing that tells this host. A pane that can no longer measure a viewport must not resize
+            // its session to one it took off a surface that is gone: the same rule that keeps an
+            // off-screen pane from reporting the `cellMetrics()` estimate. The real grid comes back with
+            // the surface rebuilt when the pane is displayed again.
+            guard terminalView.surfaceCellSize() != nil else { return }
             let requestedSize: (columns: Int, rows: Int) = (columns, rows)
             let runtimeSize = latestState?.runtimeState.map { runtimeState in (columns: runtimeState.columns ?? 0, rows: runtimeState.rows ?? 0) }
             guard

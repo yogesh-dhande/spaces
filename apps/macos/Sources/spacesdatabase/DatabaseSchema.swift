@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 8
+    public static let currentVersion = 9
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -193,6 +193,42 @@ public enum DatabaseSchema {
                     UPDATE terminal_remote_session_states SET has_final_render = 1 WHERE payload_json LIKE '%"renderUpdate":"%';
                     """)
         },
+        // Records when a session's program last rang the terminal bell, which is what the clients derive
+        // a bell alert from. Existing rows carry NULL: nothing observed a bell before this version, and a
+        // synthesized timestamp would raise an alert for a session that never rang.
+        //
+        // The frozen pre-v9 shape is created first for the same reason the v7→v8 step creates its table:
+        // a database that predates the terminal tables carries none of them (they were only ever created
+        // by the fresh-schema SQL), and the ALTER needs a table to alter; on a database that already has
+        // the table the CREATE is a no-op.
+        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "Add terminal_runtime_states.bell_at", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS terminal_runtime_states (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      service_pid INTEGER NOT NULL,
+                      child_pid INTEGER,
+                      title TEXT,
+                      working_directory TEXT,
+                      columns INTEGER,
+                      rows INTEGER,
+                      state TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      exited_at TEXT,
+                      foreground_pid INTEGER,
+                      foreground_executable_path TEXT,
+                      foreground_executable_name TEXT,
+                      foreground_argv_json TEXT,
+                      foreground_detected_agent_kind TEXT,
+                      foreground_display_label TEXT,
+                      foreground_display_command TEXT
+                    );
+                    ALTER TABLE terminal_runtime_states ADD COLUMN bell_at TEXT;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -263,7 +299,8 @@ public enum DatabaseSchema {
               foreground_argv_json TEXT,
               foreground_detected_agent_kind TEXT,
               foreground_display_label TEXT,
-              foreground_display_command TEXT
+              foreground_display_command TEXT,
+              bell_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS terminal_clients (

@@ -155,6 +155,28 @@ import workspacecore
         }
     }
 
+    /// Picker rows describe an ad hoc shell the way the sidebar does: its name, then the title its
+    /// program reported — nothing for a shell that has reported none.
+    @Test func terminalRowsShowTheNameDescribedByTheLiveTitle() throws {
+        let workspace = SpacesDeviceWorkspaceSummary(
+            id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/workspace-1",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 2,
+            terminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "row-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/workspace-1",
+                    sessionID: "session-quiet", runState: .running, canOpenTerminal: true, canStop: true),
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "row-busy", workspaceID: "workspace-1", title: "shell-2", workingDirectory: "/device/workspace-1", sessionID: "session-busy",
+                    runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
+            ])
+        let presentation = AppKitController.sessionPickerPresentation(
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: [])
+
+        #expect(try #require(presentation.items.first { $0.label == "shell-1" }).detail == nil)
+        #expect(try #require(presentation.items.first { $0.label == "shell-2" }).detail == "vim main.swift")
+    }
+
     @Test func globalScopeListsEveryWorkspaceInOrderAndExcludesOpenSessionsFromEither() {
         let workspaceA = richWorkspace(id: "workspace-1")
         let workspaceB = richWorkspace(id: "workspace-2")

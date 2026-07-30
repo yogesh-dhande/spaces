@@ -15,7 +15,7 @@ ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
 # build flags and the artifact release is keyed on the Ghostty SHA alone, so
 # this is the only thing that invalidates artifacts built with older flags.
 BUILD_SCRIPT_VERSION="3"
-MANIFEST_SCHEMA_VERSION="1"
+MANIFEST_SCHEMA_VERSION="2"
 VALIDATION_XCODE_BUILD_MISMATCH=42
 VALIDATION_OPTIMIZE_MISMATCH=43
 VALIDATION_HOST_ARCH_MISMATCH=44
@@ -333,6 +333,12 @@ ghostty_vt_runtime_library_present() {
 }
 
 normalize_ghosttykit_static_library() {
+    # Renaming the static library and rewriting the xcframework Info.plist rewrites
+    # artifact bytes, so any digest computed for the installed tree is void. Every
+    # install path (build, cache restore, download) normalizes before anything
+    # digests the result, so this one reset covers all of them.
+    INSTALLED_CONTENT_DIGEST=""
+
     local macos_lib_dir="$XCFRAMEWORK_ROOT/macos-arm64_x86_64"
 
     if [[ -f "$macos_lib_dir/ghostty-internal.a" && ! -f "$macos_lib_dir/libghostty-internal.a" ]]; then
@@ -358,6 +364,124 @@ normalize_ghosttykit_static_library() {
     fi
 }
 
+# One digest over the four artifact trees the manifest's install_paths name, in a
+# fixed order: every regular file contributes its path and content, every symlink
+# its path and target, with the file list ordered by raw path bytes so the digest
+# is reproducible on any host.
+#
+# This is an INTEGRITY field, deliberately not part of artifact_validity_fields: a
+# cache key has to be derivable before the content it names exists, while this can
+# only be computed from produced artifacts. It closes the gap that let a poisoned
+# artifact set validate forever -- the manifest and the cache key record build
+# INPUTS only, so artifacts whose compiled code disagreed with their own headers
+# (an ABI skew that still declares every symbol verify_ghosttykit.sh checks) passed
+# every trust path until someone rebuilt by hand.
+#
+# $1 is a ghosttykit root (GhosttyKit.xcframework + Resources), $2 a ghosttyvt root
+# (include + lib), so the same function digests an installed .local and a cache
+# entry.
+artifact_content_digest() {
+    python3 - \
+        "ghosttykit/GhosttyKit.xcframework=$1/GhosttyKit.xcframework" \
+        "ghosttykit/Resources=$1/Resources" \
+        "ghosttyvt/include=$2/include" \
+        "ghosttyvt/lib=$2/lib" <<'PY'
+import hashlib
+import os
+import sys
+
+CHUNK = 1024 * 1024
+
+
+def tree_entries(root):
+    """Every file and symlink under root as (relative path bytes, kind, path)."""
+    found = []
+    stack = [(b"", root)]
+    while stack:
+        rel, path = stack.pop()
+        with os.scandir(path) as scan:
+            for entry in scan:
+                name = os.fsencode(entry.name)
+                child_rel = rel + b"/" + name if rel else name
+                if entry.is_symlink():
+                    found.append((child_rel, b"symlink", entry.path))
+                elif entry.is_dir(follow_symlinks=False):
+                    stack.append((child_rel, entry.path))
+                else:
+                    found.append((child_rel, b"file", entry.path))
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+digest = hashlib.sha256()
+for spec in sys.argv[1:]:
+    label, _, root = spec.partition("=")
+    if not os.path.isdir(root):
+        print(f"missing Ghostty artifact tree: {root}", file=sys.stderr)
+        sys.exit(1)
+
+    label_bytes = os.fsencode(label)
+    for rel, kind, path in tree_entries(root):
+        digest.update(label_bytes + b"/" + rel + b"\0" + kind + b"\0")
+        if kind == b"symlink":
+            target = os.fsencode(os.readlink(path))
+            digest.update(target + b"\0")
+            continue
+        file_digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(CHUNK), b""):
+                file_digest.update(chunk)
+        digest.update(file_digest.digest())
+
+print("sha256:" + digest.hexdigest())
+PY
+}
+
+# Digest of the artifacts installed in apps/macos/.local, computed at most once per
+# run. Hashing the artifact trees costs seconds, and the local reuse check and the
+# cache publish both need the same answer.
+INSTALLED_CONTENT_DIGEST=""
+
+compute_installed_content_digest() {
+    [[ -n "$INSTALLED_CONTENT_DIGEST" ]] && return 0
+    INSTALLED_CONTENT_DIGEST="$(artifact_content_digest "$GHOSTTYKIT_ROOT" "$GHOSTTYVT_ROOT")"
+}
+
+manifest_content_digest() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        digest = json.load(handle)["artifact_content_digest"]
+except Exception:
+    sys.exit(1)
+
+if not digest:
+    sys.exit(1)
+print(digest)
+PY
+}
+
+# True when the artifacts installed in .local still hash to what the installed
+# manifest recorded for them.
+installed_content_matches_manifest() {
+    compute_installed_content_digest || return 1
+    local recorded
+    recorded="$(manifest_content_digest "$LOCAL_MANIFEST")" || return 1
+    [[ "$recorded" == "$INSTALLED_CONTENT_DIGEST" ]]
+}
+
+# The same check for a shared-cache entry, whose trees sit at the entry root.
+cache_entry_content_matches_manifest() {
+    local entry="$1"
+    local recorded actual
+    recorded="$(manifest_content_digest "$entry/ghostty-artifacts/manifest.json")" || return 1
+    actual="$(artifact_content_digest "$entry/ghosttykit" "$entry/ghosttyvt")" || return 1
+    [[ "$recorded" == "$actual" ]]
+}
+
 verify_ghosttykit_contract() {
     if [[ "${SPACES_GHOSTTY_SETUP_SKIP_API_VERIFY:-0}" == "1" ]]; then
         return
@@ -371,14 +495,20 @@ verify_ghosttykit_contract() {
 
 reuse_local_artifacts_if_valid() {
     if manifest_matches_current_sha "$LOCAL_MANIFEST"; then
-        if installed_artifacts_present; then
-            echo "==> Reusing local Ghostty artifacts for $GHOSTTY_SHA"
-            normalize_ghosttykit_static_library
-            verify_ghosttykit_contract
-            return 0
+        if ! installed_artifacts_present; then
+            echo "==> Local Ghostty artifacts are incomplete or not loadable on this platform"
+            return 1
         fi
-        echo "==> Local Ghostty artifacts are incomplete or not loadable on this platform"
-        return 1
+
+        normalize_ghosttykit_static_library
+        if ! installed_content_matches_manifest; then
+            echo "==> Local Ghostty artifacts do not match the content digest their manifest records"
+            return 1
+        fi
+
+        echo "==> Reusing local Ghostty artifacts for $GHOSTTY_SHA"
+        verify_ghosttykit_contract
+        return 0
     fi
 
     if [[ -f "$LOCAL_MANIFEST" ]]; then
@@ -453,6 +583,11 @@ restore_from_cache_if_valid() {
     fi
 
     normalize_ghosttykit_static_library
+    if ! installed_content_matches_manifest; then
+        echo "==> Cached Ghostty artifacts do not match the content digest their manifest records; falling through to download"
+        return 1
+    fi
+
     if ! verify_ghosttykit_contract; then
         echo "==> Cached Ghostty artifacts failed API contract verification; falling through to download"
         return 1
@@ -472,6 +607,11 @@ save_to_cache() {
     if ! installed_artifacts_present; then
         return 0
     fi
+    # Never publish artifacts that disagree with their own manifest: the shared
+    # cache is what every other worktree on this machine trusts.
+    if ! installed_content_matches_manifest; then
+        return 0
+    fi
 
     local entry
     entry="$(cache_entry_dir)"
@@ -481,10 +621,22 @@ save_to_cache() {
         # mismatch here is a damaged or hand-edited entry rather than another
         # checkout's valid artifacts -- replacing it repairs the key instead of
         # taking it away from a peer that still wants it.
-        if manifest_matches_current_sha "$entry/ghostty-artifacts/manifest.json"; then
-            return 0
+        #
+        # The content digest is checked here for the same reason: an entry whose
+        # artifacts no longer hash to what its manifest records is rejected by
+        # every restore, so the run that rejected it downloads or builds good
+        # artifacts and must repair the entry. Without this check the poisoned
+        # entry would survive its own rejection and keep costing every reader a
+        # wasted restore.
+        local entry_manifest="$entry/ghostty-artifacts/manifest.json"
+        if manifest_matches_current_sha "$entry_manifest"; then
+            if cache_entry_content_matches_manifest "$entry"; then
+                return 0
+            fi
+            echo "==> Replacing Ghostty cache entry whose artifacts do not match its recorded content digest ($entry)"
+        else
+            echo "==> Replacing stale Ghostty cache entry ($entry)"
         fi
-        echo "==> Replacing stale Ghostty cache entry ($entry)"
         rm -rf "$entry"
     fi
 
@@ -580,9 +732,12 @@ write_manifest() {
     local manifest_path="$1"
     local dirty="$2"
     local mode="$3"
-    local kit_checksum="${4:-}"
-    local resources_checksum="${5:-}"
-    local vt_checksum="${6:-}"
+    # Required: a manifest without the digest of the artifacts it describes cannot
+    # be trusted by any reuse path, so there is no caller that may omit it.
+    local content_digest="$4"
+    local kit_checksum="${5:-}"
+    local resources_checksum="${6:-}"
+    local vt_checksum="${7:-}"
 
     mkdir -p "$(dirname "$manifest_path")"
     python3 - "$manifest_path" \
@@ -598,6 +753,7 @@ write_manifest() {
         "$GHOSTTY_BUILD_OPTIMIZE" \
         "$dirty" \
         "$mode" \
+        "$content_digest" \
         "$kit_checksum" \
         "$resources_checksum" \
         "$vt_checksum" <<'PY'
@@ -618,10 +774,11 @@ import sys
     build_optimize,
     dirty,
     mode,
+    content_digest,
     kit_checksum,
     resources_checksum,
     vt_checksum,
-) = sys.argv[1:17]
+) = sys.argv[1:18]
 
 artifact_checksums = {}
 if kit_checksum:
@@ -644,6 +801,7 @@ manifest = {
     "build_optimize": build_optimize,
     "dirty": dirty == "true",
     "mode": mode,
+    "artifact_content_digest": content_digest,
     "artifact_checksums": artifact_checksums,
     "install_paths": {
         "ghosttykit_xcframework": "apps/macos/.local/ghosttykit/GhosttyKit.xcframework",
@@ -720,7 +878,11 @@ build_from_source() {
     install_source_build_outputs
     installed_artifacts_present || die "Ghostty source build did not install a loadable libghostty-vt runtime library"
     normalize_ghosttykit_static_library
-    write_manifest "$LOCAL_MANIFEST" "$dirty" "build"
+    # After normalization, so the recorded digest describes the tree every reuse
+    # path re-hashes (normalization rewrites the static library name and the
+    # xcframework Info.plist).
+    compute_installed_content_digest || die "failed to digest the Ghostty artifacts installed by the source build"
+    write_manifest "$LOCAL_MANIFEST" "$dirty" "build" "$INSTALLED_CONTENT_DIGEST"
     verify_ghosttykit_contract
 
     if [[ -n "$PACKAGE_DIR" ]]; then
@@ -941,6 +1103,15 @@ download_release_artifacts() {
 
     installed_artifacts_present || die "Downloaded Ghostty artifacts did not install a loadable libghostty-vt runtime library"
     normalize_ghosttykit_static_library
+    # The asset checksums above prove the tarballs are the ones the manifest was
+    # written for; this proves the tree they unpacked to is. A release whose
+    # manifest describes different content than it ships is broken at the source
+    # and cannot be repaired here, so it fails loudly. The rejected artifacts stay
+    # where they were unpacked, which is harmless: they carry the manifest they
+    # failed against, so the next setup rejects them on the same digest instead of
+    # reusing them.
+    installed_content_matches_manifest \
+        || die "Downloaded Ghostty artifacts do not match the content digest in their manifest; republish $release_tag with apps/macos/scripts/ensure_ghostty_artifacts.sh on a trusted workflow or build locally with --build"
     verify_ghosttykit_contract
 }
 
@@ -972,7 +1143,12 @@ package_installed_artifacts() {
     kit_checksum="$(sha256_file "$package_dir/GhosttyKit.xcframework.tar.gz")"
     resources_checksum="$(sha256_file "$package_dir/GhosttyKit-resources.tar.gz")"
     vt_checksum="$(sha256_file "$package_dir/libghostty-vt.tar.gz")"
-    write_manifest "$package_dir/manifest.json" "$dirty" "build" "$kit_checksum" "$resources_checksum" "$vt_checksum"
+    # The packaged manifest carries the digest of the installed trees the tarballs
+    # were made from, which is what a consumer recomputes after extracting them.
+    # The build that produced this install already computed it.
+    compute_installed_content_digest || die "failed to digest the Ghostty artifacts being packaged"
+    write_manifest "$package_dir/manifest.json" "$dirty" "build" "$INSTALLED_CONTENT_DIGEST" \
+        "$kit_checksum" "$resources_checksum" "$vt_checksum"
 
     (
         cd "$package_dir"

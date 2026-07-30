@@ -1174,6 +1174,49 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(host.effectiveTitle, "live-title")
             XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/updated")
 
+            // A metadata action refreshes runtime state on the spot rather than leaving it to the periodic
+            // timer, so the row every overview and alert reads carries the new title in the same turn the
+            // program reported it. Read through the state payload, which serves the in-memory
+            // authoritative copy that refresh advances.
+            let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+            XCTAssertEqual(payload?.runtimeState?.title, "live-title")
+            XCTAssertEqual(payload?.runtimeState?.workingDirectory, "/tmp/updated")
+        }
+    }
+
+    /// The durable runtime-state row records what the program reported and nothing else. A shell that has
+    /// set no title stores none, so a reader asking what the session is doing
+    /// (`TerminalSessionCatalogEntry.liveTitle`, the sidebar's secondary text) gets nothing instead of the
+    /// session's own name echoed back beside it. `effectiveTitle` — what a pane displays — still falls back
+    /// to the launch title, which is why the two must not share one stored value.
+    func testPersistedRuntimeStateCarriesOnlyTheReportedTitle() async throws {
+        try useIsolatedSpacesProfile()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        try await TerminalEngineActor.run {
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "runtime-title-session", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.debugSetLastKnownChildPID(4242)
+
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "nothing has been reported yet")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
+
+            host.applyActionEvent(.setTitle("vim main.swift"))
+            host.debugPersistRuntimeState()
+            XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "vim main.swift")
+
+            host.applyActionEvent(.setTitle("   "))
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "a cleared title reports nothing again")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
         }
     }
 
@@ -2869,6 +2912,43 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A click names the cell it landed on, so an incomplete or absent pointer is a malformed request
+    /// rather than a click at wherever the pointer happened to be.
+    func testControlMouseButtonRequiresACompletePointerPosition() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-mouse-button-pointer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let owner = TerminalClient(
+                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-26T00:00:00Z")
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true, mousePointerX: 0.5)),
+                TerminalControlResponse(
+                    ok: false, message: "Terminal mouse button pointer coordinates must be provided together.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true)),
+                TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(
+                    .init(command: "mouseButton", clientID: owner.id, mouseButton: 0, mousePressed: true, mousePointerX: 0.5, mousePointerY: 0.5)),
+                TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument))
+        }
+    }
+
     func testControlKeyCommandKClearsScreenThroughHostAction() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
@@ -2976,6 +3056,40 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertFalse(stale.ok)
             XCTAssertEqual(stale.message, "Ignoring stale resize serial 1; latest accepted serial is 2.")
 
+        }
+    }
+
+    /// A client that reconnects to a session it already owns keeps its client id — the app reattaches as
+    /// the same owner after a relaunch — while the host behind it is new and counts resize serials from
+    /// zero again. That attach neither moves the attachment nor advances the owner epoch, so nothing else
+    /// retires the previous attachment's serials: without the attach itself starting a fresh serial
+    /// incarnation, every resize the reconnected client sends is rejected as stale and its pane stays
+    /// pinned to the grid it had before.
+    func testControlAcceptsResizeSerialsRestartedByAReattachingOwner() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-reattach-resize", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-07-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
+            let owner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-29T00:00:00Z")
+
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 5)).ok)
+
+            // The same client attaches again in the same mode: no ownership change, no epoch advance.
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            let restarted = host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 1))
+
+            XCTAssertTrue(restarted.ok, "a reconnected owner's restarted resize serial was rejected as stale: \(restarted.message)")
         }
     }
 

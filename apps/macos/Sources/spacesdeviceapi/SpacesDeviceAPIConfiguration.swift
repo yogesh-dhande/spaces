@@ -85,53 +85,65 @@ public struct SpacesDeviceAPIStatus: Codable, Equatable, Sendable {
 public final class SpacesDeviceAPISettingsStore {
     private let fileManager: FileManager
     private let environment: [String: String]
-    private let profileSource: () throws -> SpacesProfileSource
+    private let profileIsInstalled: () throws -> Bool
     private let profileRoot: () throws -> String
     private let portsClaimedByOtherProfiles: (String) -> Set<Int>
 
-    /// `profileSource`, `profileRoot`, and `portsClaimedByOtherProfiles` are injectable for testing; they
-    /// default to the running process's resolved profile and the real on-disk sibling profiles. The source
-    /// decides whether this profile is allowed to bind the canonical Device API port, and the root plus the
-    /// claimed ports decide which port it assigns itself when it is not.
+    /// `profileIsInstalled`, `profileRoot`, and `portsClaimedByOtherProfiles` are injectable for testing; they
+    /// default to the running process's resolved profile and the real on-disk sibling profiles. Installed-ness
+    /// decides whether the endpoint is the canonical constant or a persisted assignment, and the root plus the
+    /// claimed ports decide which port a development profile assigns itself.
+    ///
+    /// It is deliberately the profile's IDENTITY (its resolved root) rather than how the profile was
+    /// discovered: the installed profile is reachable through more than one resolution branch, and reading
+    /// the discovery route instead is what let a daemon serving `~/.spaces` be treated as a development
+    /// profile and take a development-range port.
     public init(
         fileManager: FileManager = .default, environment: [String: String] = ProcessInfo.processInfo.environment,
-        profileSource: @escaping () throws -> SpacesProfileSource = { try SpacesProfile.current().source },
+        profileIsInstalled: @escaping () throws -> Bool = { try SpacesProfile.current().isInstalledProfile },
         profileRoot: @escaping () throws -> String = { try SpacesProfile.current().rootDirectory },
         portsClaimedByOtherProfiles: @escaping (String) -> Set<Int> = SpacesDeviceAPISettingsStore.portsClaimedBySiblingProfiles(profileRoot:)
     ) {
         self.fileManager = fileManager
         self.environment = environment
-        self.profileSource = profileSource
+        self.profileIsInstalled = profileIsInstalled
         self.profileRoot = profileRoot
         self.portsClaimedByOtherProfiles = portsClaimedByOtherProfiles
     }
 
+    /// The installed profile's endpoint is a CONSTANT derived from its identity, never persisted state: it is
+    /// the canonical `47847` that every paired client already stores, so there is nothing to choose, nothing
+    /// to remember, and nothing a `device-api.json` could usefully say. Its file is therefore neither read
+    /// nor written — which is also what makes a file poisoned by an earlier mis-resolved daemon inert rather
+    /// than permanent, since the stickiness rule below can only make a port permanent once it is stored.
+    ///
+    /// Every other profile needs a persisted assignment, because its port is a choice rather than a constant.
+    ///
+    /// The environment override is applied last for both and never written back, so a daemon started with
+    /// `SPACES_DEVICE_API_PORT` (the E2E harnesses, which pin a port or ask for an ephemeral one) binds the
+    /// overridden port without changing what any profile records.
     public func loadOrCreate() throws -> SpacesDeviceAPISettings {
-        try applyingEnvironmentOverrides(to: assigningDevelopmentPort(loadStoredOrCreate()))
+        if try profileIsInstalled() { return applyingEnvironmentOverrides(to: SpacesDeviceAPISettings()) }
+        return try applyingEnvironmentOverrides(to: assigningDevelopmentPort(loadStoredOrCreate()))
     }
 
-    /// The fixed canonical Device API port belongs to the installed profile alone. Any other profile (dev
-    /// worktree, deployed dev profile, explicit database) that still carries the canonical port has never
-    /// been assigned one, so it is given a port from `developmentPortRange` and that assignment is PERSISTED.
+    /// A development profile (dev worktree, deployed dev profile, ephemeral explicit database) that still
+    /// carries the canonical port has never been assigned one, so it is given a port from
+    /// `developmentPortRange` and that assignment is PERSISTED.
     ///
     /// Persisting is the point. A development daemon has to be reachable at a fixed address: a paired client
     /// stores one host:port for the device, so a profile whose port moved between starts would silently
     /// orphan every client already paired with it. That is also why a stored port other than the canonical
     /// default is respected verbatim and never reassigned — once a profile has a port, it keeps it. For a
-    /// development profile `device-api.json` therefore records the port that will actually be bound, with one
-    /// exception: an environment override is applied after this and never written back, so a profile started
-    /// with `SPACES_DEVICE_API_PORT` set (the E2E profiles, which pin a port or ask for an ephemeral one)
-    /// binds the overridden port while the file still holds its own assignment.
+    /// development profile `device-api.json` therefore records the port that will actually be bound, up to
+    /// the environment override the caller applies afterward and never writes back.
     ///
     /// The choice is deterministic (profile-root hash, stepped past ports other profiles already recorded)
     /// rather than a bind probe: a probe would let anything transiently holding the derived port move this
     /// profile off it permanently. Genuine runtime occupancy needs no help here — the Device API supervisor's
     /// restart timer keeps retrying the bind, so the listener comes up as soon as the port is free again.
-    ///
-    /// Env overrides are applied afterward and still win, which is how the Linux systemd install
-    /// (SPACES_DEVICE_API_PORT together with SPACES_DB_PATH) keeps binding the canonical port.
     private func assigningDevelopmentPort(_ settings: SpacesDeviceAPISettings) throws -> SpacesDeviceAPISettings {
-        guard settings.port == SpacesDeviceAPIDefaults.port, try profileSource() != .installedFallback else { return settings }
+        guard settings.port == SpacesDeviceAPIDefaults.port else { return settings }
         let root = try profileRoot()
         var assigned = settings
         assigned.port = Self.assignedDevelopmentPort(profileRoot: root, claimedPorts: portsClaimedByOtherProfiles(root))

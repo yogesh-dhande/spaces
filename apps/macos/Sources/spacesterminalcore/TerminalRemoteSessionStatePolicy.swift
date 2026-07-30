@@ -15,6 +15,9 @@ public enum TerminalRemoteSessionStateReason {
     public static let runtimeState = "runtime_state"
     public static let resize = "resize"
     public static let terminated = "terminated"
+    /// A program copied to the clipboard (OSC 52). Carries `clipboardWrite` and nothing else the
+    /// client acts on; see `TerminalClipboardWritePayload`.
+    public static let clipboardWrite = "clipboard_write"
 }
 
 public enum TerminalRemoteSessionStatePolicy {
@@ -43,6 +46,10 @@ public enum TerminalRemoteSessionStatePolicy {
         case TerminalRemoteSessionStateReason.terminated: return true
         case TerminalRemoteSessionStateReason.input: return false
         case TerminalRemoteSessionStateReason.inputOutput: return ownerKind == .localWindow
+        // A clipboard write announces no screen change: the output turn that carried the OSC 52
+        // already broadcast the frame. Exporting one here would put a second frame on the delta
+        // chain for a payload the mirror does not render.
+        case TerminalRemoteSessionStateReason.clipboardWrite: return false
         default: return false
         }
     }

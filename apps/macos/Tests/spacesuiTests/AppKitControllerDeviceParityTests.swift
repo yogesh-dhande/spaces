@@ -338,6 +338,33 @@ import workspacecore
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
     }
 
+    /// Palette rows for ad hoc shells read the way the sidebar rows do: the terminal's name, described
+    /// by the title its program reported. A shell that has reported none is named and nothing more.
+    @Test func commandPaletteTerminalRowsShowTheNameDescribedByTheLiveTitle() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: nil,
+                    sessionCount: 2, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    config: SpacesDeviceWorkspaceConfig(),
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
+                            sessionID: "session-quiet", runState: .running, canOpenTerminal: true, canStop: true),
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-busy", workspaceID: "workspace-1", title: "shell-2", workingDirectory: "/device/project-feature",
+                            sessionID: "session-busy", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
+                    ])
+            ], sessions: [])
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        #expect(try #require(items.first { $0.label == "shell-1" }).detail == nil)
+        #expect(try #require(items.first { $0.label == "shell-2" }).detail == "vim main.swift")
+    }
+
     @Test func deviceTerminalRowsRenderThroughWorkspaceRuntimeRows() {
         let terminalRows = [
             SpacesDeviceWorkspaceTerminalRow(
@@ -680,6 +707,26 @@ import workspacecore
         #expect(request.rows == 40)
         #expect(request.ownerEpoch == 7)
         #expect(request.resizeSerial == 3)
+    }
+
+    @Test func deviceTerminalControlRequestCarriesMouseButtonAndPointerToTheDaemon() throws {
+        // The daemon rejects a mouseButton control with no button or pointer, so every field of the
+        // click must survive the device-API conversion for a mirror click to reach the application.
+        let control = TerminalControlRequest(
+            command: .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: "mac-client", ownerEpoch: 7, button: 1, pressed: true, pointerX: 0.25, pointerY: 0.75, pointerMods: 4)))
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .mouseButton)
+        #expect(request.clientID == "mac-client")
+        #expect(request.ownerEpoch == 7)
+        #expect(request.mouseButton == 1)
+        #expect(request.mousePressed == true)
+        #expect(request.mousePointerX == 0.25)
+        #expect(request.mousePointerY == 0.75)
+        #expect(request.mousePointerMods == 4)
     }
 
     @Test func deviceTerminalControlRequestPreservesPasteIntent() throws {

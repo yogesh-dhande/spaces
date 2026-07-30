@@ -45,7 +45,7 @@ public enum GhosttyTerminalSnapshotGrid {
         guard index >= 0, index < snapshot.cells.count else { return nil }
         let cell = snapshot.cells[index]
         let isCursor = snapshot.cursorVisible && row == snapshot.cursorRow && column == snapshot.cursorColumn
-        return resolvedCell(cell, snapshot: snapshot, isCursor: isCursor)
+        return resolvedCell(cell, at: index, snapshot: snapshot, isCursor: isCursor)
     }
 
     public static func fullPlainText(for snapshot: GhosttyTerminalSnapshot) -> String {
@@ -74,22 +74,16 @@ public enum GhosttyTerminalSnapshotGrid {
         return false
     }
 
-    private static func resolvedCell(_ cell: GhosttyTerminalSnapshot.Cell, snapshot: GhosttyTerminalSnapshot, isCursor: Bool)
+    private static func resolvedCell(_ cell: GhosttyTerminalSnapshot.Cell, at index: Int, snapshot: GhosttyTerminalSnapshot, isCursor: Bool)
         -> GhosttyTerminalResolvedCell
     {
         var foreground = cell.codepoint == 0 ? snapshot.defaultForegroundRGB : cell.foregroundRGB
         var background = cell.backgroundRGB
         if cell.flags & inverseFlag != 0 || isCursor { swap(&foreground, &background) }
         return GhosttyTerminalResolvedCell(
-            text: displayCharacter(for: cell), foregroundRGB: foreground, backgroundRGB: background, isBold: cell.flags & boldFlag != 0,
-            isItalic: cell.flags & italicFlag != 0, isFaint: cell.flags & faintFlag != 0, isUnderline: cell.flags & underlineFlag != 0,
-            isStrikethrough: cell.flags & strikeFlag != 0, isSpacer: cell.flags & spacerFlag != 0, isCursor: isCursor)
-    }
-
-    private static func displayCharacter(for cell: GhosttyTerminalSnapshot.Cell) -> String {
-        if cell.flags & spacerFlag != 0 || cell.flags & invisibleFlag != 0 { return " " }
-        guard cell.codepoint != 0 else { return " " }
-        guard let scalar = UnicodeScalar(cell.codepoint) else { return "\u{FFFD}" }
-        return String(scalar)
+            text: GhosttyTerminalSnapshotCellText.displayText(for: cell, cluster: snapshot.clusters[index]), foregroundRGB: foreground,
+            backgroundRGB: background, isBold: cell.flags & boldFlag != 0, isItalic: cell.flags & italicFlag != 0,
+            isFaint: cell.flags & faintFlag != 0, isUnderline: cell.flags & underlineFlag != 0, isStrikethrough: cell.flags & strikeFlag != 0,
+            isSpacer: cell.flags & spacerFlag != 0, isCursor: isCursor)
     }
 }

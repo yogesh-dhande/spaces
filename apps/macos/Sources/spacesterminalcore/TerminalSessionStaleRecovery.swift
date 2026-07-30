@@ -122,11 +122,14 @@ public enum TerminalSessionStaleRecovery {
                 terminalState = .failed
             }
 
+            // `bellAt` carries forward with the rest of the row: the repair records how the run ended, and
+            // the bell is the identity of an alert the user may not have dismissed — dropping it here would
+            // retract that alert as a side effect of a daemon crash recovery.
             let finalizedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: ownPID, childPID: runtimeState.childPID,
-                state: terminalState, updatedAt: nowString, exitedAt: nowString, title: runtimeState.title ?? launchConfiguration.title,
+                state: terminalState, updatedAt: nowString, exitedAt: nowString, title: runtimeState.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                rows: runtimeState.rows)
+                rows: runtimeState.rows, bellAt: runtimeState.bellAt)
             // The repair is a durable write. If it cannot commit within the bounded in-place retry (a
             // sustained writer lock or storage fault — the same failure that can drop a predecessor's
             // exited-state write), do NOT report the session as finalized: leave the row in its prior

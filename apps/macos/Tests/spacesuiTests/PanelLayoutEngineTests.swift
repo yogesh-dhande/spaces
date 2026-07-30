@@ -169,6 +169,29 @@ import Testing
         #expect(PanelLayoutEngine.renameTab(tabID: "missing", title: "x", in: layout) == layout)
     }
 
+    /// A tab is named after the pane the user is looking at, so splitting and then moving focus
+    /// re-titles the tab (and with it the panel window) instead of leaving it on the pane that
+    /// happens to sit first in the tree.
+    @Test func selectedPaneFollowsFocusWithinTheTab() throws {
+        var layout = layoutWithTab()
+        var tab = try #require(layout.tabs.first)
+        #expect(PanelLayoutEngine.selectedPane(in: tab)?.id == "a")
+
+        layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))
+        tab = try #require(layout.tabs.first)
+        #expect(PanelLayoutEngine.selectedPane(in: tab)?.id == "b")
+
+        layout = PanelLayoutEngine.focusPane(paneID: "a", in: layout)
+        tab = try #require(layout.tabs.first)
+        #expect(PanelLayoutEngine.selectedPane(in: tab)?.id == "a")
+    }
+
+    /// A restored tab that has not been focused since launch still has a name to show.
+    @Test func selectedPaneFallsBackToTheFirstPaneWithoutFocusMemory() {
+        let tab = PanelTab(id: "tab-1", title: nil, lastFocusedPaneID: nil, root: .leaf(pane("a")))
+        #expect(PanelLayoutEngine.selectedPane(in: tab)?.id == "a")
+    }
+
     @Test func layoutRoundTripsThroughJSON() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))

@@ -50,9 +50,13 @@ struct BandRow<Title: View, Trailing: View>: View {
             tile
             VStack(alignment: .leading, spacing: 1) {
                 title().font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
-                    Theme.mutedSecondary
-                ).lineLimit(1).truncationMode(.middle)
+                // An empty detail takes no line at all, so a shell sitting at its workspace root reads as
+                // a single-line row instead of leaving a blank second line under its name.
+                if !detail.isEmpty {
+                    Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
+                        Theme.mutedSecondary
+                    ).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer(minLength: 0)
             trailing()
@@ -116,7 +120,8 @@ extension StatusDot.Kind {
 
     init(attentionKind: SpacesMobileAttentionEvent.Kind) {
         switch attentionKind {
-        case .waitingForInput: self = .waiting
+        // A bell reads the same as "waiting for input": both mean the session wants the user's attention.
+        case .waitingForInput, .bell: self = .waiting
         case .finished: self = .done
         case .exited, .failed: self = .exited
         }

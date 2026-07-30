@@ -25,8 +25,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let alphaDefault = workspace(id: "alpha-default", project: alpha, branch: "zzz-main", isDefault: true)
         let betaDefault = workspace(id: "beta-default", project: beta, branch: "main", isDefault: true)
 
-        let overview = SpacesDeviceOverviewBuilder.build(
-            workspaces: [alphaFeature, betaDefault, alphaDefault], sessions: [])
+        let overview = SpacesDeviceOverviewBuilder.build(workspaces: [alphaFeature, betaDefault, alphaDefault], sessions: [])
 
         // Project order by name (Alpha before Beta); within Alpha the default sorts ahead of the earlier-named feature.
         XCTAssertEqual(overview.workspaces.map(\.id), ["alpha-default", "alpha-feature", "beta-default"])
@@ -409,6 +408,112 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "build watcher")
     }
 
+    /// An ad hoc shell row is named by the session, not by what its program prints: the generic launch
+    /// name stays put and the live title travels beside it as the row's secondary text, so a user
+    /// scanning the sidebar reads `shell-1` and `vim main.swift` as two separate things.
+    func testTrackedShellRowKeepsItsNameAndCarriesTheLiveTitleBeside() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-shell", title: "shell-1", workingDirectory: "/repo/feature/apps/web", workspaceID: workspace.id,
+            attachmentSnapshot: .init(), runtimeTitle: "vim main.swift")
+        let terminalWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "shell-1", terminalTrackingID: "session-shell", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [session])
+
+        let row = overview.workspaces.first?.terminalRows.first
+        XCTAssertEqual(row?.title, "shell-1")
+        XCTAssertEqual(row?.liveTitle, "vim main.swift")
+    }
+
+    /// A shell whose program has reported no title has no secondary text to show — the row must not
+    /// echo its own name into the secondary slot ("shell-1  shell-1").
+    func testShellRowWithoutAReportedTitleCarriesNoLiveTitle() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let workspaceDescriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
+        func rows(runtimeTitle: String?) -> (row: SpacesDeviceWorkspaceTerminalRow?, session: SpacesDeviceTerminalSessionSummary?) {
+            let session = makeSessionCatalogEntry(
+                sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+                runtimeTitle: runtimeTitle)
+            let overview = SpacesDeviceOverviewBuilder.build(projects: [project], workspaces: [workspaceDescriptor], sessions: [session])
+            return (overview.workspaces.first?.terminalRows.first, overview.sessions.first)
+        }
+
+        // Never reported one.
+        XCTAssertEqual(rows(runtimeTitle: nil).row?.title, "shell-1")
+        XCTAssertNil(rows(runtimeTitle: nil).row?.liveTitle)
+        XCTAssertNil(rows(runtimeTitle: nil).session?.liveTitle)
+        // Reported one.
+        XCTAssertEqual(rows(runtimeTitle: "vim main.swift").row?.liveTitle, "vim main.swift")
+        XCTAssertEqual(rows(runtimeTitle: "vim main.swift").session?.liveTitle, "vim main.swift")
+        // Cleared it.
+        XCTAssertNil(rows(runtimeTitle: "   ").row?.liveTitle)
+        XCTAssertNil(rows(runtimeTitle: "").session?.liveTitle)
+    }
+
+    /// A rename names the row; the live title keeps showing beside it rather than being displaced or
+    /// displacing the new name.
+    func testRenamedShellRowKeepsShowingItsLiveTitleBesideTheNewName() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            userTitle: "build watcher", runtimeTitle: "vim main.swift")
+        let terminalWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "build watcher", terminalTrackingID: "session-shell",
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [session])
+
+        let row = overview.workspaces.first?.terminalRows.first
+        XCTAssertEqual(row?.title, "build watcher")
+        XCTAssertEqual(row?.liveTitle, "vim main.swift")
+    }
+
+    /// Rows are ordered by name, so a program retitling itself cannot reorder the list — palette and
+    /// cycling requests reference these rows by list index against a later overview.
+    func testTerminalRowOrderFollowsNamesNotLiveTitles() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let windows = [
+            WindowRecord(
+                id: "window-1", workspaceID: workspace.id, app: "Spaces", name: "shell-1", terminalTrackingID: "session-1", role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"),
+            WindowRecord(
+                id: "window-2", workspaceID: workspace.id, app: "Spaces", name: "shell-2", terminalTrackingID: "session-2", role: "terminal",
+                orderIndex: 1, lastSeenAt: "now"),
+        ]
+        func rows(secondTitle: String) -> [String?] {
+            let sessions = [
+                makeSessionCatalogEntry(
+                    sessionID: "session-1", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init()),
+                makeSessionCatalogEntry(
+                    sessionID: "session-2", title: "shell-2", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+                    runtimeTitle: secondTitle),
+            ]
+            let overview = SpacesDeviceOverviewBuilder.build(
+                projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: windows)], sessions: sessions)
+            return overview.workspaces.first?.terminalRows.map(\.sessionID) ?? []
+        }
+
+        XCTAssertEqual(rows(secondTitle: "shell-2"), ["session-1", "session-2"])
+        // "a build" sorts before "shell-1"; the row must stay in place anyway.
+        XCTAssertEqual(rows(secondTitle: "a build"), ["session-1", "session-2"])
+    }
+
     func testTrackedWorkspaceTerminalRequiresLiveSessionIDBeforeStopIsAvailable() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
@@ -538,8 +643,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
         let endedShellWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell",
-            role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [endedShellWindow])], sessions: [])
@@ -560,13 +665,12 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
             terminalTrackingID: "session-process", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")
         let exitedAgent = AgentWindowRecord(
-            id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-agent",
-            sessionKey: nil, status: .exited, createdAt: "now", updatedAt: "now")
+            id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-agent", sessionKey: nil,
+            status: .exited, createdAt: "now", updatedAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
-            workspaces: [.init(project: project, workspace: workspace, runningProcesses: [exitedProcess], agentWindows: [exitedAgent])],
-            sessions: [])
+            workspaces: [.init(project: project, workspace: workspace, runningProcesses: [exitedProcess], agentWindows: [exitedAgent])], sessions: [])
 
         XCTAssertEqual(overview.retainedTerminalSessionIDs, ["session-agent", "session-process"])
         XCTAssertFalse(overview.retainedTerminalSessionIDs.contains("session-never-existed"))
@@ -581,8 +685,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
             shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z", workspaceID: workspaceID, kind: kind, userTitle: userTitle)
         let runtimeState = TerminalSessionRuntimeState(
+            // No `?? title` fallback: the runtime state carries only what the program reported, so a
+            // fixture without `runtimeTitle` is a session that has reported nothing — exactly what the
+            // daemon writes for a shell that never set a title.
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-18T08:00:05Z",
-            title: runtimeTitle ?? title, workingDirectory: workingDirectory)
+            title: runtimeTitle, workingDirectory: workingDirectory)
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
             paths: TerminalSessionPaths(rootDirectory: "/tmp/\(sessionID)"), isControlAvailable: isControlAvailable,

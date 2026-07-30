@@ -98,7 +98,18 @@
         /// is unaffected by the session having no view.
         private static let contentScale = 2.0
 
+        /// A null session is all `ghostty_session_new_headless` can report across the C boundary: the
+        /// reason stays inside libghostty's log, and one cause — GhosttyKit artifacts whose compiled
+        /// code disagrees with the headers they ship — produces exactly this null while passing every
+        /// artifact check, so the message names both the log switch and the rebuild that repairs it.
+        private static let headlessSessionCreationFailure = """
+            ghostty_session_new_headless failed. Set GHOSTTY_LOG=stderr to see the reason libghostty rejected the session; \
+            if the installed GhosttyKit artifacts may be ABI-skewed, rebuild them with apps/macos/scripts/setup_ghostty.sh --build.
+            """
+
         var onActionEvent: (@TerminalEngineActor (GhosttyActionEvent) -> Void)?
+        /// A program's OSC 52 copy, already decoded and capped; empty text is a clear.
+        var onClipboardWrite: (@TerminalEngineActor (String) -> Void)?
         var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
         var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
         var onSessionStateChanged: (@TerminalEngineActor (GhosttyEmbeddedSessionStateChange) -> Void)?
@@ -183,12 +194,19 @@
             //    output.log gets written in the first place), so leaving it wired would
             //    append the entire transcript to output.log a second time. The screen is
             //    still fully reconstructed — the callback only tees, it does not parse.
+            //    The clipboard is suppressed for the same window (see
+            //    `GhosttyEmbeddedSurfaceUserData.isReplayingHistoricalOutput`): re-pushing every OSC 52
+            //    the transcript ever carried would overwrite the owner's clipboard with stale text. The
+            //    suppression outlives the replay by one `tick`, which is what drains the surface
+            //    messages the replay queued and therefore fires their clipboard callbacks.
             let restoreOutputHandler = outputHandler
             outputHandler = nil
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
             outputHandler = restoreOutputHandler
             ghostty_session_refresh(createdSession)
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
 
             finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: (columns: columns, rows: rows), startReadLoop: false)
 
@@ -217,7 +235,8 @@
             sessionConfig.surface.receive_resize = Self.hostManagedReceiveResizeCallback
 
             let surfaceUserData = GhosttyEmbeddedSurfaceUserData(
-                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface })
+                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface },
+                clipboardWriteHandler: { [weak self] text in self?.onClipboardWrite?(text) })
             self.surfaceUserData = surfaceUserData
             sessionConfig.surface.userdata = Unmanaged.passUnretained(surfaceUserData).toOpaque()
 
@@ -226,7 +245,7 @@
                 sessionConfig.surface.working_directory = cwd
                 return ghostty_session_new_headless(app, &sessionConfig)
             }
-            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_session_new_headless failed") }
+            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 
             session = createdSession
             self.hostPTY = hostPTY
@@ -353,9 +372,11 @@
         /// Ghostty data callback remains disabled, so replay updates the renderer without
         /// appending those bytes to the transcript a second time.
         func replayPersistedHandoffOutput(at path: String, startingAt offset: UInt64) async {
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: path, startingAt: offset)
             if let session { ghostty_session_refresh(session) }
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
         }
 
         /// Final failed-`execv` fallback step: restore the data callback and normal PTY
@@ -502,18 +523,36 @@
         ) -> Bool {
             guard let session, let surface else { return false }
             debugLastScrollModsValue = scrollMods
-            if let pointerPosition {
-                guard pointerPosition.isValid else { return false }
-                let size = ghostty_session_size(session)
-                let widthPixels = max(Double(size.width_px), 1)
-                let heightPixels = max(Double(size.height_px), 1)
-                let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
-                let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
-                ghostty_surface_mouse_pos(
-                    surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
-            }
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
             ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), scrollMods)
             requestSurfaceRefresh()
+            return true
+        }
+
+        /// Delivers one button press or release to the session's terminal. The surface encodes the
+        /// mouse report against its own live mouse mode and writes it to the child through the same
+        /// receive buffer that carries keyboard input, so nothing here has to know the reporting
+        /// format the application asked for.
+        @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            guard let session, let surface else { return false }
+            let mods = ghostty_input_mods_e(pointerPosition?.mods ?? GHOSTTY_MODS_NONE.rawValue)
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
+            _ = ghostty_surface_mouse_button(
+                surface, pressed ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE, ghostty_input_mouse_button_e(UInt32(button)), mods)
+            requestSurfaceRefresh()
+            return true
+        }
+
+        /// Converts a client's normalized pointer into this surface's own point coordinates. Raw client
+        /// pixels are never transported because client and daemon display scales differ.
+        private func movePointer(to pointerPosition: TerminalScrollPointerPosition, session: ghostty_session_t, surface: ghostty_surface_t) -> Bool {
+            guard pointerPosition.isValid else { return false }
+            let size = ghostty_session_size(session)
+            let widthPixels = max(Double(size.width_px), 1)
+            let heightPixels = max(Double(size.height_px), 1)
+            let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
+            let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
+            ghostty_surface_mouse_pos(surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
             return true
         }
 

@@ -33,6 +33,17 @@ typedef void (*GhosttyKeyEventSetKeyFn)(GhosttyKeyEvent, GhosttyKey);
 typedef void (*GhosttyKeyEventSetModsFn)(GhosttyKeyEvent, GhosttyMods);
 typedef void (*GhosttyKeyEventSetUtf8Fn)(GhosttyKeyEvent, const char *, size_t);
 typedef void (*GhosttyKeyEventSetUnshiftedCodepointFn)(GhosttyKeyEvent, uint32_t);
+typedef GhosttyResult (*GhosttyMouseEncoderNewFn)(const GhosttyAllocator *, GhosttyMouseEncoder *);
+typedef void (*GhosttyMouseEncoderFreeFn)(GhosttyMouseEncoder);
+typedef void (*GhosttyMouseEncoderSetoptFn)(GhosttyMouseEncoder, GhosttyMouseEncoderOption, const void *);
+typedef void (*GhosttyMouseEncoderSetoptFromTerminalFn)(GhosttyMouseEncoder, GhosttyTerminal);
+typedef GhosttyResult (*GhosttyMouseEncoderEncodeFn)(GhosttyMouseEncoder, GhosttyMouseEvent, char *, size_t, size_t *);
+typedef GhosttyResult (*GhosttyMouseEventNewFn)(const GhosttyAllocator *, GhosttyMouseEvent *);
+typedef void (*GhosttyMouseEventFreeFn)(GhosttyMouseEvent);
+typedef void (*GhosttyMouseEventSetActionFn)(GhosttyMouseEvent, GhosttyMouseAction);
+typedef void (*GhosttyMouseEventSetButtonFn)(GhosttyMouseEvent, GhosttyMouseButton);
+typedef void (*GhosttyMouseEventSetModsFn)(GhosttyMouseEvent, GhosttyMods);
+typedef void (*GhosttyMouseEventSetPositionFn)(GhosttyMouseEvent, GhosttyMousePosition);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -80,6 +91,17 @@ typedef struct {
     GhosttyKeyEventSetModsFn key_event_set_mods;
     GhosttyKeyEventSetUtf8Fn key_event_set_utf8;
     GhosttyKeyEventSetUnshiftedCodepointFn key_event_set_unshifted_codepoint;
+    GhosttyMouseEncoderNewFn mouse_encoder_new;
+    GhosttyMouseEncoderFreeFn mouse_encoder_free;
+    GhosttyMouseEncoderSetoptFn mouse_encoder_setopt;
+    GhosttyMouseEncoderSetoptFromTerminalFn mouse_encoder_setopt_from_terminal;
+    GhosttyMouseEncoderEncodeFn mouse_encoder_encode;
+    GhosttyMouseEventNewFn mouse_event_new;
+    GhosttyMouseEventFreeFn mouse_event_free;
+    GhosttyMouseEventSetActionFn mouse_event_set_action;
+    GhosttyMouseEventSetButtonFn mouse_event_set_button;
+    GhosttyMouseEventSetModsFn mouse_event_set_mods;
+    GhosttyMouseEventSetPositionFn mouse_event_set_position;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -107,6 +129,9 @@ struct SpacesGhosttyVtSession {
     GhosttyRenderState render_state;
     GhosttyRenderStateRowIterator row_iterator;
     GhosttyRenderStateRowCells row_cells;
+    // Filled by the effect callbacks (only once `spaces_ghostty_vt_session_enable_events` has run) and
+    // emptied by `spaces_ghostty_vt_session_drain_events`.
+    SpacesGhosttyVtSessionEvents pending;
 };
 
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session);
@@ -324,6 +349,18 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->key_event_set_utf8 = (GhosttyKeyEventSetUtf8Fn)dlsym(handle, "ghostty_key_event_set_utf8");
     symbols->key_event_set_unshifted_codepoint =
         (GhosttyKeyEventSetUnshiftedCodepointFn)dlsym(handle, "ghostty_key_event_set_unshifted_codepoint");
+    symbols->mouse_encoder_new = (GhosttyMouseEncoderNewFn)dlsym(handle, "ghostty_mouse_encoder_new");
+    symbols->mouse_encoder_free = (GhosttyMouseEncoderFreeFn)dlsym(handle, "ghostty_mouse_encoder_free");
+    symbols->mouse_encoder_setopt = (GhosttyMouseEncoderSetoptFn)dlsym(handle, "ghostty_mouse_encoder_setopt");
+    symbols->mouse_encoder_setopt_from_terminal =
+        (GhosttyMouseEncoderSetoptFromTerminalFn)dlsym(handle, "ghostty_mouse_encoder_setopt_from_terminal");
+    symbols->mouse_encoder_encode = (GhosttyMouseEncoderEncodeFn)dlsym(handle, "ghostty_mouse_encoder_encode");
+    symbols->mouse_event_new = (GhosttyMouseEventNewFn)dlsym(handle, "ghostty_mouse_event_new");
+    symbols->mouse_event_free = (GhosttyMouseEventFreeFn)dlsym(handle, "ghostty_mouse_event_free");
+    symbols->mouse_event_set_action = (GhosttyMouseEventSetActionFn)dlsym(handle, "ghostty_mouse_event_set_action");
+    symbols->mouse_event_set_button = (GhosttyMouseEventSetButtonFn)dlsym(handle, "ghostty_mouse_event_set_button");
+    symbols->mouse_event_set_mods = (GhosttyMouseEventSetModsFn)dlsym(handle, "ghostty_mouse_event_set_mods");
+    symbols->mouse_event_set_position = (GhosttyMouseEventSetPositionFn)dlsym(handle, "ghostty_mouse_event_set_position");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -364,6 +401,17 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->key_event_set_mods == NULL ||
         symbols->key_event_set_utf8 == NULL ||
         symbols->key_event_set_unshifted_codepoint == NULL ||
+        symbols->mouse_encoder_new == NULL ||
+        symbols->mouse_encoder_free == NULL ||
+        symbols->mouse_encoder_setopt == NULL ||
+        symbols->mouse_encoder_setopt_from_terminal == NULL ||
+        symbols->mouse_encoder_encode == NULL ||
+        symbols->mouse_event_new == NULL ||
+        symbols->mouse_event_free == NULL ||
+        symbols->mouse_event_set_action == NULL ||
+        symbols->mouse_event_set_button == NULL ||
+        symbols->mouse_event_set_mods == NULL ||
+        symbols->mouse_event_set_position == NULL ||
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
@@ -447,9 +495,19 @@ static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const
     session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
 }
 
+// Releases a cell buffer along with the per-cell grapheme clusters it owns. Every path that abandons
+// a partially filled buffer must go through this, not a bare free(), or the clusters leak.
+static void spaces_ghostty_vt_free_cells(SpacesGhosttyVtSnapshotCell *cells, size_t cell_count) {
+    if (cells == NULL) return;
+    for (size_t index = 0; index < cell_count; index++) {
+        if (cells[index].grapheme_extras != NULL) free(cells[index].grapheme_extras);
+    }
+    free(cells);
+}
+
 static void spaces_ghostty_vt_snapshot_reset(SpacesGhosttyVtSnapshot *snapshot) {
     if (snapshot == NULL) return;
-    if (snapshot->cells != NULL) free(snapshot->cells);
+    spaces_ghostty_vt_free_cells(snapshot->cells, snapshot->cell_count);
     memset(snapshot, 0, sizeof(*snapshot));
 }
 
@@ -521,12 +579,15 @@ static void spaces_ghostty_vt_fill_default_cells(
     uint32_t foreground_rgb,
     uint32_t background_rgb
 ) {
+    // Only ever called on cells the row iterator has not visited, so no cluster can be dropped here.
     if (cells == NULL || end <= start) return;
     for (size_t index = start; index < end; index++) {
         cells[index].codepoint = 0;
         cells[index].foreground_rgb = foreground_rgb;
         cells[index].background_rgb = background_rgb;
         cells[index].flags = 0;
+        cells[index].grapheme_extra_len = 0;
+        cells[index].grapheme_extras = NULL;
     }
 }
 
@@ -579,6 +640,155 @@ bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const 
     return true;
 }
 
+// Upper bound on one turn's accumulated query responses. The write_pty callback runs on the hot
+// `ghostty_terminal_vt_write` path, so a program spraying queries must not be able to grow this buffer
+// without bound; past the cap the excess is dropped and the responses already recorded still go out.
+#define SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES (64u * 1024u)
+
+// The effect callbacks. All of these run synchronously inside `ghostty_terminal_vt_write`, so each one
+// only records into the session's sink: no allocation beyond the two accumulators, no re-entry into the
+// terminal, no blocking.
+
+static void spaces_ghostty_vt_on_bell(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    if (session->pending.bell_count < UINT32_MAX) session->pending.bell_count++;
+}
+
+static void spaces_ghostty_vt_on_title_changed(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    session->pending.title_changed = true;
+}
+
+static void spaces_ghostty_vt_on_pwd_changed(GhosttyTerminal terminal, void *userdata) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL) return;
+    session->pending.pwd_changed = true;
+}
+
+static void spaces_ghostty_vt_on_write_pty(GhosttyTerminal terminal, void *userdata, const uint8_t *data, size_t len) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || data == NULL || len == 0) return;
+
+    // Responses are appended, never replaced: a single write turn can produce several (a DA reply and a
+    // cursor-position report, say) and the program parses them in the order the terminal emitted them.
+    size_t existing = session->pending.pty_response_len;
+    if (existing >= SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES) return;
+    size_t room = SPACES_GHOSTTY_VT_MAX_PTY_RESPONSE_BYTES - existing;
+    size_t take = len < room ? len : room;
+    char *grown = (char *)realloc(session->pending.pty_response, existing + take);
+    if (grown == NULL) return;
+    memcpy(grown + existing, data, take);
+    session->pending.pty_response = grown;
+    session->pending.pty_response_len = existing + take;
+}
+
+static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
+    GhosttyTerminal terminal, void *userdata, const GhosttyClipboardWrite *request
+) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || request == NULL) return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+    // Sized struct: a request smaller than this build's struct predates a field read below.
+    if (request->size < sizeof(GhosttyClipboardWrite)) return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+
+    // Spaces carries only the system clipboard; the selection clipboards have no counterpart here.
+    if (request->location != GHOSTTY_CLIPBOARD_LOCATION_STANDARD) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    }
+
+    if (request->contents_len == 0) {
+        free(session->pending.clipboard_text);
+        session->pending.clipboard_text = NULL;
+        session->pending.clipboard_len = 0;
+        session->pending.clipboard_cleared = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+    }
+
+    // The representations are alternative encodings of one value; Spaces stores text, so the first
+    // `text/plain` one wins and a write offering none is refused.
+    const GhosttyClipboardContent *chosen = NULL;
+    static const char plain_text_prefix[] = "text/plain";
+    const size_t plain_text_prefix_len = sizeof(plain_text_prefix) - 1;
+    for (size_t index = 0; index < request->contents_len && chosen == NULL; index++) {
+        const GhosttyClipboardContent *content = &request->contents[index];
+        if (content->mime.ptr == NULL || content->mime.len < plain_text_prefix_len) continue;
+        if (memcmp(content->mime.ptr, plain_text_prefix, plain_text_prefix_len) != 0) continue;
+        chosen = content;
+    }
+    if (chosen == NULL) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    }
+    if (chosen->data.len > (size_t)SPACES_GHOSTTY_VT_MAX_CLIPBOARD_BYTES) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+    }
+
+    // The payload is borrowed for the callback's duration only, so it is copied here.
+    char *copy = (char *)malloc(chosen->data.len > 0 ? chosen->data.len : 1);
+    if (copy == NULL) {
+        session->pending.clipboard_dropped = true;
+        return GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR;
+    }
+    if (chosen->data.len > 0 && chosen->data.ptr != NULL) memcpy(copy, chosen->data.ptr, chosen->data.len);
+
+    // Last write of the turn wins, including over a clear that arrived earlier in the same turn.
+    free(session->pending.clipboard_text);
+    session->pending.clipboard_text = copy;
+    session->pending.clipboard_len = chosen->data.len;
+    session->pending.clipboard_cleared = false;
+    return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+}
+
+bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
+    if (session == NULL || session->terminal == NULL || session->symbols.terminal_set == NULL) return false;
+    GhosttyTerminalSetFn terminal_set = session->symbols.terminal_set;
+    // One userdata serves every callback, and callback options take the function pointer itself rather
+    // than a pointer to it. The uintptr_t hop is what makes the function-to-object conversion explicit.
+    const struct {
+        GhosttyTerminalOption option;
+        const void *value;
+    } registrations[] = {
+        {GHOSTTY_TERMINAL_OPT_USERDATA, session},
+        {GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty},
+        {GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell},
+        {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
+        {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
+        {GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, (const void *)(uintptr_t)spaces_ghostty_vt_on_clipboard_write},
+    };
+
+    // Every registration is attempted and every result folded in: the caller depends on these events
+    // exclusively for metadata and query replies, so a session that got only some of its callbacks is
+    // silent feature loss rather than degraded output, and has to be reported as a failure.
+    bool registered = true;
+    for (size_t index = 0; index < sizeof(registrations) / sizeof(registrations[0]); index++) {
+        registered &= terminal_set(session->terminal, registrations[index].option, registrations[index].value) == GHOSTTY_SUCCESS;
+    }
+    return registered;
+}
+
+void spaces_ghostty_vt_session_drain_events(SpacesGhosttyVtSession *session, SpacesGhosttyVtSessionEvents *out_events) {
+    if (out_events == NULL) return;
+    memset(out_events, 0, sizeof(*out_events));
+    if (session == NULL) return;
+    *out_events = session->pending;
+    memset(&session->pending, 0, sizeof(session->pending));
+}
+
+void spaces_ghostty_vt_session_events_free(SpacesGhosttyVtSessionEvents *events) {
+    if (events == NULL) return;
+    free(events->clipboard_text);
+    free(events->pty_response);
+    memset(events, 0, sizeof(*events));
+}
+
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
     if (session == NULL) return;
 
@@ -595,6 +805,7 @@ void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
         session->symbols.terminal_free(session->terminal);
     }
 
+    spaces_ghostty_vt_session_events_free(&session->pending);
     spaces_ghostty_vt_unload_symbols(&session->symbols);
     free(session);
 }
@@ -768,6 +979,120 @@ bool spaces_ghostty_vt_session_encode_key(
     return true;
 }
 
+bool spaces_ghostty_vt_session_mouse_tracking_active(SpacesGhosttyVtSession *session, bool *out_active) {
+    if (out_active == NULL) return false;
+    *out_active = false;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    bool active = false;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &active) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out_active = active;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_encode_mouse(
+    SpacesGhosttyVtSession *session,
+    uint8_t action,
+    uint8_t button,
+    uint16_t mods,
+    uint16_t cell_column,
+    uint16_t cell_row,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+    if (button < SPACES_GHOSTTY_VT_MOUSE_BUTTON_LEFT || button > SPACES_GHOSTTY_VT_MOUSE_BUTTON_ELEVEN) return false;
+    if (action != SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS && action != SPACES_GHOSTTY_VT_MOUSE_ACTION_RELEASE) return false;
+
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    if (columns == 0 || rows == 0) return false;
+    if (cell_column >= columns) cell_column = columns - 1;
+    if (cell_row >= rows) cell_row = rows - 1;
+
+    GhosttyMouseEncoder encoder = NULL;
+    if (session->symbols.mouse_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return false;
+    // Reading the options off the terminal is the whole point: it is what makes the encoding follow
+    // the tracking mode and report format the running program enabled.
+    session->symbols.mouse_encoder_setopt_from_terminal(encoder, session->terminal);
+    // `setopt_from_terminal` deliberately leaves geometry alone, and a headless session has none: it
+    // is resized in cells with zero cell pixel sizes, which the encoder rejects. Give it a synthetic
+    // one-pixel-per-cell screen so the caller's cell coordinates pass straight through as
+    // surface-space pixels. The only consequence is that SGR-pixels reports cell granularity, which
+    // is the best a session with no rendered geometry can describe.
+    GhosttyMouseEncoderSize size = {
+        .size = sizeof(GhosttyMouseEncoderSize),
+        .screen_width = columns,
+        .screen_height = rows,
+        .cell_width = 1,
+        .cell_height = 1,
+    };
+    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+    const bool any_button_pressed = action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS;
+    session->symbols.mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
+
+    GhosttyMouseEvent event = NULL;
+    if (session->symbols.mouse_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+    session->symbols.mouse_event_set_action(
+        event,
+        action == SPACES_GHOSTTY_VT_MOUSE_ACTION_PRESS ? GHOSTTY_MOUSE_ACTION_PRESS : GHOSTTY_MOUSE_ACTION_RELEASE
+    );
+    session->symbols.mouse_event_set_button(event, (GhosttyMouseButton)button);
+    session->symbols.mouse_event_set_mods(event, (GhosttyMods)mods);
+    // Aim at the middle of the cell so the encoder's floor-to-cell lands on the requested one.
+    GhosttyMousePosition position = { .x = (float)cell_column + 0.5f, .y = (float)cell_row + 0.5f };
+    session->symbols.mouse_event_set_position(event, position);
+
+    size_t required = 0;
+    GhosttyResult result = session->symbols.mouse_encoder_encode(encoder, event, NULL, 0, &required);
+    if (result != GHOSTTY_OUT_OF_SPACE && result != GHOSTTY_SUCCESS) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+    // An event the terminal's current tracking mode does not report encodes to nothing; that is
+    // success with an empty payload, not an error.
+    if (required == 0) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return true;
+    }
+
+    char *encoded = (char *)malloc(required);
+    if (encoded == NULL) {
+        session->symbols.mouse_event_free(event);
+        session->symbols.mouse_encoder_free(encoder);
+        return false;
+    }
+
+    size_t written = 0;
+    result = session->symbols.mouse_encoder_encode(encoder, event, encoded, required, &written);
+    session->symbols.mouse_event_free(event);
+    session->symbols.mouse_encoder_free(encoder);
+    if (result != GHOSTTY_SUCCESS) {
+        free(encoded);
+        return false;
+    }
+
+    *out_ptr = encoded;
+    *out_len = written;
+    return true;
+}
+
 bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, SpacesGhosttyVtSnapshot *out_snapshot) {
     if (session == NULL || out_snapshot == NULL) return false;
 
@@ -835,7 +1160,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     }
 
     if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
-        free(cells);
+        spaces_ghostty_vt_free_cells(cells, cell_count);
         return false;
     }
 
@@ -848,7 +1173,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 &session->row_cells
             ) != GHOSTTY_SUCCESS
         ) {
-            free(cells);
+            spaces_ghostty_vt_free_cells(cells, cell_count);
             return false;
         }
 
@@ -861,11 +1186,19 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             GhosttyColorRgb foreground = colors.foreground;
             GhosttyColorRgb background = colors.background;
             uint32_t codepoint = 0;
+            uint32_t grapheme_len = 0;
 
             session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw_cell);
             session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
             session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
             session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+            if (
+                session->symbols.row_cells_get(
+                    session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &grapheme_len
+                ) != GHOSTTY_SUCCESS
+            ) {
+                grapheme_len = 0;
+            }
             if (
                 session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &foreground) !=
                 GHOSTTY_SUCCESS
@@ -877,6 +1210,31 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 GHOSTTY_SUCCESS
             ) {
                 background = colors.background;
+            }
+
+            // GRAPHEMES_BUF writes the full reported graphemes_len elements (base first, then the
+            // extras), so the buffer is sized from that exact count; the cap keeps it on the stack and
+            // keeps one cell from driving an unbounded copy. A cluster the library reports but declines
+            // to write leaves the cell at its base codepoint alone, the same degradation the preamble
+            // painter takes.
+            if (grapheme_len > 1 && grapheme_len <= SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS) {
+                uint32_t cluster[SPACES_GHOSTTY_VT_MAX_GRAPHEME_CODEPOINTS];
+                if (
+                    session->symbols.row_cells_get(
+                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cluster
+                    ) == GHOSTTY_SUCCESS
+                ) {
+                    uint16_t extra_len = (uint16_t)(grapheme_len - 1);
+                    uint32_t *extras = (uint32_t *)malloc((size_t)extra_len * sizeof(uint32_t));
+                    if (extras == NULL) {
+                        spaces_ghostty_vt_free_cells(cells, cell_count);
+                        return false;
+                    }
+                    memcpy(extras, cluster + 1, (size_t)extra_len * sizeof(uint32_t));
+                    codepoint = cluster[0];
+                    cells[cell_index].grapheme_extra_len = extra_len;
+                    cells[cell_index].grapheme_extras = extras;
+                }
             }
 
             cells[cell_index].codepoint = codepoint;
@@ -1738,6 +2096,42 @@ bool spaces_ghostty_vt_session_mode_is_set(SpacesGhosttyVtSession *session, uint
     }
     *out_set = value;
     return true;
+}
+
+// Copies one of the terminal's escape-sequence-set string values into a caller-owned buffer.
+// libghostty-vt hands back a BORROWED pointer into terminal storage that is invalidated by the next
+// `ghostty_terminal_vt_write` or reset, so the bytes must be copied here rather than handed across
+// the C/Swift boundary. An unset value is reported by the library as an empty string, so "absent"
+// and "explicitly cleared" are indistinguishable and both return false.
+static bool spaces_ghostty_vt_session_copy_string_data(
+    SpacesGhosttyVtSession *session,
+    GhosttyTerminalData data,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyString value = {NULL, 0};
+    if (session->symbols.terminal_get(session->terminal, data, &value) != GHOSTTY_SUCCESS) return false;
+    if (value.ptr == NULL || value.len == 0) return false;
+
+    char *copy = malloc(value.len);
+    if (copy == NULL) return false;
+    memcpy(copy, value.ptr, value.len);
+    *out_ptr = copy;
+    *out_len = value.len;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_title(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    return spaces_ghostty_vt_session_copy_string_data(session, GHOSTTY_TERMINAL_DATA_TITLE, out_ptr, out_len);
+}
+
+bool spaces_ghostty_vt_session_pwd(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    return spaces_ghostty_vt_session_copy_string_data(session, GHOSTTY_TERMINAL_DATA_PWD, out_ptr, out_len);
 }
 
 bool spaces_ghostty_vt_session_kitty_keyboard_flags(SpacesGhosttyVtSession *session, uint8_t *out_flags) {
