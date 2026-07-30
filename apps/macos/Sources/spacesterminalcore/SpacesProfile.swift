@@ -301,8 +301,9 @@ public struct SpacesProfile: Sendable, Equatable {
     public static func installedRootDirectory(homeDirectoryURL: URL) -> URL { homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true) }
 
     /// `environment`, reduced to what a process serving THIS profile may act on and pass on — the one
-    /// definition of "a process bound to a profile it does not own neither honours an inherited Spaces
-    /// redirection nor hands one to anything it launches".
+    /// definition of "a process bound to a profile it does not own neither honours an inherited redirection
+    /// nor hands one to anything it launches, and hands out an environment that describes the profile it
+    /// serves".
     ///
     /// It answers both halves of that sentence because they are one question. What this process executes is
     /// decided from the same inherited environment its children inherit, so a variable subtracted at one end
@@ -321,13 +322,26 @@ public struct SpacesProfile: Sendable, Equatable {
     /// process and its children on the profile the binding named, exactly as the binding resolves them away
     /// for the parent too.
     ///
+    /// `HOME` is CORRECTED rather than dropped, and it is the same question the subtraction answers: what
+    /// environment describes the profile this process serves. A binding is in-process, so a child never
+    /// inherits it — it resolves from its own environment, and the branch it lands on for the installed
+    /// profile is `<home>/.spaces`. The desktop E2E lanes export a temporary `HOME`, so a `spacesd` spawned
+    /// from one of those shells would serve `$TMPDIR/.../.spaces` while its parent waited on the account
+    /// profile's socket: a start that times out, and a scratch profile created under the temporary home.
+    /// Unlike a `SPACES_` redirect, `HOME` cannot simply be removed — a shell and everything it runs need a
+    /// home — so the rule has to correct it instead of subtracting it. The value comes from this profile's own
+    /// root rather than from `getpwuid` again, so the child is handed the home whose `.spaces` IS this
+    /// profile, however this profile was resolved.
+    ///
     /// Every other profile passes the environment through untouched, because a process that OWNS its profile
     /// reached it by belonging to it, and these variables then describe that same profile: the ephemeral
     /// throwaway root nothing else can name, the pinned daemon the terminal E2E lanes choose, the port a
-    /// harness asked its own daemon to bind.
+    /// harness asked its own daemon to bind, the home a harness gave the whole run.
     public func environmentServingThisProfile(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
         guard source == .explicitInstalledProfile else { return environment }
-        return Self.droppingOwnedNamespace(environment)
+        var reduced = Self.droppingOwnedNamespace(environment)
+        reduced[Self.homeEnvironmentVariable] = URL(fileURLWithPath: rootDirectory, isDirectory: true).deletingLastPathComponent().path
+        return reduced
     }
 
     /// The single place a resolved profile becomes real: it applies the two refusals, decides whether the

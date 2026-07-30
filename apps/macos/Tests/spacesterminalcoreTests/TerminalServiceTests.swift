@@ -287,19 +287,52 @@ import XCTest
                 "SPACES_SOMETHING_INVENTED_NEXT_YEAR": "/tmp/scratch/whatever",
             ])
 
-            XCTAssertEqual(environment, [:], "A bound child inherits no Spaces variable at all, including ones this test does not know about.")
+            XCTAssertEqual(
+                environment, [homeEnvironmentVariable: expectedBoundHome(of: profile)],
+                "A bound child inherits no Spaces variable at all, including ones this test does not know about — only the corrected home.")
         }
 
         // The other half of the namespace rule: it stops at the namespace. A terminal a bound sweep opens has
         // to behave like the user's own terminal, which means inheriting the user's shell configuration —
         // none of which can name a Spaces profile.
         func testDaemonSpawnEnvironmentKeepsNonSpacesVariablesForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
             let inherited = ["PATH": "/usr/bin", "SHELL": "/bin/zsh", "TERM": "xterm-256color", "ZDOTDIR": "/Users/tester", "DEBUG": "1"]
 
-            let environment = makeProfile(isInstalled: true, source: .explicitInstalledProfile).environmentServingThisProfile(inherited)
+            let environment = profile.environmentServingThisProfile(inherited)
 
-            XCTAssertEqual(environment, inherited)
+            XCTAssertEqual(environment, inherited.merging([homeEnvironmentVariable: expectedBoundHome(of: profile)]) { _, new in new })
         }
+
+        // `HOME` is the one redirect that cannot be dropped — a shell and everything it runs need a home — so
+        // it is corrected instead. A binding is in-process and a child never inherits one: a spawned `spacesd`
+        // resolves the installed profile as `<home>/.spaces`, so a redirected `HOME` (which the desktop E2E
+        // lanes export) would have it serve a throwaway profile while its parent waited on the account
+        // profile's socket.
+        func testDaemonSpawnEnvironmentCorrectsHomeToTheBoundProfilesOwnHomeForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let environment = profile.environmentServingThisProfile([homeEnvironmentVariable: "/tmp/redirected-home", "PATH": "/usr/bin"])
+
+            XCTAssertEqual(
+                environment[homeEnvironmentVariable], expectedBoundHome(of: profile),
+                "The child must resolve `<home>/.spaces` onto the very profile its parent bound.")
+            XCTAssertEqual(environment["PATH"], "/usr/bin")
+        }
+
+        // A profile the build OWNS was reached from this process's own environment, so that environment
+        // already describes it — including the home a harness gave the whole run. Correcting it there would
+        // point the child at a different profile from its parent, which is this rule in reverse.
+        func testDaemonSpawnEnvironmentLeavesHomeUntouchedForAProfileTheBuildOwns() {
+            for source: SpacesProfileSource in [.explicitDatabasePath, .developmentWorktree, .deployedDevelopmentProfile, .installedFallback] {
+                let inherited = [homeEnvironmentVariable: "/tmp/harness-home"]
+
+                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).environmentServingThisProfile(inherited)
+
+                XCTAssertEqual(environment, inherited, "A \(source.rawValue) profile's child inherits the home that described it.")
+            }
+        }
+
 
         // The exception list is what a reader is pointed at, so it is asserted rather than described: it is
         // empty, and an entry added to it has to survive into a bound child for this to keep passing.
@@ -454,6 +487,14 @@ import XCTest
                 "spacesd tests \(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             return root
+        }
+
+        private let homeEnvironmentVariable = "HOME"
+
+        /// The home a bound profile hands its children: the directory its own `.spaces` root sits in, taken
+        /// from the profile rather than from the account so it holds however the profile was resolved.
+        private func expectedBoundHome(of profile: SpacesProfile) -> String {
+            URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).deletingLastPathComponent().path
         }
 
         private func makeExecutableFile(at url: URL) throws {
