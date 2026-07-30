@@ -515,7 +515,13 @@ public enum Shell {
         try run(command, cwd: cwd, preparedEnvironment: processEnvironment())
     }
 
-    @discardableResult static func run(_ command: [String], cwd: String? = nil, environment: [String: String]) throws -> Int32 {
+    /// Runs a command with a CALLER-SUPPLIED environment instead of this process's own. Public because the
+    /// one caller outside this module is workspace-script execution, which has to subtract the profile
+    /// overrides a process bound to a profile it does not own must not pass on
+    /// (`WorkspaceOrchestrator.workspaceScriptEnvironment`). PATH is prepared exactly as it is for the
+    /// process-environment overload, so a supplied environment still reaches the login shell's and Homebrew's
+    /// directories.
+    @discardableResult public static func run(_ command: [String], cwd: String? = nil, environment: [String: String]) throws -> Int32 {
         try run(command, cwd: cwd, preparedEnvironment: preparedEnvironment(from: environment))
     }
 

@@ -10,7 +10,13 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
     case readOnly
 
     /// Mutates only what a QA sweep can undo or re-do — runtime, window, and session state it created or can
-    /// recreate. Never creates or removes a project, a workspace, or a paired device.
+    /// recreate — or does exactly what a user can already do to that profile from the product's own UI.
+    /// Never creates or removes a project, a workspace, or a paired device.
+    ///
+    /// The counter-test is the one a new classification has to answer: a command that DESTROYS or OVERWRITES
+    /// state the sweep did not create, and that the UI offers no way to produce, is refused however easy the
+    /// change looks to describe. "The sweep will put it back afterwards" is not reversibility — nothing here
+    /// captures what was there first.
     case reversible
 
     /// Never allowed against the installed profile. `reason` is written for the person who typed the command
@@ -44,6 +50,11 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
 
         // Reversible: terminal session and pane lifecycle. A session these start is one they can end, and
         // ending a session is what removes the abnormal-teardown distortion from a resource measurement.
+        // Ending or focusing someone else's session is permitted too, because closing and focusing a terminal
+        // is an action the product's own UI offers. `terminal-service-control` belongs here rather than with
+        // the unclassifiable request channels below because the terminal control protocol's command set is
+        // closed and every member of it — attach, send, key, resize, scroll, appearance — is something the
+        // terminal UI already does; an unrecognised command is rejected as unsupported rather than carried.
         "start-workspace-terminal-session": .reversible,
         "terminate-terminal-session": .reversible,
         "open-workspace-terminal": .reversible,
@@ -51,21 +62,19 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
         "focus-terminal-session-window": .reversible,
         "terminal-window-shortcut": .reversible,
         "terminal-service-control": .reversible,
-        "clear-workspace-agent-windows": .reversible,
 
         // Reversible: workspace runtime. Stopping a workspace or a process is undone by starting it again;
         // neither removes the workspace, the project, or the process template.
+        //
+        // `stop-workspace` stays here deliberately, and is not to be "corrected" to refused: stopping a
+        // workspace is a normal action the app's own UI offers, so the tool does nothing to the profile that
+        // the user cannot do themselves, and losing the contents of the terminals it closes is inherent to
+        // stopping a workspace rather than something this route adds.
         "stop-workspace": .reversible,
         "run-workspace-process": .reversible,
         "stop-workspace-process": .reversible,
         "restart-workspace-process": .reversible,
         "launch-workspace-agent": .reversible,
-
-        // Reversible: workspace settings a sweep replaces to drive a launcher or a browser session, and
-        // clears again afterwards. These REPLACE what one workspace has configured, so they are aimed at a
-        // workspace the sweep is exercising rather than at one the user has set up for their own work.
-        "set-workspace-agent-launchers": .reversible,
-        "set-workspace-browser-session-urls": .reversible,
 
         // Reversible: focus, cycling, and window visibility. Nothing here is persisted state.
         "focus-workspace-window": .reversible,
@@ -98,12 +107,27 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
         "record-mobile-demo": .refused(reason: "it records from seeded fixture workspaces, which the installed profile must not have"),
 
         // Refused: removes a workspace from the user's own view, or overwrites configuration the sweep has
-        // no way to restore.
+        // no way to restore. A sweep captures nothing before it writes, so every one of these destroys
+        // settings it did not create, with no undo — and none of them is a shape the product's own UI can
+        // produce.
         "archive-workspace": .refused(reason: "archiving a workspace takes it out of the user's list and this tooling never puts it back"),
         "hide-workspace": .refused(reason: "hiding a workspace takes it out of the user's list and this tooling never puts it back"),
         "set-workspace-stop-script": .refused(reason: "it overwrites the workspace's configured stop script with no record of what was there"),
         "add-workspace-process": .refused(reason: "it writes a process template into workspace settings the user configured"),
         "remove-workspace-process": .refused(reason: "it deletes a process template from workspace settings the user configured"),
+        "set-workspace-agent-launchers": .refused(
+            reason: "it replaces the workspace's whole configured coding-agent launcher list with no record of what was there. "
+                + "`launch-workspace-agent` is allowed, so an already-configured launcher's lifecycle is still testable there"),
+        "set-workspace-browser-session-urls": .refused(
+            reason: "it rewrites the workspace's stored browser session URLs with no record of what was there"),
+
+        // Refused: deletes state that belongs to something still running. `clear-workspace-agent-windows`
+        // removes EVERY agent row in the workspace, including rows a sweep did not create, while the agents'
+        // terminals stay live — so tracking, subscriptions, and event history are gone for an agent that is
+        // still going. The product's own UI never produces that state.
+        "clear-workspace-agent-windows": .refused(
+            reason: "it deletes every coding-agent row in the workspace — including ones it did not create — while their terminals stay live, "
+                + "leaving a running agent with no tracking, no subscriptions, and no event history"),
 
         // Refused: device pairing. A pairing is a durable trust relationship of the user's real profile, and
         // a QA sweep neither needs to add one nor can take one back.

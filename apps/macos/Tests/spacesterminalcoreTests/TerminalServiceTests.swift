@@ -242,6 +242,42 @@ import XCTest
             }
         }
 
+        // The daemon `ensureRunning` spawns has to resolve the SAME profile the spawn was decided for. A
+        // bound installed profile is stated on this process's command line, which a child never sees, so an
+        // inherited `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` would be the only thing reaching it — and the
+        // daemon would come up on a scratch database, or with its socket and instance lock under another
+        // profile's runtime root, while the parent waited on the installed profile's socket.
+        func testDaemonSpawnEnvironmentDropsBothProfileOverridesForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let environment = profile.childProcessEnvironment(inheriting: [
+                SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
+                SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime", "PATH": "/usr/bin",
+            ])
+
+            XCTAssertNil(environment[SpacesProfile.databasePathEnvironmentVariable])
+            XCTAssertNil(environment[SpacesProfile.runtimeDirectoryEnvironmentVariable])
+            XCTAssertEqual(environment["PATH"], "/usr/bin", "Only the two profile overrides are dropped; the rest of the environment is inherited.")
+        }
+
+        // The companion direction: every profile a process reached by belonging to it passes its environment
+        // to the daemon untouched, including the ephemeral scratch root that only the override can describe.
+        // Dropping it there would leave the daemon serving a different profile from its parent — the very
+        // failure the bound case above exists to prevent, in reverse.
+        func testDaemonSpawnEnvironmentForwardsProfileOverridesForAProfileTheBuildOwns() {
+            for source: SpacesProfileSource in [.explicitDatabasePath, .developmentWorktree, .deployedDevelopmentProfile, .installedFallback] {
+                let inherited = [
+                    SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
+                    SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
+                ]
+
+                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).childProcessEnvironment(
+                    inheriting: inherited)
+
+                XCTAssertEqual(environment, inherited, "A \(source.rawValue) profile's daemon inherits the environment that describes it.")
+            }
+        }
+
         func testResolveExecutableURLUsesDevelopmentBuildDaemonForDevelopmentProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }

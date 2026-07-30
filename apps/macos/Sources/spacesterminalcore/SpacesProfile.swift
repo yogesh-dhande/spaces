@@ -123,9 +123,24 @@ public struct SpacesProfile: Sendable, Equatable {
     ///
     /// Clearing the cache keeps `current()` honest for anything that resolved before the binding was made;
     /// `spacese2e` binds before it runs any command, so in practice there is nothing to clear.
-    public static func bindToInstalledProfile() {
+    public static func bindToInstalledProfile() { setInstalledProfileBinding(true) }
+
+    /// Runs `body` with this process bound to the installed profile, then unbinds it again.
+    ///
+    /// Test-only, and scoped rather than a bare unbind on purpose: the product binds once at startup and
+    /// never unbinds, so the only reason to undo one is to keep a test's binding from leaking into the next
+    /// test in the same process — which a `defer` guarantees and a caller pairing two calls does not.
+    static func withInstalledProfileBindingForTesting<T>(_ body: () throws -> T) rethrows -> T {
+        setInstalledProfileBinding(true)
+        defer { setInstalledProfileBinding(false) }
+        return try body()
+    }
+
+    /// Sets the binding and invalidates the cache it changes the answer of, as one operation under the one
+    /// lock that guards both, so the flag and the cached profile can never disagree.
+    private static func setInstalledProfileBinding(_ bound: Bool) {
         cachedProfileLock.lock()
-        installedProfileBound = true
+        installedProfileBound = bound
         cachedProfile = nil
         cachedProfileFingerprint = nil
         cachedProfileLock.unlock()
@@ -210,8 +225,8 @@ public struct SpacesProfile: Sendable, Equatable {
             return try makeProfile(
                 source: .explicitInstalledProfile, profileRoot: profileRoot,
                 databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path,
-                environment: environment.filter { !profileOverrideEnvironmentVariables.contains($0.key) }, homeDirectoryURL: homeDirectoryURL,
-                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
+                environment: droppingProfileOverrides(environment), homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath,
+                fileManager: fileManager)
         }
 
         if let overridePath = trimmed(environment[databasePathEnvironmentVariable]), !overridePath.isEmpty {
@@ -264,6 +279,29 @@ public struct SpacesProfile: Sendable, Equatable {
     /// The installed profile's root for a given home directory. The single spelling of `~/.spaces`, shared by
     /// the branch that resolves onto it and the identity test that recognises it.
     public static func installedRootDirectory(homeDirectoryURL: URL) -> URL { homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true) }
+
+    /// The environment to launch a child process with from a process serving THIS profile — the one
+    /// definition of "a process bound to a profile it does not own never hands a profile override to anything
+    /// it launches". Its callers are the three places this codebase launches a process that goes on to
+    /// resolve a Spaces profile of its own: the daemon a client spawns, the shell a workspace terminal session
+    /// runs, and a workspace script.
+    ///
+    /// An explicit installed-profile binding lives on the binding process's own command line
+    /// (`bindToInstalledProfile()`), and a child inherits an environment, not a command line. So the only
+    /// thing that reaches the child is the environment this process was started with, and if that carries
+    /// `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` the child resolves a DIFFERENT profile from the parent that
+    /// started it for this one: a daemon on a scratch database, or one whose socket, session directories, and
+    /// instance lock sit under another profile's runtime root while the parent waits on the installed
+    /// profile's socket — a second daemon on the installed database under a different instance lock. Dropping
+    /// both overrides makes the child fall through to `~/.spaces`, which is exactly how the binding resolves
+    /// them away for the parent.
+    ///
+    /// Every other profile passes the environment through untouched, because a child discovers those on its
+    /// own terms: from its own location on disk, or from the very overrides carried here.
+    public func childProcessEnvironment(inheriting environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        guard source == .explicitInstalledProfile else { return environment }
+        return Self.droppingProfileOverrides(environment)
+    }
 
     /// The single place a resolved profile becomes real: it applies the two refusals, decides whether the
     /// resolved root is the installed profile, creates the profile's directories, and builds the value.
@@ -457,6 +495,14 @@ public struct SpacesProfile: Sendable, Equatable {
     private static let profileOverrideEnvironmentVariables: Set<String> = [
         SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
     ]
+
+    /// Drops both profile overrides from an environment, written once for the two places an installed-profile
+    /// binding has to apply the same rule: resolving this process's own profile, and building the environment
+    /// a child that must serve it is spawned with. Split apart, one of the two would eventually keep a
+    /// variable the other drops, which is the half-attached state the binding exists to prevent.
+    private static func droppingProfileOverrides(_ environment: [String: String]) -> [String: String] {
+        environment.filter { !profileOverrideEnvironmentVariables.contains($0.key) }
+    }
 
     private static let cachedProfileLock = NSLock()
     private nonisolated(unsafe) static var cachedProfile: SpacesProfile?

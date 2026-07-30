@@ -195,10 +195,15 @@ import Foundation
             // spawned replacement.
             let deadline = Date().addingTimeInterval(timeout)
 
-            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
+            // The one place a spacesd is spawned on macOS, so it is where the daemon's environment is decided.
+            // `childProcessEnvironment` is what makes the child resolve the SAME profile this call resolved:
+            // for a bound installed profile it drops the two overrides, which the child would otherwise
+            // inherit and resolve a different profile from.
+            let profile = try SpacesProfile.current()
+            let executableURL = try resolveExecutableURL(profile: profile)
             let process = Process()
             process.executableURL = executableURL
-            process.environment = ProcessInfo.processInfo.environment
+            process.environment = profile.childProcessEnvironment()
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice

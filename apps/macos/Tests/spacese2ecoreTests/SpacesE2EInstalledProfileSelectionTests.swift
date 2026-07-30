@@ -72,6 +72,48 @@ final class SpacesE2EInstalledProfileSelectionTests: XCTestCase {
         }
     }
 
+    /// Overwriting or deleting state a sweep did not create is refused even where the change looks small and
+    /// easy to describe as temporary. Nothing in this tooling captures what a workspace had configured before
+    /// it writes, so "the sweep clears it again afterwards" restores nothing — and clearing the agent rows of
+    /// a workspace whose agents are still running is a state the product's own UI cannot produce at all. Each
+    /// refusal has to say which of those it is, because that reason is the argument for the classification.
+    func testCommandsThatDestroyStateTheSweepDidNotCreateAreRefused() throws {
+        let expectedReasonPhrases = [
+            "set-workspace-agent-launchers": ["configured coding-agent launcher list", "no record of what was there"],
+            "set-workspace-browser-session-urls": ["browser session URLs", "no record of what was there"],
+            "clear-workspace-agent-windows": ["did not create", "terminals stay live"],
+        ]
+
+        for (commandName, phrases) in expectedReasonPhrases {
+            XCTAssertThrowsError(
+                try SpacesE2EInstalledProfileSelection.parse(arguments: ["--installed-profile", commandName, "--workspace-dir", "/tmp/workspace"]),
+                "Expected \(commandName) to be refused."
+            ) { error in
+                guard case SpacesE2EInstalledProfileRefusal.commandRefused(let refusedCommand, let reason) = error else {
+                    return XCTFail("Expected \(commandName) to be classified as refused, got \(error).")
+                }
+                XCTAssertEqual(refusedCommand, commandName)
+                for phrase in phrases {
+                    XCTAssertTrue(reason.contains(phrase), "\(commandName)'s refusal must say what it would destroy (missing '\(phrase)'): \(reason)")
+                }
+            }
+        }
+    }
+
+    /// The other half of that line, pinned so it is not "corrected" later: a command that does exactly what a
+    /// user can already do to their own profile from the app stays permitted. Stopping a workspace is an
+    /// action the UI offers, and losing the contents of the terminals it closes is inherent to stopping a
+    /// workspace rather than something this route adds. `launch-workspace-agent` stays permitted with it, so
+    /// an already-configured launcher's lifecycle is still testable on the installed profile even though the
+    /// command that would REPLACE that configuration is refused.
+    func testCommandsTheProductUIAlreadyOffersStayPermitted() throws {
+        for commandName in ["stop-workspace", "launch-workspace-agent"] {
+            let invocation = try SpacesE2EInstalledProfileSelection.parse(
+                arguments: ["--installed-profile", commandName, "--workspace-dir", "/tmp/workspace"])
+            XCTAssertTrue(invocation.targetsInstalledProfile, "Expected \(commandName) to be permitted against the installed profile.")
+        }
+    }
+
     /// A command with no classification is refused rather than assumed safe, so a command added later cannot
     /// reach a live profile by omission. The message points at the one place a classification is declared.
     func testUnclassifiedCommandFailsClosed() throws {

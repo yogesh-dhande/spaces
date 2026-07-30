@@ -104,7 +104,13 @@ public final class SpacesClientDatabase {
 
     deinit { sqlite3_close(db) }
 
-    public static func defaultPath(homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> String {
+    /// The client store follows the profile THIS PROCESS resolved, which is why it asks `SpacesProfile` for it
+    /// rather than resolving one of its own from the environment. Resolving here separately answered a
+    /// different question — "which profile does the environment describe" instead of "which profile is this
+    /// process serving" — and so missed the one route that is not in the environment at all: a process bound
+    /// to the installed profile (`spacese2e --installed-profile`) read the checkout's development client store
+    /// while every other part of it acted on `~/.spaces`.
+    public static func defaultPath() throws -> String {
         if let override = ProcessInfo.processInfo.environment[databasePathEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines),
             !override.isEmpty
         {
@@ -112,12 +118,7 @@ public final class SpacesClientDatabase {
             if expanded.hasPrefix("/") { return expanded }
             return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(expanded).path
         }
-        let environment = currentProfileEnvironment()
-        let currentDirectoryPath = FileManager.default.currentDirectoryPath
-        let profile = try SpacesProfile.resolve(
-            environment: environment, homeDirectoryURL: profileHomeDirectoryURL(environment: environment, fallback: homeDirectoryURL),
-            currentDirectoryPath: currentDirectoryPath,
-            executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath))
+        let profile = try SpacesProfile.current()
         return URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).appendingPathComponent("Client", isDirectory: true)
             .appendingPathComponent("spaces-client.db", isDirectory: false).path
     }
@@ -131,21 +132,6 @@ public final class SpacesClientDatabase {
 
     public static func setDefaultSetting(key: String, value: String?) throws {
         try withDefaultDatabase { database in try database.setSetting(key: key, value: value) }
-    }
-
-    private static func currentProfileEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        for key in [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, "HOME"] {
-            if let value = getenv(key) { environment[key] = String(cString: value) } else { environment.removeValue(forKey: key) }
-        }
-        return environment
-    }
-
-    private static func profileHomeDirectoryURL(environment: [String: String], fallback: URL) -> URL {
-        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines), !home.isEmpty {
-            return URL(fileURLWithPath: home, isDirectory: true)
-        }
-        return fallback
     }
 
     public func upsert(device: SpacesPairedDeviceRecord) throws {

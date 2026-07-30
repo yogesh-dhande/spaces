@@ -23,7 +23,8 @@ struct SpacesE2ECommand: ParsableCommand {
             Commands act on the profile this binary resolves from where it sits — the development profile of \
             the checkout it was built in. Pass --installed-profile before a command to act on the installed \
             profile (~/.spaces) instead, for QA of the shipped build. Commands that create or remove \
-            projects, workspaces, or pairings there are refused.
+            projects, workspaces, or pairings there are refused, as are commands that overwrite \
+            configuration or delete rows the sweep did not create.
             """,
         subcommands: [
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,

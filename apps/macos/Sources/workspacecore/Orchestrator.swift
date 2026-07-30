@@ -1264,7 +1264,7 @@ public final class WorkspaceOrchestrator {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : defaultTitle
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
@@ -1317,7 +1317,7 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
@@ -1803,7 +1803,23 @@ public final class WorkspaceOrchestrator {
             stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 
-    private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
+    private func runScript(_ script: String, cwd: String) throws {
+        _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd, environment: try workspaceScriptEnvironment())
+    }
+
+    /// The environment a workspace script (the stop script) runs with: this process's own environment, minus
+    /// anything a process bound to a profile it does not own must not pass on. A stop script is user-authored
+    /// shell that commonly calls `spaces`, so a `SPACES_DB_PATH` inherited from the shell that started
+    /// `spacese2e --installed-profile stop-workspace` would point those calls at a profile this run is not
+    /// serving. Shared with the terminal-session and daemon launch paths through
+    /// `SpacesProfile.childProcessEnvironment`, so the exception is defined once.
+    ///
+    /// The base is `Shell.currentProcessEnvironment()` rather than the raw process environment because that
+    /// is what a script launched through `Shell` gets today: PATH merged with the login shell's and Homebrew's
+    /// directories, which the version-manager shims a stop script relies on live in.
+    func workspaceScriptEnvironment() throws -> [String: String] {
+        try SpacesProfile.current().childProcessEnvironment(inheriting: Shell.currentProcessEnvironment())
+    }
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
