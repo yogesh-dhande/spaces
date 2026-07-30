@@ -137,7 +137,7 @@ public final class WorkspaceOrchestrator {
     /// process-wide submitter the daemon installs; with none installed (non-daemon callers, tests that
     /// build an engine directly) delivery throws, which the engine reads as a vanished subscriber and
     /// which is unreachable when the agent has no subscribers. The `(<kind>)` parenthetical reuses the
-    /// same runtime-state resolution `agent list` uses.
+    /// same kind resolution `agent list` uses.
     func makeAgentNotificationEngine() -> AgentNotificationEngine {
         let submitter = Self.agentNotificationLineSubmitterOverrideStore.get()
         return AgentNotificationEngine(
@@ -145,8 +145,7 @@ public final class WorkspaceOrchestrator {
             deliver: { sessionID, line in
                 guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
                 try submitter(sessionID, line)
-            }, resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
-            logError: { Self.writeStandardError($0) })
+            }, resolveAgentKind: { [self] agent in resolvedAgentKind(agent) }, logError: { Self.writeStandardError($0) })
     }
 
     struct ResolvedBrowserSession {
