@@ -29,9 +29,8 @@ public struct SpacesProfile: Sendable, Equatable {
     public static let runtimeDirectoryEnvironmentVariable = "SPACES_RUNTIME_DIR"
 
     /// Names the `spacesd` binary that serves a profile (read by `TerminalService.resolveExecutableURL`).
-    /// It redirects which BINARY serves a profile rather than which profile is served, but it is subtracted
-    /// on exactly the same terms as the two above — see `redirectingEnvironmentVariables` — so it is declared
-    /// beside them rather than as a literal at its reader.
+    /// Declared beside the two above rather than as a literal at its reader, because all three are read by
+    /// name in more than one place.
     public static let daemonExecutableEnvironmentVariable = "SPACESD_EXECUTABLE"
 
     /// How this profile was DISCOVERED. Provenance only — diagnostics and error text. Nothing decides what
@@ -76,6 +75,15 @@ public struct SpacesProfile: Sendable, Equatable {
     /// built from `getenv` and a single `getcwd` because `current()` is on hot paths — every
     /// terminal-session path lookup goes through it — and reading the whole process environment
     /// dictionary cost more than the `resolve()` work the cache exists to avoid.
+    ///
+    /// A BOUND resolution takes its home from the account (`getpwuid`) rather than from `HOME`. "The
+    /// installed profile" means the one the user's own app, daemon, and CLI serve, and `HOME` is not that
+    /// statement — the desktop E2E lanes export a temporary one, so a sweep run from those shells would bind
+    /// `$TMPDIR/.../.spaces`, an empty throwaway, while reporting `explicit-installed-profile` and every
+    /// reading it took of "the shipped build" would be worthless. The account home is the same fact the
+    /// live-profile and test-host refusals already read, and it cannot be redirected by an inherited
+    /// variable, which is the whole point of the binding. `resolve`'s own `homeDirectoryURL` parameter is
+    /// untouched and stays the seam a test injects through.
     public static func current() throws -> SpacesProfile {
         let currentDirectoryPath = FileManager.default.currentDirectoryPath
         let bindsInstalledProfile = isBoundToInstalledProfile()
@@ -96,8 +104,9 @@ public struct SpacesProfile: Sendable, Equatable {
         // rather than a subset the fingerprint happens to cover today.
         let environment = currentProcessEnvironment()
         let resolved = try resolve(
-            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment), currentDirectoryPath: currentDirectoryPath,
-            bindsInstalledProfile: bindsInstalledProfile)
+            environment: environment,
+            homeDirectoryURL: bindsInstalledProfile ? try accountHomeDirectoryURL() : currentHomeDirectoryURL(environment: environment),
+            currentDirectoryPath: currentDirectoryPath, bindsInstalledProfile: bindsInstalledProfile)
 
         cachedProfileLock.lock()
         cachedProfile = resolved
@@ -222,18 +231,22 @@ public struct SpacesProfile: Sendable, Equatable {
     ) throws -> SpacesProfile {
         // An explicit installed-profile binding (see `bindToInstalledProfile()`) states WHICH profile this
         // process serves, so it precedes every discovery branch — including `SPACES_DB_PATH`, which names an
-        // ephemeral throwaway profile and can therefore only contradict it. Every redirecting variable is
-        // dropped rather than merged for the same reason: honouring an inherited `SPACES_RUNTIME_DIR` would
-        // leave the process reading the installed database while its sockets, session directories, and
-        // instance lock sat under some other profile's runtime root — the half-attached state the runtime
-        // refusal exists to stop.
+        // ephemeral throwaway profile and can therefore only contradict it. The whole Spaces environment
+        // namespace is dropped rather than merged for the same reason: honouring an inherited
+        // `SPACES_RUNTIME_DIR` would leave the process reading the installed database while its sockets,
+        // session directories, and instance lock sat under some other profile's runtime root — the
+        // half-attached state the runtime refusal exists to stop.
+        //
+        // `homeDirectoryURL` is honoured here so this stays the seam a test injects a scratch home through.
+        // `current()` — the only product route to a binding — hands it the ACCOUNT home rather than one
+        // derived from `HOME`, so a redirected `HOME` cannot make a real invocation bind a throwaway root.
         if bindsInstalledProfile {
             let profileRoot = installedRootDirectory(homeDirectoryURL: homeDirectoryURL)
             return try makeProfile(
                 source: .explicitInstalledProfile, profileRoot: profileRoot,
                 databasePath: profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path,
-                environment: droppingRedirectingVariables(environment), homeDirectoryURL: homeDirectoryURL,
-                currentDirectoryPath: currentDirectoryPath, fileManager: fileManager)
+                environment: droppingOwnedNamespace(environment), homeDirectoryURL: homeDirectoryURL, currentDirectoryPath: currentDirectoryPath,
+                fileManager: fileManager)
         }
 
         if let overridePath = trimmed(environment[databasePathEnvironmentVariable]), !overridePath.isEmpty {
@@ -288,32 +301,33 @@ public struct SpacesProfile: Sendable, Equatable {
     public static func installedRootDirectory(homeDirectoryURL: URL) -> URL { homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true) }
 
     /// `environment`, reduced to what a process serving THIS profile may act on and pass on — the one
-    /// definition of "a process bound to a profile it does not own neither honours an inherited redirection
-    /// nor hands one to anything it launches".
+    /// definition of "a process bound to a profile it does not own neither honours an inherited Spaces
+    /// redirection nor hands one to anything it launches".
     ///
     /// It answers both halves of that sentence because they are one question. What this process executes is
-    /// decided from the same inherited environment that its children inherit, so a variable subtracted at one
-    /// end and honoured at the other would let the same redirection back in by the other route: the daemon
-    /// this process starts for the profile is chosen by `SPACESD_EXECUTABLE`, and the terminal that daemon
-    /// hosts is bound by `SPACES_DB_PATH`. Its callers are therefore daemon resolution, the daemon spawn, the
-    /// shell a workspace terminal session runs, and a workspace script.
+    /// decided from the same inherited environment its children inherit, so a variable subtracted at one end
+    /// and honoured at the other would let the same redirection back in by the other route: the daemon this
+    /// process starts for the profile is chosen by `SPACESD_EXECUTABLE`, the terminal that daemon hosts is
+    /// bound by `SPACES_DB_PATH`, and the endpoint that daemon serves its paired devices on is set by
+    /// `SPACES_DEVICE_API_PORT` — a variable no command reads, which the daemon inherits anyway. Its callers
+    /// are daemon resolution, the daemon spawn, the shell a workspace terminal session runs, and a workspace
+    /// script.
     ///
     /// An explicit installed-profile binding lives on the binding process's own command line
-    /// (`bindToInstalledProfile()`), and neither a child nor an inherited variable can see a command line. So
-    /// what an inherited `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, or `SPACESD_EXECUTABLE` describes is always a
-    /// profile this process is not serving: a daemon on a scratch database; one whose socket, session
-    /// directories, and instance lock sit under another profile's runtime root while the parent waits on the
-    /// installed profile's socket; or — the one the E2E scripts export as a matter of course — a checkout's
-    /// own `spacesd` started against `~/.spaces`, free to migrate the installed daemon's database. Dropping
-    /// all three leaves this process and its children on the profile the binding named, which is how the
-    /// binding resolves them away for the parent too.
+    /// (`bindToInstalledProfile()`), and neither a child nor an inherited variable can see a command line, so
+    /// a Spaces variable in that environment always describes something this process is not serving. The
+    /// whole namespace goes rather than the redirects anyone has thought of — see
+    /// `ownedEnvironmentNamespacePrefixes` for why that is the only complete form of this rule — leaving this
+    /// process and its children on the profile the binding named, exactly as the binding resolves them away
+    /// for the parent too.
     ///
     /// Every other profile passes the environment through untouched, because a process that OWNS its profile
     /// reached it by belonging to it, and these variables then describe that same profile: the ephemeral
-    /// throwaway root nothing else can name, and the pinned daemon the terminal E2E lanes deliberately choose.
+    /// throwaway root nothing else can name, the pinned daemon the terminal E2E lanes choose, the port a
+    /// harness asked its own daemon to bind.
     public func environmentServingThisProfile(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
         guard source == .explicitInstalledProfile else { return environment }
-        return Self.droppingRedirectingVariables(environment)
+        return Self.droppingOwnedNamespace(environment)
     }
 
     /// The single place a resolved profile becomes real: it applies the two refusals, decides whether the
@@ -431,6 +445,16 @@ public struct SpacesProfile: Sendable, Equatable {
     /// substitute: every Foundation home-directory API honours `HOME`, so falling back to one would
     /// return the very value this function exists to avoid — and each caller's correct response to "the
     /// account home is unknown" differs, so it is theirs to make rather than something to paper over here.
+    /// `accountHomeDirectoryPath()` as a URL, for the one caller that cannot continue without it: an
+    /// installed-profile binding, whose entire meaning is "the profile of the account's own installed build".
+    /// An unreadable password database is refused rather than fallen back to `HOME`, because falling back is
+    /// precisely how a bound sweep would end up reading a throwaway profile and reporting it as the shipped
+    /// build.
+    private static func accountHomeDirectoryURL() throws -> URL {
+        guard let path = accountHomeDirectoryPath() else { throw SpacesProfileResolutionError.accountHomeUnavailableForInstalledProfileBinding }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     public static func accountHomeDirectoryPath() -> String? {
         let uid = getuid()
         let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
@@ -507,19 +531,41 @@ public struct SpacesProfile: Sendable, Equatable {
 
     private static let homeEnvironmentVariable = "HOME"
 
-    /// Every variable that can redirect a Spaces process onto state or binaries belonging to a profile other
-    /// than the one it serves: the two that name a profile's halves, and the one that names the daemon binary
-    /// serving it. They are ONE set because a process bound to a profile it does not own has the same answer
-    /// for all three — it neither acts on them nor passes them on — and two sets would eventually disagree
-    /// about a variable, which is the half-attached state the binding exists to prevent. Taken from the
-    /// variables themselves so the set cannot drift from them.
-    private static let redirectingEnvironmentVariables: Set<String> = [
-        SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
-        SpacesProfile.daemonExecutableEnvironmentVariable,
-    ]
+    /// The environment namespace Spaces owns. Every variable in it exists to redirect a Spaces process — at a
+    /// profile, a runtime root, a daemon binary, a port, an endpoint, a log — which is what makes the whole
+    /// namespace, rather than a list of the redirects known today, the subtraction a bound process applies.
+    ///
+    /// Written this way ON PURPOSE, after three rounds in which a hand-maintained list was found incomplete
+    /// three times: the profile paths, then the daemon binary, then the Device API host/port. Each was
+    /// reasoned safe because no permitted COMMAND read it, and each was wrong for the same reason — the
+    /// daemon and the shells this process starts inherit the environment regardless of what the command does.
+    /// A namespace rule cannot be incomplete that way: a `SPACES_`-prefixed variable introduced next year is
+    /// covered the day it is introduced, by nobody remembering anything.
+    ///
+    /// Nothing outside the namespace is touched. The user's shell configuration — `PATH`, `SHELL`, `TERM`,
+    /// `ZDOTDIR`, `HOME`, the rest — is exactly what a terminal has to inherit to behave like the user's own
+    /// terminal, and none of it can name a Spaces profile.
+    private static let ownedEnvironmentNamespacePrefixes = ["SPACES_", "SPACESD_"]
 
-    private static func droppingRedirectingVariables(_ environment: [String: String]) -> [String: String] {
-        environment.filter { !redirectingEnvironmentVariables.contains($0.key) }
+    /// The Spaces-namespace variables a bound process still passes on, as the list of EXCEPTIONS — the
+    /// removals are the rule and need no entry.
+    ///
+    /// Deliberately empty. A bound invocation acts on the installed profile, which its own build does not
+    /// own: the daemon it may have to start must come up exactly as launchd starts it, with nothing from the
+    /// shell that ran the sweep, and a terminal or script it launches there must look like one the installed
+    /// build started. An entry here has to say why a child cannot do its job without that variable, and it
+    /// widens what a QA sweep can do to a profile a user relies on, so it is a decision rather than a
+    /// convenience.
+    private static let boundEnvironmentNamespaceExceptions: Set<String> = []
+
+    /// Whether `key` is a Spaces-namespace variable a bound process drops.
+    static func isBoundProcessRedirect(_ key: String) -> Bool {
+        guard !boundEnvironmentNamespaceExceptions.contains(key) else { return false }
+        return ownedEnvironmentNamespacePrefixes.contains { key.hasPrefix($0) }
+    }
+
+    private static func droppingOwnedNamespace(_ environment: [String: String]) -> [String: String] {
+        environment.filter { !isBoundProcessRedirect($0.key) }
     }
 
     private static let cachedProfileLock = NSLock()
@@ -711,6 +757,10 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
     /// itself lives, never by an inherited environment binding.
     case explicitDatabasePathInsideLiveUserProfile(path: String)
 
+    /// A process bound to the installed profile could not read the account's home from the password
+    /// database, so it cannot say which profile "installed" means.
+    case accountHomeUnavailableForInstalledProfileBinding
+
     public var description: String {
         switch self {
         case .repoBuiltGitProbeFailed(let executablePath, let repoRoot, let underlyingError):
@@ -733,6 +783,10 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
                 + "inherited binding cannot make one profile's daemon serve another's state. Unset "
                 + "\(SpacesProfile.databasePathEnvironmentVariable) to run against the profile this binary belongs to, or point it at a path "
                 + "OUTSIDE those roots — one under the system temporary directory — for a throwaway profile."
+        case .accountHomeUnavailableForInstalledProfileBinding:
+            return "this process bound itself to the installed profile, but the account's home directory could not be read from the password "
+                + "database, so which profile `~/.spaces` names cannot be established. Refusing rather than falling back to HOME, which a caller "
+                + "can redirect and which would silently bind a throwaway profile while reporting the installed one."
         }
     }
 

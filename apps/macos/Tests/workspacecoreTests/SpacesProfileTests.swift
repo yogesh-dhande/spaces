@@ -846,6 +846,37 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(profile.databasePath, overridePath)
     }
 
+    /// "The installed profile" means the profile of the account's own installed build, and `HOME` is not that
+    /// statement: the desktop E2E lanes export a temporary one, so a sweep run from those shells would bind
+    /// an empty throwaway root while reporting `explicit-installed-profile`, and every reading it took of the
+    /// shipped build would be worthless. A bound `current()` therefore takes its home from the account
+    /// (`getpwuid`), which no inherited variable can redirect.
+    ///
+    /// The refusal IS the assertion, and it carries both halves: it names the account home's `~/.spaces`
+    /// database — proving `HOME` lost — and it proves the test-host refusal still fires for a bound
+    /// resolution, which is what keeps these suites off the real installed profile once `HOME` no longer
+    /// does.
+    func testBoundResolutionUsesTheAccountHomeAndIsStillRefusedToATestHost() throws {
+        let accountHome = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+
+        try withEnvironmentValues(["HOME": tempHomeURL.path]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+            XCTAssertThrowsError(try SpacesProfile.withInstalledProfileBindingForTesting { try SpacesProfile.current() }) { error in
+                guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile(let component, let path) = error else {
+                    return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+                }
+                XCTAssertEqual(component, .database)
+                XCTAssertEqual(
+                    path, accountHome.appendingPathComponent(".spaces/spaces.db").path,
+                    "A binding resolves the account's installed profile, not the one a redirected HOME points at.")
+                XCTAssertFalse(
+                    FileManager.default.fileExists(atPath: tempHomeURL.appendingPathComponent(".spaces").path),
+                    "The redirected home must not have been used, so nothing was created under it either.")
+            }
+        }
+    }
+
     private func explicitProfile(named name: String) throws -> SpacesProfile {
         let databasePath = tempHomeURL.appendingPathComponent("profiles/\(name)/spaces.db").path
         return try SpacesProfile.resolve(

@@ -37,6 +37,15 @@ public enum SpacesE2EInstalledProfileAccess: Equatable, Sendable {
     ///
     /// Keys are top-level command names as ArgumentParser sees them. A command group is classified as a whole
     /// — its subcommands are not keys — so the group's entry has to hold for every subcommand it owns.
+    ///
+    /// One gap a classifier has to close before it can widen this table: the client store
+    /// (`SpacesClientDatabase`, `SpacesDeviceCredentialStore`) reads `SPACES_CLIENT_DB_PATH` and
+    /// `SPACES_CLIENT_SECRET_DIR` from the environment BEFORE any profile logic, so a bound invocation still
+    /// honours them and would read or write a client store belonging to no profile it is serving. A bound
+    /// process no longer forwards them to anything it launches, and every command that touches that store is
+    /// refused below, which is what makes the gap unreachable rather than fixed. Classifying a command that
+    /// reads paired devices, credentials, or the client installation record as permitted means fixing that
+    /// first.
     public static let byCommandName: [String: SpacesE2EInstalledProfileAccess] = [
         // Read-only: the measurements a QA sweep of the installed build is built on.
         "dump-workspace": .readOnly,

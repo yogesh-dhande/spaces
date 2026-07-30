@@ -11,12 +11,16 @@ import XCTest
 /// the variable.
 ///
 /// The one exception is a process BOUND to the installed profile (`spacese2e --installed-profile`), which
-/// states which profile it serves on its own command line: the overrides in its environment describe a
-/// profile it is not serving, so it hands them to nothing it launches.
+/// states which profile it serves on its own command line: every Spaces-namespace variable in its environment
+/// describes something it is not serving, so it hands none of them to what it launches. That subtraction is
+/// `SpacesProfile.environmentServingThisProfile` and is covered directly in `TerminalServiceTests`; what these
+/// cover here is the ordinary forwarding rule it is the exception to, and the fact that no test host can
+/// build a bound environment at all.
 ///
 /// Building either environment resolves this process's profile, which is why these redirect `HOME` to a
 /// temporary directory: it keeps the profile they resolve a throwaway one. The account's own `~/.spaces` and
-/// `~/.spaces-dev/profiles` stay refused to a test process however it asks for them.
+/// `~/.spaces-dev/profiles` stay refused to a test process however it asks for them — including through a
+/// binding, which reads the account home and ignores `HOME` entirely.
 final class TerminalProfileBindingTests: XCTestCase {
 
     /// The daemon serving the installed profile runs under launchd with no `SPACES_*` set, and a repo-built
@@ -87,32 +91,25 @@ final class TerminalProfileBindingTests: XCTestCase {
         XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], databasePath)
     }
 
-    /// The exception, at the terminal-session site: a bound process's overrides describe a profile it is not
-    /// serving, so forwarding them would export a `SPACES_DB_PATH` into a terminal on the INSTALLED profile —
-    /// the first test's failure reached from the other side. Only those two are dropped; everything else a
-    /// session inherits is untouched.
-    func testTerminalLaunchEnvironmentDropsBothOverridesWhenBoundToTheInstalledProfile() throws {
+    /// Both launch environments resolve this process's profile, and a bound resolution names the ACCOUNT's
+    /// `~/.spaces` — which a test process is refused outright. So no suite can build an installed-profile
+    /// session or script environment at all, whatever it does to `HOME`, and that refusal is the guarantee
+    /// worth asserting at these sites: what a bound process would then subtract is settled by
+    /// `SpacesProfile.environmentServingThisProfile`, which is covered directly in `TerminalServiceTests`
+    /// where no live profile has to be resolved to exercise it.
+    func testNoTestHostCanBuildAnInstalledProfileLaunchEnvironment() throws {
         let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
         let home = try makeTempDirectory()
-        let strayRoot = try makeTempDirectory()
-        let eventsLogPath = strayRoot.appendingPathComponent("events.log", isDirectory: false).path
         defer { SpacesProfile.resetCacheForTesting() }
 
-        let env = try withEnvironmentValues([
-            "HOME": home.path, SpacesProfile.databasePathEnvironmentVariable: strayRoot.appendingPathComponent("spaces.db").path,
-            SpacesProfile.runtimeDirectoryEnvironmentVariable: strayRoot.appendingPathComponent("runtime").path,
-            "SPACES_E2E_EVENTS_LOG": eventsLogPath,
-        ]) {
-            try SpacesProfile.withInstalledProfileBindingForTesting {
-                try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true)
+        try withEnvironmentValues(["HOME": home.path]) {
+            SpacesProfile.resetCacheForTesting()
+            SpacesProfile.withInstalledProfileBindingForTesting {
+                XCTAssertThrowsError(
+                    try orchestrator.terminalLaunchEnvironment(base: [:], includeInheritedPath: false, includeProfileEnvironment: true))
+                XCTAssertThrowsError(try orchestrator.workspaceScriptEnvironment())
             }
         }
-
-        XCTAssertNil(env[SpacesProfile.databasePathEnvironmentVariable])
-        XCTAssertNil(env[SpacesProfile.runtimeDirectoryEnvironmentVariable])
-        XCTAssertEqual(
-            env["SPACES_E2E_EVENTS_LOG"], eventsLogPath,
-            "Only the two profile overrides are dropped; everything else a session inherits is forwarded as before.")
     }
 
     func testTerminalLaunchEnvironmentWithoutProfileEnvironmentExportsNoDatabasePath() throws {
@@ -128,7 +125,9 @@ final class TerminalProfileBindingTests: XCTestCase {
 
     /// A workspace stop script is user-authored shell that commonly calls `spaces`, so it follows the same
     /// rule as a terminal session: a daemon on an ephemeral profile passes its binding on, because that is
-    /// the only thing describing the profile those calls have to reach.
+    /// the only thing describing the profile those calls have to reach. It is this process's own environment,
+    /// prepared PATH included — what a bound run applies to it is a subtraction, never a different
+    /// environment.
     func testWorkspaceScriptEnvironmentForwardsTheProfileOverridesTheProcessCarries() throws {
         let profileRoot = try makeTempDirectory()
         let databasePath = profileRoot.appendingPathComponent("spaces.db", isDirectory: false).path
@@ -147,27 +146,6 @@ final class TerminalProfileBindingTests: XCTestCase {
 
         XCTAssertEqual(env[SpacesProfile.databasePathEnvironmentVariable], databasePath)
         XCTAssertEqual(env[SpacesProfile.runtimeDirectoryEnvironmentVariable], runtimeDirectory)
-    }
-
-    /// The exception, at the stop-script site: `spacese2e --installed-profile stop-workspace` runs the user's
-    /// own stop script, and a `SPACES_DB_PATH` inherited from the shell that started it would point every
-    /// `spaces` call inside that script at a profile the run is not serving. The script still gets its
-    /// prepared PATH, so this is a subtraction rather than a different environment.
-    func testWorkspaceScriptEnvironmentDropsBothOverridesWhenBoundToTheInstalledProfile() throws {
-        let orchestrator = makeTestOrchestrator(store: try makeTemporaryStore())
-        let home = try makeTempDirectory()
-        let strayRoot = try makeTempDirectory()
-        defer { SpacesProfile.resetCacheForTesting() }
-
-        let env = try withEnvironmentValues([
-            "HOME": home.path, SpacesProfile.databasePathEnvironmentVariable: strayRoot.appendingPathComponent("spaces.db").path,
-            SpacesProfile.runtimeDirectoryEnvironmentVariable: strayRoot.appendingPathComponent("runtime").path,
-        ]) {
-            try SpacesProfile.withInstalledProfileBindingForTesting { try orchestrator.workspaceScriptEnvironment() }
-        }
-
-        XCTAssertNil(env[SpacesProfile.databasePathEnvironmentVariable])
-        XCTAssertNil(env[SpacesProfile.runtimeDirectoryEnvironmentVariable])
-        XCTAssertFalse((env["PATH"] ?? "").isEmpty, "A stop script still runs with the prepared shell PATH it needs to find its tools.")
+        XCTAssertFalse((env["PATH"] ?? "").isEmpty, "A stop script runs with the prepared shell PATH it needs to find its tools.")
     }
 }

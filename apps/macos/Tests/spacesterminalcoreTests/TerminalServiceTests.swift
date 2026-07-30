@@ -270,21 +270,46 @@ import XCTest
         // inherited `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` would be the only thing reaching it — and the
         // daemon would come up on a scratch database, or with its socket and instance lock under another
         // profile's runtime root, while the parent waited on the installed profile's socket.
-        func testDaemonSpawnEnvironmentDropsEveryRedirectingVariableForABoundInstalledProfile() {
+        // The subtraction is the whole Spaces namespace, not a list of the redirects anyone thought of. Three
+        // review rounds each found one more variable that had been reasoned safe because no permitted command
+        // read it — the profile paths, the daemon pin, then the Device API endpoint — and each was wrong the
+        // same way: the daemon inherits the environment whatever the command does. `SPACES_DEVICE_API_PORT=0`
+        // alone would have the user's installed daemon bind an ephemeral port and drop every paired device.
+        func testDaemonSpawnEnvironmentDropsTheWholeSpacesNamespaceForABoundInstalledProfile() {
             let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
 
             let environment = profile.environmentServingThisProfile([
                 SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
                 SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
-                SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "PATH": "/usr/bin",
+                SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "SPACES_DEVICE_API_PORT": "0",
+                "SPACES_DEVICE_API_HOST": "127.0.0.1", "SPACES_DEVICE_API_DISABLED": "1", "SPACES_CLIENT_DB_PATH": "/tmp/scratch/client.db",
+                "SPACES_CLIENT_SECRET_DIR": "/tmp/scratch/secrets", "SPACES_E2E_EVENTS_LOG": "/tmp/scratch/events.log",
+                "SPACES_SOMETHING_INVENTED_NEXT_YEAR": "/tmp/scratch/whatever",
             ])
 
-            XCTAssertNil(environment[SpacesProfile.databasePathEnvironmentVariable])
-            XCTAssertNil(environment[SpacesProfile.runtimeDirectoryEnvironmentVariable])
-            XCTAssertNil(
-                environment[SpacesProfile.daemonExecutableEnvironmentVariable],
-                "A child that autostarts a daemon must not be handed the pin this process refused to honour.")
-            XCTAssertEqual(environment["PATH"], "/usr/bin", "Only the redirecting variables are dropped; the rest of the environment is inherited.")
+            XCTAssertEqual(environment, [:], "A bound child inherits no Spaces variable at all, including ones this test does not know about.")
+        }
+
+        // The other half of the namespace rule: it stops at the namespace. A terminal a bound sweep opens has
+        // to behave like the user's own terminal, which means inheriting the user's shell configuration —
+        // none of which can name a Spaces profile.
+        func testDaemonSpawnEnvironmentKeepsNonSpacesVariablesForABoundInstalledProfile() {
+            let inherited = ["PATH": "/usr/bin", "SHELL": "/bin/zsh", "TERM": "xterm-256color", "ZDOTDIR": "/Users/tester", "DEBUG": "1"]
+
+            let environment = makeProfile(isInstalled: true, source: .explicitInstalledProfile).environmentServingThisProfile(inherited)
+
+            XCTAssertEqual(environment, inherited)
+        }
+
+        // The exception list is what a reader is pointed at, so it is asserted rather than described: it is
+        // empty, and an entry added to it has to survive into a bound child for this to keep passing.
+        func testBoundProcessRedirectPredicateCoversTheNamespaceMinusItsDeclaredExceptions() {
+            for key in ["SPACES_DB_PATH", "SPACESD_EXECUTABLE", "SPACES_DEVICE_API_PORT", "SPACES_ANYTHING_AT_ALL"] {
+                XCTAssertTrue(SpacesProfile.isBoundProcessRedirect(key), "\(key) is in the Spaces namespace, so a bound process drops it.")
+            }
+            for key in ["PATH", "SHELL", "HOME", "TERM", "DEBUG", "SPACE_INVADERS"] {
+                XCTAssertFalse(SpacesProfile.isBoundProcessRedirect(key), "\(key) is outside the Spaces namespace and is inherited untouched.")
+            }
         }
 
         // The companion direction: every profile a process reached by belonging to it passes its environment
@@ -297,7 +322,7 @@ import XCTest
                 let inherited = [
                     SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
                     SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
-                    SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd",
+                    SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "SPACES_DEVICE_API_PORT": "0",
                 ]
 
                 let environment = makeProfile(isInstalled: source == .installedFallback, source: source).environmentServingThisProfile(inherited)
