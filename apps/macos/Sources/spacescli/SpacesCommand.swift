@@ -983,7 +983,7 @@ struct TerminalSendTextCommand: ParsableCommand {
     @Flag(
         name: .long,
         help:
-            "Submit the text: send it, then a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste."
+            "Submit the text: send it as a paste, then a separate Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste."
     ) var submit = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 

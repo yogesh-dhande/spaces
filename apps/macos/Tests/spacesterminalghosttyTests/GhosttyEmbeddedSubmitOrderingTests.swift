@@ -5,11 +5,12 @@ import spacesterminalcore
 
 @testable import spacesterminalghostty
 
-/// Ordering coverage for submit-style control sends. A text send with `appendNewline` writes the text
-/// and a delayed carriage return so agent TUIs read the Enter as a distinct keystroke; that text+CR
-/// pair must stay ordered against every later control-request input write. Two submit sends arriving
-/// within the CR delay (the daemon's notification flush delivers queued lines back-to-back like this)
-/// must reach the child as two separately submitted lines, never as one merged line with a stray Enter.
+/// Ordering coverage for submit-style control sends. A text send with `appendNewline` becomes two writes
+/// — the text (paste-encoded) and then the carriage return that submits it — and that pair must stay
+/// adjacent and ordered against every later control-request input write. Two submit sends enqueued
+/// back-to-back (the daemon's notification flush delivers queued lines like this) must reach the child as
+/// two separately submitted lines, never as one merged line with a stray Enter. `cat` leaves bracketed
+/// paste off, so the pasted text reaches the PTY verbatim and the transcript shows the raw grouping.
 final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?

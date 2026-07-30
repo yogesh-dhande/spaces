@@ -5,10 +5,11 @@
 
     @testable import spacesterminalghostty
 
-    /// Linux mirror of `GhosttyEmbeddedSubmitOrderingTests`: two submit-style sends arriving within
-    /// the submit-CR delay must reach the child as two separately submitted lines, never as one
-    /// merged line with a stray Enter (the daemon's notification flush delivers queued lines
-    /// back-to-back like this).
+    /// Linux mirror of `GhosttyEmbeddedSubmitOrderingTests`: two submit-style sends enqueued
+    /// back-to-back must reach the child as two separately submitted lines, never as one merged line
+    /// with a stray Enter (the daemon's notification flush delivers queued lines like this). Each
+    /// submit is a paste-encoded text write followed immediately by its carriage return, and the
+    /// child leaves bracketed paste off, so the text reaches the PTY verbatim.
     ///
     /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops
     /// onto the engine for every core call: the core is created inside a `TerminalEngineActor.run`

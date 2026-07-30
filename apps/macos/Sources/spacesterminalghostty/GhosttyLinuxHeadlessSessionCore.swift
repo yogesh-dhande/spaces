@@ -79,8 +79,8 @@
         /// engine executor. Runtime-state writes coalesce latest-wins; the terminated writes are FIFO-fenced.
         /// See `TerminalCorePersistenceQueue`.
         private let persistence: TerminalCorePersistenceQueue
-        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
-        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session so a
+        /// submit's pasted text and its carriage return stay an adjacent pair; see
         /// `TerminalControlInputSequencer`.
         private let controlInputSequencer = TerminalControlInputSequencer()
         private let ptyDriver: HostManagedPTYTerminalSessionDriver
@@ -363,11 +363,12 @@
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
 
-            // Drain accepted-but-unwritten control input before handing off. A `terminal send --submit`
-            // splits into the text write and a carriage return the sequencer holds back by its separation
-            // delay; the PTY write queue is likewise asynchronous. The control server is stopped above, so no
-            // new sends can enqueue — await the sequencer chain and then the PTY write queue so the `execv`
-            // that inherits this same master fd cannot destroy either with the CR (or the whole line) unwritten.
+            // Drain accepted-but-unwritten control input before handing off. A control send is acknowledged
+            // before its bytes reach the PTY: a `terminal send --submit` becomes two sequencer writes (the
+            // pasted text, then the carriage return), and the PTY write queue behind them is likewise
+            // asynchronous. The control server is stopped above, so no new sends can enqueue — await the
+            // sequencer chain and then the PTY write queue so the `execv` that inherits this same master fd
+            // cannot destroy either with the CR (or the whole line) unwritten.
             await controlInputSequencer.drain()
             await ptyDriver.drainPendingWrites()
 
@@ -819,30 +820,31 @@
             guard let payload = request.inputPayload else {
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
-            markLocalOwnerCommandInputOutputResyncPending()
-            // Submit-safe two-write split for text payloads; see GhosttyEmbeddedSessionHost for the
-            // paste-heuristic rationale and TerminalControlInputSequencer for the ordering guarantee. A
-            // bare Enter (empty text) and opaque byte payloads keep the single (still sequenced) write.
-            let isTextPayload = request.bytes == nil
-            if request.appendNewline, isTextPayload, !payload.isEmpty {
-                enqueueControlInputWrite(payload)
-                enqueueControlSubmitCarriageReturn()
-            } else {
-                var bytes = payload
-                if request.appendNewline { bytes.append(0x0D) }
-                enqueueControlInputWrite(bytes)
+            // Submit-safe two-write split for text payloads: the text goes in paste-encoded (bracketed when
+            // the application enabled DECSET 2004) and the carriage return follows immediately as its own
+            // write, so the framing rather than a timed gap is what makes the CR a distinct Enter. See
+            // GhosttyEmbeddedSessionHost for the full rationale and TerminalControlInputSequencer for the
+            // ordering guarantee. A bare Enter (empty text) and opaque byte payloads keep the single (still
+            // sequenced) write. The paste encoding is resolved before anything is marked or enqueued so an
+            // encode failure leaves no half-applied send.
+            if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
+                guard let pastePayload = encodePastePayload(text) else {
+                    return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
+                }
+                markLocalOwnerCommandInputOutputResyncPending()
+                enqueueControlInputWrite(pastePayload)
+                enqueueControlInputWrite(Data([0x0D]))
+                return TerminalControlResponse(ok: true, message: "Sent input.")
             }
+            markLocalOwnerCommandInputOutputResyncPending()
+            var bytes = payload
+            if request.appendNewline { bytes.append(0x0D) }
+            enqueueControlInputWrite(bytes)
             return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
-        }
-
-        private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
-            }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {

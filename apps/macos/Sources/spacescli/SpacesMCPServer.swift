@@ -203,12 +203,12 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
                 description:
-                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text and a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text as a paste and then a separate Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
                     "text": stringSchema("Text to send. Use an empty string with submit to press Enter alone."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
-                    "submit": boolSchema("Send a spaced Enter keystroke after the payload; with text this submits the line."),
+                    "submit": boolSchema("Send a separate Enter keystroke after the payload; with text this submits the line."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in

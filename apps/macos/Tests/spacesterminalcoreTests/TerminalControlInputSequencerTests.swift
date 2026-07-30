@@ -3,9 +3,9 @@ import XCTest
 
 @testable import spacesterminalcore
 
-/// Contract coverage for the control-input sequencer: writes run strictly in enqueue order, and a
-/// submit carriage return is temporally separated from the write before it (the text it submits) and
-/// the write after it (the next request's bytes), so the CR reaches the TUI as a lone Enter burst.
+/// Contract coverage for the control-input sequencer: writes run strictly in enqueue order with no
+/// artificial pacing, a submit's carriage return stays glued to the text it submits even when other
+/// sends arrive in between, and `drain()` waits for the whole outstanding chain.
 final class TerminalControlInputSequencerTests: XCTestCase {
     private final class WriteRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -24,18 +24,20 @@ final class TerminalControlInputSequencerTests: XCTestCase {
         }
     }
 
-    func testSubmitPairsStayOrderedAndSeparatedAgainstRapidFollowUpWrites() async {
-        let separation: Duration = .milliseconds(50)
-        let sequencer = TerminalControlInputSequencer(separation: separation)
+    /// A submit is two writes (the pasted text, then the CR that submits it). Nothing may be written
+    /// between them, or two submissions merge into one line with a stray Enter — which is what the
+    /// sequencer exists to prevent now that the pair is separated structurally (bracketed paste) rather
+    /// than by a timed gap. This enqueues two submits back-to-back the way the daemon's notification
+    /// flush delivers queued lines, plus a following write, and pins the exact interleaving.
+    func testSubmitPairsStayAdjacentAcrossBackToBackSends() async {
+        let sequencer = TerminalControlInputSequencer()
         let recorder = WriteRecorder()
         let drained = expectation(description: "all writes ran")
 
-        // Two rapid submit-style sends (text + CR each), enqueued back-to-back the way the daemon's
-        // notification flush delivers queued lines.
         sequencer.enqueueWrite { recorder.record("text-1") }
-        sequencer.enqueueSubmitCarriageReturn { recorder.record("cr-1") }
+        sequencer.enqueueWrite { recorder.record("cr-1") }
         sequencer.enqueueWrite { recorder.record("text-2") }
-        sequencer.enqueueSubmitCarriageReturn { recorder.record("cr-2") }
+        sequencer.enqueueWrite { recorder.record("cr-2") }
         sequencer.enqueueWrite {
             recorder.record("text-3")
             drained.fulfill()
@@ -43,80 +45,57 @@ final class TerminalControlInputSequencerTests: XCTestCase {
 
         await fulfillment(of: [drained], timeout: 10)
 
-        let recorded = recorder.recorded
-        XCTAssertEqual(recorded.map(\.label), ["text-1", "cr-1", "text-2", "cr-2", "text-3"])
-        // Task.sleep guarantees at least the requested interval, so lower bounds are stable; a small
-        // epsilon absorbs clock-capture jitter around the write itself.
-        let minimumGap: Duration = .milliseconds(45)
-        XCTAssertGreaterThanOrEqual(recorded[0].at.duration(to: recorded[1].at), minimumGap, "the CR must trail the text it submits")
-        XCTAssertGreaterThanOrEqual(recorded[1].at.duration(to: recorded[2].at), minimumGap, "the write after a CR must be held back")
-        XCTAssertGreaterThanOrEqual(recorded[2].at.duration(to: recorded[3].at), minimumGap, "the second CR must trail its text")
-        XCTAssertGreaterThanOrEqual(recorded[3].at.duration(to: recorded[4].at), minimumGap, "the write after the second CR must be held back")
+        XCTAssertEqual(recorder.recorded.map(\.label), ["text-1", "cr-1", "text-2", "cr-2", "text-3"])
     }
 
-    /// Regression guard for issue #187: `terminal send text --submit` reliably submitted Claude Code and
-    /// Codex at the previous, shorter default separation, but left OpenCode's composer holding the
-    /// unsubmitted text — its composer needs materially more room before it reads a lone CR burst as its
-    /// own Enter keystroke. This pins the default (used by every consumer: the interactive "Enter"
-    /// button, `terminal send --submit`, and the agent-notification injection path) at a value generous
-    /// enough to cover OpenCode too, so a future change cannot silently shrink it back toward the
-    /// Claude/Codex-only threshold without failing a test.
-    func testDefaultSeparationIsGenerousEnoughForTheSlowestSupportedComposer() async {
+    /// The point of removing the timed separation: a submit pays no pacing cost. A text+CR pair, and a
+    /// second submit right behind it, must all land promptly rather than each waiting out a fixed
+    /// interval (issue #389 — a lone submit cost ~500ms and back-to-back submits ~1s before the shell
+    /// even saw the newline).
+    func testSubmitWritesRunWithoutArtificialPacing() async {
         let sequencer = TerminalControlInputSequencer()
         let recorder = WriteRecorder()
-        let drained = expectation(description: "text then CR ran")
+        let drained = expectation(description: "both submits ran")
 
-        sequencer.enqueueWrite { recorder.record("text") }
-        sequencer.enqueueSubmitCarriageReturn {
-            recorder.record("cr")
+        let start = ContinuousClock.now
+        sequencer.enqueueWrite { recorder.record("text-1") }
+        sequencer.enqueueWrite { recorder.record("cr-1") }
+        sequencer.enqueueWrite { recorder.record("text-2") }
+        sequencer.enqueueWrite {
+            recorder.record("cr-2")
             drained.fulfill()
         }
 
         await fulfillment(of: [drained], timeout: 10)
 
         let recorded = recorder.recorded
-        XCTAssertEqual(recorded.map(\.label), ["text", "cr"])
-        XCTAssertGreaterThanOrEqual(
-            recorded[0].at.duration(to: recorded[1].at), .milliseconds(450),
-            "the default submit separation regressed toward the shorter Claude/Codex-only gap that left OpenCode unsubmitted (issue #187)")
+        XCTAssertEqual(recorded.map(\.label), ["text-1", "cr-1", "text-2", "cr-2"])
+        XCTAssertLessThan(
+            start.duration(to: recorded[3].at), .milliseconds(150),
+            "two submit pairs must not pay a fixed per-submit pacing interval")
     }
 
-    /// `drain()` must suspend until every write enqueued so far — including a submit CR still held back by
-    /// its separation delay — has actually run. This is the handoff-quiesce guarantee (finding D1): before
-    /// the daemon `execv`s, a pending `terminal send --submit` must not be lost with its CR (or whole line)
-    /// unwritten. Asserting the recorded writes SYNCHRONOUSLY right after `await drain()` proves the drain
-    /// waited rather than letting the delayed CR fire later.
-    func testDrainWaitsForPendingSubmitCarriageReturnBeforeReturning() async {
-        let separation: Duration = .milliseconds(300)
-        let sequencer = TerminalControlInputSequencer(separation: separation)
+    /// `drain()` must suspend until every write enqueued so far has actually run. This is the
+    /// handoff-quiesce guarantee (finding D1): before the daemon `execv`s, a pending
+    /// `terminal send --submit` must not be lost with its CR (or whole line) unwritten. The writes here
+    /// are deliberately slow so a `drain()` that did not await the chain would return early; asserting the
+    /// recorded writes SYNCHRONOUSLY right after `await drain()` proves it waited.
+    func testDrainWaitsForEverythingEnqueuedBeforeReturning() async {
+        let sequencer = TerminalControlInputSequencer()
         let recorder = WriteRecorder()
 
-        sequencer.enqueueWrite { recorder.record("text") }
-        sequencer.enqueueSubmitCarriageReturn { recorder.record("cr") }
-
-        // Drain immediately, while the CR is still inside its separation delay.
-        await sequencer.drain()
-
-        // No polling: the CR must already have run because drain awaited the whole chain.
-        XCTAssertEqual(recorder.recorded.map(\.label), ["text", "cr"], "drain() returned before the delayed submit CR ran")
-    }
-
-    func testPlainWritesRunBackToBackWithoutArtificialSpacing() async {
-        let sequencer = TerminalControlInputSequencer(separation: .milliseconds(200))
-        let recorder = WriteRecorder()
-        let drained = expectation(description: "all writes ran")
-
-        let start = ContinuousClock.now
-        sequencer.enqueueWrite { recorder.record("a") }
-        sequencer.enqueueWrite { recorder.record("b") }
         sequencer.enqueueWrite {
-            recorder.record("c")
-            drained.fulfill()
+            try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
+            recorder.record("text")
+        }
+        sequencer.enqueueWrite {
+            try? await Task.sleep(for: .milliseconds(100), clock: .continuous)
+            recorder.record("cr")
         }
 
-        await fulfillment(of: [drained], timeout: 10)
+        await sequencer.drain()
 
-        XCTAssertEqual(recorder.recorded.map(\.label), ["a", "b", "c"])
-        XCTAssertLessThan(start.duration(to: recorder.recorded[2].at), .milliseconds(150), "plain writes must not inherit submit spacing")
+        // No polling: both writes must already have run because drain awaited the whole chain.
+        XCTAssertEqual(recorder.recorded.map(\.label), ["text", "cr"], "drain() returned before the queued submit writes ran")
     }
 }

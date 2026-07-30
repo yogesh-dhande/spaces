@@ -91,7 +91,7 @@ spaces terminal show <session-id>`}</CodeBlock>
           <Flag name="--workspace <id>" description="Workspace ID for terminal command; omit inside a workspace." />
           <Flag name="--command <cmd>" description="Shell command. Defaults to a login shell." />
           <Flag name="--title <title>" description="Session title. Defaults to shell." />
-          <Flag name="--submit" description="Sends a separate, spaced Enter keystroke after the text so every supported agent TUI (Claude Code, Codex, OpenCode) submits the line instead of leaving it as an unsubmitted paste." />
+          <Flag name="--submit" description="Sends the text as a paste followed by a separate Enter keystroke so every supported agent TUI (Claude Code, Codex, OpenCode) submits the line instead of leaving it as an unsubmitted paste." />
           <Flag name="<byte>" description="Decimal byte value from 0 through 255." />
           <Flag name="--lines <count>" description="Number of lines to print. Defaults to 20." />
           <Flag name="show <session>" description="Opens a native Spaces window for the session in owner-seeking mode on macOS." />

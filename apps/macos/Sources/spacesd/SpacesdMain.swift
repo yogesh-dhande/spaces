@@ -1787,10 +1787,11 @@ enum SpacesDaemonProfileCommandRouting {
     /// Delivers a rendered notification line into a subscriber terminal and submits it with a single
     /// `appendNewline: true` send. Submit-safety lives at the session-host send chokepoint
     /// (`GhosttyEmbeddedSessionHost`/`GhosttyLinuxHeadlessSessionCore`): for a text payload with
-    /// `appendNewline` it writes the text and the carriage return as separate spaced writes, so an agent
-    /// TUI reads the CR as a distinct Enter keystroke and submits the line rather than treating the whole
-    /// burst as an unsubmitted paste. This helper is the shared chokepoint used by the local notification
-    /// engine wiring and the cross-device `RemoteAgentWatchService` so both submit identically.
+    /// `appendNewline` it writes the text as a paste and the carriage return as its own write, so an agent
+    /// TUI reads the framed text and then a distinct Enter keystroke and submits the line rather than
+    /// treating the whole burst as an unsubmitted paste. This helper is the shared chokepoint used by the
+    /// local notification engine wiring and the cross-device `RemoteAgentWatchService` so both submit
+    /// identically.
     ///
     /// The send reaches a live in-process session core through the terminal engine actor
     /// (`sendProfileTerminalControlOffMain` → `TerminalEngineActor.runSynchronously`), which the main

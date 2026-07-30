@@ -18,7 +18,7 @@
 # PATH, spawn the agent (detection-only — spawn delivers no prompt), then drive the real orchestrator
 # flow itself: `terminal send text ... --submit`, poll `terminal tail` for the reply, and record the
 # hook signal sequence via `agent status` polling. `--submit` is the one intended way to submit a
-# prompt — it sends the text, then a separate, spaced Enter keystroke, so every supported agent TUI
+# prompt — it sends the text as a paste, then a separate Enter keystroke, so every supported agent TUI
 # (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste; no
 # per-provider send sequence is needed here. A non-zero spawn (detection
 # failure) or a row surviving kill is a per-provider FAIL; a missing reply is only recorded, because it
