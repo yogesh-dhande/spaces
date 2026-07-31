@@ -1859,17 +1859,12 @@ enum SpacesDaemonProfileCommandRouting {
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             },
-            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) from the
-            // child's persisted runtime state — the same identity `agentRuntimeKind` puts in an
-            // orchestration row's `agent:` field, kept off the launch title so the label is not
-            // duplicated (`smoke-hello (smoke-hello)`). Reads disk, so it works at exit time too (the row
-            // is rendered before deletion).
-            resolveAgentKind: { agent in
-                guard let terminalSessionID = agent.terminalTrackingID, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
-                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-                else { return nil }
-                return runtimeState.foregroundDetectedAgentKind?.displayLabel
-            }, logError: { writeStandardError($0) })
+            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) the row
+            // carries — the same identity an orchestration row's `agent:` field reports, kept off the
+            // launch title so the label is not duplicated (`smoke-hello (smoke-hello)`). Resolved through
+            // the orchestrator so this path and the reconcilers' own engine name a kind identically,
+            // including at exit, when live foreground state no longer reports one.
+            resolveAgentKind: { agent in orchestrator.resolvedAgentKind(agent) }, logError: { writeStandardError($0) })
     }
 
     /// Delivers a rendered notification line into a subscriber terminal and submits it with a single

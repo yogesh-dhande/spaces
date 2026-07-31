@@ -21,9 +21,12 @@ import ghosttyvtshim
 /// To keep from-zero replay correct after a trim, a trim synthesizes a state-restoration PREAMBLE and
 /// writes it at the head of the retained tail. The preamble is derived by replaying the pre-trim head
 /// `[0..cut]` through a throwaway vt session and serializing its resulting persistent state
-/// (`spaces_ghostty_vt_session_state_preamble`): the terminal modes, Kitty keyboard flags, and cursor
-/// position, plus a repaint of the active screen's visible grid so cells the dropped head drew once
-/// (e.g. a static TUI header) that the retained tail never redraws survive the trim. This is
+/// (`spaces_ghostty_vt_session_state_preamble`): the terminal modes, Kitty keyboard flags, scrolling
+/// region, charset designations, and cursor position, plus a repaint of the active screen's visible grid
+/// so cells the dropped head drew once (e.g. a static TUI header) that the retained tail never redraws
+/// survive the trim. The region and the charsets are what let the retained tail's own bytes be
+/// interpreted the way the dropped head established: a TUI that set a scrolling region once and then only
+/// feeds lines into it would otherwise scroll the whole screen on replay. This is
 /// inductively correct across successive trims: each trim's head replay `[0..cut]` itself starts from
 /// the previous trim's preamble, so the serialized state always reflects the true accumulated state at
 /// the cut. The retained tail is copied verbatim after the preamble, and its cut lands just before the
@@ -337,9 +340,14 @@ enum TerminalTranscriptTrim {
 
     /// Builds the state preamble by streaming `[0..cutOffset]` through a throwaway vt session (created
     /// at the session's grid with flat scrollback, since scrollback content is irrelevant to the state
-    /// queries) and serializing its persistent terminal state. This is the expensive part of a trim and
-    /// is why staging runs off the engine actor; the throwaway session owns its own dlopen'd symbols and
-    /// terminal, sharing nothing with the live session's renderer.
+    /// queries — and it is what bounds the formatting the shim runs to read the state the terminal
+    /// exposes no getter for) and serializing its persistent terminal state. This is the expensive part
+    /// of a trim and is why staging runs off the engine actor; the throwaway session owns its own
+    /// dlopen'd symbols and terminal, sharing nothing with the live session's renderer.
+    ///
+    /// The replay starts at offset 0 because that is where a full state preamble begins: a fresh
+    /// transcript's blank terminal, or the head preamble the previous trim wrote. That is what makes
+    /// successive trims inductively correct.
     private static func statePreamble(outputPath: String, cutOffset: UInt64, columns: Int, rows: Int) throws -> Data {
         guard let session = spaces_ghostty_vt_session_new(UInt16(clamping: max(columns, 1)), UInt16(clamping: max(rows, 1)), 0, nil) else {
             throw TrimError.vtSessionUnavailable

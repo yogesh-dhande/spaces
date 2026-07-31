@@ -15,13 +15,19 @@ public struct AgentWindowRecord: Codable, Sendable {
     /// derived from prompts or terminal output, and survives status signals — only the annotate path
     /// clears or replaces it.
     public let note: String?
+    /// The coding agent kind (claude/codex/opencode) foreground detection classified this session as,
+    /// persisted the first time it is observed and refreshed by every later observation. It is stored
+    /// rather than read live because the live foreground state it comes from is cleared exactly when the
+    /// agent exits, which is when the exited notification has to name the kind. Nil until a kind is
+    /// detected, which renders honestly as "coding agent" downstream.
+    public let detectedAgentKind: String?
     public let createdAt: String
     public let updatedAt: String
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil,
         terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
-        status: AgentWindowStatus, note: String? = nil, createdAt: String, updatedAt: String
+        status: AgentWindowStatus, note: String? = nil, detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -34,6 +40,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.claimedLauncherName = claimedLauncherName
         self.status = status
         self.note = note
+        self.detectedAgentKind = detectedAgentKind
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

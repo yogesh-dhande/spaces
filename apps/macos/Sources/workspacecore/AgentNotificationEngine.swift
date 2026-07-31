@@ -14,10 +14,11 @@ public struct AgentNotificationEngine {
     /// (a dead/absent session), which the engine treats as the subscriber having vanished.
     public typealias DeliverLine = (_ subscriberTerminalSessionID: String, _ line: String) throws -> Void
 
-    /// Resolves the coding-agent kind label (claude/codex/opencode, or a launch title) for a local watched
-    /// agent, used for the `(<kind>)` parenthetical. The daemon wires this to the same runtime-label
-    /// resolution `agent list` uses; a `nil` result renders as `coding agent`. Defaults to `nil` so tests
-    /// and non-daemon callers do not have to supply session-file access.
+    /// Resolves the coding-agent kind label (claude/codex/opencode) for a local watched agent, used for
+    /// the `(<kind>)` parenthetical. Every caller wires this to `WorkspaceOrchestrator.resolvedAgentKind`,
+    /// the same resolution `agent list` reports — the kind persisted on the agent row, which still names
+    /// the agent after its process is gone; a `nil` result renders as `coding agent`. Defaults to `nil` so
+    /// tests and non-daemon callers do not have to supply one.
     public typealias ResolveAgentKind = (_ agent: AgentWindowRecord) -> String?
 
     /// The lifecycle transitions that produce a notification. `working`/`init` never do.
@@ -56,9 +57,11 @@ public struct AgentNotificationEngine {
 
     /// A watched child agent transitioned to blocked/done/exited. For every subscriber of that agent,
     /// render one notification block and deliver it now if the subscriber is idle, else coalesce it into that
-    /// subscriber's pending queue. For an `exited` child the caller MUST invoke this before deleting the
-    /// agent row, since row deletion cascades the subscription edges away; the rendered pending line has
-    /// no FK and survives that deletion.
+    /// subscriber's pending queue. The local `exited` transition does NOT come through here: an exit is
+    /// enqueued inside the finalization claim and delivered by `deliverClaimedExitNotices`, because the
+    /// exit's queue rows must exist before any other termination path can see the row as finalized and
+    /// drop its subscription edges. Everything else — including a paired device's watched child exiting,
+    /// whose edges no local termination touches — renders and queues here.
     public func childDidTransition(agent: AgentWindowRecord, transition: ChildTransition) throws {
         let subscriptions = try store.agentSubscriptions(agentSessionID: agent.id)
         guard !subscriptions.isEmpty else { return }
@@ -66,6 +69,31 @@ public struct AgentNotificationEngine {
         for subscription in subscriptions {
             try deliverOrQueue(
                 subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agent.id, transition: transition, line: line)
+        }
+    }
+
+    /// Delivers the `exited` notices that the finalization claim already queued for a watched child's
+    /// subscribers (`SQLiteStore.claimAgentSessionExitEvent`). Exit is the one transition whose notice is
+    /// enqueued before it is delivered rather than the other way round: the claim commits the queue rows
+    /// in the same transaction as the `exit` event, so the obligation is durable from the instant any
+    /// other path can observe the row as finalized and start tearing its subscription edges down. This
+    /// pass therefore only decides WHEN each queued row lands — immediately for an idle subscriber, or
+    /// left queued for a busy subscriber's next idle flush, the same gate `deliverOrQueue` applies to
+    /// every other transition. The listing read below is only a set of candidates: the row is taken out
+    /// of the queue by `claimPendingAgentNotification` (see its consume invariant) BEFORE it is
+    /// delivered, so a concurrent idle flush racing this pass for the same row gets nil and delivers
+    /// nothing. A failed delivery means that subscriber terminal is gone, handled by `subscriberDidExit`
+    /// exactly as on the other delivery paths; the row is already out of the queue, and that teardown
+    /// discards the subscriber's remaining queue too.
+    public func deliverClaimedExitNotices(agentSessionID: String) throws {
+        for queued in try store.pendingAgentNotifications(agentSessionID: agentSessionID) {
+            guard try subscriberIsIdle(terminalSessionID: queued.subscriberTerminalSessionID) else { continue }
+            guard let claimed = try store.claimPendingAgentNotification(id: queued.id) else { continue }
+            if !attemptDelivery(
+                subscriberTerminalSessionID: claimed.subscriberTerminalSessionID, agentSessionID: agentSessionID, line: claimed.message)
+            {
+                try? subscriberDidExit(subscriberTerminalSessionID: claimed.subscriberTerminalSessionID)
+            }
         }
     }
 
@@ -123,22 +151,23 @@ public struct AgentNotificationEngine {
     }
 
     /// A subscriber terminal became idle (or exited). Flush its queued notifications in enqueue order,
-    /// delivering each once (delivered-once: a successfully delivered row is deleted immediately and never
-    /// re-attempted). The first delivery failure means the subscriber terminal is dead, not just that one
-    /// queued row: the loop stops right there and hands off to `subscriberDidExit`, which purges every
-    /// still-pending row for this subscriber — including the one that just failed, which is why this loop
-    /// never deletes that row itself — and tears down every outgoing watch edge the subscriber holds, so a
-    /// dead subscriber never accumulates undeliverable state on a later child transition either.
+    /// delivering each once: the listing read is only a set of candidates, and each row is taken out of
+    /// the queue by `claimPendingAgentNotification` (see its consume invariant) before it is delivered, so
+    /// a row another drain took meanwhile is skipped rather than delivered a second time. The first
+    /// delivery failure means the subscriber terminal is dead, not just that one queued row: the loop
+    /// stops right there and hands off to `subscriberDidExit`, which purges every still-pending row for
+    /// this subscriber and tears down every outgoing watch edge it holds, so a dead subscriber never
+    /// accumulates undeliverable state on a later child transition either.
     public func subscriberDidBecomeIdle(subscriberTerminalSessionID: String) throws {
-        for pending in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
+        for queued in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
+            guard let claimed = try store.claimPendingAgentNotification(id: queued.id) else { continue }
             guard
                 attemptDelivery(
-                    subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: pending.agentSessionID, line: pending.message)
+                    subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: claimed.agentSessionID, line: claimed.message)
             else {
                 try? subscriberDidExit(subscriberTerminalSessionID: subscriberTerminalSessionID)
                 return
             }
-            try store.deletePendingAgentNotification(id: pending.id)
         }
     }
 
@@ -159,9 +188,7 @@ public struct AgentNotificationEngine {
     /// signal, so a device whose last edge just vanished has its stream closed without this method
     /// needing to reach into daemon-only state.
     public func subscriberDidExit(subscriberTerminalSessionID: String) throws {
-        for pending in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
-            try store.deletePendingAgentNotification(id: pending.id)
-        }
+        try store.deletePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
         try store.deleteAgentSubscriptions(subscriberTerminalSessionID: subscriberTerminalSessionID)
         try store.deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: subscriberTerminalSessionID)
     }
@@ -269,9 +296,7 @@ public struct AgentNotificationEngine {
     /// an apostrophe means a note like "don't" renders as "dont", an accepted readability cost.
     private static func shellSafeNotificationField(_ value: String) -> String {
         let forbidden = Set("$`;|&<>()\"'\\".unicodeScalars)
-        let filtered = value.unicodeScalars.filter { scalar in
-            !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar)
-        }
+        let filtered = value.unicodeScalars.filter { scalar in !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar) }
         return String(String.UnicodeScalarView(filtered))
     }
 }

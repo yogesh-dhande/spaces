@@ -26,13 +26,17 @@ extension SQLiteStore {
         agent_sessions.status,
         agent_sessions.note,
         agent_sessions.created_at,
-        agent_sessions.updated_at
+        agent_sessions.updated_at,
+        COALESCE(agent_sessions.detected_agent_kind, '')
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
     /// launcher launch) hold the authoritative record they just computed, so on conflict the row's
     /// lifecycle columns take the caller's values: `status`, `session_key`, and `claimed_launcher_name`
-    /// are overwritten from `excluded`.
+    /// are overwritten from `excluded`. `detected_agent_kind` is the exception both upserts share: a
+    /// caller that observed no kind (foreground detection has not classified the session, or already
+    /// cleared its classification at exit) carries nil, and nil must never erase a kind the row already
+    /// learned — the stored value is what the exit notification names.
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         try upsertAgentWindow(record, conflictClause: Self.lifecycleOwningConflictClause)
     }
@@ -87,6 +91,7 @@ extension SQLiteStore {
           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
           claimed_launcher_name = excluded.claimed_launcher_name,
           note = COALESCE(excluded.note, agent_sessions.note),
+          detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           updated_at = excluded.updated_at
         """
 
@@ -102,6 +107,7 @@ extension SQLiteStore {
           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
           claimed_launcher_name = COALESCE(excluded.claimed_launcher_name, agent_sessions.claimed_launcher_name),
           note = COALESCE(excluded.note, agent_sessions.note),
+          detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           created_at = agent_sessions.created_at,
           updated_at = agent_sessions.updated_at
         """
@@ -113,15 +119,15 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, detected_agent_kind, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
                     terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
-                    record.note ?? "", record.createdAt, record.updatedAt,
+                    record.note ?? "", record.detectedAgentKind ?? "", record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -235,6 +241,17 @@ extension SQLiteStore {
         try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
     }
 
+    /// Records the coding-agent kind foreground detection classified for an agent session, writing that
+    /// column and nothing else — for the same reason `setAgentSessionNote` writes directly rather than
+    /// through `upsertAgentWindow`: `updated_at` tracks when the row entered its current lifecycle state
+    /// (clients read it as the alert's event time), and learning which agent is running is not a lifecycle
+    /// transition, so bumping it would re-date a stale blocked/finished alert to now. Takes a non-optional
+    /// kind because a nil observation must never erase a kind the row already learned — the same rule both
+    /// upserts enforce with `COALESCE`.
+    public func setAgentSessionDetectedKind(id: String, kind: String) throws {
+        try execute(sql: "UPDATE agent_sessions SET detected_agent_kind = ? WHERE id = ?", bindings: [kind, id])
+    }
+
     /// Whether an agent session row with this id exists in any workspace. Used to validate a
     /// subscription target before persisting the edge, since the subscriber references an agent row by
     /// id rather than by a workspace-scoped lookup.
@@ -339,6 +356,69 @@ extension SQLiteStore {
                     """, bindings: [agentSessionID]), row.count >= 2, let lastExitRowID = Int64(row[0]), let lastInitRowID = Int64(row[1])
         else { return false }
         return lastExitRowID > 0 && lastExitRowID > lastInitRowID
+    }
+
+    /// Claims the one exit finalization an agent session's current life is allowed, recording its `exit`
+    /// lifecycle event AND queueing the already-rendered exited notice for every current subscriber in the
+    /// same transaction. Returns whether THIS caller claimed it; a false result means the exit was already
+    /// recorded (or the row is gone) and the caller must do nothing further.
+    ///
+    /// The check and the record are one conditional INSERT inside an immediate transaction, so two
+    /// reconcile passes observing the same transition on their own connections cannot both pass a
+    /// finalized check and both record the exit — the very read-then-write window that duplicated the
+    /// event and, with it, the notification every subscriber received. The condition is exactly the
+    /// finalized fact `agentSessionHasRecordedExitEvent` and `agentRowIsFinalized` read: the row must
+    /// still exist, must not already be held `exited`, and must have no `exit` event recorded after its
+    /// last `init` (which is what scopes the fact to the row's CURRENT life, so a fresh agent reusing the
+    /// row is finalizable again). `eventType` binds both the recorded event and the condition, so the
+    /// claim is self-consistent for whatever event type the termination reason carries.
+    ///
+    /// Queueing the notice INSIDE the same transaction is what makes the claim safe to observe. The
+    /// recorded `exit` event is the finalized fact every other termination path reads, and a path that
+    /// reads it suppresses its own notice and drops the row's `agent_subscriptions` edges. Enqueueing
+    /// afterwards would expose a window in which the exit is finalized but nothing is owed to anyone: a
+    /// teardown landing in it would delete the edges, and the claimant would then find no subscribers and
+    /// deliver nothing at all. Committed together, the delivery obligation exists the instant the
+    /// finalized fact does; `agent_pending_notifications` carries no foreign key, so neither the edge
+    /// drop nor the row delete can take it back. The queued rows are what the claimant then delivers
+    /// (`AgentNotificationEngine.deliverClaimedExitNotices`), and any it cannot deliver yet stay queued
+    /// for the subscriber's next idle flush.
+    ///
+    /// Accepted window: the claim commits before the caller applies the row's disposition (the `done`/delete
+    /// that `handleAgentExit` decides), so a daemon death in between leaves a durable `exit` event on a row
+    /// that is still listed as active, which both reconcilers then skip as finalized. A recoverable
+    /// disposition, or a completion marker committed only after it lands, is what closes it — deliberately
+    /// deferred (issue #401) rather than built here, because the window is a few milliseconds wide and the
+    /// stranded row is still removable: `agent kill` destroys unconditionally even when it loses the claim.
+    public func claimAgentSessionExitEvent(
+        agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String, exitedNoticeTransition: String,
+        exitedNoticeMessage: String
+    ) throws -> Bool {
+        try withImmediateTransaction {
+            try execute(
+                sql: """
+                    INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, created_at)
+                    SELECT ?, ?, ?, ?, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND status <> ?)
+                      AND COALESCE(
+                            (SELECT MAX(CASE WHEN event_type = ? THEN rowid END) FROM agent_session_events WHERE agent_session_id = ?), 0)
+                          <= COALESCE(
+                            (SELECT MAX(CASE WHEN event_type = 'init' THEN rowid END) FROM agent_session_events WHERE agent_session_id = ?), 0)
+                    """,
+                bindings: [
+                    UUID().uuidString, agentSessionID, eventType, source, message ?? "", createdAt, agentSessionID, AgentWindowStatus.exited.rawValue,
+                    eventType, agentSessionID, agentSessionID,
+                ])
+            // Read immediately after the conditional INSERT: `changes()` reports the most recently
+            // completed write, and the enqueue below would otherwise overwrite the answer.
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? ""), changed > 0 else { return false }
+            for subscription in try agentSubscriptions(agentSessionID: agentSessionID) {
+                try upsertPendingAgentNotification(
+                    subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agentSessionID,
+                    transition: exitedNoticeTransition, message: exitedNoticeMessage, createdAt: createdAt)
+            }
+            return true
+        }
     }
 
     private func decodeAgentSubscription(row: [String]) -> AgentSubscriptionRecord? {
@@ -552,20 +632,63 @@ extension SQLiteStore {
         ).compactMap(decodePendingAgentNotification)
     }
 
-    public func deletePendingAgentNotification(id: String) throws {
-        try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+    /// Every subscriber's pending notification for ONE watched agent, in enqueue order — the rows the
+    /// exit claim (`claimAgentSessionExitEvent`) just wrote. The claimant reads them straight back to
+    /// deliver the ones whose subscriber is idle; it keys on the agent rather than the subscriber so it
+    /// touches only the notice it owes, leaving other children's held lines for their own idle flush.
+    public func pendingAgentNotifications(agentSessionID: String) throws -> [AgentPendingNotificationRecord] {
+        try queryRows(
+            sql: """
+                SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                FROM agent_pending_notifications
+                WHERE agent_session_id = ?
+                ORDER BY created_at, rowid
+                """, bindings: [agentSessionID]
+        ).compactMap(decodePendingAgentNotification)
+    }
+
+    /// Takes one queued notification out of the queue for delivery, returning it only to the caller that
+    /// removed it. A nil result means another drain already took the row and this caller owes nothing.
+    ///
+    /// THE CONSUME INVARIANT, shared by every path that drains this queue: a row is READ AND DELETED in
+    /// one `BEGIN IMMEDIATE` transaction, and only then delivered. `BEGIN IMMEDIATE` takes the database's
+    /// write lock before the SELECT runs, so two drains on separate connections — the exit claimant's
+    /// `deliverClaimedExitNotices`, a subscriber's idle flush, and the MCP piggyback drain all run on
+    /// their own — cannot both observe the same row: the second one blocks, then finds it gone. Reading
+    /// first and deleting after delivery would reopen exactly the duplicate the exit claim was built to
+    /// close, one layer down, since the delivery in between is a terminal round-trip.
+    ///
+    /// Consuming BEFORE delivering rather than after is deliberate. A delivery that throws means one
+    /// thing here — the subscriber terminal is gone — and every caller answers it with
+    /// `subscriberDidExit`, which discards that subscriber's whole queue anyway, so the consumed row was
+    /// never going to be delivered to anyone. What the ordering costs is a block lost if the process dies
+    /// between the commit and the send; what it buys is that a block can never be injected twice, which
+    /// would make an orchestrating agent act twice on one child exit. At-most-once is the deliberate
+    /// choice for a notice whose whole purpose is to prompt an action.
+    public func claimPendingAgentNotification(id: String) throws -> AgentPendingNotificationRecord? {
+        try withImmediateTransaction {
+            guard
+                let row = try queryRow(
+                    sql: """
+                        SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                        FROM agent_pending_notifications
+                        WHERE id = ?
+                        """, bindings: [id]), let record = decodePendingAgentNotification(row: row)
+            else { return nil }
+            try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+            return record
+        }
     }
 
     /// Atomically drains a subscriber terminal's held notifications: reads its pending rows in `created_at`
     /// order and deletes them in one `BEGIN IMMEDIATE` transaction, returning the rendered messages. This is
     /// the MCP piggyback path — a busy orchestrator (whose idle-flush has therefore not run) picks its
-    /// watched children's held events up on the response of its next tool call. Reusing the same
-    /// `pendingAgentNotifications` SELECT the idle-flush path (`AgentNotificationEngine.subscriberDidBecomeIdle`)
-    /// reads, then deleting the whole set inside the transaction on the store's single connection, is what
-    /// keeps the two delivery paths from ever handing out the same row twice: whichever runs first removes
-    /// the rows atomically before the other can observe them, and both delete as they deliver.
+    /// watched children's held events up on the response of its next tool call. It is the whole-queue form
+    /// of the consume invariant on `claimPendingAgentNotification`: the write lock is held across the read
+    /// and the delete, so the rows this returns are rows no other drain can also return, and the caller
+    /// owns delivering them.
     public func consumePendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [String] {
-        try withTransaction {
+        try withImmediateTransaction {
             let pending = try pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
             guard !pending.isEmpty else { return [] }
             try deletePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
@@ -596,7 +719,7 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 18 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
@@ -607,8 +730,8 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
             terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
-            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14], createdAt: row[15],
-            updatedAt: row[16])
+            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14],
+            detectedAgentKind: row[17].isEmpty ? nil : row[17], createdAt: row[15], updatedAt: row[16])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {
