@@ -825,7 +825,7 @@ export default function HomePage() {
             </p>
           </div>
 
-          <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
+          {/* <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
             <video
               src="/media/demo_nav_palette.mp4"
               autoPlay
@@ -834,7 +834,7 @@ export default function HomePage() {
               playsInline
               className="h-auto w-full rounded-sm"
             />
-          </figure>
+          </figure> */}
         </div>
       </section>
 

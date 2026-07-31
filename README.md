@@ -4,6 +4,8 @@ Manage parallel coding sessions across all of your devices
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 
+<p align="center"><img src="docs/media/hero.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
+
 ## Features
 
 - **Projects and workspaces** — a project is any directory, Git or not; a workspace is one feature, branch, or experiment inside it, backed by a Git worktree or a separate clone. Keeps parallel work separate instead of stashing and switching branches in one checkout.
@@ -15,12 +17,14 @@ Manage parallel coding sessions across all of your devices
 - **Caddy reverse proxy** — a bundled proxy serves every service at a stable URL like `http://api.my-branch.localhost:7391`. One address per service that never changes, and a separate cookie jar per workspace so logins don't collide across branches.
 - **Remote machines** — pair with a Mac or Ubuntu machine and drive its workspaces, terminals, and processes from your laptop. Sessions run on the remote daemon and survive app quits.
 - **iPhone control** — the iOS client pairs by QR code and attaches to any live terminal session. Check on a long-running agent or process away from your desk.
+<p align="center"><img src="docs/media/readme-ios.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 - **CLI** — [`spaces`](https://usespaces.dev/docs/cli) cli drives projects, workspaces, and terminal sessions from a shell. Scriptable, and the way coding agents report status.
 - **MCP server** — [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, and terminals as tools. A coding agent can inspect and drive Spaces directly.
 - **Keyboard shortcuts** — focus and cycle windows scoped to the current workspace. Navigation stays inside the work you're on.
 - **Global command palette** — `⌘⌥-` jumps to any window in any workspace. One key to reach anything without hunting through Mission Control.
+<p align="center"><img src="apps/web/public/media/palette.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
 
-<p align="center"><img src="docs/media/readme-ios.png" width="620" alt="The iOS app's workspace list next to a live agent terminal session"></p>
+
 
 ## Requirements
 
