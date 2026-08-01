@@ -304,6 +304,31 @@ final class AgentHookTests: XCTestCase {
         XCTAssertFalse(reinit.status.leavesSubscriberIdle, "a still-spinning row must not trigger a queued-notification flush")
     }
 
+    /// A blocked agent that reports tool activity again is working, and its workspace stops counting it
+    /// as a waiting agent — which is what removes it from Alerts and from dock attention. This is the
+    /// contract the agents' post-approval hooks drive: whatever event a given agent emits once its
+    /// permission prompt is answered arrives here as one `working` signal.
+    func testWorkingSignalClearsABlockedAgentAndItsWaitingAlert() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "agent-session")
+
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "agent-session", status: .idle)
+        let blocked = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .waiting, eventType: "blocked")
+        XCTAssertEqual(blocked.status, .waiting)
+        XCTAssertEqual(try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id).waitingAgentWindowCount, 1)
+
+        let resumed = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .spinning, eventType: "working")
+
+        XCTAssertEqual(resumed.id, blocked.id)
+        XCTAssertEqual(resumed.status, .spinning)
+        XCTAssertEqual(try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id).waitingAgentWindowCount, 0)
+    }
+
     /// The single authority for the flush decision (shared by the daemon signal path and the notification
     /// engine's live idle check): only idle and done leave a subscriber ready to receive queued lines.
     /// Exited is a bare shell — its queue must wait for a new agent to init and reset it to idle.

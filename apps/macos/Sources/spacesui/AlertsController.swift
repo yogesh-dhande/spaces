@@ -155,8 +155,11 @@ import workspacecore
         }
     }
 
+    /// Renders the Alerts pane. Also the pane's re-render: every refresh that lands new device state
+    /// calls this again while alerts is already the visible pane, so nothing here may discard state the
+    /// user is in the middle of — `presentDetailPane` is what decides that this is a re-render rather
+    /// than navigation, and leaves an open form window alone.
     func showAlertsDetail() {
-        host.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.presentDetailPane(.alerts)
         host.showingSettings = false

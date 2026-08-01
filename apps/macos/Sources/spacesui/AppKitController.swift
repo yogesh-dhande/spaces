@@ -4804,12 +4804,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
-    /// switching away from a workspace also clears the workspace-only titlebar tab strip.
+    /// switching away from a workspace also clears the workspace-only titlebar tab strip, and
+    /// navigating to different content dismisses the free-standing add/settings form windows.
     func presentDetailPane(_ pane: DetailPane) {
+        if Self.detailPanePresentationIsNavigation(current: detailPane, presented: pane) { clearActiveAddFormStateAndCloseWindows() }
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
     }
+
+    /// Whether presenting `presented` moves the detail pane to different content, which is what
+    /// dismisses the open New Project / New Workspace / Project Settings windows.
+    ///
+    /// The `show*` methods are both the navigation entry points and the pane's re-render: every
+    /// background refresh that lands new device state re-presents the pane that is already showing
+    /// (`showAlertsDetail` from an overview tick, `refreshSelection` from a sidebar reload). Those forms
+    /// are free-standing windows the user is filling in, so only a genuine change of content may close
+    /// them — re-rendering the same content must leave them alone.
+    nonisolated static func detailPanePresentationIsNavigation(current: DetailPane, presented: DetailPane) -> Bool { presented != current }
 
     private func hideWorkspacePanelTabStrip() {
         panelTabStripView.releaseTabBar()
@@ -4851,7 +4863,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func showPlaceholder(message: String = "Select a project or workspace.") {
-        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         presentDetailPane(.none)
         showingSettings = false
@@ -4940,7 +4951,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         visibleCompatibilityBlockRemedy = remedy
 
-        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         presentDetailPane(.compatibilityBlock(deviceID: deviceID))
         showingSettings = false
@@ -5050,7 +5060,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
-        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         // A visible compatibility block survives the loading placeholder: the reload behind this loading
         // state re-resolves back to the block. Only a workspace or alerts pane is cleared.
@@ -6175,7 +6184,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func prepareWorkspaceDetailContainer(workspaceID: String) {
-        clearActiveAddFormStateAndCloseWindows()
         presentDetailPane(.workspace(id: workspaceID))
         showingSettings = false
         updateAlertsRowAppearance()

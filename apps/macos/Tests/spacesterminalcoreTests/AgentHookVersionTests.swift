@@ -151,6 +151,32 @@ import Testing
         #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .current)
     }
 
+    // MARK: - Ending a block
+
+    /// Every supported agent must bind an event that fires *after* a permission prompt is answered.
+    ///
+    /// The pre-tool hooks alone cannot do it: Claude Code and Codex both fire `PreToolUse` before the
+    /// permission decision, so the `blocked` a gated tool raises always lands after that tool's own
+    /// `working`. With only `PreToolUse` bound, a row stays `waiting` for the entire run of the approved
+    /// tool and — when that tool is the turn's last — right through to `Stop`, never returning to
+    /// `working` at all. `PostToolUse` is the first thing either agent emits once the human has
+    /// answered, because it proves the tool actually ran.
+    @Test func everyAgentReportsWorkingOnceAnAnsweredPermissionPromptLetsTheToolRun() {
+        for agent in [SupportedCodingAgentHook.claudeCode, .codex] {
+            let bindings = agent.jsonEventBindings
+            #expect(bindings.contains { $0.eventName == "PermissionRequest" && $0.event == .blocked })
+            #expect(bindings.contains { $0.eventName == "PreToolUse" && $0.event == .working })
+            #expect(bindings.contains { $0.eventName == "PostToolUse" && $0.event == .working })
+        }
+
+        // opencode is the one agent that reports the answer itself, so it need not wait for the tool to
+        // finish: `permission.replied` fires the moment the human allows or rejects.
+        let plugin = AgentHookOpencodePluginWriter.pluginContents(spacesExecutablePath: "/usr/local/bin/spaces")
+        #expect(plugin.contains("permission.asked") && plugin.contains("signal(\"blocked\")"))
+        let repliedLine = plugin.split(separator: "\n").first { $0.contains("permission.replied") }
+        #expect(repliedLine?.contains("signal(\"working\")") == true)
+    }
+
     // MARK: - opencode plugin
 
     @Test func opencodePluginStateTracksTheHeaderVersion() throws {

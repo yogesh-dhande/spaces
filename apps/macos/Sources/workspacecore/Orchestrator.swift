@@ -416,7 +416,20 @@ public final class WorkspaceOrchestrator {
             }
             if trimmedBranch != workspace.branch {
                 if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch), existing.id != workspace.id {
-                    throw WorkspaceError.invalidArgument(message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.displayName)'.")
+                    // Same rule `createWorkspace` applies: an archived record reserves its branch name only
+                    // while that branch exists. Once the branch is gone the reservation is stale and must not
+                    // refuse a rename git itself would accept, so release the name and keep the archived
+                    // record. The lookup runs only for an archived claimant, so an ordinary rejection still
+                    // costs no git call.
+                    var claimIsStale = false
+                    if existing.isArchived {
+                        claimIsStale = try !branchExistsForNewWorkspace(project: project, branch: trimmedBranch, allowRemoteBranchLookup: true)
+                    }
+                    guard claimIsStale else {
+                        throw WorkspaceError.invalidArgument(
+                            message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.displayName)'.")
+                    }
+                    try store.updateWorkspaceBranch(id: existing.id, branch: nil)
                 }
                 try git.renameCurrentBranch(path: workspace.dir, to: trimmedBranch)
                 updatedBranch = trimmedBranch
@@ -522,15 +535,9 @@ public final class WorkspaceOrchestrator {
             resolvedBaseBranch = nil
         }
         if project.isGitRepo, let branchName = resolvedBranch {
-            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName) {
-                if existing.isArchived {
-                    guard allowExistingBranchReuse else {
-                        throw WorkspaceError.invalidArgument(
-                            message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
-                    }
-                } else {
-                    throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
-                }
+            let existing = try workspaceForBranch(projectID: projectID, branch: branchName)
+            if let existing, !existing.isArchived {
+                throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
             }
             let branchExists = try branchExistsForNewWorkspace(project: project, branch: branchName, allowRemoteBranchLookup: allowRemoteBranchLookup)
             if allowExistingBranchReuse, !branchExists {
@@ -541,6 +548,14 @@ public final class WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
+            // An archived record keeps its branch so that recreating that branch revives the record. Once the
+            // branch itself is gone — archived with branch deletion that could not be confirmed at the time, or
+            // merged and deleted outside Spaces — the identity is stale and would otherwise reserve the name
+            // forever: creating a new branch reports it as taken, and reusing an existing one reports it as
+            // missing. Release the name here and keep the archived record (its directory, notes, and settings)
+            // so this create can proceed on a fresh branch. Only a full lookup proves the branch is gone, so a
+            // local-only lookup leaves the identity untouched.
+            if let existing, !branchExists, allowRemoteBranchLookup { try store.updateWorkspaceBranch(id: existing.id, branch: nil) }
         }
         if project.isGitRepo, let branchName = resolvedBranch, let existing = try archivedWorkspace(projectID: projectID, branch: branchName) {
             let revivedDir: String
@@ -667,6 +682,11 @@ public final class WorkspaceOrchestrator {
         let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if let existing = try workspaceForBranch(projectID: project.id, branch: branch) {
             if existing.isArchived {
+                // Unlike `createWorkspace` and `updateWorkspaceMetadata`, this path never meets a stale
+                // archived claim: the worktree being imported belongs to this project's repository and has
+                // `branch` checked out, so that branch is live by construction and the archived record is a
+                // real conflict — one the user resolves by unarchiving it rather than by importing a second
+                // workspace onto the same name.
                 throw WorkspaceError.invalidArgument(
                     message:
                         "Workspace already exists for archived branch '\(branch)': \(existing.displayName). Unarchive it or use a different worktree."
@@ -705,7 +725,13 @@ public final class WorkspaceOrchestrator {
             let existingWorkspaces = try store.workspaces(projectID: project.id, includeArchived: true)
             for workspace in existingWorkspaces {
                 let normalizedWorkspacePath = normalizePath(workspace.dir)
-                if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
+                // Archiving removes the workspace's worktree, so a worktree standing at an archived record's
+                // recorded path belongs to whichever workspace was created there afterwards (directory names
+                // are recycled once a record is archived). Only a live record's branch tracks what is on disk;
+                // stamping that branch onto the archived record too would make two rows claim one branch.
+                if !workspace.isArchived, let worktree = discoverableWorktreeByPath[normalizedWorkspacePath],
+                    workspace.branch != worktree.branchName
+                {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: worktree.branchName,
                         baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,

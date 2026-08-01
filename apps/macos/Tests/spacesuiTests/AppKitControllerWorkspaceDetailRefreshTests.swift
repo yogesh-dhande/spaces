@@ -180,4 +180,29 @@ import workspacecore
         #expect(pane.compatibilityBlockDeviceID == nil)
     }
 
+    // A background refresh re-presents the pane that is already showing — an overview tick rebuilding
+    // the Alerts list, a sidebar reload rebuilding the selected workspace's detail. That re-render must
+    // not be treated as navigation, because navigation dismisses the open New Project / New Workspace /
+    // Project Settings windows, and a dialog the user is filling in has to survive every refresh.
+    @Test func rePresentingTheVisiblePaneIsNotNavigation() {
+        #expect(!AppKitController.detailPanePresentationIsNavigation(current: .alerts, presented: .alerts))
+        #expect(
+            !AppKitController.detailPanePresentationIsNavigation(current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1")))
+        #expect(
+            !AppKitController.detailPanePresentationIsNavigation(
+                current: .compatibilityBlock(deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-1")))
+        #expect(!AppKitController.detailPanePresentationIsNavigation(current: .none, presented: .none))
+    }
+
+    @Test func presentingDifferentPaneContentIsNavigation() {
+        #expect(AppKitController.detailPanePresentationIsNavigation(current: .alerts, presented: .workspace(id: "workspace-1")))
+        #expect(AppKitController.detailPanePresentationIsNavigation(current: .workspace(id: "workspace-1"), presented: .alerts))
+        #expect(AppKitController.detailPanePresentationIsNavigation(current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-2")))
+        #expect(
+            AppKitController.detailPanePresentationIsNavigation(
+                current: .compatibilityBlock(deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-2")))
+        #expect(AppKitController.detailPanePresentationIsNavigation(current: .none, presented: .alerts))
+        #expect(AppKitController.detailPanePresentationIsNavigation(current: .alerts, presented: .none))
+    }
+
 }
