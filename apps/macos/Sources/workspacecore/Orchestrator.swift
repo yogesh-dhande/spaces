@@ -612,9 +612,19 @@ public final class WorkspaceOrchestrator {
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
             try replaceManagedWorkspaceDirectoryIfNeeded(path: workspaceDir, allowReplacement: replacesExplicitManagedDirectory)
-            try git.createWorktree(
-                path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
-                allowRemoteBranchLookup: allowRemoteBranchLookup)
+            // The branch mode the user chose decides the git operation rather than letting git infer it from
+            // whichever refs happen to be present: `Use existing` attaches to a branch validation proved
+            // exists, while `Create branch` starts a branch validation proved exists nowhere at the chosen
+            // base — so a leftover `origin/<branch>` from a branch deleted elsewhere cannot become its start.
+            if allowExistingBranchReuse {
+                try git.createWorktree(
+                    path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
+                    allowRemoteBranchLookup: allowRemoteBranchLookup)
+            } else {
+                try git.createWorktreeOnNewBranch(
+                    path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
+                    allowRemoteBranchLookup: allowRemoteBranchLookup)
+            }
             workspaceBranch = branchName
         } else {
             workspaceDir = project.dir

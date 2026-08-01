@@ -475,7 +475,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Failure states should be explicit and actionable.
 - The GUI should prefer inline guidance over silent failure or hidden background behavior.
 - Remote-device setup should use user-facing status and error messages: Macs need the Spaces app installed, while supported Linux devices are set up automatically over SSH.
-- Background sidebar/runtime refresh should update in place without replacing the current detail pane or resetting the selected workspace tab. An open dialog window — New Project, New Workspace, project settings — stays open across those refreshes whatever pane is behind it, including Alerts; only the user moving the detail pane to different content dismisses it.
+- Background sidebar/runtime refresh should update in place without replacing the current detail pane or resetting the selected workspace tab. An open dialog window — New Project, New Workspace, project settings — stays open across those refreshes whatever pane is behind it, including Alerts, and stays open when a refresh changes what that pane shows: a device going offline or wire-incompatible, its recovery, a failed reload, or a workspace removed elsewhere all leave the dialog and its typed input alone. Only the user moving the detail pane to different content — selecting another row, opening Alerts, following the compatibility caption's button — dismisses it.
 
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.

@@ -1334,6 +1334,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.displayName)")
             // Drop a full-pane alerts view so the selection below resolves to the workspace instead of
             // `refreshSelection` bouncing back to alerts; a shown workspace/compatibility pane is untouched.
+            // Left as a background presentation: this only clears the way, and the selection it makes
+            // room for is what carries the navigation — `selectWorkspace` lands on the outline row whose
+            // selection change presents the workspace pane as `.userNavigation`.
             if case .alerts = self.detailPane { self.presentDetailPane(.none) }
             self.showingSettings = false
             self.selectWorkspace(workspace)
@@ -4174,7 +4177,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    @objc func alertsRowClicked() { alerts.showAlertsDetail() }
+    @objc func alertsRowClicked() { alerts.showAlertsDetail(presentation: .userNavigation) }
 
     // MARK: - Alerts forwarders
     // Thin pass-throughs that keep widely-used alerts entry points callable from
@@ -4183,7 +4186,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
     func consumeFocusedSessionBellAlerts() { alerts.consumeFocusedSessionBellAlerts() }
-    func showAlertsDetail() { alerts.showAlertsDetail() }
+    func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) { alerts.showAlertsDetail(presentation: presentation) }
 
     private func makeRightPane() -> NSView {
         let container = NSView()
@@ -4804,24 +4807,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
-    /// switching away from a workspace also clears the workspace-only titlebar tab strip, and
+    /// switching away from a workspace also clears the workspace-only titlebar tab strip, and the user
     /// navigating to different content dismisses the free-standing add/settings form windows.
-    func presentDetailPane(_ pane: DetailPane) {
-        if Self.detailPanePresentationIsNavigation(current: detailPane, presented: pane) { clearActiveAddFormStateAndCloseWindows() }
+    func presentDetailPane(_ pane: DetailPane, presentation: DetailPanePresentation = .backgroundRefresh) {
+        if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
+            clearActiveAddFormStateAndCloseWindows()
+        }
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
     }
 
-    /// Whether presenting `presented` moves the detail pane to different content, which is what
-    /// dismisses the open New Project / New Workspace / Project Settings windows.
+    /// Whether this presentation dismisses the open New Project / New Workspace / project settings
+    /// windows. Both conditions are required: the user has to be the one asking for a different pane
+    /// (`DetailPanePresentation`), and the pane has to actually move out from under the form.
     ///
-    /// The `show*` methods are both the navigation entry points and the pane's re-render: every
-    /// background refresh that lands new device state re-presents the pane that is already showing
-    /// (`showAlertsDetail` from an overview tick, `refreshSelection` from a sidebar reload). Those forms
-    /// are free-standing windows the user is filling in, so only a genuine change of content may close
-    /// them — re-rendering the same content must leave them alone.
-    nonisolated static func detailPanePresentationIsNavigation(current: DetailPane, presented: DetailPane) -> Bool { presented != current }
+    /// A background refresh never dismisses, however much it changes — inferring intent from the
+    /// content alone would close a form on a device turning wire-incompatible, on its recovery, on a
+    /// failed reload's error placeholder, and on the selected workspace being deleted elsewhere. Nor
+    /// does re-presenting the same content on a user action: clicking the Alerts row while Alerts is
+    /// already showing moves nothing.
+    nonisolated static func detailPanePresentationDismissesFormWindows(
+        current: DetailPane, presented: DetailPane, presentation: DetailPanePresentation
+    ) -> Bool {
+        guard presentation == .userNavigation else { return false }
+        return presented != current
+    }
 
     private func hideWorkspacePanelTabStrip() {
         panelTabStripView.releaseTabBar()
@@ -4862,9 +4873,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
     }
 
-    func showPlaceholder(message: String = "Select a project or workspace.") {
+    func showPlaceholder(message: String = "Select a project or workspace.", presentation: DetailPanePresentation = .backgroundRefresh) {
         stopWorkspaceSetupDetailRefreshTimer()
-        presentDetailPane(.none)
+        presentDetailPane(.none, presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -4942,7 +4953,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
     /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
-    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility, presentation: DetailPanePresentation = .backgroundRefresh) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else {
             // A device with no remedy needs no block — leave the detail pane exactly as it is rather
@@ -4952,7 +4963,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         visibleCompatibilityBlockRemedy = remedy
 
         stopWorkspaceSetupDetailRefreshTimer()
-        presentDetailPane(.compatibilityBlock(deviceID: deviceID))
+        presentDetailPane(.compatibilityBlock(deviceID: deviceID), presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -6183,8 +6194,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func prepareWorkspaceDetailContainer(workspaceID: String) {
-        presentDetailPane(.workspace(id: workspaceID))
+    private func prepareWorkspaceDetailContainer(workspaceID: String, presentation: DetailPanePresentation) {
+        presentDetailPane(.workspace(id: workspaceID), presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -6204,20 +6215,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+    func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary, presentation: DetailPanePresentation = .backgroundRefresh) {
         // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
         // detail surface is the compatibility banner. Other devices' workspaces stay usable.
         // The owning device comes from the row's own project (callers always pass the pair the
         // sidebar resolved together), so the panel scope below can never key off a stale id.
         let workspaceDeviceID = project.deviceID
         if let verdict = deviceCompatibility(forDeviceID: workspaceDeviceID), !verdict.isCompatible {
-            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
+            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict, presentation: presentation)
             return
         }
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
             requestSidebarReload()
             return
@@ -6225,7 +6236,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deviceWorkspace = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspaceSummary)
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
             showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
@@ -6248,7 +6259,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             panelCoordinator.refreshTabTitles(scope: scope)
             return
         }
-        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
         showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()

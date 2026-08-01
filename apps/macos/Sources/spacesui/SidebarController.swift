@@ -983,7 +983,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 showingAlerts: host.showingAlerts, direction: direction)
         else { return false }
         switch target {
-        case .alerts: host.showAlertsDetail()
+        case .alerts: host.showAlertsDetail(presentation: .userNavigation)
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -2005,7 +2005,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard let raw = sender.identifier?.rawValue, raw.hasPrefix("compat:") else { return }
         let deviceID = String(raw.dropFirst("compat:".count))
         guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
-        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .userNavigation)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -2017,7 +2017,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedProjectID = nil
             host.selectedWorkspaceID = nil
             host.showingSettings = false
-            if !host.showingAlerts { host.showPlaceholder() }
+            if !host.showingAlerts { host.showPlaceholder(presentation: .userNavigation) }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
@@ -2056,14 +2056,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // A non-git project has no workspace row to expand, but a git workspace that was only
             // transiently expanded still needs to collapse now that the selection moved to this project.
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             host.selectedWorkspaceID = workspace.id
             AppKitController.setClientActiveWorkspaceID(workspace.id)
             host.showingSettings = false
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         }
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,

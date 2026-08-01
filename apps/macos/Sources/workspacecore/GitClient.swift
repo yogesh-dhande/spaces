@@ -103,6 +103,26 @@ public final class GitClient {
         return branches.sorted { lhs, rhs in lhs.localizedStandardCompare(rhs) == .orderedAscending }
     }
 
+    /// Creates `branch` fresh at `baseBranch` and checks it out in a new worktree.
+    ///
+    /// Distinct from `createWorktree`, which attaches a worktree to a branch that already exists somewhere and
+    /// therefore prefers `refs/remotes/origin/<branch>` when only the remote has it. The caller here has
+    /// established the opposite — the branch exists neither in `refs/heads` nor on the remote — so a
+    /// `refs/remotes/origin/<branch>` still present in this clone is a leftover of a branch deleted on the
+    /// remote by another clone and never pruned here. Starting from it would silently put the new branch at
+    /// that obsolete tip instead of the base the user chose, so this path reads only the base.
+    public func createWorktreeOnNewBranch(
+        path repoPath: String, worktreePath: String, branch: String, baseBranch: String?, allowRemoteBranchLookup: Bool
+    ) throws {
+        if let startPoint = try resolveStartPoint(path: repoPath, baseBranch: baseBranch, allowRemoteBranchLookup: allowRemoteBranchLookup) {
+            try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, startPoint])
+            return
+        }
+        try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath])
+    }
+
+    /// Attaches a new worktree to `branch`, which the caller has established already exists locally or on the
+    /// remote. Creating a branch that exists nowhere is `createWorktreeOnNewBranch`'s job.
     public func createWorktree(
         path repoPath: String, worktreePath: String, branch: String, baseBranch: String? = nil, allowRemoteBranchLookup: Bool = true
     ) throws {

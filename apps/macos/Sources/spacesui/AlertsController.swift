@@ -157,11 +157,11 @@ import workspacecore
 
     /// Renders the Alerts pane. Also the pane's re-render: every refresh that lands new device state
     /// calls this again while alerts is already the visible pane, so nothing here may discard state the
-    /// user is in the middle of — `presentDetailPane` is what decides that this is a re-render rather
-    /// than navigation, and leaves an open form window alone.
-    func showAlertsDetail() {
+    /// user is in the middle of. `presentation` is what tells the two apart — it defaults to the
+    /// refresh, and only the entry points the user actually reached for pass `.userNavigation`.
+    func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) {
         host.stopWorkspaceSetupDetailRefreshTimer()
-        host.presentDetailPane(.alerts)
+        host.presentDetailPane(.alerts, presentation: presentation)
         host.showingSettings = false
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
@@ -362,7 +362,7 @@ import workspacecore
 
     func handleAlertsShortcut(event: NSEvent) -> Bool {
         guard let alertsShortcutSpec, host.matches(event: event, spec: alertsShortcutSpec) else { return false }
-        showAlertsDetail()
+        showAlertsDetail(presentation: .userNavigation)
         return true
     }
 }

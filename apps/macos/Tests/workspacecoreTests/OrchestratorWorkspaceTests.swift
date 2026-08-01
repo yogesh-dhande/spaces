@@ -381,6 +381,72 @@ extension OrchestratorTests {
         XCTAssertNil(try store.workspace(id: workspace.id)?.branch)
     }
 
+    /// A branch deleted on the remote by another clone leaves this clone's `refs/remotes/origin/<branch>`
+    /// behind until something prunes it. Creating a *new* branch of that name must start at the chosen base:
+    /// the leftover tracking ref points at the obsolete tip of a branch that no longer exists anywhere.
+    func testCreateWorkspaceOnNewBranchStartsAtBaseDespiteStaleRemoteTrackingRef() throws {
+        let fixture = try makeStaleRemoteTrackingRefFixture(branch: "stale-tip", marker: "STALE.md")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: fixture.clone.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "stale-tip", baseBranch: "main")
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: workspace.dir + "/STALE.md"),
+            "A new branch must not start at the obsolete tip the stale tracking ref points to.")
+        let workspaceHead = try runGitAndCapture(["rev-parse", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(workspaceHead, fixture.baseRevision)
+    }
+
+    /// The same must hold when the branch name was also being held by a stale archived record: releasing that
+    /// claim puts the create into new-branch mode, which must still start at the base.
+    func testCreateWorkspaceReusingArchivedNameStartsAtBaseDespiteStaleRemoteTrackingRef() throws {
+        let fixture = try makeStaleRemoteTrackingRefFixture(branch: "stale-claim", marker: "STALE_CLAIM.md")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: fixture.clone.path)
+        let archivedWorkspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, dir: workspacesRoot.appendingPathComponent("gone", isDirectory: true).path,
+            dirname: "gone", branch: "stale-claim", baseBranch: "main", isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: archivedWorkspace)
+
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "stale-claim", baseBranch: "main")
+
+        XCTAssertNil(try store.workspace(id: archivedWorkspace.id)?.branch)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir + "/STALE_CLAIM.md"))
+        let workspaceHead = try runGitAndCapture(["rev-parse", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(workspaceHead, fixture.baseRevision)
+    }
+
+    /// A clone whose `refs/remotes/origin/<branch>` still points at a branch another clone deleted on the
+    /// remote: the branch exists neither locally nor on the remote, only the unpruned tracking ref remains.
+    /// `baseRevision` is the clone's `main` tip, which a new branch of that name has to start from.
+    private func makeStaleRemoteTrackingRefFixture(branch: String, marker: String) throws -> (
+        root: URL, remote: URL, clone: URL, baseRevision: String
+    ) {
+        let fixture = try makeRemoteFixture()
+        try runGit(["checkout", "-b", branch], cwd: fixture.clone.path)
+        try "stale".write(to: fixture.clone.appendingPathComponent(marker), atomically: true, encoding: .utf8)
+        try runGit(["add", marker], cwd: fixture.clone.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "stale tip"], cwd: fixture.clone.path)
+        try runGit(["push", "-u", "origin", branch], cwd: fixture.clone.path)
+        try runGit(["checkout", "main"], cwd: fixture.clone.path)
+
+        // Another clone deletes the branch on the remote; this clone never fetches with --prune afterwards.
+        try runGit(["update-ref", "-d", "refs/heads/\(branch)"], cwd: fixture.remote.path)
+        try runGit(["branch", "-D", branch], cwd: fixture.clone.path)
+        try runGit(["show-ref", "--verify", "refs/remotes/origin/\(branch)"], cwd: fixture.clone.path)
+
+        let baseRevision = try runGitAndCapture(["rev-parse", "main"], cwd: fixture.clone.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (fixture.root, fixture.remote, fixture.clone, baseRevision)
+    }
+
     /// Renaming a workspace's branch obeys the same rule as creating one: a branch name whose only claimant
     /// is an archived record that no longer owns it is free to take.
     func testUpdateWorkspaceMetadataRenamesBranchArchivedRecordNoLongerOwns() throws {
