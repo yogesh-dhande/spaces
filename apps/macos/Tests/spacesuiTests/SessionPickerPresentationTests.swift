@@ -29,7 +29,7 @@ import workspacecore
             ])
         return SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(id)", isRunning: true,
-            isArchived: false, isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isHidden: false, isDefault: false, sessionCount: 3, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web-\(id)", workspaceID: id, name: "web", command: "npm run dev", templateID: "tpl-web-\(id)",
@@ -138,7 +138,7 @@ import workspacecore
         // leaves the picker with just its create row.
         let workspace = SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
-            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+            isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "row-shell", workspaceID: "workspace-1", title: "shell", workingDirectory: "/tmp/workspace-1", sessionID: "session-shell",
@@ -160,7 +160,7 @@ import workspacecore
     @Test func terminalRowsShowTheNameDescribedByTheLiveTitle() throws {
         let workspace = SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/workspace-1",
-            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 2,
+            isRunning: true, isHidden: false, isDefault: false, sessionCount: 2,
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "row-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/workspace-1",

@@ -1639,6 +1639,21 @@ wait_for_workspace_lookup() {
   fail "workspace not found: $title"
 }
 
+wait_for_workspace_absent() {
+  # Archiving deletes the workspace record, so the harness waits for the lookup to stop
+  # resolving the name rather than for a flag to flip on a row that no longer exists.
+  local title="$1"
+  local out="$TMP_ROOT/workspace-absent-lookup.json"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! lookup_workspace "$title" "$out" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "workspace still present after archive: $title"
+}
+
 wait_for_workspace_running_state() {
   local workspace_dir="$1"
   local expected="$2"
@@ -2255,19 +2270,18 @@ archive_workspace_via_gui() {
   wait_for_spaces_frontmost_ready
   ui_select_outline_row 2
   sleep 0.5
-  ui_click_button_description "Archive"
+  ui_click_button_description "Delete"
   osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application "System Events"
   tell process "SpacesApp"
-    if exists sheet 1 of window 1 then click button "Archive" of sheet 1 of window 1
+    if exists sheet 1 of window 1 then click button "Delete" of sheet 1 of window 1
   end tell
 end tell
 APPLESCRIPT
   local out="$TMP_ROOT/archive-workspace-state.json"
   local deadline=$((SECONDS + 4))
   while (( SECONDS < deadline )); do
-    lookup_workspace "$WORKSPACE_BRANCH" "$out" >/dev/null 2>&1 || true
-    if [[ -f "$out" ]] && [[ "$(json_get "$out" "isArchived")" == "true" ]]; then
+    if ! lookup_workspace "$WORKSPACE_BRANCH" "$out" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -2510,7 +2524,7 @@ on run argv
                 repeat with dialogButton in buttons of targetWindow
                   try
                     set buttonTitle to (title of dialogButton as text)
-                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
                   end try
                 end repeat
           end try
@@ -2542,7 +2556,7 @@ on run argv
                 repeat with sheetButton in buttons of targetSheet
                   try
                     set buttonTitle to (title of sheetButton as text)
-                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
                   end try
                 end repeat
               end try
@@ -6330,8 +6344,7 @@ EOF
   begin_case "archive branch workspaces"
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-harbor-branch.json
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$lantern_branch_workspace_dir" >/tmp/spaces-e2e-archive-lantern-branch.json
-  wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
-  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "harbor branch workspace archived"
+  wait_for_workspace_absent "$WORKSPACE_BRANCH"
   pass_case
 }
 

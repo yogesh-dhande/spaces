@@ -750,7 +750,7 @@ apps/macos/Tests/e2e.sh all
 This suite is manual by design. It drives the real app, `spaces`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
 
 Primary coverage:
-- adding and archiving a workspace
+- adding and deleting a workspace
 - overriding workspace settings after creation
 - launch, stop, restart, and dead-process recovery
 - built-in Spaces terminal coverage

@@ -22,7 +22,7 @@ import workspacecore
             ])
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isArchived: false, isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isHidden: false, isDefault: false, sessionCount: 3, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "proc-web",
@@ -133,7 +133,7 @@ import workspacecore
 
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+            isHidden: false, isDefault: false, sessionCount: 1,
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "term-1", workspaceID: "workspace", title: "shell-1", workingDirectory: "/tmp/workspace", sessionID: "sess-term",
@@ -153,7 +153,7 @@ import workspacecore
         }
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isArchived: false, isHidden: false, isDefault: false, sessionCount: terminalRows.count, terminalRows: terminalRows)
+            isHidden: false, isDefault: false, sessionCount: terminalRows.count, terminalRows: terminalRows)
         let items = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
         #expect(items.count == 12)
         #expect(items[9].shortcutIndex == 10)

@@ -9,6 +9,99 @@ import spacesterminalcore
 @testable import workspacecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
+    /// Deleting a workspace can be asked to delete its branches, and each branch's outcome — deleted, not
+    /// found, skipped as protected, or failed — is something the user is owed. The daemon computes that
+    /// report, so it has to reach the client on the response rather than being dropped for a fixed
+    /// "Deleted workspace." message.
+    func testDeleteWorkspaceCarriesBranchDeletionOutcomeToTheClient() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+
+            // A real repository with a real branch checked out in a real worktree: the delete has to remove
+            // the worktree and the branch for its report to mean anything.
+            let projectDir = root.appendingPathComponent("delete-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("delete-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-report", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-delete", name: "Delete Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let workspace = WorkspaceRecord(
+                id: "workspace-delete", projectID: project.id, dir: worktreeDir.path, dirname: "delete-worktree", branch: "feature-report",
+                baseBranch: "main", isDefault: false, isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-DELETE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .archiveWorkspace(.init(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: false)),
+                    authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            let notice = try XCTUnwrap(response.mutationNotice, "the branch-deletion report must reach the client")
+            XCTAssertTrue(notice.contains("Deleted local branch 'feature-report'."), notice)
+            XCTAssertNil(try store.workspace(id: workspace.id), "the workspace record is gone")
+            XCTAssertFalse(GitClient().branchExists(path: projectDir.path, branch: "feature-report"))
+        }
+    }
+
+    /// A delete that was not asked to touch any branch has nothing extra to report, so it carries no notice
+    /// and the client stays silent instead of showing an empty report.
+    func testDeleteWorkspaceWithoutBranchDeletionCarriesNoNotice() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("quiet-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("quiet-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-quiet", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-quiet", name: "Quiet Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            try store.upsert(project: project)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-quiet", projectID: project.id, dir: worktreeDir.path, dirname: "quiet-worktree", branch: "feature-quiet",
+                    baseBranch: "main", isDefault: false, isRunning: false, lastLaunchedAt: nil))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-DELETE-QUIET", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .archiveWorkspace(.init(workspaceID: "workspace-quiet", deleteLocalBranch: false, deleteRemoteBranch: false)),
+                    authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertNil(response.mutationNotice)
+            XCTAssertNil(try store.workspace(id: "workspace-quiet"))
+            XCTAssertTrue(GitClient().branchExists(path: projectDir.path, branch: "feature-quiet"), "an untouched branch survives the delete")
+        }
+    }
+
     func testAgentHookStatusDoesNotBlockOtherDeviceAPIRequests() throws {
         try withTemporaryProfile { _ in
             let identity = try testTLSIdentity()
@@ -517,7 +610,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
@@ -591,7 +684,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-impact", name: "Impact Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-impact", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                id: "workspace-impact", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
@@ -655,7 +748,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
@@ -713,7 +806,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
-                isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -780,7 +873,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-process", name: "Process Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
                 isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
@@ -837,7 +930,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 defaultBranch: nil)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-overview-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
-                isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -1428,7 +1521,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         let project = ProjectRecord(id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
         let workspace = WorkspaceRecord(
             id: "workspace-\(sessionID)", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: nil, isDefault: true,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1616,5 +1709,36 @@ private final class DeviceAPITransportTestResultBox: @unchecked Sendable {
         let data = storedResponseData
         lock.unlock()
         return data
+    }
+}
+
+/// Runs `git` for the Device API server tests' repository fixtures. The Device API delete path shells out to
+/// real git, so these tests need real repositories rather than seeded rows.
+private func runDeviceAPITestGit(_ arguments: [String], cwd: String) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = arguments
+    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    var environment = ProcessInfo.processInfo.environment
+    environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    environment["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    environment["GIT_AUTHOR_NAME"] = "spaces-test"
+    environment["GIT_AUTHOR_EMAIL"] = "test@example.com"
+    environment["GIT_COMMITTER_NAME"] = "spaces-test"
+    environment["GIT_COMMITTER_EMAIL"] = "test@example.com"
+    environment.removeValue(forKey: "GIT_DIR")
+    environment.removeValue(forKey: "GIT_WORK_TREE")
+    process.environment = environment
+    let errorPipe = Pipe()
+    process.standardOutput = Pipe()
+    process.standardError = errorPipe
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        throw NSError(
+            domain: "spaces.tests", code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"])
     }
 }

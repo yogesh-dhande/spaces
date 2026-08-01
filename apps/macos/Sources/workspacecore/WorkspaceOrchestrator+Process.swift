@@ -35,7 +35,7 @@ extension WorkspaceOrchestrator {
     public func runningOwnedProcessPIDs() throws -> Set<Int> {
         var pids: Set<Int> = []
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 for process in try store.runningProcesses(workspaceID: workspace.id) where process.status == .running {
                     // A Spaces terminal-backed process can be recorded running before its child PID is
                     // persisted: the child PID is written to terminal runtime state, not the database, and
@@ -56,7 +56,7 @@ extension WorkspaceOrchestrator {
         var didUpdate = false
         let allProjects = try store.projects()
         for project in allProjects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            let workspaces = try store.workspaces(projectID: project.id)
             for workspace in workspaces {
                 if try refreshProcessStatuses(workspaceID: workspace.id, project: project, ignoreStartupGracePeriod: ignoreStartupGracePeriod) {
                     didUpdate = true

@@ -75,7 +75,7 @@ struct SpacesDeviceOverviewBuilder {
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
                 branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
-                isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
+                isRunning: descriptor.workspace.isRunning, isHidden: descriptor.workspace.isHidden,
                 isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
                 environment: descriptor.environment, setupState: descriptor.setupState.map(deviceWorkspaceSetupState),

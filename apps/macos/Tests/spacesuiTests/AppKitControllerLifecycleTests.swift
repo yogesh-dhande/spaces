@@ -210,10 +210,10 @@ import workspacecore
             servicePID: 123, childPID: 456, controlSocketPath: "/tmp/\(id).sock", outputPath: "/tmp/\(id).log")
     }
 
-    private static func workspaceRecord(id: String, isArchived: Bool = false, isRunning: Bool) -> WorkspaceRecord {
+    private static func workspaceRecord(id: String, isRunning: Bool) -> WorkspaceRecord {
         WorkspaceRecord(
-            id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isArchived: isArchived,
-            isRunning: isRunning, lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
+            id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isRunning: isRunning,
+            lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
     }
 
     private static func cleanupResult(workspaceIDs: [String], remainingSessionIDs: [String]) -> AppKitController.StopAllQuitCleanupResult {

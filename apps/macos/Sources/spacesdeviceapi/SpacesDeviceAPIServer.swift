@@ -1595,7 +1595,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         var impact = RestartImpactCounts()
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 impact.accumulate(
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -1672,7 +1672,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
         let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
         let workspaces = try projects.flatMap { project in
-            try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
+            try store.workspaces(projectID: project.id).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(
                     branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
                 // `resolvedWorkspaceBrowserSessions` and `workspaceSettings` stay per-workspace on
@@ -2056,7 +2056,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         } else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.", errorCode: .invalidArgument)
         }
-        let defaultWorkspaceID = try store.workspaces(projectID: project.id, includeArchived: false).first(where: \.isDefault)?.id
+        let defaultWorkspaceID = try store.workspaces(projectID: project.id).first(where: \.isDefault)?.id
         return try refreshedMutationResponse(
             context: context, message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
     }
@@ -2171,9 +2171,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleArchiveWorkspaceRequest(_ request: SpacesDeviceWorkspaceArchiveRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        _ = try context.orchestrator().archiveWorkspace(
+        // The outcome carries what happened to each branch the request asked to delete, which the user is
+        // owed whether it succeeded, found nothing, skipped a protected branch, or failed.
+        let outcome = try context.orchestrator().archiveWorkspace(
             workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
-        return try refreshedMutationResponse(context: context, message: "Archived workspace.", workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(
+            context: context, message: "Deleted workspace.", workspaceID: request.workspaceID, notice: outcome.notice)
     }
 
     private func handleRunWorkspaceSetupRequest(_ request: SpacesDeviceWorkspaceReference, context: RequestContext) throws -> SpacesDeviceAPIResponse
@@ -2431,13 +2434,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func refreshedMutationResponse(
-        context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil
+        context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
+        notice: String? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
-                    overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID)))
+                    overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
+                    notice: notice)))
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {
@@ -2607,7 +2612,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let projects = try store.projects()
         var roots = Set(projects.map(\.dir))
         for project in projects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            let workspaces = try store.workspaces(projectID: project.id)
             roots.formUnion(workspaces.map(\.dir))
         }
         return Array(roots)

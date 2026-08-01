@@ -78,7 +78,7 @@ export default function ServicesDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Adding & Removing Services</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Adding a service reserves its port immediately — you don&apos;t need to relaunch the workspace to use it.</li>
-          <li>• A service&apos;s port stays assigned to its workspace until that workspace is archived, even while the workspace is stopped.</li>
+          <li>• A service&apos;s port stays assigned to its workspace until that workspace is deleted, even while the workspace is stopped.</li>
           <li>• While a workspace is running, its assigned ports are not placeholder-reserved on your machine; if another local process claims one first, resolve the conflict manually before your server binds it.</li>
         </ul>
       </article>

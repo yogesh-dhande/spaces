@@ -180,4 +180,64 @@ import workspacecore
         #expect(pane.compatibilityBlockDeviceID == nil)
     }
 
+    // A background refresh re-presents the pane that is already showing — an overview tick rebuilding
+    // the Alerts list, a sidebar reload rebuilding the selected workspace's detail. Dismissing the open
+    // New Project / New Workspace / project settings window there would throw away input the user is in
+    // the middle of typing, so a refresh never dismisses.
+    @Test func backgroundRefreshOfTheVisiblePaneKeepsFormWindows() {
+        #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .backgroundRefresh))
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .backgroundRefresh))
+    }
+
+    // The refresh paths change pane content on their own: a remote device turning wire-incompatible
+    // swaps in its compatibility block, recovery clears the pane, a failed reload swaps in the error
+    // placeholder, and a selected workspace deleted elsewhere drops the pane back to alerts. None of
+    // those are the user navigating, so none may dismiss a form window — which is why the rule reads the
+    // caller's intent instead of inferring it from the content having changed.
+    @Test func backgroundRefreshThatChangesPaneContentKeepsFormWindows() {
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .compatibilityBlock(deviceID: "device-1"), presentation: .backgroundRefresh),
+            "A device turning wire-incompatible must not close a dialog")
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .compatibilityBlock(deviceID: "device-1"), presented: .none, presentation: .backgroundRefresh),
+            "A device recovering must not close a dialog")
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .none, presentation: .backgroundRefresh),
+            "A failed reload's placeholder must not close a dialog")
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .backgroundRefresh),
+            "A selected workspace deleted elsewhere must not close a dialog")
+    }
+
+    @Test func userNavigationToDifferentPaneContentDismissesFormWindows() {
+        #expect(
+            AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .alerts, presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+        #expect(
+            AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .userNavigation))
+        #expect(
+            AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-2"), presentation: .userNavigation))
+        #expect(
+            AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .compatibilityBlock(deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-2"),
+                presentation: .userNavigation))
+        #expect(AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .none, presentation: .userNavigation))
+    }
+
+    // Clicking the Alerts row while Alerts is already showing, or re-selecting the selected workspace,
+    // moves nothing out from under the dialog, so it stays open.
+    @Test func userNavigationToTheSamePaneKeepsFormWindows() {
+        #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .userNavigation))
+        #expect(
+            !AppKitController.detailPanePresentationDismissesFormWindows(
+                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+    }
+
 }

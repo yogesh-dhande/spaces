@@ -318,11 +318,11 @@ public final class WorkspaceOrchestrator {
 
     public func project(dir: String) throws -> ProjectRecord? { try store.project(dir: dir) }
 
-    public func listWorkspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceSummary] {
-        let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
+    public func listWorkspaces(projectID: String) throws -> [WorkspaceSummary] {
+        let records = try store.workspaces(projectID: projectID)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived,
+                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
                 isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
         }
     }
@@ -455,7 +455,7 @@ public final class WorkspaceOrchestrator {
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
             isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
         try store.upsert(workspace: updatedWorkspace)
     }
@@ -523,14 +523,7 @@ public final class WorkspaceOrchestrator {
         }
         if project.isGitRepo, let branchName = resolvedBranch {
             if let existing = try workspaceForBranch(projectID: projectID, branch: branchName) {
-                if existing.isArchived {
-                    guard allowExistingBranchReuse else {
-                        throw WorkspaceError.invalidArgument(
-                            message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
-                    }
-                } else {
-                    throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
-                }
+                throw WorkspaceError.invalidArgument(message: "Branch '\(branchName)' is already used by workspace '\(existing.displayName)'.")
             }
             let branchExists = try branchExistsForNewWorkspace(project: project, branch: branchName, allowRemoteBranchLookup: allowRemoteBranchLookup)
             if allowExistingBranchReuse, !branchExists {
@@ -542,47 +535,10 @@ public final class WorkspaceOrchestrator {
                     message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
         }
-        if project.isGitRepo, let branchName = resolvedBranch, let existing = try archivedWorkspace(projectID: projectID, branch: branchName) {
-            let revivedDir: String
-            let revivedDirname: String?
-            let revivedBranch: String?
-            let dirname = try makeWorkspaceDirname(
-                project: project, preferredExistingDirname: existing.dirname, requestedDirname: trimmedDirectoryName, excludingDirname: nil,
-                excludingFilesystemDirname: replacesExplicitManagedDirectory ? trimmedDirectoryName : nil)
-            revivedDirname = dirname
-            let worktreeRoot = try worktreeRoot(project: project)
-            try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
-            revivedDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
-            try replaceManagedWorkspaceDirectoryIfNeeded(path: revivedDir, allowReplacement: replacesExplicitManagedDirectory)
-            if !FileManager.default.fileExists(atPath: revivedDir) {
-                try git.createWorktree(
-                    path: project.dir, worktreePath: revivedDir, branch: branchName, baseBranch: resolvedBaseBranch,
-                    allowRemoteBranchLookup: allowRemoteBranchLookup)
-            }
-            revivedBranch = branchName
-            let revived = WorkspaceRecord(
-                id: existing.id, projectID: project.id, dir: revivedDir, dirname: revivedDirname, branch: revivedBranch,
-                baseBranch: existing.baseBranch ?? resolvedBaseBranch, isDefault: false, isArchived: false, isHidden: existing.isHidden,
-                isRunning: false, lastLaunchedAt: nil)
-            try store.upsert(workspace: revived)
-            try seedWorkspaceSettings(project: project, workspace: revived)
-            try initializeWorkspaceRuntime(project: project, workspace: revived, runSetupScript: runSetupScript)
-            return revived
-        }
-        if !project.isGitRepo, let existingActive = try store.workspace(dir: project.dir), !existingActive.isArchived {
-            // A non-git project owns exactly one workspace (the project directory). If an
-            // active one already exists, return it rather than inserting a duplicate that
-            // would be indistinguishable by display name.
-            return existingActive
-        }
-        if !project.isGitRepo, let existing = try archivedWorkspace(projectID: projectID, dir: project.dir) {
-            let revived = WorkspaceRecord(
-                id: existing.id, projectID: project.id, dir: project.dir, dirname: existing.dirname, branch: nil, baseBranch: nil, isDefault: false,
-                isArchived: false, isHidden: existing.isHidden, isRunning: false, lastLaunchedAt: nil)
-            try store.upsert(workspace: revived)
-            try seedWorkspaceSettings(project: project, workspace: revived)
-            try initializeWorkspaceRuntime(project: project, workspace: revived, runSetupScript: runSetupScript)
-            return revived
+        if !project.isGitRepo, let existing = try store.workspace(dir: project.dir) {
+            // A non-git project owns exactly one workspace (the project directory), so an existing record for
+            // that directory is returned rather than duplicated into a second, indistinguishable one.
+            return existing
         }
         let workspaceDir: String
         let workspaceDirname: String?
@@ -597,9 +553,19 @@ public final class WorkspaceOrchestrator {
             try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
             workspaceDir = worktreeRoot.appendingPathComponent(dirname, isDirectory: true).path
             try replaceManagedWorkspaceDirectoryIfNeeded(path: workspaceDir, allowReplacement: replacesExplicitManagedDirectory)
-            try git.createWorktree(
-                path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
-                allowRemoteBranchLookup: allowRemoteBranchLookup)
+            // The branch mode the user chose decides the git operation rather than letting git infer it from
+            // whichever refs happen to be present: `Use existing` attaches to a branch validation proved
+            // exists, while `Create branch` starts a branch validation proved exists nowhere at the chosen
+            // base — so a leftover `origin/<branch>` from a branch deleted elsewhere cannot become its start.
+            if allowExistingBranchReuse {
+                try git.createWorktree(
+                    path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
+                    allowRemoteBranchLookup: allowRemoteBranchLookup)
+            } else {
+                try git.createWorktreeOnNewBranch(
+                    path: project.dir, worktreePath: workspaceDir, branch: branchName, baseBranch: resolvedBaseBranch,
+                    allowRemoteBranchLookup: allowRemoteBranchLookup)
+            }
             workspaceBranch = branchName
         } else {
             workspaceDir = project.dir
@@ -608,7 +574,7 @@ public final class WorkspaceOrchestrator {
         }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: workspaceDirname, branch: workspaceBranch,
-            baseBranch: resolvedBaseBranch, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            baseBranch: resolvedBaseBranch, isDefault: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
@@ -657,27 +623,17 @@ public final class WorkspaceOrchestrator {
                 message: "Project not found for git root: \(gitRoot). Add the project in the app before importing this workspace.")
         }
         if let existing = try store.workspace(dir: normalizedWorktreePath) {
-            if existing.isArchived {
-                throw WorkspaceError.invalidArgument(
-                    message: "Workspace already exists but is archived: \(existing.displayName). Unarchive it or use a different worktree.")
-            }
             throw WorkspaceError.invalidArgument(message: "Workspace already exists: \(existing.displayName)")
         }
         let branchOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
         let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if let existing = try workspaceForBranch(projectID: project.id, branch: branch) {
-            if existing.isArchived {
-                throw WorkspaceError.invalidArgument(
-                    message:
-                        "Workspace already exists for archived branch '\(branch)': \(existing.displayName). Unarchive it or use a different worktree."
-                )
-            }
             throw WorkspaceError.invalidArgument(message: "Workspace already exists for branch '\(branch)': \(existing.displayName)")
         }
         let dirname = URL(fileURLWithPath: normalizedWorktreePath).lastPathComponent
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: normalizedWorktreePath, dirname: dirname, branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
@@ -702,19 +658,19 @@ public final class WorkspaceOrchestrator {
                 discoverableWorktreeByPath[normalizedPath] = worktree
             }
 
-            let existingWorkspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            let existingWorkspaces = try store.workspaces(projectID: project.id)
             for workspace in existingWorkspaces {
                 let normalizedWorkspacePath = normalizePath(workspace.dir)
                 if let worktree = discoverableWorktreeByPath[normalizedWorkspacePath], workspace.branch != worktree.branchName {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: worktree.branchName,
-                        baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-                        isHidden: workspace.isHidden, isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes
+                        baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
+                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes
                     )
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
-                guard !workspace.isArchived, !workspace.isDefault else { continue }
+                guard !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
                 try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
             }
@@ -723,12 +679,11 @@ public final class WorkspaceOrchestrator {
 
                 guard isDiscoverableWorktreePath(project: project, path: normalizedPath) else { continue }
 
-                if try store.isIgnoredWorktree(path: normalizedPath) { continue }
                 if (try store.workspace(dir: normalizedPath)) != nil { continue }
                 guard let branchName = worktree.branchName else { continue }
                 let workspace = WorkspaceRecord(
                     id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
-                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isArchived: false,
+                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false,
                     isRunning: false, lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
                 try seedWorkspaceSettings(project: project, workspace: workspace)
@@ -740,15 +695,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func workspaceForBranch(projectID: String, branch: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch }
-    }
-
-    private func archivedWorkspace(projectID: String, branch: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.isArchived }
-    }
-
-    private func archivedWorkspace(projectID: String, dir: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first(where: { $0.dir == dir && $0.isArchived })
+        try store.workspaces(projectID: projectID).first { $0.branch == branch }
     }
 
     private func branchExistsForNewWorkspace(project: ProjectRecord, branch: String, allowRemoteBranchLookup: Bool) throws -> Bool {
@@ -757,12 +704,12 @@ public final class WorkspaceOrchestrator {
         return try git.remoteBranchLookupStatus(path: project.dir, branch: branch) == .exists
     }
 
+    /// A workspace whose worktree is gone has nothing left to run in; discovery retires it exactly as the
+    /// Archive action does, by removing the record.
     private func archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: String) throws {
         let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { return }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
-        try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+        try deleteWorkspaceRecord(workspace)
     }
 
     private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {
@@ -792,7 +739,6 @@ public final class WorkspaceOrchestrator {
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (_, workspace) = try resolveWorkspace(id: workspaceID)
-            guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
             try validateWorkspaceFocusNames(workspaceID: workspace.id)
             let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
             if workspace.isRunning || hasTrackedRuntime {
@@ -812,7 +758,6 @@ public final class WorkspaceOrchestrator {
 
     private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
         let (_, initialWorkspace) = try resolveWorkspace(id: workspaceID)
-        guard !initialWorkspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
@@ -977,23 +922,35 @@ public final class WorkspaceOrchestrator {
 
     private func archiveWorkspaceUnlocked(workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws -> WorkspaceArchiveOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
+        guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be deleted.") }
         // `stopWorkspaceUnlocked` already deleted this workspace's agent rows (notifying subscribers and
         // tearing down watch state) under the same lifecycle lock, so archive does not repeat the delete.
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, waitForTerminalExit: false)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
-        try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+        // Branch deletion reads the record's branch, so it happens before the record is gone.
         let notice = try branchDeletionNotice(
             project: project, workspace: workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
-        if try shouldClearArchivedWorkspaceBranchIdentity(
-            project: project, workspace: workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
-        {
-            try store.updateWorkspaceBranch(id: workspace.id, branch: nil)
-        }
+        try deleteWorkspaceRecord(workspace)
         return WorkspaceArchiveOutcome(notice: notice)
+    }
+
+    /// The single place a workspace record is removed. Callers tear the workspace down first (stop, worktree
+    /// removal, any branch deletion); this drops the record and everything keyed to it.
+    ///
+    /// Coding-agent rows are finalized through the termination chokepoint before the bulk delete rather than
+    /// left to it. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so a row still watched
+    /// from another workspace would make the delete throw; finalizing tells those watchers the agent exited
+    /// and drops the edges. A stopped workspace has no agent rows left, so this normally finalizes nothing —
+    /// it is what makes the guarantee hold for a row that appeared between the stop and the delete, and what
+    /// keeps the delete from ever silently orphaning a watcher.
+    private func deleteWorkspaceRecord(_ workspace: WorkspaceRecord) throws {
+        for agent in try store.agentWindows(workspaceID: workspace.id) {
+            try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: true))
+        }
+        try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
+        try store.deleteWorkspace(id: workspace.id)
     }
 
     private func branchDeletionNotice(project: ProjectRecord, workspace: WorkspaceRecord, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws
@@ -1002,9 +959,9 @@ public final class WorkspaceOrchestrator {
         guard project.isGitRepo else { return nil }
         guard deleteLocalBranch || deleteRemoteBranch else { return nil }
         guard let branch = workspace.branch?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty else {
-            return "Workspace archived, but Spaces could not delete branches because no branch name was recorded."
+            return "Workspace deleted, but Spaces could not delete branches because no branch name was recorded."
         }
-        if isProtectedBranchName(branch) { return "Workspace archived, but Spaces skipped branch deletion because '\(branch)' is protected." }
+        if isProtectedBranchName(branch) { return "Workspace deleted, but Spaces skipped branch deletion because '\(branch)' is protected." }
 
         var notices: [String] = []
         if deleteRemoteBranch {
@@ -1027,17 +984,6 @@ public final class WorkspaceOrchestrator {
         }
         guard !notices.isEmpty else { return nil }
         return notices.joined(separator: " ")
-    }
-
-    private func shouldClearArchivedWorkspaceBranchIdentity(
-        project: ProjectRecord, workspace: WorkspaceRecord, deleteLocalBranch: Bool, deleteRemoteBranch: Bool
-    ) throws -> Bool {
-        guard project.isGitRepo else { return false }
-        guard deleteLocalBranch || deleteRemoteBranch else { return false }
-        guard let branch = workspace.branch?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty else { return false }
-        guard !git.branchExists(path: project.dir, branch: branch) else { return false }
-        guard let remoteMissing = try? git.remoteBranchLookupStatus(path: project.dir, branch: branch) == .missing else { return false }
-        return remoteMissing
     }
 
     private func hasTrackedRuntimeIndicators(workspaceID: String) throws -> Bool {
@@ -1204,7 +1150,7 @@ public final class WorkspaceOrchestrator {
         var didMutate = false
         var trackedCounts: [String: Int] = [:]
         for project in try store.projects() {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+            let workspaces = try store.workspaces(projectID: project.id)
             for workspace in workspaces {
                 if try refreshWorkspaceWindows(workspaceID: workspace.id) { didMutate = true }
                 let tracked = try indexedWorkspaceWindows(workspaceID: workspace.id)
@@ -1224,7 +1170,6 @@ public final class WorkspaceOrchestrator {
         -> TerminalServiceSessionSummary
     {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
         // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
         // virtue of the terminal); with one, the command runs through that same interactive login shell
@@ -1248,7 +1193,6 @@ public final class WorkspaceOrchestrator {
         -> TerminalServiceSessionSummary
     {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
         let defaultTitle =
@@ -1301,7 +1245,7 @@ public final class WorkspaceOrchestrator {
     }
 
     /// Resolves the workspace `spaces terminal command` should target: the explicit
-    /// `--workspace` id when given, else the deepest unarchived workspace whose directory
+    /// `--workspace` id when given, else the deepest workspace whose directory
     /// contains `cwd` (same containment rule as `workspaceForBuiltInTerminalSession`'s
     /// fallback). Errors clearly when neither resolves, instead of falling back to a
     /// workspace-less session.
@@ -1309,7 +1253,7 @@ public final class WorkspaceOrchestrator {
         if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
             return explicitWorkspaceID
         }
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: false) }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id) }
         guard
             let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
                 normalizePath($0.dir).count < normalizePath($1.dir).count
@@ -1320,7 +1264,6 @@ public final class WorkspaceOrchestrator {
 
     public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
@@ -1695,19 +1638,10 @@ public final class WorkspaceOrchestrator {
     }
 
     func ensureDefaultWorkspace(for project: ProjectRecord) throws {
-        if let existing = try defaultWorkspace(projectID: project.id) {
-            if existing.isArchived {
-                let revived = WorkspaceRecord(
-                    id: existing.id, projectID: project.id, dir: existing.dir, dirname: existing.dirname, branch: existing.branch,
-                    baseBranch: existing.baseBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden, isRunning: existing.isRunning,
-                    lastLaunchedAt: existing.lastLaunchedAt)
-                try store.upsert(workspace: revived)
-            }
-            return
-        }
+        if try defaultWorkspace(projectID: project.id) != nil { return }
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: project.dir, dirname: nil, branch: project.defaultBranch,
-            baseBranch: project.defaultBranch, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            baseBranch: project.defaultBranch, isDefault: true, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
@@ -1740,7 +1674,7 @@ public final class WorkspaceOrchestrator {
     }
 
     func workspaceConfigurationSnapshots(projectID: String) throws -> [WorkspaceConfigurationSnapshot] {
-        let workspaces = try store.workspaces(projectID: projectID, includeArchived: true)
+        let workspaces = try store.workspaces(projectID: projectID)
         return try workspaces.map { workspace in
             let settings: WorkspaceSettings?
             if try store.workspaceSettingsExists(workspaceID: workspace.id) {
@@ -1779,11 +1713,7 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
             definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
-        if snapshot.workspace.isArchived {
-            PortReserver.shared.releasePorts(workspaceID: snapshot.workspace.id)
-        } else {
-            try PortAllocator(store: store).reserveExistingPorts(workspaceID: snapshot.workspace.id)
-        }
+        try PortAllocator(store: store).reserveExistingPorts(workspaceID: snapshot.workspace.id)
     }
 
     func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
@@ -2109,7 +2039,7 @@ public final class WorkspaceOrchestrator {
         for project in try store.projects() {
             let projectPath = normalizePath(project.dir)
             if projectPath != path, isPath(projectPath, inside: path) { return true }
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 let workspacePath = normalizePath(workspace.dir)
                 if workspacePath != path, isPath(workspacePath, inside: path) { return true }
             }
@@ -2141,10 +2071,9 @@ public final class WorkspaceOrchestrator {
     private func usedWorkspaceDirnames(project: ProjectRecord, excludingDirname: String?, excludingFilesystemDirname: String? = nil) throws -> Set<
         String
     > {
-        let records = try store.workspaces(projectID: project.id, includeArchived: true)
+        let records = try store.workspaces(projectID: project.id)
         var used = Set<String>()
         for record in records {
-            if project.isGitRepo, record.isArchived { continue }
             if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) }
         }
         let root = try worktreeRoot(project: project)
@@ -2258,7 +2187,7 @@ public final class WorkspaceOrchestrator {
     }
 
     func rollbackFailedImportedProjectCreation(project: ProjectRecord, workspaceDirectory: String) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        let workspaces = try store.workspaces(projectID: project.id)
         let portAllocator = PortAllocator(store: store)
         for workspace in workspaces { try portAllocator.releasePorts(workspaceID: workspace.id) }
         try store.deleteProject(id: project.id)
@@ -2271,7 +2200,7 @@ public final class WorkspaceOrchestrator {
     private func isManagedRepositoryEntryPath(_ path: String) -> Bool { isPathPreservingSymlinks(path, inside: repositoriesRootDirectory().path) }
 
     private func defaultWorkspace(projectID: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
+        try store.workspaces(projectID: projectID).first(where: \.isDefault)
     }
 
     func importedRepositoryDefaultBranch(path: String) throws -> String { try git.repositoryDefaultBranch(path: path) }
@@ -2382,7 +2311,7 @@ public final class WorkspaceOrchestrator {
 
     func markWorkspaceStopped(_ workspace: WorkspaceRecord) throws {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        if !workspace.isArchived { try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) }
+        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
     }
 
     func safeFilename(_ raw: String) -> String {

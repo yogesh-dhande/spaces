@@ -52,7 +52,7 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String, branch: String? = nil) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isArchived: false, isRunning: false,
+        id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isRunning: false,
         lastLaunchedAt: nil)
 }
 

@@ -1665,7 +1665,8 @@ extension OrchestratorTests {
 
 /// Captures the lines the process-wide agent-notification submitter is asked to deliver, so a reconcile
 /// path that routes through `makeAgentNotificationEngine()` can be asserted against without a live daemon.
-private final class AgentNotificationSubmitterRecorder: @unchecked Sendable {
+/// Shared with the workspace-teardown tests, which assert the same delivery from the archive path.
+final class AgentNotificationSubmitterRecorder: @unchecked Sendable {
     private(set) var delivered: [(sessionID: String, line: String)] = []
     func submit(_ sessionID: String, _ line: String) throws { delivered.append((sessionID: sessionID, line: line)) }
 }

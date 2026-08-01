@@ -24,7 +24,10 @@ public enum AgentHookCommand {
     ///
     /// v2: per-tool `working` bindings (Claude/Codex `PreToolUse`, opencode `tool.execute.before`) so
     /// an agent resuming after a permission approval leaves `blocked`.
-    public static let hookVersion = 2
+    /// v3: post-approval `working` bindings (Claude/Codex `PostToolUse`, opencode `permission.replied`).
+    /// v2's `PreToolUse` fires *before* the permission decision, so it can never end the block it
+    /// precedes — the row stayed `waiting` until a *later*, different tool call, or until `Stop`.
+    public static let hookVersion = 3
 
     /// Version-less ownership token. Every Spaces-owned entry, of every version, contains it.
     ///

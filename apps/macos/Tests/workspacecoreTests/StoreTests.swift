@@ -223,6 +223,98 @@ final class StoreTests: XCTestCase {
     // Upgrading a profile that already holds live terminal sessions must carry each session forward
     // whole, and a session that predates bell tracking must report no bell: the bell timestamp is what
     // raises an alert, so a synthesized one would greet the user with an alert they never earned.
+    /// A v10 profile carrying archived workspaces — including one with notes and its own settings, ports,
+    /// and agent rows — upgrades by dropping exactly those workspaces and nothing else. Everything live has
+    /// to survive intact, since archiving is the only thing that removes a workspace.
+    func testUpgradeDeletesArchivedWorkspacesAndKeepsLiveOnes() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let liveDir = root.appendingPathComponent("live", isDirectory: true).path
+        let archivedDir = root.appendingPathComponent("archived", isDirectory: true).path
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (10);
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git_repo INTEGER NOT NULL,
+                  default_branch TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  base_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX workspaces_project_branch_active_unique
+                ON workspaces(project_id, branch)
+                WHERE length(branch) > 0 AND is_archived = 0;
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  stop_script TEXT,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                );
+                CREATE TABLE ignored_worktrees (
+                  worktree_dir TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                INSERT INTO projects(id, name, dir, is_git_repo, default_branch)
+                  VALUES ('project', 'Project', '\(root.path)', 1, 'main');
+                INSERT INTO workspaces(id, project_id, dir, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, notes)
+                  VALUES ('live', 'project', '\(liveDir)', 'live', 'feature', 'main', 0, 0, 0, 0, 'live notes');
+                INSERT INTO workspaces(id, project_id, dir, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, notes)
+                  VALUES ('archived', 'project', '\(archivedDir)', 'archived', 'retired', 'main', 0, 1, 0, 0, 'archived notes');
+                INSERT INTO workspace_settings(workspace_id, stop_script, updated_at)
+                  VALUES ('live', 'echo live', '2026-07-31T00:00:00Z');
+                INSERT INTO workspace_settings(workspace_id, stop_script, updated_at)
+                  VALUES ('archived', 'echo archived', '2026-07-31T00:00:00Z');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            let store = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertNil(try store.workspace(id: "archived"), "an archived workspace is dropped by the upgrade")
+            let live = try XCTUnwrap(store.workspace(id: "live"), "a live workspace must survive the upgrade untouched")
+            XCTAssertEqual(live.branch, "feature")
+            XCTAssertEqual(live.baseBranch, "main")
+            XCTAssertEqual(live.dirname, "live")
+            XCTAssertEqual(live.notes, "live notes")
+            XCTAssertEqual(try store.workspaces(projectID: "project").map(\.id), ["live"])
+            XCTAssertEqual(try store.workspaceStopScript(workspaceID: "live"), "echo live")
+            XCTAssertEqual(
+                try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ignored_worktrees'"), 0,
+                "the upgrade drops the ignored-worktree table with the archived model")
+            XCTAssertEqual(
+                try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM workspace_settings WHERE workspace_id = 'archived'"), 0,
+                "the dropped workspace takes its settings with it")
+
+            // The freed branch name is immediately usable again by a new workspace.
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "reuse", projectID: "project", dir: archivedDir, dirname: "reuse", branch: "retired", baseBranch: "main", isDefault: false,
+                    isRunning: false, lastLaunchedAt: nil))
+            XCTAssertEqual(try store.workspace(id: "reuse")?.branch, "retired")
+        }
+    }
+
     func testUpgradeKeepsRuntimeSessionsAndReportsNoBell() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
@@ -650,8 +742,8 @@ final class StoreTests: XCTestCase {
             dbURL: dbURL,
             sql: """
                 INSERT INTO projects(id, name, dir, is_git) VALUES ('project-1', 'Project', '/tmp/project', 0);
-                INSERT INTO workspaces(id, project_id, dir, is_default, is_archived, is_hidden, is_running)
-                VALUES ('workspace-1', 'project-1', '/tmp/project/feature', 0, 0, 0, 0);
+                INSERT INTO workspaces(id, project_id, dir, is_default, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', '/tmp/project/feature', 0, 0, 0);
                 """)
 
         XCTAssertThrowsError(
@@ -1285,21 +1377,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
     }
 
-    // Tests upsert workspace clears ignored worktree path by arranging representative inputs and asserting the expected result.
-    func testUpsertWorkspaceClearsIgnoredWorktreePath() throws {
-        let store = try makeTemporaryStore()
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
-        try store.upsert(project: project)
-        try store.markIgnoredWorktree(path: workspace.dir, projectID: project.id)
-        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
-
-        try store.upsert(workspace: workspace)
-        XCTAssertFalse(try store.isIgnoredWorktree(path: workspace.dir))
-    }
 
     // Tests delete project removes project workspaces and dependents by arranging representative inputs and asserting the expected result.
     func testDeleteProjectRemovesProjectWorkspacesAndDependents() throws {
@@ -1317,7 +1396,7 @@ final class StoreTests: XCTestCase {
         try store.deleteProject(id: project.id)
 
         XCTAssertNil(try store.project(id: project.id))
-        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
@@ -1331,10 +1410,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(workspace: workspace)
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-01-01T00:00:00Z")
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
         let updated = try store.workspace(id: workspace.id)
         XCTAssertEqual(updated?.isRunning, true)
-        XCTAssertEqual(updated?.isArchived, true)
         XCTAssertEqual(updated?.lastLaunchedAt, "2026-01-01T00:00:00Z")
 
         XCTAssertNil(try store.setting(key: "key"))
@@ -1375,18 +1452,17 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false,
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isRunning: false,
             lastLaunchedAt: nil)
-        let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isArchived: true,
-            isRunning: false, lastLaunchedAt: nil)
-        try store.upsert(workspace: archivedWorkspace)
+        let secondWorkspace = WorkspaceRecord(
+            id: "second", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
+        try store.upsert(workspace: secondWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
-        XCTAssertEqual(try store.workspace(id: "archived")?.id, "archived")
-        XCTAssertEqual(try store.workspace(id: "archived")?.baseBranch, "develop")
-        XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
-        XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
+        XCTAssertEqual(try store.workspace(id: "second")?.id, "second")
+        XCTAssertEqual(try store.workspace(id: "second")?.baseBranch, "develop")
+        XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id).map(\.id)), Set(["default", "second"]))
     }
 
     // Tests delete running process and delete running processes by arranging representative inputs and asserting the expected result.
@@ -1754,10 +1830,10 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isArchived: false,
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
             isRunning: false, lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isArchived: false,
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
             isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
@@ -1773,24 +1849,6 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(notFound)
     }
 
-    func testWorkspaceLookupByDirectoryPrefersActiveWorkspaceOverArchivedDuplicate() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let workspaceDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let archived = WorkspaceRecord(
-            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: true, isRunning: false,
-            lastLaunchedAt: nil)
-        let active = WorkspaceRecord(
-            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil)
-        try store.upsert(project: project)
-        try store.upsert(workspace: archived)
-        try store.upsert(workspace: active)
-
-        let found = try store.workspace(dir: workspaceDir)
-        XCTAssertEqual(found?.id, "active")
-    }
 
     func testStoreRejectsDuplicateWorkspaceBranchWithinProject() throws {
         let store = try makeTemporaryStore()
@@ -1799,10 +1857,10 @@ final class StoreTests: XCTestCase {
         let branch = "feature-branch"
         let first = WorkspaceRecord(
             id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
             id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
         XCTAssertThrowsError(try store.upsert(workspace: second))

@@ -6,14 +6,13 @@ public struct WorkspaceSummary: Sendable {
     public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
     public let deviceID: String
 
     public init(
-        id: String, branch: String?, baseBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool, isHidden: Bool = false,
+        id: String, branch: String?, baseBranch: String? = nil, dir: String, isRunning: Bool, isHidden: Bool = false,
         isDefault: Bool, notes: String? = nil, deviceID: String = SpacesDeviceRecord.localDeviceID
     ) {
         self.id = id
@@ -21,7 +20,6 @@ public struct WorkspaceSummary: Sendable {
         self.baseBranch = baseBranch
         self.dir = dir
         self.isRunning = isRunning
-        self.isArchived = isArchived
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.notes = notes

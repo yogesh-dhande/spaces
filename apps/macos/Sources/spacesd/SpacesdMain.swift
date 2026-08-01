@@ -1416,14 +1416,11 @@ enum SpacesDaemonProfileCommandRouting {
             return TerminalServiceProfileCommandResponse(message: "Listed projects.", projects: projects)
         case .workspaceList(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            let includeArchived = payload.includeArchived
             let workspaces: [WorkspaceRecord]
             if let projectID = normalizedProfileArgument(payload.projectID) {
-                workspaces = try orchestrator.store.workspaces(projectID: projectID, includeArchived: includeArchived)
+                workspaces = try orchestrator.store.workspaces(projectID: projectID)
             } else {
-                workspaces = try orchestrator.store.projects().flatMap {
-                    try orchestrator.store.workspaces(projectID: $0.id, includeArchived: includeArchived)
-                }
+                workspaces = try orchestrator.store.projects().flatMap { try orchestrator.store.workspaces(projectID: $0.id) }
             }
             return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(profileWorkspaceRecord))
         case .workspaceCreate(let payload):
@@ -1711,7 +1708,7 @@ enum SpacesDaemonProfileCommandRouting {
     private nonisolated func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
-            isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden, isRunning: value.isRunning,
+            isDefault: value.isDefault, isHidden: value.isHidden, isRunning: value.isRunning,
             lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
@@ -1785,7 +1782,7 @@ enum SpacesDaemonProfileCommandRouting {
         let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
         if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
 
-        // Per-tool hooks (PreToolUse / tool.execute.before) fire `working` on every tool call. When the
+        // Per-tool hooks fire `working` as each tool starts and again as it completes. When the
         // agent is already working the signal changes nothing, so return before building the engine or
         // posting the GUI-refresh notification; the orchestrator enforces the same duplicate-working
         // suppression at the store layer for every other signal surface.

@@ -290,15 +290,14 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let branch: String?
     public let baseBranch: String?
     public let isDefault: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isRunning: Bool
     public let lastLaunchedAt: String?
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isArchived: Bool,
-        isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isHidden: Bool,
+        isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
@@ -307,7 +306,6 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.branch = branch
         self.baseBranch = baseBranch
         self.isDefault = isDefault
-        self.isArchived = isArchived
         self.isHidden = isHidden
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt

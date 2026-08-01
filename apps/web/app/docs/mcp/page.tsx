@@ -75,7 +75,7 @@ args = ["mcp"]`}</CodeBlock>
         </p>
         <ul className="mt-3 space-y-1">
           <Tool name="spaces_project_list" description="List Spaces projects." />
-          <Tool name="spaces_workspace_list" description="List workspaces, optionally filtered by project and including archived workspaces." />
+          <Tool name="spaces_workspace_list" description="List workspaces, optionally filtered by project." />
           <Tool name="spaces_workspace_create" description="Create a workspace on this device. Requires a project and branch; accepts a title, base branch, and existing-branch reuse." />
           <Tool name="spaces_workspace_start" description="Ensure a workspace is running." />
           <Tool name="spaces_workspace_restart" description="Force a full stop and relaunch for a workspace." />

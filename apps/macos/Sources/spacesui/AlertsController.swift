@@ -155,10 +155,13 @@ import workspacecore
         }
     }
 
-    func showAlertsDetail() {
-        host.clearActiveAddFormStateAndCloseWindows()
+    /// Renders the Alerts pane. Also the pane's re-render: every refresh that lands new device state
+    /// calls this again while alerts is already the visible pane, so nothing here may discard state the
+    /// user is in the middle of. `presentation` is what tells the two apart — it defaults to the
+    /// refresh, and only the entry points the user actually reached for pass `.userNavigation`.
+    func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) {
         host.stopWorkspaceSetupDetailRefreshTimer()
-        host.presentDetailPane(.alerts)
+        host.presentDetailPane(.alerts, presentation: presentation)
         host.showingSettings = false
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
@@ -190,7 +193,7 @@ import workspacecore
         let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false)
 
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
@@ -359,7 +362,7 @@ import workspacecore
 
     func handleAlertsShortcut(event: NSEvent) -> Bool {
         guard let alertsShortcutSpec, host.matches(event: event, spec: alertsShortcutSpec) else { return false }
-        showAlertsDetail()
+        showAlertsDetail(presentation: .userNavigation)
         return true
     }
 }

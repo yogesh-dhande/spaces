@@ -1753,7 +1753,7 @@ private struct StopFixturesCommand: ParsableCommand {
         for project in try orchestrator.store.projects() {
             let normalizedDir = normalizePath(project.dir)
             guard normalizedDir == normalizedPrefix || normalizedDir.hasPrefix(normalizedPrefix + "/") else { continue }
-            for workspace in try orchestrator.store.workspaces(projectID: project.id, includeArchived: true) {
+            for workspace in try orchestrator.store.workspaces(projectID: project.id) {
                 _ = try? orchestrator.stopWorkspace(workspaceID: workspace.id)
                 stoppedWorkspaces.append(workspace.dir)
             }
@@ -2264,15 +2264,17 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
 
     @Option(name: .long) var workspaceDir: String
 
-    /// Archives one workspace through the production lifecycle path so the
-    /// manual harness can fall back when the archive confirmation UI is flaky.
+    /// Deletes one workspace through the production lifecycle path so the manual harness can fall back when
+    /// the delete confirmation UI is flaky. The record is gone afterwards, so the harness gets the identity
+    /// it asked to delete plus whatever the delete reported about its branches.
     func run() throws {
         let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
-        guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
-            throw ValidationError("Workspace disappeared: \(workspace.id)")
+        let outcome = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        guard try orchestrator.store.workspace(id: workspace.id) == nil else {
+            throw ValidationError("Workspace still present after delete: \(workspace.id)")
         }
-        try emitJSON(workspaceSummaryPayload(updated))
+        try emitJSON(
+            WorkspaceDeletePayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, notice: outcome.notice))
     }
 }
 
@@ -2445,11 +2447,17 @@ private struct RemoteDevicePairingWindowPayload: Codable {
     let expiresAt: String?
 }
 
+private struct WorkspaceDeletePayload: Codable {
+    let id: String
+    let name: String
+    let dir: String
+    let notice: String?
+}
+
 private struct WorkspaceSummaryPayload: Codable {
     let id: String
     let name: String
     let dir: String
-    let isArchived: Bool
     let isRunning: Bool
     let notes: String?
 }
@@ -2667,7 +2675,7 @@ private struct ClickEventTiming {
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, name: String?) throws -> WorkspaceSummaryPayload? {
     let normalizedProjectDir = normalizePath(projectDir)
     guard let project = try orchestrator.project(dir: normalizedProjectDir) else { return nil }
-    let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+    let workspaces = try orchestrator.listWorkspaces(projectID: project.id)
     let match: WorkspaceSummary?
     if let name { match = workspaces.first(where: { $0.displayName == name }) } else { match = workspaces.first(where: \.isDefault) }
     guard let workspace = match else { return nil }
@@ -2676,14 +2684,12 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        notes: workspace.notes)
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceSummary) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        notes: workspace.notes)
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> WorkspaceSettingsPayload {

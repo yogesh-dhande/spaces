@@ -32,7 +32,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Understand how workspaces move between stopped, running, and archived states across the GUI and the minimal CLI runtime flow.",
+      "Understand how workspaces move between stopped and running, and how deleting removes one, across the GUI and the minimal CLI runtime flow.",
   },
   {
     href: "/docs/services",

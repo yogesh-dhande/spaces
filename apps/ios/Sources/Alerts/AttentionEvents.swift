@@ -109,9 +109,9 @@ enum SpacesMobileAttention {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
-        let invisibleWorkspaceIDs = Set(overview.workspaces.lazy.filter { $0.isArchived || $0.isHidden }.map(\.id))
+        let invisibleWorkspaceIDs = Set(overview.workspaces.lazy.filter(\.isHidden).map(\.id))
 
-        for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
+        for workspace in overview.workspaces where !workspace.isHidden {
             for agent in workspace.codingAgentRows {
                 if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
                 let kind: SpacesMobileAttentionEvent.Kind?

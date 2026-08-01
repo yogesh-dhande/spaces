@@ -19,6 +19,22 @@ func migrationExecuteBatch(_ handle: OpaquePointer, sql: String) throws {
     }
 }
 
+/// Whether `table` exists in the database a migration step is running against.
+///
+/// Steps normally name tables unconditionally, because a database at version N provably has whatever the
+/// fresh schema and the earlier steps created. A step that has to touch a table it did not create itself
+/// uses this to stay a no-op on a database that legitimately never had it, instead of aborting the whole
+/// upgrade on a table its own work does not depend on.
+func migrationTableExists(_ handle: OpaquePointer, table: String) throws -> Bool {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(handle, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", -1, &statement, nil) == SQLITE_OK else {
+        throw SpacesDatabaseError.migrationFailed(message: String(cString: sqlite3_errmsg(handle)))
+    }
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_text(statement, 1, table, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+    return sqlite3_step(statement) == SQLITE_ROW
+}
+
 public struct DatabaseMigrationStep: Sendable {
     public let fromVersion: Int
     public let toVersion: Int

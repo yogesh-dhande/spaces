@@ -561,14 +561,13 @@
         }
 
         private func makeWorkspace(
-            id: String, branch: String?, isArchived: Bool = false, isHidden: Bool = false,
-            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-            terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+            id: String, branch: String?, isHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
+            processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
         ) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
-                isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows,
-                codingAgentRows: codingAgentRows, terminalRows: terminalRows)
+                isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows, codingAgentRows: codingAgentRows,
+                terminalRows: terminalRows)
         }
 
         private func makeAgentRow(

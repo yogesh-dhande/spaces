@@ -393,10 +393,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
     /// longer running, comparing the previous local-section runtime state against the just-fetched
-    /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
+    /// snapshot. This reload is the only channel through which the GUI learns about stop/delete
     /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
     /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
-    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
+    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/delete handlers
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
     private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
@@ -411,7 +411,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// Workspace ids that were running in `previous` but are no longer running in `current` — either
-    /// reported stopped or absent entirely (deleted/archived out of the runtime map). Pure so the
+    /// reported stopped or absent entirely (deleted out of the runtime map). Pure so the
     /// transition contract can be unit-tested without Chrome or the client store.
     nonisolated static func workspaceIDsTransitionedToNotRunning(
         previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
@@ -939,7 +939,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return (project, entry.workspace)
     }
 
-    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }
+    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isHidden }
 
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
@@ -983,7 +983,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 showingAlerts: host.showingAlerts, direction: direction)
         else { return false }
         switch target {
-        case .alerts: host.showAlertsDetail()
+        case .alerts: host.showAlertsDetail(presentation: .userNavigation)
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -1093,7 +1093,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
-                    id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
+                    id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         if case .workspace(let project, let workspace) = (item as? OutlineItemRef)?.item {
@@ -1262,7 +1262,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
 
@@ -1435,7 +1435,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)
+        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1516,7 +1516,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .running: return sidebarRunningIndicatorColor()
         case .exited: return sidebarFailedIndicatorColor()
         case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
-        case nil: return sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        case nil: return sidebarPrimaryTextColor(isSelected: isSelected)
         }
     }
 
@@ -1660,7 +1660,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
         let menu = NSMenu()
         // The menu keeps its shape while the owning device is unreachable — the same items in the same
-        // order — and disables only the ones that need its daemon, so lifecycle, Hide and Archive read
+        // order — and disables only the ones that need its daemon, so lifecycle, Hide and Delete read
         // as temporarily unavailable rather than silently disappearing mid-outage. Auto-enabling is off
         // so those decisions are the menu's own rather than AppKit's responder-chain guess.
         menu.autoenablesItems = false
@@ -1703,10 +1703,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         addItem(
             "Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
-        // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
+        // Delete is destructive (it removes the git worktree and the workspace), so it sits last, below the separator, and
         // routes through the same confirmation the detail ⋯ overflow menu uses.
         addItem(
-            "Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id,
+            "Delete…", symbol: "trash", target: self, action: #selector(deleteWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
         return menu
     }
@@ -1731,9 +1731,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.hideWorkspace(id: id)
     }
 
-    @objc private func archiveWorkspaceMenuItem(_ sender: NSMenuItem) {
+    @objc private func deleteWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
-        host.archiveWorkspace(id: id)
+        host.deleteWorkspace(id: id)
     }
 
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
@@ -1890,8 +1890,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func sidebarPanelBackgroundColor() -> NSColor { sidebarThemeColor(light: (248, 247, 241), dark: (15, 21, 23)) }
 
-    func sidebarCardBackgroundColor(isArchived: Bool) -> NSColor {
-        let alpha: CGFloat = isArchived ? 0.42 : 0.55
+    func sidebarCardBackgroundColor() -> NSColor {
+        let alpha: CGFloat = 0.55
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
@@ -1908,8 +1908,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.72)
     }
 
-    func sidebarPrimaryTextColor(isSelected: Bool, isArchived: Bool) -> NSColor {
-        let alpha: CGFloat = if isArchived { 0.70 } else if isSelected { 0.96 } else { 0.92 }
+    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor {
+        let alpha: CGFloat = isSelected ? 0.96 : 0.92
         return sidebarThemeColor(light: (16, 32, 40), dark: (234, 240, 239), alpha: alpha)
     }
 
@@ -2005,7 +2005,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard let raw = sender.identifier?.rawValue, raw.hasPrefix("compat:") else { return }
         let deviceID = String(raw.dropFirst("compat:".count))
         guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
-        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .userNavigation)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -2017,7 +2017,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedProjectID = nil
             host.selectedWorkspaceID = nil
             host.showingSettings = false
-            if !host.showingAlerts { host.showPlaceholder() }
+            if !host.showingAlerts { host.showPlaceholder(presentation: .userNavigation) }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
@@ -2056,14 +2056,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // A non-git project has no workspace row to expand, but a git workspace that was only
             // transiently expanded still needs to collapse now that the selection moved to this project.
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             host.selectedWorkspaceID = workspace.id
             AppKitController.setClientActiveWorkspaceID(workspace.id)
             host.showingSettings = false
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         }
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,

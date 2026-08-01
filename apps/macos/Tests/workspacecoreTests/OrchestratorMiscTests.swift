@@ -101,7 +101,7 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.workspace(id: workspace.id)?.isRunning ?? false)
     }
 
-    func testLaunchWorkspaceArchivedPendingSetupThrowsArchivedWithoutMutatingSetupState() throws {
+    func testLaunchWorkspaceAfterArchiveThrowsBecauseTheRecordIsGone() throws {
         let repo = try makeTempGitRepo(name: "archived-pending-setup")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -115,10 +115,10 @@ extension OrchestratorTests {
 
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
+        XCTAssertNil(try store.workspace(id: workspace.id), "archiving removes the workspace record")
         XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("archived"))
+            XCTAssertTrue(error.localizedDescription.contains("Workspace not found"))
         }
-        XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
     }
 
     func testWorkspaceSetupFailureStoresExitCodeLogAndBlocksLaunch() throws {
@@ -214,14 +214,14 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: repo.path)
         _ = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", baseBranch: "develop")
 
-        let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+        let workspaces = try orchestrator.listWorkspaces(projectID: project.id)
         let feature = try XCTUnwrap(workspaces.first(where: { $0.displayName == "feature-branch" }))
         XCTAssertEqual(feature.branch, "feature-branch")
         XCTAssertEqual(feature.baseBranch, "develop")
     }
 
-    // Tests list workspaces honors include archived flag by arranging representative inputs and asserting the expected result.
-    func testListWorkspacesHonorsIncludeArchivedFlag() throws {
+    /// Archiving removes the workspace, so listing a project reports only what is left.
+    func testListWorkspacesDropsArchivedWorkspace() throws {
         let repo = try makeTempGitRepo(name: "list-archived")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -232,13 +232,10 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
-        let activeOnly = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-        XCTAssertEqual(activeOnly.count, 1)
-        XCTAssertTrue(try XCTUnwrap(activeOnly.first).isDefault)
-
-        let all = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
-        XCTAssertEqual(all.count, 2)
-        XCTAssertEqual(all.filter { !$0.isDefault }.map(\.id), [workspace.id])
+        let remaining = try orchestrator.listWorkspaces(projectID: project.id)
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertTrue(try XCTUnwrap(remaining.first).isDefault)
+        XCTAssertNil(try store.workspace(id: workspace.id))
     }
 
     // Tests workspace metadata update can change title, branch, directory name, and notes by arranging representative inputs and asserting the expected result.
@@ -575,19 +572,6 @@ extension OrchestratorTests {
 
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
-    // Tests launch workspace rejects archived workspace by arranging representative inputs and asserting the expected result.
-    func testLaunchWorkspaceRejectsArchivedWorkspace() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        // The helper's workspace is the project's single (default) workspace; mark it
-        // archived directly so we can exercise launch's archived-workspace rejection.
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
-
-        // Mocked dependencies are present only to satisfy adapter calls; launch should fail before launching anything.
-        // Remaining risk: launch behavior when partially archived/misaligned runtime state exists is covered elsewhere.
-        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
-            XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
-        }
-    }
 
     // MARK: - workspaceSetupState from orchestrator
 
@@ -702,7 +686,7 @@ extension OrchestratorTests {
         try store.upsert(
             workspace: WorkspaceRecord(
                 id: UUID().uuidString, projectID: project.id, dir: ownedDir.path, dirname: "owned", branch: "owned", baseBranch: "main",
-                isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                isDefault: false, isRunning: false, lastLaunchedAt: nil))
 
         XCTAssertThrowsError(
             try orchestrator.createWorkspace(
@@ -853,7 +837,7 @@ extension OrchestratorTests {
         let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main")
         try store.upsert(project: projectRecord)
         let workspaceRecord = WorkspaceRecord(
-            id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true, isArchived: false,
+            id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true,
             isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
 

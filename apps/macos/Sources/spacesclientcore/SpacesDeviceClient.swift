@@ -712,9 +712,7 @@ public enum SpacesDeviceClient {
         throws -> [SpacesDeviceProjectSummary]
     { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
 
-    /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`). The
-    /// overview carries only active workspaces, so this never includes archived ones (see the CLI, which
-    /// rejects `--include-archived` with `--device` rather than silently returning a filtered subset).
+    /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`).
     public static func workspaces(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> [SpacesDeviceWorkspaceSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.workspaces }

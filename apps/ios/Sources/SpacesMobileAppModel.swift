@@ -646,7 +646,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
     /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
     /// from the Mac's Workspace Visibility dialog is hidden here too.
-    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden } }
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isHidden } }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
