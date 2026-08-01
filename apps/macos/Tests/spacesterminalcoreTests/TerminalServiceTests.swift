@@ -275,6 +275,9 @@ import XCTest
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2))
             let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertTrue(message.contains("Restart the daemon"))
+            // The reason is the wire protocol, never a comparison against this build's version: the CLI
+            // and a given device's daemon are on unrelated release trains.
+            XCTAssertTrue(message.contains("older connection protocol"))
             // Impact suffix appears when a restart would interrupt running work.
             XCTAssertTrue(message.contains("Restarting stops"))
             XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
@@ -292,6 +295,7 @@ import XCTest
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
             let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertTrue(message.contains("Update Spaces"))
+            XCTAssertTrue(message.contains("newer connection protocol"))
             XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
                 guard case TerminalServiceError.daemonWireIncompatible(let incompatibility) = error else {
                     return XCTFail("Expected daemonWireIncompatible, got \(error)")

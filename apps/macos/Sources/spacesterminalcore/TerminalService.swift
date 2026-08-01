@@ -940,13 +940,16 @@ extension TerminalService {
         guard !verdict.isCompatible else { return nil }
         var message: String
         switch verdict {
-        case .clientTooOld: message = "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
+        case .clientTooOld:
+            message = "The running spacesd daemon speaks a newer connection protocol than this Spaces build. Update Spaces to match it, then retry."
         case .daemonTooOld, .compatible:
             // Quitting/relaunching the Spaces app does not help: the daemon is managed by the OS service
             // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
             // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
             // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
-            message = "The running spacesd daemon is older than this Spaces build needs. " + "Restart the daemon to load the update, then retry."
+            message =
+                "The running spacesd daemon speaks an older connection protocol than this Spaces build. "
+                + "Restart the daemon to load the update, then retry."
             if let status = response.daemonStatus,
                 status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
             {

@@ -150,6 +150,29 @@ import spacesterminalcore
         #expect(content.installerCommand == nil)
     }
 
+    // The block explains a wire-protocol mismatch, so its copy must blame the connection protocol and
+    // never a comparison against this app's own build. The two are on unrelated release trains, which
+    // makes such a comparison meaningless in general — and plainly absurd in the common case this test
+    // pins, where both sides report the same marketing version (every development build) and the old
+    // copy read "running Spaces 0.1.0, older than this app needs (Spaces 0.1.0)".
+    @Test func installGuidanceBlamesTheConnectionProtocolNeverThisAppsVersion() {
+        let variants: [(label: String, isLocalDevice: Bool, isLinuxDaemon: Bool)] = [
+            ("Linux daemon", false, true), ("local Mac", true, false), ("remote Mac", false, false),
+        ]
+        for variant in variants {
+            let content = CompatibilityBlockView.content(
+                remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "build-box", isLocalDevice: variant.isLocalDevice,
+                isLinuxDaemon: variant.isLinuxDaemon, clientVersion: "0.1.0", canCheckForUpdates: false)
+            #expect(content.detail.contains("older connection protocol than this app"), "\(variant.label) must name the protocol as the reason")
+            #expect(!content.detail.contains("than this app needs"), "\(variant.label) must not state a version requirement")
+            // The daemon's build appears once, as identifying context. A second occurrence would mean
+            // this app's version is being named as the bar the daemon fails to clear.
+            #expect(
+                content.detail.components(separatedBy: "0.1.0").count - 1 == 1,
+                "\(variant.label) must name a version only as context, never as a comparison")
+        }
+    }
+
     @Test func versionsAppearInCopyOnlyWhenNonEmptyAndNeverAsTheLiteralWordNil() {
         let withVersions = CompatibilityBlockView.content(
             remedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), deviceName: "Yogesh's Mac", isLocalDevice: false,
