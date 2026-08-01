@@ -92,28 +92,17 @@ final class SpacesMCPStdioServer {
                 name: "spaces_workspace_list", description: "List Spaces workspaces on this or a paired device.",
                 properties: [
                     "project": stringSchema("Project ID filter."),
-                    "includeArchived": boolSchema("Include archived workspaces. Not supported with device."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: []
             ) { server, arguments in
                 if let device = try server.resolvedDevice(arguments) {
-                    // The device overview carries only active workspaces, so archived ones are
-                    // unreachable over this path; reject the combination rather than silently ignore it.
-                    guard server.optionalBool(arguments["includeArchived"]) != true else {
-                        throw MCPError.invalidArguments(
-                            "includeArchived is not supported with device: a paired device's overview lists only active workspaces.")
-                    }
                     var workspaces = try SpacesDeviceClient.workspaces(device: device, clientApp: cliDeviceClientApp())
                     if let project = server.optionalString(arguments["project"]) { workspaces = workspaces.filter { $0.projectID == project } }
                     return .profile(
                         TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord)))
                 }
                 return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .workspaceList(
-                            .init(
-                                projectID: server.optionalString(arguments["project"]),
-                                includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false))))
+                    try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: server.optionalString(arguments["project"])))))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_create",
@@ -550,7 +539,7 @@ final class SpacesMCPStdioServer {
     private static func profileWorkspaceRecord(_ summary: SpacesDeviceWorkspaceSummary) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: summary.id, projectID: summary.projectID, dir: summary.dir, dirname: nil, branch: summary.branch, baseBranch: summary.baseBranch,
-            isDefault: summary.isDefault, isArchived: summary.isArchived, isHidden: summary.isHidden, isRunning: summary.isRunning,
+            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning,
             lastLaunchedAt: nil, notes: summary.notes)
     }
 

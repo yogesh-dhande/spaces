@@ -411,7 +411,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
@@ -428,8 +427,8 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isArchived: Bool,
-        isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
+        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isHidden: Bool,
+        isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
         environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
         config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
         codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
@@ -441,7 +440,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.baseBranch = baseBranch
         self.dir = dir
         self.isRunning = isRunning
-        self.isArchived = isArchived
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.notes = notes
@@ -463,7 +461,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case baseBranch
         case dir
         case isRunning
-        case isArchived
         case isHidden
         case isDefault
         case notes
@@ -486,7 +483,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
         isRunning = try container.decode(Bool.self, forKey: .isRunning)
-        isArchived = try container.decode(Bool.self, forKey: .isArchived)
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         notes = try container.decodeIfPresent(String.self, forKey: .notes)

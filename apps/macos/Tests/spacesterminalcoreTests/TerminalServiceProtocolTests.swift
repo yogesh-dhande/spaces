@@ -63,7 +63,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: "/srv/work", dirname: "feature", branch: "feature", baseBranch: "main",
-                    isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
+                    isDefault: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
                 terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
@@ -179,7 +179,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
     func testProfileCommandRoundTripsEveryOperation() throws {
         let commands: [TerminalServiceProfileCommand] = [
-            .projectList, .terminalList, .workspaceList(.init(projectID: "project-1", includeArchived: true)), .workspaceList(.init()),
+            .projectList, .terminalList, .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
             .workspaceRestart(workspaceID: "workspace-1"),

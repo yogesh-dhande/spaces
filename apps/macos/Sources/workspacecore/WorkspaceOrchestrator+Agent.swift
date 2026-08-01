@@ -227,7 +227,7 @@ extension WorkspaceOrchestrator {
     @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
                     // recorded on a previous pass). A live turn-complete `.done` row is NOT finalized: a
@@ -516,7 +516,7 @@ extension WorkspaceOrchestrator {
         let candidateSessionIDs = Set([event.terminalTrackingID, event.sessionID].compactMap { normalizedTerminalSessionID($0) })
         guard !candidateSessionIDs.isEmpty else { return nil }
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 if try store.agentWindows(workspaceID: workspace.id).contains(where: { agent in
                     guard let sessionID = builtInTerminalSessionID(for: agent) else { return false }
                     return candidateSessionIDs.contains(sessionID)
@@ -1139,7 +1139,7 @@ extension WorkspaceOrchestrator {
     public func agentSessionRows(workspaceID: String? = nil, sessionID: String? = nil) throws -> [TerminalServiceAgentSessionRow] {
         var rows: [TerminalServiceAgentSessionRow] = []
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 if let workspaceID, workspace.id != workspaceID { continue }
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)

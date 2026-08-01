@@ -12,12 +12,12 @@ import workspacecore
 /// identically to remote alerts.
 struct AppKitControllerAlertsBuilderTests {
     private func workspace(
-        id: String, isRunning: Bool = true, isArchived: Bool = false, processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+        id: String, isRunning: Bool = true, processRows: [SpacesDeviceWorkspaceProcessRow] = [],
         codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
-            isArchived: isArchived, isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
+            isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
             config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
     }
 
@@ -120,14 +120,6 @@ struct AppKitControllerAlertsBuilderTests {
         let groups = AppKitController.buildOverviewAlertsGroups(
             from: overview([workspace(id: "ws", isRunning: false, processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "t")])]),
             deviceID: "local")
-        #expect(groups.isEmpty)
-    }
-
-    @Test func archivedWorkspaceIsExcluded() {
-        let groups = AppKitController.buildOverviewAlertsGroups(
-            from: overview([
-                workspace(id: "ws", isArchived: true, codingAgentRows: [agent(id: "a", agentID: "ag", activityState: .waiting, updatedAt: nil)])
-            ]), deviceID: "local")
         #expect(groups.isEmpty)
     }
 

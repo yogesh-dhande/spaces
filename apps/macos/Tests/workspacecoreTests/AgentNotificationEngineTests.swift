@@ -128,7 +128,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: dir + "/hello", dirname: "hello", branch: "smoke/hello", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -198,7 +198,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: dir + "/hello", dirname: "hello", branch: "main; rm -rf ~", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")

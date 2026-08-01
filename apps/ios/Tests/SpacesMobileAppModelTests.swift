@@ -1724,12 +1724,12 @@
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature", baseBranch: "main",
-                dir: "/repo/feature", isRunning: featureIsRunning, isArchived: false, isHidden: featureIsHidden, isDefault: false, sessionCount: 1,
+                dir: "/repo/feature", isRunning: featureIsRunning, isHidden: featureIsHidden, isDefault: false, sessionCount: 1,
                 assignedPorts: featureAssignedPorts, config: featureConfig, processRows: processRows, codingAgentRows: codingAgentRows,
                 terminalRows: featureTerminalRows)
             let docs = SpacesDeviceWorkspaceSummary(
                 id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main", dir: "/repo/docs",
-                isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0, processRows: [], codingAgentRows: [],
+                isRunning: false, isHidden: false, isDefault: false, sessionCount: 0, processRows: [], codingAgentRows: [],
                 terminalRows: [
                     SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs", sessionID: nil,

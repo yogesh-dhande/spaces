@@ -73,7 +73,7 @@
 - Migrations must faithfully carry existing user data forward to the new schema version; never lose or corrupt data the product still uses.
 - Schema upgrades run serially through every intermediate version: each migration step moves exactly one version forward (vN to vN+1), and a database several versions behind applies each step in order. Never add a step that skips versions or a special-cased jump path.
 - Tables and columns that no code reads or writes anymore may be dropped in a migration; remove their schema definitions in the same change.
-- Never add any migration or reset path that can remove existing projects or workspaces.
+- A workspace record is removed only by an explicit user action (archiving it, or deleting its project) or by the discovery scan retiring a workspace whose worktree is gone; archiving deletes the workspace, its settings, and its port assignments, and keeps no tombstone. Never add any other path — migration, reset, repair, or cleanup — that can remove a project, or a workspace whose worktree is still valid.
 
 ## Web Rules
 - Use the shared color and typography tokens in `apps/web/app/globals.css` instead of hard-coded values.

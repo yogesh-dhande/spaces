@@ -482,7 +482,7 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         XCTAssertFalse(project.isGitRepo)
-        XCTAssertEqual(try store.workspaces(projectID: project.id, includeArchived: true).count, 1)
+        XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
 
         // The user runs `git init` in the folder after adding it as a plain project.
         try runGit(["init"], cwd: projectDir.path)
@@ -491,7 +491,7 @@ extension OrchestratorTests {
 
         XCTAssertNil(try store.project(id: project.id))
         XCTAssertNil(try store.project(dir: projectDir.path))
-        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
         XCTAssertTrue(try orchestrator.listProjects().isEmpty)
     }
 
@@ -511,7 +511,7 @@ extension OrchestratorTests {
         let project = ProjectRecord(id: UUID().uuidString, name: "project", dir: recordedDir, isGitRepo: false, defaultBranch: nil)
         try store.upsert(project: project)
         try orchestrator.ensureDefaultWorkspace(for: project)
-        XCTAssertEqual(try store.workspaces(projectID: project.id, includeArchived: true).count, 1)
+        XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
 
         // The directory-based path silently matches nothing and leaves the project in place.
         try orchestrator.removeProject(dir: recordedDir)
@@ -520,7 +520,7 @@ extension OrchestratorTests {
         // The id-based path used by the delete action removes it reliably.
         try orchestrator.removeProject(id: project.id)
         XCTAssertNil(try store.project(id: project.id))
-        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
     }
 
     // Deleting an unknown project id fails loudly rather than reporting success for a no-op.

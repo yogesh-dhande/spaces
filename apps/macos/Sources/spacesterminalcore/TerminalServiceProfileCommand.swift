@@ -61,12 +61,8 @@ public struct TerminalServiceWorkspaceListPayload: Codable, Sendable, Equatable 
     /// Optional project filter. `nil` (or an empty value the daemon normalizes away) lists every
     /// project's workspaces.
     public let projectID: String?
-    public let includeArchived: Bool
 
-    public init(projectID: String? = nil, includeArchived: Bool = false) {
-        self.projectID = projectID
-        self.includeArchived = includeArchived
-    }
+    public init(projectID: String? = nil) { self.projectID = projectID }
 }
 
 public struct TerminalServiceWorkspaceCreatePayload: Codable, Sendable, Equatable {

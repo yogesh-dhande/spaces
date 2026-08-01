@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 10
+    public static let currentVersion = 11
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -270,6 +270,46 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_sessions ADD COLUMN detected_agent_kind TEXT;
                     """)
         },
+        // Archiving a workspace deletes its record, so the archived flag and the rows it marked have no
+        // reader left. The archived rows go first: `workspaces` children cascade (the connection runs with
+        // `foreign_keys=ON`), but two agent tables are not reached by that cascade and are cleared first.
+        // `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so an archived workspace still
+        // holding a watched agent row would otherwise abort the whole upgrade, and `agent_pending_
+        // notifications` deliberately has no foreign key and would be orphaned. A watcher of an archived
+        // workspace's agent loses that edge without an exit notice, which is the one thing this bulk purge
+        // cannot deliver — the rows being removed are invisible to the product and their agents stopped when
+        // the workspace was archived. The branch-uniqueness index is rebuilt without the archived predicate
+        // and renamed to match, which also has to happen before the column can be dropped: SQLite refuses to
+        // drop a column an index reads. `ignored_worktrees` goes with them: deleting a workspace removes its
+        // worktree, so a worktree still standing at a former workspace's path is live work for discovery to
+        // import, and nothing writes that table any more. Each table this step did not create itself is
+        // touched only when it is present, so a database that never had one is upgraded rather than failed on
+        // work it does not need.
+        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Delete archived workspaces and drop is_archived", requiresBackup: true)
+        { handle in
+            guard try migrationTableExists(handle, table: "workspaces") else { return }
+            if try migrationTableExists(handle, table: "agent_sessions") {
+                for table in ["agent_subscriptions", "agent_pending_notifications"] where try migrationTableExists(handle, table: table) {
+                    try migrationExecuteBatch(
+                        handle,
+                        sql: """
+                            DELETE FROM \(table) WHERE agent_session_id IN (
+                              SELECT id FROM agent_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE is_archived = 1));
+                            """)
+                }
+            }
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    DELETE FROM workspaces WHERE is_archived = 1;
+                    DROP TABLE IF EXISTS ignored_worktrees;
+                    DROP INDEX IF EXISTS workspaces_project_branch_active_unique;
+                    ALTER TABLE workspaces DROP COLUMN is_archived;
+                    CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_unique
+                      ON workspaces(project_id, branch)
+                      WHERE length(branch) > 0;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -447,7 +487,6 @@ public enum DatabaseSchema {
               branch TEXT,
               base_branch TEXT,
               is_default INTEGER NOT NULL,
-              is_archived INTEGER NOT NULL,
               is_hidden INTEGER NOT NULL DEFAULT 0,
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
@@ -455,9 +494,9 @@ public enum DatabaseSchema {
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_active_unique
+            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_unique
             ON workspaces(project_id, branch)
-            WHERE length(branch) > 0 AND is_archived = 0;
+            WHERE length(branch) > 0;
 
             CREATE TABLE IF NOT EXISTS workspace_service_ports (
               workspace_id TEXT NOT NULL,
@@ -540,12 +579,6 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS ignored_worktrees (
-              worktree_dir TEXT PRIMARY KEY,
-              project_id TEXT NOT NULL,
-              FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS runtime_targets (

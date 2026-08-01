@@ -59,7 +59,7 @@ extension AppKitController {
             workspaceIDs.append(workspaceID)
         }
 
-        for workspace in runningWorkspaces where !workspace.isArchived && workspace.isRunning { appendWorkspaceID(workspace.id) }
+        for workspace in runningWorkspaces where workspace.isRunning { appendWorkspaceID(workspace.id) }
 
         for session in liveSessions {
             guard let workspace = try workspaceForLiveSession(session.id) else { continue }
@@ -163,7 +163,7 @@ extension AppKitController {
 
     nonisolated static func runningLocalWorkspacesForStopAllQuit(store: SQLiteStore) throws -> [WorkspaceRecord] {
         var workspaces: [WorkspaceRecord] = []
-        for project in try store.projects() { workspaces.append(contentsOf: try store.workspaces(projectID: project.id, includeArchived: false)) }
+        for project in try store.projects() { workspaces.append(contentsOf: try store.workspaces(projectID: project.id)) }
         return workspaces
     }
 

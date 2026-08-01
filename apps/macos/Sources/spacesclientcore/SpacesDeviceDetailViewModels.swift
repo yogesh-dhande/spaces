@@ -30,7 +30,6 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
@@ -51,7 +50,6 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         baseBranch = workspace.baseBranch
         dir = workspace.dir
         isRunning = workspace.isRunning
-        isArchived = workspace.isArchived
         isHidden = workspace.isHidden
         isDefault = workspace.isDefault
         notes = workspace.notes

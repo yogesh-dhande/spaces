@@ -55,15 +55,14 @@ spaces agent signal blocked`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Workspace commands list, create, start, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview, so it shows only active workspaces and <Cmd>--include-archived</Cmd> is not accepted with <Cmd>--device</Cmd>.
+          Workspace commands list, create, start, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview.
         </p>
-        <CodeBlock>{`spaces workspace list [--project <project-id>] [--include-archived] [--device <name-or-id>]
+        <CodeBlock>{`spaces workspace list [--project <project-id>] [--device <name-or-id>]
 spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
 spaces workspace start --workspace <workspace-id> [--device <name-or-id>]
 spaces workspace restart --workspace <workspace-id> [--device <name-or-id>]`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
-          <Flag name="--include-archived" description="Includes archived workspaces in list output. Not supported with --device." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
           <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />

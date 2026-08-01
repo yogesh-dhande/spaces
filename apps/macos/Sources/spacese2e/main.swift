@@ -1753,7 +1753,7 @@ private struct StopFixturesCommand: ParsableCommand {
         for project in try orchestrator.store.projects() {
             let normalizedDir = normalizePath(project.dir)
             guard normalizedDir == normalizedPrefix || normalizedDir.hasPrefix(normalizedPrefix + "/") else { continue }
-            for workspace in try orchestrator.store.workspaces(projectID: project.id, includeArchived: true) {
+            for workspace in try orchestrator.store.workspaces(projectID: project.id) {
                 _ = try? orchestrator.stopWorkspace(workspaceID: workspace.id)
                 stoppedWorkspaces.append(workspace.dir)
             }
@@ -2449,7 +2449,6 @@ private struct WorkspaceSummaryPayload: Codable {
     let id: String
     let name: String
     let dir: String
-    let isArchived: Bool
     let isRunning: Bool
     let notes: String?
 }
@@ -2667,7 +2666,7 @@ private struct ClickEventTiming {
 private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, name: String?) throws -> WorkspaceSummaryPayload? {
     let normalizedProjectDir = normalizePath(projectDir)
     guard let project = try orchestrator.project(dir: normalizedProjectDir) else { return nil }
-    let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+    let workspaces = try orchestrator.listWorkspaces(projectID: project.id)
     let match: WorkspaceSummary?
     if let name { match = workspaces.first(where: { $0.displayName == name }) } else { match = workspaces.first(where: \.isDefault) }
     guard let workspace = match else { return nil }
@@ -2676,14 +2675,12 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        notes: workspace.notes)
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceSummary) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        notes: workspace.notes)
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> WorkspaceSettingsPayload {

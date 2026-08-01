@@ -193,7 +193,7 @@ import workspacecore
         let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
         headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false)
 
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal

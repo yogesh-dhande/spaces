@@ -522,7 +522,7 @@ extension WorkspaceOrchestrator {
     }
 
     func builtInTerminalSessionOwnership(sessionID: String) throws -> BuiltInTerminalSessionOwnership {
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: true) }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id) }
         var owningProcess: RunningProcessRecord?
         var owningAgent: AgentWindowRecord?
         var terminalWindowWorkspaceID: String?

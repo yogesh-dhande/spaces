@@ -17,7 +17,7 @@ public struct SpacesCommand: ParsableCommand {
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
               - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
-              - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview, so `workspace list --device` shows only active workspaces and rejects `--include-archived`. Omitting `--device` targets this device's spacesd daemon.
+              - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
@@ -88,26 +88,18 @@ struct WorkspaceListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List workspaces on this or a paired device.")
 
     @Option(name: .long, help: "Project ID. When omitted, lists workspaces from every project.") var project: String?
-    @Flag(name: .long, help: "Include archived workspaces. Not supported with --device.") var includeArchived = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local workspaces.") var device: String?
 
     func run() throws {
         let context = CLIContext()
         if let device {
-            // The device overview carries only active workspaces, so archived ones are unreachable over
-            // this path. Reject the flag combination loudly rather than silently ignoring it and
-            // returning a subset that looks like the full archived listing.
-            guard !includeArchived else {
-                throw ValidationError("--include-archived is not supported with --device: a paired device's overview lists only active workspaces.")
-            }
             let record = try SpacesPairedDeviceSelection.resolve(device)
             var workspaces = try SpacesDeviceClient.workspaces(device: record, clientApp: cliDeviceClientApp())
             if let project { workspaces = workspaces.filter { $0.projectID == project } }
             context.output.emitLines(workspaces.map(workspaceListRow))
             return
         }
-        let workspaces =
-            try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: project, includeArchived: includeArchived))).workspaces ?? []
+        let workspaces = try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: project))).workspaces ?? []
         context.output.emitLines(workspaces.map(workspaceListRow))
     }
 }

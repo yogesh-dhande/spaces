@@ -308,7 +308,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
-                    isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow], codingAgentRows: [agentRow],
+                    isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow], codingAgentRows: [agentRow],
                     terminalRows: [terminalRow])
             ], sessions: [session])
 
@@ -482,7 +482,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
-                    isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
+                    isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
             ], sessions: [])
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(

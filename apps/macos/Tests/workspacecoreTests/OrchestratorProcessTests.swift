@@ -1656,7 +1656,7 @@ extension OrchestratorTests {
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)", dirname: workspace.dirname,
-            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
             isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
@@ -1684,7 +1684,7 @@ extension OrchestratorTests {
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname, branch: workspace.branch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
             isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
@@ -1797,19 +1797,20 @@ extension OrchestratorTests {
         XCTAssertNotNil(updated?.exitedAt)
     }
 
-    // Tests upWorkspace throws invalidArgument when the workspace is archived (covers guard !workspace.isArchived else throw).
-    func testUpWorkspaceThrowsForArchivedWorkspace() throws {
+    /// Archiving removes the record, so `upWorkspace` has nothing to bring up.
+    func testUpWorkspaceThrowsAfterArchive() throws {
+        let repo = try makeTempGitRepo(name: "up-after-archive")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
+        XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("archived"))
+            XCTAssertTrue(error.localizedDescription.contains("Workspace not found"))
         }
     }
 }

@@ -29,7 +29,7 @@ extension OrchestratorTests {
         try store.upsert(
             workspace: WorkspaceRecord(
                 id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: "main", branch: "main", baseBranch: "main", isDefault: true,
-                isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                isRunning: false, lastLaunchedAt: nil))
 
         try orchestrator.rollbackFailedImportedProjectCreation(project: project, workspaceDirectory: workspaceDir)
 
@@ -52,7 +52,6 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         XCTAssertEqual(workspace.dir, projectDir.path)
-        XCTAssertFalse(workspace.isArchived)
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 0)
     }
 
@@ -63,7 +62,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: projectDir.path)
         let workspace = WorkspaceRecord(
-            id: "workspace-stop-all-quit", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            id: "workspace-stop-all-quit", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
             isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -231,9 +230,44 @@ extension OrchestratorTests {
 
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
-        let archivedWorkspace = try store.workspace(id: workspace.id)
-        XCTAssertEqual(archivedWorkspace?.isArchived, true)
+        XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    /// Archiving removes the workspace record and everything keyed to it, and it routes the workspace's
+    /// coding agents through the termination chokepoint on the way out: an agent watched from another
+    /// terminal must have its watcher told it exited and its inbound edges dropped, or the record delete
+    /// would hit the `ON DELETE RESTRICT` edge and fail.
+    func testArchiveWorkspaceDeletesRecordAndFinalizesWatchedAgentsThroughChokepoint() throws {
+        let repo = try makeTempGitRepo(name: "archive-deletes-record")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionTerminator: { _ in })
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-teardown")
+        try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: "notes")
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: agent.id, createdAt: "t")
+
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        XCTAssertNil(try store.workspace(id: workspace.id), "archiving removes the workspace record")
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty, "the watcher's edge is dropped, not left dangling")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the outside watcher must be told the agent exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+        XCTAssertNil(try store.workspaceStopScript(workspaceID: workspace.id))
+        XCTAssertTrue(try orchestrator.workspacePorts(workspaceID: workspace.id).isEmpty)
     }
 
     func testArchiveWorkspaceCanDeleteLocalAndRemoteBranch() throws {
@@ -270,93 +304,14 @@ extension OrchestratorTests {
 
         XCTAssertFalse(client.branchExists(path: clone.path, branch: "feature-cleanup"))
         XCTAssertFalse(client.remoteBranchExists(path: clone.path, branch: "feature-cleanup"))
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)
+        XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertTrue(outcome.notice?.contains("Deleted remote branch 'feature-cleanup'.") == true)
         XCTAssertTrue(outcome.notice?.contains("Deleted local branch 'feature-cleanup'.") == true)
     }
 
-    func testArchiveWorkspaceClearsArchivedBranchWhenDeletionRemovesBranchIdentity() throws {
-        let repo = try makeTempGitRepo(name: "archive-clears-deleted-branch")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
-
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true)
-
-        let archived = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertTrue(archived.isArchived)
-        XCTAssertNil(archived.branch)
-
-        let recreated = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
-        XCTAssertEqual(recreated.branch, "feature")
-        XCTAssertNotEqual(recreated.id, workspace.id)
-    }
-
-    func testArchiveWorkspacePreservesBranchIdentityWhenRemoteLookupFails() throws {
-        let fixture = try makeRemoteFixture()
-        try runGit(["checkout", "-b", "remote-archive"], cwd: fixture.source.path)
-        try "remote archive".write(to: fixture.source.appendingPathComponent("REMOTE_ARCHIVE.md"), atomically: true, encoding: .utf8)
-        try runGit(["add", "REMOTE_ARCHIVE.md"], cwd: fixture.source.path)
-        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "remote archive"], cwd: fixture.source.path)
-        try runGit(["push", fixture.remote.path, "remote-archive"], cwd: fixture.source.path)
-
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let createOrchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-        let project = try createOrchestrator.addProject(dir: fixture.clone.path)
-        let workspace = try createOrchestrator.createWorkspace(projectID: project.id, branch: "remote-archive", allowExistingBranchReuse: true)
-
-        let archiveOrchestrator = WorkspaceOrchestrator(
-            store: store, workspacesRootDirectory: workspacesRoot, git: try makeLsRemoteFailingGitClient())
-        let outcome = try archiveOrchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: true)
-
-        let archived = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertTrue(archived.isArchived)
-        XCTAssertEqual(archived.branch, "remote-archive")
-        XCTAssertTrue(outcome.notice?.contains("Failed to delete remote branch 'remote-archive': Git command failed: remote lookup failed") == true)
-    }
-
-    /// Archiving with branch deletion keeps the archived record's branch when the archive could not confirm
-    /// the branch is gone from the remote. The branch is still deleted, so the name has to stay usable for a
-    /// new workspace instead of being reserved forever by that stale record.
-    func testCreateWorkspaceReusesBranchNameArchivedRecordNoLongerOwns() throws {
-        let fixture = try makeRemoteFixture()
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: fixture.clone.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-reuse")
-        try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: "archived history")
-
-        let archiveOrchestrator = WorkspaceOrchestrator(
-            store: store, workspacesRootDirectory: workspacesRoot, git: try makeLsRemoteFailingGitClient())
-        _ = try archiveOrchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: true)
-        let archived = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertTrue(archived.isArchived)
-        XCTAssertEqual(archived.branch, "qa-reuse")
-        XCTAssertFalse(GitClient().branchExists(path: fixture.clone.path, branch: "qa-reuse"))
-
-        let recreated = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-reuse")
-
-        XCTAssertEqual(recreated.branch, "qa-reuse")
-        XCTAssertFalse(recreated.isArchived)
-        XCTAssertNotEqual(recreated.id, workspace.id)
-        let preserved = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertTrue(preserved.isArchived)
-        XCTAssertNil(preserved.branch)
-        XCTAssertEqual(preserved.notes, "archived history")
-    }
-
     /// The same reservation has to be released when the branch disappears outside Spaces — the usual
     /// merge-and-delete flow after a workspace was archived without deleting its branch.
-    func testCreateWorkspaceReusesBranchNameDeletedOutsideSpacesAfterArchive() throws {
+    func testCreateWorkspaceReusesBranchNameImmediatelyAfterArchive() throws {
         let fixture = try makeRemoteFixture()
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -367,18 +322,14 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-merged")
         try runGit(["push", "-u", "origin", "qa-merged"], cwd: workspace.dir)
 
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "qa-merged")
-
-        try runGit(["push", "origin", "--delete", "qa-merged"], cwd: fixture.clone.path)
-        try runGit(["branch", "-D", "qa-merged"], cwd: fixture.clone.path)
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: true)
+        XCTAssertNil(try store.workspace(id: workspace.id), "archiving removes the workspace record")
 
         let recreated = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-merged")
 
         XCTAssertEqual(recreated.branch, "qa-merged")
         XCTAssertNotEqual(recreated.id, workspace.id)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)
-        XCTAssertNil(try store.workspace(id: workspace.id)?.branch)
+        XCTAssertEqual(try store.workspaces(projectID: project.id).filter { $0.branch == "qa-merged" }.count, 1)
     }
 
     /// A branch deleted on the remote by another clone leaves this clone's `refs/remotes/origin/<branch>`
@@ -397,29 +348,6 @@ extension OrchestratorTests {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: workspace.dir + "/STALE.md"),
             "A new branch must not start at the obsolete tip the stale tracking ref points to.")
-        let workspaceHead = try runGitAndCapture(["rev-parse", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(workspaceHead, fixture.baseRevision)
-    }
-
-    /// The same must hold when the branch name was also being held by a stale archived record: releasing that
-    /// claim puts the create into new-branch mode, which must still start at the base.
-    func testCreateWorkspaceReusingArchivedNameStartsAtBaseDespiteStaleRemoteTrackingRef() throws {
-        let fixture = try makeStaleRemoteTrackingRefFixture(branch: "stale-claim", marker: "STALE_CLAIM.md")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: fixture.clone.path)
-        let archivedWorkspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, dir: workspacesRoot.appendingPathComponent("gone", isDirectory: true).path,
-            dirname: "gone", branch: "stale-claim", baseBranch: "main", isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
-        try store.upsert(workspace: archivedWorkspace)
-
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "stale-claim", baseBranch: "main")
-
-        XCTAssertNil(try store.workspace(id: archivedWorkspace.id)?.branch)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir + "/STALE_CLAIM.md"))
         let workspaceHead = try runGitAndCapture(["rev-parse", "HEAD"], cwd: workspace.dir).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(workspaceHead, fixture.baseRevision)
     }
@@ -449,7 +377,7 @@ extension OrchestratorTests {
 
     /// Renaming a workspace's branch obeys the same rule as creating one: a branch name whose only claimant
     /// is an archived record that no longer owns it is free to take.
-    func testUpdateWorkspaceMetadataRenamesBranchArchivedRecordNoLongerOwns() throws {
+    func testUpdateWorkspaceMetadataRenamesBranchOntoNameFreedByArchive() throws {
         let fixture = try makeRemoteFixture()
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -458,90 +386,13 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: fixture.clone.path)
         let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-rename-target")
-        try orchestrator.updateWorkspaceNotes(workspaceID: archivedWorkspace.id, notes: "archived history")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
-        XCTAssertEqual(try store.workspace(id: archivedWorkspace.id)?.branch, "qa-rename-target")
-        try runGit(["branch", "-D", "qa-rename-target"], cwd: fixture.clone.path)
+        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id, deleteLocalBranch: true)
+        XCTAssertNil(try store.workspace(id: archivedWorkspace.id))
 
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-rename-source")
         try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "qa-rename-target")
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "qa-rename-target")
-        let preserved = try XCTUnwrap(store.workspace(id: archivedWorkspace.id))
-        XCTAssertTrue(preserved.isArchived)
-        XCTAssertNil(preserved.branch)
-        XCTAssertEqual(preserved.notes, "archived history")
-    }
-
-    /// The rename guard still holds while the archived record's branch exists, so a rename cannot quietly
-    /// take a name another record can still be revived on.
-    func testUpdateWorkspaceMetadataRejectsBranchStillOwnedByArchivedRecord() throws {
-        let repo = try makeTempGitRepo(name: "rename-onto-archived-branch")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "kept-rename-target")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "kept-rename-source")
-
-        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "kept-rename-target")) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-            XCTAssertTrue(message.contains("Branch 'kept-rename-target' is already used by workspace"))
-        }
-        XCTAssertEqual(try store.workspace(id: archivedWorkspace.id)?.branch, "kept-rename-target")
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "kept-rename-source")
-    }
-
-    /// Importing a worktree can never meet a stale archived claim: the imported worktree has the branch
-    /// checked out, so the name an archived record is holding is live again and that record stays a genuine
-    /// conflict to resolve by unarchiving.
-    func testCreateWorkspaceFromWorktreeRejectsArchivedBranchNameThatIsLiveAgain() throws {
-        let fixture = try makeRemoteFixture()
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: fixture.clone.path)
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "qa-import")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
-        try runGit(["branch", "-D", "qa-import"], cwd: fixture.clone.path)
-
-        let importedWorktree = root.appendingPathComponent("imported-qa-import", isDirectory: true)
-        try runGit(["worktree", "add", "-b", "qa-import", importedWorktree.path], cwd: fixture.clone.path)
-
-        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: importedWorktree.path)) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-            XCTAssertTrue(message.contains("Workspace already exists for archived branch 'qa-import'"))
-        }
-        XCTAssertEqual(try store.workspace(id: archivedWorkspace.id)?.branch, "qa-import")
-    }
-
-    /// An archived record whose branch still exists keeps owning that name: creating it as a new branch is
-    /// refused, and reusing the existing branch revives the archived record rather than adding a second one.
-    func testCreateWorkspaceKeepsArchivedRecordOwningBranchThatStillExists() throws {
-        let repo = try makeTempGitRepo(name: "archived-branch-still-exists")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "kept-branch")
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
-
-        XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "kept-branch")) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-            XCTAssertTrue(message.contains("Branch 'kept-branch' already exists"))
-        }
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.branch, "kept-branch")
-
-        let revived = try orchestrator.createWorkspace(projectID: project.id, branch: "kept-branch", allowExistingBranchReuse: true)
-        XCTAssertEqual(revived.id, workspace.id)
-        XCTAssertFalse(revived.isArchived)
     }
 
     // Tests built-in terminal runtime sync revives an exited managed process when the tracked pane is still alive by arranging representative inputs and asserting the expected result.
@@ -609,7 +460,6 @@ extension OrchestratorTests {
         XCTAssertEqual(workspace.branch, "feature-branch")
         XCTAssertEqual(workspace.dir, worktree.path)
         XCTAssertEqual(workspace.dirname, "feature-branch")
-        XCTAssertFalse(workspace.isArchived)
         let stored = try store.workspace(id: workspace.id)
         XCTAssertNotNil(stored)
         XCTAssertEqual(stored?.displayName, "feature-branch")
@@ -665,7 +515,7 @@ extension OrchestratorTests {
         let names = Set(created.map(\.displayName))
         XCTAssertTrue(names.contains("feature-1"))
         XCTAssertTrue(names.contains("feature-2"))
-        let allWorkspaces = try store.workspaces(projectID: project.id, includeArchived: false)
+        let allWorkspaces = try store.workspaces(projectID: project.id)
         XCTAssertEqual(allWorkspaces.count, 3)
     }
 
@@ -716,26 +566,79 @@ extension OrchestratorTests {
         XCTAssertEqual(marker, "discovered")
     }
 
-    // Tests scan and create workspaces from worktrees skips deleted workspace paths marked ignored by arranging representative inputs and asserting the expected result.
-    func testScanAndCreateWorkspacesFromWorktreesSkipsDeletedWorkspacePathsMarkedIgnored() throws {
-        let repo = try makeTempGitRepo(name: "test-repo")
+    /// Deleting a workspace removes its worktree, so a worktree still standing at that path afterwards is
+    /// live work rather than something the user retired: discovery imports it as a fresh workspace. This is
+    /// what a delete whose worktree removal failed leaves behind, and re-importing it is the intended
+    /// outcome — the record is gone, the checkout is not.
+    func testScanAndCreateWorkspacesFromWorktreesReimportsWorktreeLeftAtDeletedWorkspacePath() throws {
+        let repo = try makeTempGitRepo(name: "reimport-after-delete")
         let root = repo.deletingLastPathComponent()
-
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
-        let worktree = root.appendingPathComponent("feature-ignored", isDirectory: true)
-        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-ignored")
+        let worktree = root.appendingPathComponent("feature-left-behind", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature-left-behind")
         let workspace = try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)
 
+        // The record goes, the checkout stays — the shape a worktree removal failure leaves behind.
         try store.deleteWorkspace(id: workspace.id)
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path))
 
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees()
-        XCTAssertTrue(created.isEmpty)
-        XCTAssertNil(try store.workspace(dir: worktree.path))
-        XCTAssertTrue(try store.isIgnoredWorktree(path: worktree.path))
+
+        let rediscovered = try XCTUnwrap(created.first { normalizeTestPath($0.dir) == normalizeTestPath(worktree.path) })
+        XCTAssertNotEqual(rediscovered.id, workspace.id, "the worktree comes back as a fresh workspace, not the deleted record")
+        XCTAssertEqual(rediscovered.branch, "feature-left-behind")
+        XCTAssertNotNil(try store.workspace(dir: worktree.path))
+    }
+
+    /// A worktree the user makes by hand at a deleted workspace's former path is ordinary new work, so
+    /// discovery imports it like any other worktree.
+    func testScanAndCreateWorkspacesFromWorktreesImportsHandMadeWorktreeAtDeletedWorkspacePath() throws {
+        let repo = try makeTempGitRepo(name: "handmade-after-delete")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "recycled-path")
+        let formerDir = workspace.dir
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true)
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: formerDir), "deleting the workspace removes its worktree")
+
+        try runGit(["worktree", "add", "-b", "recycled-path", formerDir], cwd: repo.path)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        let discovered = try XCTUnwrap(created.first { normalizeTestPath($0.dir) == normalizeTestPath(formerDir) })
+        XCTAssertEqual(discovered.branch, "recycled-path")
+        XCTAssertNotEqual(discovered.id, workspace.id)
+    }
+
+    /// Hiding is how an existing worktree is kept out of view: the record stays, so discovery's
+    /// already-in-store check leaves it alone and never re-imports it as a second, visible workspace.
+    func testScanAndCreateWorkspacesFromWorktreesLeavesHiddenWorkspaceHidden() throws {
+        let repo = try makeTempGitRepo(name: "hidden-survives-discovery")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "hidden-feature")
+        try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertTrue(created.isEmpty, "a hidden workspace's worktree is already in the store, so nothing is imported")
+        let stored = try XCTUnwrap(store.workspace(id: workspace.id))
+        XCTAssertTrue(stored.isHidden)
+        XCTAssertEqual(try store.workspaces(projectID: project.id).filter { $0.dir == workspace.dir }.count, 1)
     }
 
     // Tests scan and create workspaces from worktrees skips missing worktree directories by arranging representative inputs and asserting the expected result.
@@ -758,7 +661,7 @@ extension OrchestratorTests {
     }
 
     // Tests scan and create workspaces from worktrees archives existing workspace when worktree is removed by arranging representative inputs and asserting the expected result.
-    func testScanAndCreateWorkspacesFromWorktreesArchivesWorkspaceWhenWorktreeIsRemoved() throws {
+    func testScanAndCreateWorkspacesFromWorktreesRemovesWorkspaceWhenWorktreeIsRemoved() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
 
@@ -776,8 +679,7 @@ extension OrchestratorTests {
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
         XCTAssertTrue(created.isEmpty)
 
-        let archivedWorkspace = try store.workspace(id: workspace.id)
-        XCTAssertEqual(archivedWorkspace?.isArchived, true)
+        XCTAssertNil(try store.workspace(id: workspace.id), "a workspace whose worktree is gone is removed, not flagged")
     }
 
     // A daemon-side orchestrator built without an explicit handoff predicate — exactly how
@@ -828,7 +730,7 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try handoffScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)) { error in
             guard case WorkspaceError.daemonHandoffInProgress = error else { return XCTFail("Expected daemonHandoffInProgress, got \(error)") }
         }
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, false)
+        XCTAssertNotNil(try store.workspace(id: workspace.id))
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 1)
         XCTAssertTrue(terminated.sessionIDs.isEmpty)
@@ -840,7 +742,7 @@ extension OrchestratorTests {
         let normalScanOrchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
         let created = try normalScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
         XCTAssertTrue(created.isEmpty)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)
+        XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
@@ -866,28 +768,6 @@ extension OrchestratorTests {
         XCTAssertEqual(refreshedWorkspace?.branch, "feature-renamed-on-disk")
     }
 
-    /// A workspace created after an archive reuses the archived record's recycled directory, so a scan finds a
-    /// worktree standing at the archived record's recorded path. That worktree belongs to the live workspace;
-    /// the archived record must not adopt its branch and start competing for the same name.
-    func testScanAndCreateWorkspacesFromWorktreesDoesNotAdoptBranchIntoArchivedRecord() throws {
-        let repo = try makeTempGitRepo(name: "scan-archived-branch-adoption")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "recycled-dir")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id, deleteLocalBranch: true)
-        let recreated = try orchestrator.createWorkspace(projectID: project.id, branch: "recycled-dir")
-        XCTAssertEqual(recreated.dir, archivedWorkspace.dir, "The archived record's directory name should be recycled by the new workspace.")
-
-        _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
-
-        XCTAssertNil(try store.workspace(id: archivedWorkspace.id)?.branch)
-        XCTAssertEqual(try store.workspace(id: recreated.id)?.branch, "recycled-dir")
-    }
-
     // Tests scan and create workspaces from worktrees scans all projects when no project id provided by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesScansAllProjectsWhenNoProjectIDProvided() throws {
         let repo1 = try makeTempGitRepo(name: "repo1")
@@ -904,9 +784,9 @@ extension OrchestratorTests {
         try client.createWorktree(path: repo2.path, worktreePath: worktree2.path, branch: "bugfix")
         let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
         XCTAssertEqual(created.count, 2)
-        let project1Workspaces = try store.workspaces(projectID: project1.id, includeArchived: false)
+        let project1Workspaces = try store.workspaces(projectID: project1.id)
         XCTAssertEqual(project1Workspaces.count, 2)
-        let project2Workspaces = try store.workspaces(projectID: project2.id, includeArchived: false)
+        let project2Workspaces = try store.workspaces(projectID: project2.id)
         XCTAssertEqual(project2Workspaces.count, 2)
     }
 
@@ -1022,28 +902,6 @@ extension OrchestratorTests {
         XCTAssertEqual(parseWorktreePaths(afterWorktrees).filter { $0 == listedOrphanDir }.count, 1, afterWorktrees)
     }
 
-    // Tests createWorkspace revives an archived git workspace by branch and applies the requested title.
-    func testCreateWorkspaceRevivesArchivedGitWorkspaceByBranch() throws {
-        let repo = try makeTempGitRepo(name: "revive-git-workspace")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let original = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch")
-        _ = try orchestrator.archiveWorkspace(workspaceID: original.id)
-        let archived = try XCTUnwrap(store.workspace(id: original.id))
-        XCTAssertTrue(archived.isArchived)
-
-        let revived = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", allowExistingBranchReuse: true)
-        let persisted = try XCTUnwrap(store.workspace(id: revived.id))
-        XCTAssertEqual(revived.id, original.id)
-        XCTAssertFalse(persisted.isArchived)
-        XCTAssertEqual(persisted.displayName, "feature-branch")
-        XCTAssertEqual(persisted.branch, "feature-branch")
-    }
-
     func testCreateWorkspaceAllowsReusingArchivedGitDirname() throws {
         let repo = try makeTempGitRepo(name: "reuse-archived-git-dirname")
         let root = try makeTempDirectory()
@@ -1058,53 +916,6 @@ extension OrchestratorTests {
         let replacement = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-new", directoryName: "docs")
         XCTAssertEqual(replacement.dirname, "docs")
         XCTAssertEqual(replacement.branch, "docs-new")
-    }
-
-    func testCreateWorkspaceRevivesArchivedGitWorkspaceWithFreshDirnameWhenOldDirnameIsTaken() throws {
-        let repo = try makeTempGitRepo(name: "revive-git-fresh-dirname")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let archived = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-old", directoryName: "docs")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archived.id)
-        let replacement = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-new", directoryName: "docs")
-
-        let revived = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-old", allowExistingBranchReuse: true)
-        XCTAssertEqual(revived.id, archived.id)
-        XCTAssertNotEqual(revived.dirname, "docs")
-        XCTAssertNotEqual(revived.dirname, replacement.dirname)
-    }
-
-    func testCreateWorkspaceRevivesArchivedGitWorkspaceReplacingConfirmedOrphanedDirectory() throws {
-        let repo = try makeTempGitRepo(name: "revive-replace-orphan-dir")
-        let root = try makeTempDirectory()
-        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
-
-        let project = try orchestrator.addProject(dir: repo.path)
-        let archived = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-revive-replace", directoryName: "old-feature-dir")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archived.id)
-        let workspaceRoot = URL(fileURLWithPath: archived.dir, isDirectory: true).deletingLastPathComponent()
-        let orphanDir = workspaceRoot.appendingPathComponent("revived-feature-dir", isDirectory: true)
-        try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
-        let orphanMarker = orphanDir.appendingPathComponent("orphan.txt")
-        try "orphan".write(to: orphanMarker, atomically: true, encoding: .utf8)
-        let candidate = try XCTUnwrap(
-            try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "revived-feature-dir"))
-        XCTAssertEqual(candidate.path, orphanDir.path)
-
-        let revived = try orchestrator.createWorkspace(
-            projectID: project.id, branch: "feature-revive-replace", directoryName: "revived-feature-dir", allowExistingBranchReuse: true,
-            replaceExistingManagedDirectory: true)
-
-        XCTAssertEqual(revived.id, archived.id)
-        XCTAssertEqual(revived.dir, orphanDir.path)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanMarker.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(revived.dir)/README.md"))
     }
 
     func testCreateWorkspaceRejectsExistingBranchInCreateMode() throws {
@@ -1223,25 +1034,6 @@ extension OrchestratorTests {
 
     // Tests handleProcessExit with onExit .restart restarts the process via openWindowAndRun by arranging representative inputs and asserting the expected result.
     // Tests createWorkspaceFromWorktree throws when the worktree directory matches an archived workspace by arranging representative inputs and asserting the expected result.
-    func testCreateWorkspaceFromWorktreeThrowsWhenAlreadyArchivedWorkspaceExists() throws {
-        let repo = try makeTempGitRepo(name: "archived-worktree-repo")
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: repo.path)
-
-        // The default workspace has dir=repo.path; archive it so the next createWorkspaceFromWorktree finds it archived.
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-        let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
-        let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
-            isArchived: true, isRunning: false, lastLaunchedAt: nil)
-        try store.upsert(workspace: archived)
-
-        // createWorkspaceFromWorktree should detect the archived workspace and throw.
-        XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: repo.path)) { error in
-            guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-        }
-    }
 
     // Tests createWorkspace rejects a non-ASCII directory name by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsNonAsciiDirectoryName() throws {
@@ -1273,13 +1065,13 @@ extension OrchestratorTests {
         let fakeWorktreeDir = root.appendingPathComponent("not-a-registered-worktree").path
         let workspaceRecord = WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: fakeWorktreeDir, dirname: "fake", branch: "feature-x", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
 
         XCTAssertNoThrow(try orchestrator.archiveWorkspace(workspaceID: workspaceRecord.id))
 
         let archived = try store.workspace(id: workspaceRecord.id)
-        XCTAssertEqual(archived?.isArchived, true)
+        XCTAssertNil(archived)
     }
 
     // Tests scanAndCreateWorkspacesFromWorktrees throws missingProject when a specific projectID is not found.
@@ -1307,8 +1099,9 @@ extension OrchestratorTests {
         ) { error in XCTAssertTrue(error.localizedDescription.contains("already in use"), "Expected 'already in use' error, got: \(error)") }
     }
 
-    // Tests archive workspace does not delete project directory for non git project by arranging representative inputs and asserting the expected result.
-    func testNonGitProjectWorkspaceCannotBeArchivedAndProjectDirectoryIsPreserved() throws {
+    /// A non-git project's only workspace is its default, which cannot be deleted; that is what keeps the
+    /// shared project directory from ever being torn down by a workspace delete.
+    func testNonGitProjectWorkspaceCannotBeDeletedAndProjectDirectoryIsPreserved() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1318,17 +1111,15 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        // A non-git project owns exactly one workspace, the default, which cannot be archived;
-        // this keeps the shared project directory from ever being torn down.
         let workspace = try XCTUnwrap(orchestrator.listWorkspaces(projectID: project.id).first)
         XCTAssertTrue(workspace.isDefault)
         XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: workspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Default workspace cannot be archived"))
+            XCTAssertTrue(error.localizedDescription.contains("Default workspace cannot be deleted"))
         }
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, false)
+        XCTAssertNotNil(try store.workspace(id: workspace.id), "a refused archive leaves the workspace in place")
     }
 
     // Tests create workspace from worktree derives its display name from the branch by arranging representative inputs and asserting the expected result.
@@ -1382,6 +1173,6 @@ extension OrchestratorTests {
         // A non-git project owns exactly one workspace; a second create returns it, not a duplicate.
         let created = try orchestrator.createWorkspace(projectID: project.id)
         XCTAssertEqual(created.id, existing.id)
-        XCTAssertEqual(try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).count, 1)
+        XCTAssertEqual(try orchestrator.listWorkspaces(projectID: project.id).count, 1)
     }
 }

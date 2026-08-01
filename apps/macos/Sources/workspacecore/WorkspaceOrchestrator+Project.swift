@@ -143,7 +143,7 @@ extension WorkspaceOrchestrator {
         let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
         let defaultWorkspace = WorkspaceRecord(
             id: prepared.defaultWorkspace.id, projectID: record.id, dir: prepared.defaultWorkspace.dir, dirname: prepared.defaultWorkspace.dirname,
-            branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch, isDefault: true, isArchived: false,
+            branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch, isDefault: true,
             isHidden: prepared.defaultWorkspace.isHidden, isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
         try store.upsert(project: record)
         do {
@@ -219,7 +219,7 @@ extension WorkspaceOrchestrator {
     }
 
     private func removeProject(_ project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        let workspaces = try store.workspaces(projectID: project.id)
         // Finalize every coding-agent row in the project through the termination chokepoint BEFORE the
         // bulk store delete. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so
         // `deleteProject`'s raw `DELETE FROM agent_sessions` throws if the scope still holds any agent
@@ -269,12 +269,12 @@ extension WorkspaceOrchestrator {
         try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, baseBranch: branch)
         return WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: branch, branch: branch, baseBranch: branch, isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
     }
 
     func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
+        let workspaces = try store.workspaces(projectID: project.id)
+        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: true) }
     }
 
     func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {
