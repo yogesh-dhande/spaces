@@ -950,6 +950,43 @@ extension OrchestratorTests {
         }
     }
 
+    // Tests that attaching to an existing branch needs no base branch and records none.
+    func testCreateWorkspaceOnExistingBranchRecordsNoBaseBranch() throws {
+        let repo = try makeTempGitRepo(name: "existing-branch-no-base")
+        try runGit(["checkout", "-b", "existing-branch"], cwd: repo.path)
+        try runGit(["checkout", "main"], cwd: repo.path)
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "existing-branch", allowExistingBranchReuse: true)
+
+        XCTAssertEqual(workspace.branch, "existing-branch")
+        XCTAssertNil(workspace.baseBranch)
+        XCTAssertNil(try store.workspace(id: workspace.id)?.baseBranch)
+    }
+
+    // Tests that a base branch supplied while attaching to an existing branch is ignored.
+    func testCreateWorkspaceOnExistingBranchIgnoresSuppliedBaseBranch() throws {
+        let repo = try makeTempGitRepo(name: "existing-branch-ignores-base")
+        try runGit(["checkout", "-b", "existing-branch"], cwd: repo.path)
+        try runGit(["checkout", "main"], cwd: repo.path)
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(
+            projectID: project.id, branch: "existing-branch", baseBranch: "main", allowExistingBranchReuse: true)
+
+        XCTAssertEqual(workspace.branch, "existing-branch")
+        XCTAssertNil(workspace.baseBranch)
+        XCTAssertNil(try store.workspace(id: workspace.id)?.baseBranch)
+    }
+
     func testCreateWorkspaceRemoteLookupFailureDoesNotDecideBranchMode() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "remote-only"], cwd: fixture.source.path)

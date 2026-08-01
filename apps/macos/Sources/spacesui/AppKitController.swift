@@ -6095,6 +6095,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 10
+        contentStack.detachesHiddenViews = true
 
         let modeSegmented = NSSegmentedControl(
             labels: ["Create branch", "Use existing"], trackingMode: .selectOne, target: self, action: #selector(addWorkspaceBranchModeChanged(_:)))
@@ -6150,8 +6151,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
-            createButton: createButton)
+            newBranchField: newBranchField, baseBranchField: baseBranchField, baseBranchRow: baseRow, notesField: notesField,
+            autoNameState: autoNameState, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = addWorkspaceFieldRefs {
             updateAddWorkspaceBranchInputUI(refs: refs)
@@ -7708,13 +7709,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, branchModeSegmented: NSSegmentedControl?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
-        baseBranchField: NSComboBox?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, createButton: NSButton
+        baseBranchField: NSComboBox?, baseBranchRow: NSView?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?,
+        createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         addWorkspaceFieldRefs = AddWorkspaceFieldRefs(
             formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented,
-            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField,
-            autoNameState: autoNameState, createButton: createButton)
+            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, baseBranchRow: baseBranchRow,
+            notesField: notesField, autoNameState: autoNameState, createButton: createButton)
         branchModeSegmented?.tag = id
         return id
     }
@@ -8385,6 +8387,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let isCreatingBranch = addWorkspaceBranchMode(refs: refs) == .create
         refs.existingBranchField?.isHidden = isCreatingBranch
         refs.newBranchField?.isHidden = !isCreatingBranch
+        // Base branch is the start point for a branch Spaces creates. Attaching to an existing
+        // branch has no start point, so the whole row leaves the form in that mode.
+        refs.baseBranchRow?.isHidden = !isCreatingBranch
     }
 
     private func updateAddWorkspaceProgressiveDisclosure(refs: AddWorkspaceFieldRefs, branchValue: String) {
@@ -8411,16 +8416,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func createWorkspace(_ sender: NSButton) {
         guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         do {
-            let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mode = addWorkspaceBranchMode(refs: refs)
+            // Base branch only names the start point for a branch Spaces creates; attaching to an
+            // existing branch checks that branch out directly and sends no base branch.
+            let baseBranch = mode == .create ? refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
             let notes = refs.notesField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedNotes: String?
             if let notes, notes.isEmpty { resolvedNotes = nil } else { resolvedNotes = notes }
             if refs.isGitRepo, branch.isEmpty { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
-            if refs.isGitRepo, baseBranch == nil || baseBranch?.isEmpty == true {
+            if refs.isGitRepo, mode == .create, baseBranch == nil || baseBranch?.isEmpty == true {
                 throw WorkspaceError.invalidArgument(message: "Base branch is required for git projects.")
             }
-            if refs.isGitRepo, addWorkspaceBranchMode(refs: refs) == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
+            if refs.isGitRepo, mode == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
@@ -8428,7 +8436,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             {
                 let input = WorkspaceCreateInput(
                     projectID: refs.projectID, branch: branch, baseBranch: baseBranch, notes: resolvedNotes, allowRemoteBranchLookup: true,
-                    allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing, replaceExistingManagedDirectory: false)
+                    allowExistingBranchReuse: mode == .existing, replaceExistingManagedDirectory: false)
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
