@@ -513,7 +513,10 @@ public final class WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.")
             }
             resolvedBranch = trimmedBranch
-            resolvedBaseBranch = try resolveWorkspaceBaseBranch(project: project, baseBranch: baseBranch)
+            // A base branch is only the start point for a branch Spaces creates. Attaching to an
+            // existing branch checks that branch out directly, so nothing is resolved and any
+            // caller-supplied base branch is ignored rather than stored on the workspace.
+            resolvedBaseBranch = allowExistingBranchReuse ? nil : try resolveWorkspaceBaseBranch(project: project, baseBranch: baseBranch)
         } else {
             if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty {
                 throw WorkspaceError.invalidArgument(message: "Directory name override is only supported for git projects.")

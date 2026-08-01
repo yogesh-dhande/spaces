@@ -387,6 +387,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
 
         let store = try makeTemporaryStore()
+        let childPIDWritten = DispatchSemaphore(value: 0)
         let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -404,6 +405,7 @@ extension OrchestratorTests {
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: Int32(getpid()), state: .running,
                             updatedAt: "2026-05-09T17:00:01Z"), paths: paths)
+                    childPIDWritten.signal()
                 }
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -412,7 +414,12 @@ extension OrchestratorTests {
             settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            try orchestrator.launchWorkspace(workspaceID: workspace.id)
+            // Launch has already returned without the childPID; wait for the delayed write here so it
+            // still sees this profile's database and session directories rather than a torn-down one.
+            XCTAssertEqual(childPIDWritten.wait(timeout: .now() + 5), .success)
+        }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
