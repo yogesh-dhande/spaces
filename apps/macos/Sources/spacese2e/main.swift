@@ -2264,15 +2264,17 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
 
     @Option(name: .long) var workspaceDir: String
 
-    /// Archives one workspace through the production lifecycle path so the
-    /// manual harness can fall back when the archive confirmation UI is flaky.
+    /// Deletes one workspace through the production lifecycle path so the manual harness can fall back when
+    /// the delete confirmation UI is flaky. The record is gone afterwards, so the harness gets the identity
+    /// it asked to delete plus whatever the delete reported about its branches.
     func run() throws {
         let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
-        guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
-            throw ValidationError("Workspace disappeared: \(workspace.id)")
+        let outcome = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        guard try orchestrator.store.workspace(id: workspace.id) == nil else {
+            throw ValidationError("Workspace still present after delete: \(workspace.id)")
         }
-        try emitJSON(workspaceSummaryPayload(updated))
+        try emitJSON(
+            WorkspaceDeletePayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, notice: outcome.notice))
     }
 }
 
@@ -2443,6 +2445,13 @@ private struct RemoteDevicePairingWindowPayload: Codable {
     let pairingLink: String
     let certificateFingerprint: String
     let expiresAt: String?
+}
+
+private struct WorkspaceDeletePayload: Codable {
+    let id: String
+    let name: String
+    let dir: String
+    let notice: String?
 }
 
 private struct WorkspaceSummaryPayload: Codable {

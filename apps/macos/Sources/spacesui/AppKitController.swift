@@ -8741,6 +8741,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
+                    // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
+                    // remote that refused), so its report is shown; a delete with no branch boxes ticked
+                    // carries no notice and stays silent.
+                    if let notice = response.mutationNotice, !notice.isEmpty {
+                        self.showInfoMessage(title: "Deleted workspace", message: notice)
+                    }
                 case .failure(let error):
                     requestSidebarReload()
                     button?.isEnabled = true

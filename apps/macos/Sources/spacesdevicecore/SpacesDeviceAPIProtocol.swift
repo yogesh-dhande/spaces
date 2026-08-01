@@ -1807,12 +1807,21 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     public let projectID: String?
     public let workspaceID: String?
     public let sessionID: String?
+    /// What the mutation did beyond succeeding, when that is something the user asked for and has to be
+    /// told about — deleting a workspace's branches reports each branch it deleted, could not find, skipped
+    /// as protected, or failed to delete. `nil` when the mutation has nothing extra to report, which is what
+    /// lets a client show it only when there is something to show.
+    public let notice: String?
 
-    public init(overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil) {
+    public init(
+        overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
+        notice: String? = nil
+    ) {
         self.overview = overview
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.sessionID = sessionID
+        self.notice = notice
     }
 }
 
@@ -1925,6 +1934,9 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
         default: nil
         }
     }
+
+    /// The mutation's extra outcome, when it had one (see `SpacesDeviceMutationResult.notice`).
+    public var mutationNotice: String? { if case .mutation(let payload) = result { payload.notice } else { nil } }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
 
