@@ -49,25 +49,40 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
     /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings.
     /// opencode uses a plugin file instead and returns an empty list.
     ///
-    /// **Two tool events map to `working`, and the second one is what ends a block.** Neither agent
-    /// emits any event at the instant a permission prompt is answered, and both fire `PreToolUse`
-    /// *before* the permission decision, so a tool that needs approval always fires `PreToolUse` and
-    /// then `PermissionRequest` — the block always supersedes that tool's own `working`. `PostToolUse`
-    /// is the earliest evidence the human answered: the tool actually ran. Binding only `PreToolUse`
-    /// leaves the row `waiting` for the whole execution of the approved tool and, when that tool is the
-    /// turn's last, all the way to `Stop` — so the row never returns to `working` at all and its alert
-    /// only ever changes from blocked to done. (Verified against claude-code 2.1.220 and codex-cli
-    /// 0.146: `PreToolUse` → `PermissionRequest` → *approval, no hook* → `PostToolUse` → next tool's
-    /// `PreToolUse`.) The daemon suppresses the repeat `working` signals both events produce while the
-    /// agent is already spinning.
+    /// **The post-tool events are what end a block.** Neither agent emits anything at the instant a
+    /// permission prompt is answered, and both fire `PreToolUse` *before* the permission decision, so a
+    /// tool that needs approval always fires `PreToolUse` and then `PermissionRequest` — the block
+    /// always supersedes that tool's own `working`. The approved tool having run is the earliest
+    /// evidence the human answered. Binding only `PreToolUse` leaves the row `waiting` for the whole
+    /// execution of the approved tool and, when that tool is the turn's last, all the way to `Stop` — so
+    /// the row never returns to `working` at all and its alert only ever changes from blocked to done.
+    /// (Verified against claude-code 2.1.220 and codex-cli 0.146: `PreToolUse` → `PermissionRequest` →
+    /// *approval, no hook* → post-tool event → next tool's `PreToolUse`.)
+    ///
+    /// Claude Code splits the post-tool event by outcome: a tool that succeeds fires `PostToolUse`, and
+    /// one that fails or is interrupted fires `PostToolUseFailure` **instead**. Both must map to
+    /// `working` or an approved command that exits non-zero — the common case, since a risky command is
+    /// exactly what gets gated — would leave the row blocked. Codex has no failure variant in its hook
+    /// registry (PreToolUse/PostToolUse/PermissionRequest/Pre+PostCompact/SessionStart/SessionEnd/
+    /// UserPromptSubmit/SubagentStart/SubagentStop/Stop) and its single `PostToolUse` is verified to fire
+    /// for a non-zero exit, so it needs no second binding and a name it does not know would only add an
+    /// inert entry.
+    ///
+    /// **Denying a prompt is silent.** Both denial paths in Claude Code — `Esc` to cancel and the "No"
+    /// option — end the turn without firing any hook at all, `PermissionDenied` and `Stop` included
+    /// (`PermissionDenied` exists in the registry but is not the interactive-denial signal). Nothing can
+    /// be bound for it; the row leaves `blocked` on the human's next prompt instead.
+    ///
+    /// The daemon suppresses the repeat `working` signals these events produce while the agent is
+    /// already spinning.
     var jsonEventBindings: [AgentHookJSONWriter.EventBinding] {
         switch self {
         case .claudeCode:
             [
                 .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
                 .init(eventName: "PreToolUse", event: .working), .init(eventName: "PostToolUse", event: .working),
-                .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
-                .init(eventName: "SessionEnd", event: .exit),
+                .init(eventName: "PostToolUseFailure", event: .working), .init(eventName: "PermissionRequest", event: .blocked),
+                .init(eventName: "Stop", event: .done), .init(eventName: "SessionEnd", event: .exit),
             ]
         case .codex:
             // Codex has no session-end event, so no `exit` binding. Its hooks feature accepts the
