@@ -545,10 +545,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         processInfo.disableSuddenTermination()
     }
 
-    /// Clicking the Dock icon (or otherwise reopening the app) while the main window is hidden brings it
-    /// back instead of leaving the user with no visible window and no obvious way to summon one.
+    /// Clicking the Dock icon (or otherwise reopening the app) restores the main window whenever it is
+    /// not visible, even if another Spaces window (a panel window) is visible: `hasVisibleWindows` counts
+    /// every app window, so relying on it alone would leave the main window hidden behind a visible
+    /// panel. When the main window is already visible, AppKit's default reopen handling stands.
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        guard !hasVisibleWindows else { return true }
+        guard let window, !window.isVisible else { return true }
         ensureMainWindowVisible()
         return false
     }

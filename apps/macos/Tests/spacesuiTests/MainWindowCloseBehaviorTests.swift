@@ -86,20 +86,29 @@ final class MainWindowCloseBehaviorTests {
         #expect(controller.windowShouldClose(otherWindow))
     }
 
-    @Test func applicationShouldHandleReopenSkipsRepresentingWhenAWindowIsAlreadyVisible() {
+    @Test func applicationShouldHandleReopenSkipsRepresentingWhenTheMainWindowIsAlreadyVisible() {
         let controller = makeController()
-        controller.window = makeWindow()
+        let mainWindow = makeWindow()
+        controller.window = mainWindow
+        mainWindow.orderFront(nil)
 
+        // The method gates on the main window's own visibility, not the aggregate `hasVisibleWindows`
+        // flag (which counts every app window, including panel windows) — so the outcome must be the
+        // same regardless of what the caller passes for it.
         #expect(controller.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true))
+        #expect(controller.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false))
     }
 
-    // A `hasVisibleWindows: false` call would re-present the main window via `ensureMainWindowVisible()`,
-    // which routes through `presentWindowIfAllowed` — guarded only by
-    // `AppKitController.isRunningUnderXCTest` (checks `XCTestConfigurationFilePath`). That guard does not
-    // trip for Swift Testing suites run through `swift test` / `swiftpm.sh test`: per
-    // `SpacesTestHost.isRunningUnderXCTest()`'s doc comment, the Swift Testing lane has no `.xctest` path
-    // in argv and sets no `XCTestConfigurationFilePath`, unlike the linked-in-`XCTestCase` signal that
-    // guard doesn't check. Calling the `hasVisibleWindows: false` branch here would really invoke
-    // `NSApp.activate(ignoringOtherApps:)` and force-order a bogus window to the front during a unit
-    // test run, so that branch is left untested rather than fought.
+    // Two branches would re-present the main window via `ensureMainWindowVisible()`, which routes
+    // through `presentWindowIfAllowed` — guarded only by `AppKitController.isRunningUnderXCTest` (checks
+    // `XCTestConfigurationFilePath`): the main window hidden with `hasVisibleWindows: false` (a Dock
+    // click while no Spaces window at all is visible), and the main window hidden with
+    // `hasVisibleWindows: true` (a Dock click while a panel window is still visible — the case this
+    // method exists to get right, since the main window being hidden is what matters, not the aggregate
+    // flag). That guard does not trip for Swift Testing suites run through `swift test` /
+    // `swiftpm.sh test`: per `SpacesTestHost.isRunningUnderXCTest()`'s doc comment, the Swift Testing lane
+    // has no `.xctest` path in argv and sets no `XCTestConfigurationFilePath`, unlike the
+    // linked-in-`XCTestCase` signal that guard doesn't check. Calling either branch here would really
+    // invoke `NSApp.activate(ignoringOtherApps:)` and force-order a bogus window to the front during a
+    // unit test run, so both are left untested rather than fought.
 }
