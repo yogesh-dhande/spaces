@@ -482,9 +482,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
     /// launch starts fully expanded.
     var collapsedWorkspaceIDs: Set<String> = []
-    /// Attention events the user dismissed, one at a time or with Clear. Identities are stable per
-    /// source+kind+date, so a dismissed event stays dismissed until its source changes state again.
-    /// Persisted via `SpacesMobileDismissedAlertsStore` and pruned on every overview refresh.
+    /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
+    /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
+    /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
+    /// device's overview on every refresh; reloaded from the newly active device's bucket whenever
+    /// `activeDeviceID` changes, so this always describes the device whose overview is being published.
     var dismissedAlertIDs: Set<String> = []
     /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
     /// the terminal navigation flow as its selected session changes. Having the route open is not the
@@ -603,7 +605,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
-        dismissedAlertIDs = SpacesMobileDismissedAlertsStore.load()
 
         // When the persisted flag is on, construct the demo state directly and leave the real records
         // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
@@ -616,6 +617,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             isDemoModeEnabled = true
             self.bridgeClient = bridgeClient
             commandChannel = bridgeClient.makeCommandChannel()
+            loadDismissedAlertIDsForActiveDevice()
             return
         }
 
@@ -626,6 +628,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
     }
 
     init(
@@ -767,13 +771,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
             SpacesMobileAttention.events(
                 in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
             ).map(\.id))
-        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs)
+        saveDismissedAlertIDs()
     }
 
     /// Dismisses one attention event, leaving the rest of its band in place.
     func dismissAlert(_ event: SpacesMobileAttentionEvent) {
         dismissedAlertIDs.insert(event.id)
-        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs)
+        saveDismissedAlertIDs()
     }
 
     /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
@@ -782,7 +786,35 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview)
         guard retained != dismissedAlertIDs else { return }
         dismissedAlertIDs = retained
-        SpacesMobileDismissedAlertsStore.save(retained)
+        saveDismissedAlertIDs()
+    }
+
+    /// Loads the persisted dismissal bucket for `activeDeviceID` into the in-memory set, discarding
+    /// whatever the previous active device's bucket held. Called at every chokepoint that changes the
+    /// active device — init, a device switch or removal, and Demo Mode enable/disable — so
+    /// `dismissedAlertIDs` always belongs to the device whose overview is about to be published, never a
+    /// leftover from the connection this model just switched away from.
+    private func loadDismissedAlertIDsForActiveDevice() {
+        dismissedAlertIDs = activeDeviceID.map { SpacesMobileDismissedAlertsStore.load(deviceID: $0) } ?? []
+    }
+
+    /// Persists `dismissedAlertIDs` into the active device's bucket. A `nil` `activeDeviceID` (no device
+    /// selected yet) has nothing to attribute the dismissals to, so it's a no-op rather than a shared
+    /// bucket that would leak across whichever device pairs first.
+    private func saveDismissedAlertIDs() {
+        guard let activeDeviceID else { return }
+        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs, deviceID: activeDeviceID)
+    }
+
+    /// Drops persisted dismissal buckets for devices no longer known: the paired devices plus the demo
+    /// device, which always keeps its own bucket since Demo Mode is available regardless of pairing
+    /// state. Skipped while Demo Mode is on, because `pairedDevices` is swapped down to just the
+    /// synthetic Demo Mac then — running this against that narrowed list would read as every real device
+    /// having been unpaired and wipe their dismissals. That leaves the real buckets untouched by a Demo
+    /// Mode round trip and prunes only when `pairedDevices` genuinely reflects the paired list.
+    private func pruneDismissedAlertsForUnknownDevices() {
+        guard !isDemoModeEnabled else { return }
+        SpacesMobileDismissedAlertsStore.retainDevices(Set(pairedDevices.map(\.id)).union([SpacesMobileDemoDevice.id]))
     }
 
     /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
@@ -1204,6 +1236,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1278,6 +1312,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
+        loadDismissedAlertIDsForActiveDevice()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1305,6 +1340,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         browserRoutingTable.removeDevice(deviceID: id)
         let table = browserRoutingTable
         Task { await browserProxy.updateRoutes(table) }
@@ -1352,6 +1389,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewIdentity += 1
         DemoModeStore.save(true)
         clearActiveConnectionState()
+        loadDismissedAlertIDsForActiveDevice()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1368,6 +1406,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewIdentity += 1
         DemoModeStore.save(false)
         clearActiveConnectionState()
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         Task { await previousCommandChannel.close() }
     }
 
