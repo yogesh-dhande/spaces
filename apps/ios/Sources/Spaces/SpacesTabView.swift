@@ -112,7 +112,7 @@ struct SpacesTabView: View {
                         EmptyView()
                     } else if model.isLoading && model.overview == nil {
                         ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow()
-                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
+                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
                         ContentUnavailableView(
                             "No Workspaces", systemImage: "rectangle.stack", description: Text("Create a workspace or adjust the current filters.")
                         ).frame(maxWidth: .infinity, minHeight: 360).bandListRow()
@@ -120,6 +120,7 @@ struct SpacesTabView: View {
                         ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
                         ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
                     }
+                    if !model.isActiveDeviceBlocked { hiddenSection }
                 }.listStyle(.plain).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden).refreshable {
                     await model.refresh()
                 }
@@ -411,6 +412,52 @@ struct SpacesTabView: View {
         } else if row.canRun {
             pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
         }
+    }
+
+    // MARK: - Hidden workspaces
+
+    /// Demo Mode's backend cannot serve `setWorkspaceHidden`, so the recovery section that depends on it
+    /// stays off there — the same reasoning that keeps Hide itself out of `WorkspaceBandActions`. The
+    /// section is otherwise unfiltered by search or the row/state filters: it exists to recover a
+    /// workspace that the filtered browse below can no longer show, not to be browsed itself. Loose
+    /// terminal-session groups set the precedent for how search affects an auxiliary section here — they
+    /// stay on screen and filter their own contents rather than disappearing outright — so this section
+    /// likewise stays on screen while a search is active instead of hiding.
+    private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && !model.hiddenWorkspaces.isEmpty }
+
+    @ViewBuilder private var hiddenSection: some View {
+        if isHiddenSectionVisible {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { model.toggleHiddenSectionExpanded() }
+            } label: {
+                HeaderBand {
+                    Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("\(model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+                    Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.mutedSecondary)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow()
+            if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in hiddenWorkspaceRow(workspace) } }
+        }
+    }
+
+    private func hiddenWorkspaceRow(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
+        BandRow(
+            dotKind: nil, tile: TypeIconTile(systemName: workspace.isGitWorkspace ? "arrow.triangle.branch" : "folder"), title: workspace.displayName,
+            detail: workspace.projectName, detailIsMonospaced: false
+        ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu { unhideButton(workspace) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideButton(workspace) }
+    }
+
+    /// No confirmation: unlike Hide (which can stop a running workspace), unhiding only changes
+    /// visibility and cannot lose anything, so it fires directly from the swipe or the menu.
+    private func unhideButton(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
+        Button {
+            Task { await model.unhideWorkspace(workspace) }
+        } label: {
+            Label("Unhide", systemImage: "eye")
+        }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("workspace.unhide.\(workspace.id)")
     }
 
     // MARK: - Loose terminal-session groups

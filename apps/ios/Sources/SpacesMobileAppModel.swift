@@ -482,6 +482,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
     /// launch starts fully expanded.
     var collapsedWorkspaceIDs: Set<String> = []
+    /// Whether the Spaces tab's "Hidden" recovery section is expanded. In-memory only, like
+    /// `collapsedWorkspaceIDs`; a fresh launch starts collapsed since it exists to be checked
+    /// occasionally, not browsed by default.
+    var isHiddenSectionExpanded = false
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -657,6 +661,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// from the Mac's Workspace Visibility dialog is hidden here too.
     private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isHidden } }
 
+    /// Hidden workspaces, in the overview's own order — the same order `visibleWorkspaces` uses without
+    /// any further sort of its own. Backs the Spaces tab's "Hidden" recovery section.
+    var hiddenWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter(\.isHidden) }
+
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
             visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count && visibleRunStates.count == 3
@@ -830,6 +838,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             collapsedWorkspaceIDs.insert(workspaceID)
         }
     }
+
+    func toggleHiddenSectionExpanded() { isHiddenSectionExpanded.toggle() }
 
     /// Resolves a session summary for navigation, including sessions synthesized from
     /// workspace terminal rows that are not in the overview's session list.
@@ -1614,6 +1624,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
             }
             if currentWorkspace.isRunning { _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
             return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
+        }
+    }
+
+    /// Unhides the workspace. Unlike `hideWorkspace`, this never stops anything — a hidden workspace was
+    /// already stopped on the way in, and unhiding is purely a visibility change back to normal.
+    func unhideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: false, commandChannel: commandChannel)
         }
     }
 

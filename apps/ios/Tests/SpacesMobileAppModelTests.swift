@@ -215,6 +215,52 @@
             XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
         }
 
+        /// `hiddenWorkspaces` is the mirror image of the `workspaceGroups` exclusion above: a hidden
+        /// workspace is absent from the filtered browse list but present in the recovery list.
+        func testHiddenWorkspaceIsExcludedFromVisibleButPresentInHiddenWorkspaces() {
+            let model = makeModel()
+            model.overview = makeOverview(featureIsHidden: true)
+
+            XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
+            XCTAssertEqual(model.hiddenWorkspaces.map(\.id), ["workspace-feature"])
+        }
+
+        /// With no hidden workspaces, the recovery list is empty regardless of what else the overview has.
+        func testHiddenWorkspacesIsEmptyWhenNoneAreHidden() {
+            let model = makeModel()
+            model.overview = makeOverview()
+
+            XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
+        }
+
+        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike `hideWorkspace`, never checks
+        /// or stops anything first — there is nothing running to stop on a workspace that is already hidden.
+        func testUnhideWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsHidden: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let hiddenWorkspace = makeOverview(featureIsHidden: true).workspaces[0]
+
+            await model.unhideWorkspace(hiddenWorkspace)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["updateWorkspaceMetadata"])
+            guard case .updateWorkspaceMetadata(let payload)? = requests.first?.command else {
+                XCTFail("Expected an updateWorkspaceMetadata command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertEqual(payload.isHidden, false)
+            XCTAssertEqual(model.overview, refreshedOverview)
+        }
+
         /// Delete sends one `archiveWorkspace` carrying the branch choices, and publishes the refreshed
         /// overview the daemon returns with it.
         func testDeleteWorkspaceSendsArchiveWithBranchChoicesAndPublishesRefreshedOverview() async {
