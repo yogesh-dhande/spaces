@@ -205,6 +205,17 @@ enum SpacesMobileAttention {
         }
     }
 
+    /// The dismissals worth keeping: a dismissal only means anything while its event is still derivable,
+    /// so the stored set is trimmed to the identities `overview` still produces. Without this, dismissals
+    /// accumulate forever across launches.
+    ///
+    /// Derivation here deliberately suppresses nothing — no focused session, no watch windows — because a
+    /// temporarily suppressed event is still one this overview describes, and pruning its dismissal would
+    /// make it alert again once the suppression lapsed.
+    static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
+        dismissed.intersection(Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).map(\.id)))
+    }
+
     /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux
     /// runtime state. Unparseable or absent values return nil so the caller skips the source.
     static func date(fromISO8601 value: String?) -> Date? {

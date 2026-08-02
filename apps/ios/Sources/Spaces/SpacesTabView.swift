@@ -10,6 +10,7 @@ struct SpacesTabView: View {
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var isShowingFilters = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
+    @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
@@ -49,6 +50,10 @@ struct SpacesTabView: View {
                 workspace.isRunning
                     ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and removes it from this list and the Mac sidebar. Unhide it from the Mac."
                     : "\"\(workspace.displayName)\" will be removed from this list and the Mac sidebar. Unhide it from the Mac.")
+        }.sheet(item: $pendingDeleteWorkspace) { workspace in
+            WorkspaceDeleteSheet(workspace: workspace) { deleteLocalBranch, deleteRemoteBranch in
+                Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
+            }
         }
     }
 
@@ -99,26 +104,25 @@ struct SpacesTabView: View {
                     QRCodeScannerView { payload in model.prepareScannedPairingLink(payload) }
                 }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        homeControls.padding(.horizontal, 20).padding(.bottom, 12)
-                        if model.isActiveDeviceBlocked {
-                            // Fully blocked, scoped to this device: the banner in homeControls is the only
-                            // surface. Switch to another paired device or restart this device's daemon.
-                            EmptyView()
-                        } else if model.isLoading && model.overview == nil {
-                            ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360)
-                        } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
-                            ContentUnavailableView(
-                                "No Workspaces", systemImage: "rectangle.stack",
-                                description: Text("Create a workspace or adjust the current filters.")
-                            ).frame(maxWidth: .infinity, minHeight: 360)
-                        } else {
-                            ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
-                            ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
-                        }
-                    }.padding(.vertical, 12)
-                }.id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden).refreshable { await model.refresh() }
+                List {
+                    homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow()
+                    if model.isActiveDeviceBlocked {
+                        // Fully blocked, scoped to this device: the banner in homeControls is the only
+                        // surface. Switch to another paired device or restart this device's daemon.
+                        EmptyView()
+                    } else if model.isLoading && model.overview == nil {
+                        ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow()
+                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
+                        ContentUnavailableView(
+                            "No Workspaces", systemImage: "rectangle.stack", description: Text("Create a workspace or adjust the current filters.")
+                        ).frame(maxWidth: .infinity, minHeight: 360).bandListRow()
+                    } else {
+                        ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
+                        ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
+                    }
+                }.listStyle(.plain).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden).refreshable {
+                    await model.refresh()
+                }
             }
         }.background(Theme.bg.ignoresSafeArea())
     }
@@ -227,43 +231,48 @@ struct SpacesTabView: View {
         }
     }
 
-    private func projectSection(_ projectGroup: ProjectGroup) -> some View {
-        VStack(spacing: 0) {
-            Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 8)
-            ForEach(projectGroup.workspaceGroups) { group in workspaceSection(group).padding(.bottom, 14) }
-        }.padding(.bottom, 4)
+    @ViewBuilder private func projectSection(_ projectGroup: ProjectGroup) -> some View {
+        Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+            .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow()
+        ForEach(Array(projectGroup.workspaceGroups.enumerated()), id: \.element.id) { index, group in
+            // The project caption already separates the first workspace from what is above it, so only
+            // the workspaces after it carry the full band lead-in gap.
+            workspaceSection(group, topGap: index == 0 ? 8 : 14)
+        }
     }
 
-    @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup) -> some View {
+    @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup, topGap: CGFloat) -> some View {
         let isCollapsed = model.collapsedWorkspaceIDs.contains(group.id)
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
-            } label: {
-                HeaderBand {
-                    WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
-                    Spacer(minLength: 0)
-                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
-                        Theme.mutedSecondary)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").modifier(
-                WorkspaceBandContextMenu(model: model, workspace: group.workspace) { pendingHideWorkspace = group.workspace })
-            if !isCollapsed {
-                VStack(spacing: 0) {
-                    WorkspaceControlBar(
-                        workspace: group.workspace, isMutating: model.isMutating, onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                        onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                        onStop: { Task { await model.stopWorkspace(group.workspace) } },
-                        // Demo Mode's backend does not open ad hoc terminals; hide the action there.
-                        onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) })
-                    if group.rows.isEmpty {
-                        Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(
-                            maxWidth: .infinity, alignment: .leading
-                        ).padding(.vertical, 9).padding(.horizontal, 20)
-                    }
-                    ForEach(group.rows) { row in runtimeRow(row) }
-                }.padding(.top, 4)
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
+        } label: {
+            HeaderBand {
+                WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
+                Spacer(minLength: 0)
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
+                    Theme.mutedSecondary)
+            }.contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").bandListHeaderRow(topGap: topGap).modifier(
+            WorkspaceBandActions(
+                model: model, workspace: group.workspace, onHide: { pendingHideWorkspace = group.workspace },
+                onDelete: { pendingDeleteWorkspace = group.workspace }))
+        if !isCollapsed {
+            WorkspaceControlBar(
+                workspace: group.workspace, isMutating: model.isMutating, onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } },
+                onStop: { Task { await model.stopWorkspace(group.workspace) } },
+                // Demo Mode's backend does not open ad hoc terminals; hide the action there.
+                onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
+            ).bandListRow()
+            if group.rows.isEmpty {
+                Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 9).padding(.horizontal, 20).bandListRow()
+            }
+            ForEach(group.rows) { row in
+                // Lifecycle actions reach a row two ways: a long press opens the full menu (Rename
+                // included), a trailing swipe offers the lifecycle subset. Full swipe is off so an
+                // over-swipe cannot run or stop something on its own.
+                runtimeRow(row).bandListRow().swipeActions(edge: .trailing, allowsFullSwipe: false) { runtimeSwipeActions(for: row) }
             }
         }
     }
@@ -331,6 +340,37 @@ struct SpacesTabView: View {
         if row.isBrowserSession || row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
     }
 
+    /// The lifecycle subset of `runtimeContextMenu`. Rename stays menu-only: it swaps a text field into
+    /// the row, which a swipe gesture that has just closed cannot hand focus to cleanly. The row being
+    /// renamed offers nothing at all — swiping it would only drop the field's focus and discard the edit.
+    @ViewBuilder private func runtimeSwipeActions(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if renamingRowID != row.id { runtimeLifecycleSwipeActions(for: row) }
+    }
+
+    @ViewBuilder private func runtimeLifecycleSwipeActions(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.canRun {
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
+            } label: {
+                Label("Run", systemImage: "play.fill")
+            }.tint(Theme.accent).disabled(model.isMutating)
+        }
+        if row.canStop {
+            Button {
+                Task { await model.stop(row: row) }
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }.tint(Theme.red).disabled(model.isMutating)
+        }
+        if row.canRestart {
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .restart)
+            } label: {
+                Label("Restart", systemImage: "arrow.clockwise")
+            }.tint(Theme.muted).disabled(model.isMutating)
+        }
+    }
+
     @ViewBuilder private func runtimeContextMenu(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
         if row.canRun {
             Button {
@@ -375,17 +415,15 @@ struct SpacesTabView: View {
 
     // MARK: - Loose terminal-session groups
 
-    private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+    @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
         let workspace = model.overview?.workspaces.first { $0.id == group.id }
-        return VStack(spacing: 0) {
-            HeaderBand {
-                WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
-                Spacer(minLength: 0)
-                Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                    .lineLimit(1)
-            }.accessibilityIdentifier("workspace.band.\(group.id)")
-            VStack(spacing: 0) { ForEach(group.sessions) { session in terminalSessionRow(session) } }.padding(.top, 4)
-        }.padding(.bottom, 14)
+        HeaderBand {
+            WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
+            Spacer(minLength: 0)
+            Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+                .lineLimit(1)
+        }.accessibilityIdentifier("workspace.band.\(group.id)").bandListHeaderRow()
+        ForEach(group.sessions) { session in terminalSessionRow(session).bandListRow() }
     }
 
     private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
@@ -400,26 +438,48 @@ struct SpacesTabView: View {
     }
 }
 
-/// The workspace band's context menu — its only entry is Hide. Demo Mode's backend cannot hide a
-/// workspace, and the band has no other menu entry, so in Demo Mode the band presents no context menu
-/// rather than an empty one.
-private struct WorkspaceBandContextMenu: ViewModifier {
+/// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.
+/// Demo Mode's backend can do neither, so there the band presents no menu and no swipe rather than
+/// actions that would fail. A full swipe cannot fire either action: Delete needs its confirmation sheet
+/// and Hide its confirmation dialog, so neither is safe to trigger by over-swiping.
+private struct WorkspaceBandActions: ViewModifier {
     let model: SpacesMobileAppModel
     let workspace: SpacesDeviceWorkspaceSummary
     let onHide: () -> Void
+    let onDelete: () -> Void
+
+    /// The daemon refuses to delete a default workspace — a project's own directory goes when the project
+    /// does — so the action is hidden rather than offered and rejected.
+    private var canDelete: Bool { !workspace.isDefault }
 
     func body(content: Content) -> some View {
         if model.isDemoModeEnabled {
             content
         } else {
             content.contextMenu {
-                Button {
-                    onHide()
-                } label: {
-                    Label("Hide", systemImage: "eye.slash")
-                }.disabled(model.isMutating)
+                hideButton
+                if canDelete { deleteButton }
+            }.swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if canDelete { deleteButton }
+                hideButton.tint(Theme.muted)
             }
         }
+    }
+
+    private var hideButton: some View {
+        Button {
+            onHide()
+        } label: {
+            Label("Hide", systemImage: "eye.slash")
+        }.disabled(model.isMutating).accessibilityIdentifier("workspace.hide.\(workspace.id)")
+    }
+
+    private var deleteButton: some View {
+        Button(role: .destructive) {
+            onDelete()
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }.disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
 }
 

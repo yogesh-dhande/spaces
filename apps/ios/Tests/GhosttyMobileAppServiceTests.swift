@@ -1680,7 +1680,9 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(
-                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
+                scrollableButtons.compactMap(\.accessibilityLabel),
+                ["Paste", "tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
+            XCTAssertEqual(scrollableButtons.first?.accessibilityIdentifier, "terminal.accessory.paste")
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -1694,7 +1696,10 @@
             XCTAssertEqual(phoneFrames.joystickButton.width, 40, accuracy: 0.5)
             XCTAssertEqual(phoneFrames.keyboardButton.width, 40, accuracy: 0.5)
             let phoneWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .phone)
-            for width in phoneWidths.scrollable { XCTAssertEqual(width, 44, accuracy: 0.5) }
+            // The leading Paste button is an icon button, so it takes the icon width the pinned icon
+            // buttons use; the rest of the scrollable row keeps the text-button width.
+            XCTAssertEqual(phoneWidths.scrollable.first ?? 0, 40, accuracy: 0.5)
+            for width in phoneWidths.scrollable.dropFirst() { XCTAssertEqual(width, 44, accuracy: 0.5) }
             for width in phoneWidths.pinned { XCTAssertEqual(width, 40, accuracy: 0.5) }
 
             let padFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .pad)
@@ -1705,7 +1710,8 @@
             XCTAssertEqual(padFrames.joystickButton.width, 48, accuracy: 0.5)
             XCTAssertEqual(padFrames.keyboardButton.width, 48, accuracy: 0.5)
             let padWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .pad)
-            for width in padWidths.scrollable { XCTAssertEqual(width, 58, accuracy: 0.5) }
+            XCTAssertEqual(padWidths.scrollable.first ?? 0, 48, accuracy: 0.5)
+            for width in padWidths.scrollable.dropFirst() { XCTAssertEqual(width, 58, accuracy: 0.5) }
             for width in padWidths.pinned { XCTAssertEqual(width, 48, accuracy: 0.5) }
 
             hostView.setSoftwareKeyboardVisible(false)
@@ -1861,6 +1867,60 @@
             XCTAssertEqual(sentText.count, 1)
             XCTAssertEqual(sentText.first?.0, "line one\nline two")
             XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        func testRemoteTerminalAccessoryPasteButtonSendsClipboardAsPaste() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        /// The accessory Command modifier followed by "v" is the only way to reach cmd+v without a
+        /// hardware keyboard. It has to paste rather than fall through to the text path, which would type
+        /// a literal "v"; an empty clipboard still consumes the keystroke instead of typing one.
+        func testRemoteTerminalAccessoryCommandVPastesClipboard() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [(String, Bool)] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            let commandButton = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Command" })
+
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(sentKeys, [])
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+
+            // The modifier is consumed, so the next "v" is plain typed text again.
+            hostView.insertText("v")
+            XCTAssertEqual(sentText.count, 2)
+            XCTAssertEqual(sentText.last?.0, "v")
+            XCTAssertEqual(sentText.last?.1, false)
+
+            hostView.setClipboardTextForTesting(nil)
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(sentText.count, 2, "an empty clipboard must swallow cmd+v rather than type a literal v")
+            XCTAssertEqual(sentKeys, [])
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {

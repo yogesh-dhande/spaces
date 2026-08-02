@@ -26,22 +26,36 @@ struct AlertsTabView: View {
                 Text("Agents waiting for input and exited runs show up here.")
             }
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) { ForEach(model.attentionGroups) { group in alertGroupSection(group).padding(.bottom, 14) } }.padding(
-                    .vertical, 12)
-            }.scrollContentBackground(.hidden)
+            List {
+                ForEach(model.attentionGroups) { group in alertGroupSection(group) }
+                swipeHint
+            }.listStyle(.plain).scrollContentBackground(.hidden)
         }
     }
 
-    private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
-        VStack(spacing: 0) {
-            HeaderBand {
-                WorkspaceBandLabel(isGitWorkspace: group.isGitWorkspace, displayName: group.workspaceDisplayName)
-                Spacer(minLength: 0)
-                Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                    .lineLimit(1)
-            }.accessibilityIdentifier("alerts.band.\(group.workspaceID)")
-            VStack(spacing: 0) { ForEach(group.events) { event in eventRow(event) } }.padding(.top, 4)
+    /// Swiping is the only way to dismiss a single alert, and nothing on the row advertises it, so the
+    /// list closes with a one-line caption. It rides along with the alerts, so it disappears with them.
+    private var swipeHint: some View {
+        Text("Swipe an alert to dismiss it.").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).frame(
+            maxWidth: .infinity, alignment: .center
+        ).padding(.top, 16).padding(.bottom, 8).padding(.horizontal, 20).bandListRow().accessibilityIdentifier("alerts.swipeHint")
+    }
+
+    @ViewBuilder private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
+        HeaderBand {
+            WorkspaceBandLabel(isGitWorkspace: group.isGitWorkspace, displayName: group.workspaceDisplayName)
+            Spacer(minLength: 0)
+            Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+                .lineLimit(1)
+        }.accessibilityIdentifier("alerts.band.\(group.workspaceID)").bandListHeaderRow()
+        ForEach(group.events) { event in
+            eventRow(event).bandListRow().swipeActions(edge: .trailing) {
+                Button(role: .destructive) {
+                    model.dismissAlert(event)
+                } label: {
+                    Label("Dismiss", systemImage: "bell.slash")
+                }.accessibilityIdentifier("alert.dismiss.\(event.id)")
+            }
         }
     }
 

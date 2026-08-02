@@ -215,6 +215,72 @@
             XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
         }
 
+        /// Delete sends one `archiveWorkspace` carrying the branch choices, and publishes the refreshed
+        /// overview the daemon returns with it.
+        func testDeleteWorkspaceSendsArchiveWithBranchChoicesAndPublishesRefreshedOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let workspace = makeOverview().workspaces[0]
+
+            await model.deleteWorkspace(workspace, deleteLocalBranch: true, deleteRemoteBranch: false)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"])
+            guard case .archiveWorkspace(let payload)? = requests.first?.command else {
+                XCTFail("Expected an archiveWorkspace command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertTrue(payload.deleteLocalBranch)
+            XCTAssertFalse(payload.deleteRemoteBranch)
+            XCTAssertEqual(model.overview, refreshedOverview)
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        /// Branch deletion is the one part of a delete that can partly fail, so the notice it comes back
+        /// with is surfaced; a delete with no branch to report stays silent (covered above).
+        func testDeleteWorkspaceSurfacesBranchDeletionNotice() async {
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: refreshedOverview, workspaceID: "workspace-feature", notice: "Skipped protected branch \"main\".")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: true)
+
+            XCTAssertEqual(model.deletedWorkspaceNotice, "Skipped protected branch \"main\".")
+
+            model.dismissDeletedWorkspaceNotice()
+
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        func testDeleteWorkspaceSurfacesFailure() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {

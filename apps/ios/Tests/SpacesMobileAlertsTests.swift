@@ -142,6 +142,79 @@
             XCTAssertEqual(model.undismissedAlertCount, 1)
         }
 
+        func testDismissAlertRemovesOnlyThatEvent() {
+            let model = makeModel()
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
+                makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
+            ])
+            guard let dismissed = model.attentionGroups.first?.events.first(where: { $0.sourceID == "agent:agent-a" }) else {
+                XCTFail("Expected a derived event for agent-a.")
+                return
+            }
+
+            model.dismissAlert(dismissed)
+
+            XCTAssertEqual(model.undismissedAlertCount, 1)
+            XCTAssertEqual(model.attentionGroups.first?.events.map(\.sourceID), ["agent:agent-b"])
+
+            // The same source in a new state mints a new identity, so it alerts again.
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:30:00Z")
+            ])
+
+            XCTAssertEqual(model.undismissedAlertCount, 1)
+        }
+
+        func testDismissedAlertIDsRoundTripThroughStorage() {
+            let defaults = UserDefaults(suiteName: "spaces.mobile.tests.dismissed-alerts")!
+            defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts")
+            defer { defaults.removePersistentDomain(forName: "spaces.mobile.tests.dismissed-alerts") }
+
+            XCTAssertTrue(SpacesMobileDismissedAlertsStore.load(defaults: defaults).isEmpty)
+
+            SpacesMobileDismissedAlertsStore.save(["agent:a|waitingForInput|1", "agent:b|finished|2"], defaults: defaults)
+
+            XCTAssertEqual(SpacesMobileDismissedAlertsStore.load(defaults: defaults), ["agent:a|waitingForInput|1", "agent:b|finished|2"])
+        }
+
+        /// Dismissals only mean something while their event is still derivable, so a refreshed overview
+        /// that no longer produces an event drops its dismissal instead of storing it forever.
+        func testRetainedDismissalsDropIdentitiesTheOverviewNoLongerProduces() {
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
+            guard let liveID = events.first?.id else {
+                XCTFail("Expected a derived event.")
+                return
+            }
+
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID, "agent:agent-gone|finished|1"], in: overview)
+
+            XCTAssertEqual(retained, [liveID])
+        }
+
+        /// A dismissal for an event the overview still produces survives a refresh, and one for an event
+        /// the device stopped reporting is pruned out of the model's set.
+        func testRefreshPrunesStaleDismissalsAndKeepsLiveOnes() async {
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let liveID = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
+            model.dismissedAlertIDs = [liveID ?? "", "agent:agent-gone|finished|1"]
+
+            await model.refresh()
+
+            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
         func testDismissedEventFilteringLeavesOtherEvents() {
             let model = makeModel()
             model.overview = makeOverview(codingAgentRows: [

@@ -1,16 +1,19 @@
 import Foundation
 import spacesdevicecore
 
-/// Activity bands on the Agents tab, in display order.
+/// Activity bands on the Agents tab, in display order: the agents that need the user come first,
+/// then the ones with a result to read, then the ones still working, then everything idle.
 enum SpacesMobileAgentGroupKind: String, CaseIterable, Sendable {
-    case waiting
-    case running
+    case blocked
+    case done
+    case working
     case notRunning
 
     var label: String {
         switch self {
-        case .waiting: "Waiting"
-        case .running: "Running"
+        case .blocked: "Blocked"
+        case .done: "Done"
+        case .working: "Working"
         case .notRunning: "Not running"
         }
     }
@@ -60,11 +63,16 @@ enum SpacesMobileAgentGrouping {
     }
 
     static func kind(for agent: SpacesDeviceWorkspaceCodingAgentRow) -> SpacesMobileAgentGroupKind {
-        if agent.activityState == .waiting { return .waiting }
+        switch agent.activityState {
+        case .waiting: return .blocked
+        case .done: return .done
+        case .spinning: return .working
         // An exited agent still owns an interactive terminal (runState `.running`), but the agent process
-        // is gone — it belongs in "Not running", not the Running band.
-        if agent.activityState == .exited { return .notRunning }
-        if agent.runState == .running { return .running }
-        return .notRunning
+        // is gone — it belongs in "Not running", not the Working band.
+        case .exited: return .notRunning
+        // Idle says nothing about the agent, so its terminal decides: a live one is still working, a
+        // stopped one is not running.
+        case .idle: return agent.runState == .running ? .working : .notRunning
+        }
     }
 }

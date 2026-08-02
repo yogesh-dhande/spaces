@@ -471,6 +471,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
     var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
     var errorMessage: String?
+    /// The branch-deletion report a completed workspace delete came back with, shown once and cleared.
+    /// Only a delete that asked for a branch to be deleted produces one, so a plain delete stays silent.
+    var deletedWorkspaceNotice: String?
     var searchText = ""
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
     var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
@@ -479,8 +482,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
     /// launch starts fully expanded.
     var collapsedWorkspaceIDs: Set<String> = []
-    /// Attention events the user cleared. In-memory only; identities are stable per source+kind+date
-    /// so a cleared event stays cleared across refreshes until the source changes state again.
+    /// Attention events the user dismissed, one at a time or with Clear. Identities are stable per
+    /// source+kind+date, so a dismissed event stays dismissed until its source changes state again.
+    /// Persisted via `SpacesMobileDismissedAlertsStore` and pruned on every overview refresh.
     var dismissedAlertIDs: Set<String> = []
     /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
     /// the terminal navigation flow as its selected session changes. Having the route open is not the
@@ -599,6 +603,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
+        dismissedAlertIDs = SpacesMobileDismissedAlertsStore.load()
 
         // When the persisted flag is on, construct the demo state directly and leave the real records
         // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
@@ -762,6 +767,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
             SpacesMobileAttention.events(
                 in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
             ).map(\.id))
+        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs)
+    }
+
+    /// Dismisses one attention event, leaving the rest of its band in place.
+    func dismissAlert(_ event: SpacesMobileAttentionEvent) {
+        dismissedAlertIDs.insert(event.id)
+        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs)
+    }
+
+    /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
+    /// bounded by what the device currently reports rather than growing for the life of the install.
+    private func pruneDismissedAlertIDs(against overview: SpacesDeviceOverviewPayload) {
+        let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview)
+        guard retained != dismissedAlertIDs else { return }
+        dismissedAlertIDs = retained
+        SpacesMobileDismissedAlertsStore.save(retained)
     }
 
     /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
@@ -972,7 +993,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
             if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
             guard identity == overviewIdentity else { return }
-            self.overview = acceptedOverview
+            publishOverview(acceptedOverview)
             connectionNotice = nil
             errorMessage = nil
             refreshFailureStreak = nil
@@ -1556,6 +1577,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Deletes the workspace, optionally deleting the branch it was created on locally and/or on the
+    /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
+    /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
+    func deleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        do {
+            let response = try await bridgeClient.archiveWorkspace(
+                workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch,
+                commandChannel: commandChannel)
+            await applyMutationResponse(response, identity: identity)
+            guard identity == overviewIdentity else { return }
+            if let notice = response.mutationNotice, !notice.isEmpty { deletedWorkspaceNotice = notice }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
+    }
+
+    func dismissDeletedWorkspaceNotice() { deletedWorkspaceNotice = nil }
+
     private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async {
         guard !isMutating else { return }
         isMutating = true
@@ -1812,7 +1856,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard let overview = response.overview, identity == overviewIdentity else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
-        self.overview = overview
+        publishOverview(overview)
         connectionNotice = nil
         errorMessage = nil
         // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
@@ -1820,6 +1864,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // mutation keeps its original start time, and the next isolated failure alerts on the strength
         // of an outage that demonstrably ended.
         refreshFailureStreak = nil
+    }
+
+    /// Publishes an accepted overview and trims stale alert dismissals against it. Every path that
+    /// publishes a fetched overview goes through here, so the persisted dismissal set is pruned exactly
+    /// once per refresh. Clearing the overview (a device switch, a block) deliberately does not prune:
+    /// there is nothing to prune against, and pruning against nothing would discard every dismissal.
+    private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
+        overview = payload
+        if let payload { pruneDismissedAlertIDs(against: payload) }
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1846,7 +1899,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard identity == overviewIdentity else { return nil }
             await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
             guard identity == overviewIdentity else { return nil }
-            overview = refreshedOverview
+            publishOverview(refreshedOverview)
             errorMessage = nil
             connectionNotice = nil
             refreshFailureStreak = nil

@@ -9,7 +9,7 @@ struct TerminalComposerSheet: View {
     let stagedScreenshots: StagedScreenshotStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var hasPasteableImage = false
+    @State private var hasPasteableContent = false
     @State private var didStartSending = false
     @FocusState private var isMessageFieldFocused: Bool
 
@@ -17,6 +17,10 @@ struct TerminalComposerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // The actions sit above the text field so the software keyboard, which claims the bottom of
+            // the sheet as soon as the field takes focus, can never cover them.
+            actionBar
+
             if !model.composerAttachments.isEmpty { attachmentStrip }
 
             TextField("Message", text: composerDraftText, axis: .vertical).lineLimit(3...6).textFieldStyle(.plain).disabled(
@@ -29,33 +33,27 @@ struct TerminalComposerSheet: View {
                 Text(errorMessage).font(.footnote).foregroundStyle(Theme.red).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier(
                     "composer.error")
             }
-        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).background(Theme.bg).safeAreaInset(edge: .bottom) {
-            // Pin the paste/send controls to the bottom safe area so keyboard avoidance keeps them above
-            // the keyboard. A bottom-anchored Spacer put them at the sheet's edge, where the keyboard —
-            // especially as it first rises — drew over them.
-            bottomBar.padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 12).background(Theme.bg)
-        }.presentationDetents([.medium, .large]).presentationBackground(Theme.bg).accessibilityIdentifier("composer.sheet").onAppear {
-            refreshPasteState()
-            focusMessageField()
-        }.onReceive(
-            NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)
-        ) { _ in refreshPasteState() }.onChange(of: model.isSendingComposedMessage) { _, isSending in
-            if isSending {
-                didStartSending = true
-            } else if didStartSending {
-                didStartSending = false
-                // Success clears the draft and leaves no error; a partial failure keeps the draft and
-                // sets composerErrorMessage, so stay open for the user to retry.
-                if model.composerErrorMessage == nil { dismiss() }
+        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).background(Theme.bg).presentationDetents([.medium, .large])
+            .presentationBackground(Theme.bg).accessibilityIdentifier("composer.sheet").onAppear {
+                refreshPasteState()
+                focusMessageField()
+            }.onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in refreshPasteState() }.onChange(
+                of: model.isSendingComposedMessage
+            ) { _, isSending in
+                if isSending {
+                    didStartSending = true
+                } else if didStartSending {
+                    didStartSending = false
+                    // Success clears the draft and leaves no error; a partial failure keeps the draft and
+                    // sets composerErrorMessage, so stay open for the user to retry.
+                    if model.composerErrorMessage == nil { dismiss() }
+                }
             }
-        }
     }
 
     /// Focuses the message field just after the sheet settles so the keyboard rises on open. Deferring a
     /// hair avoids the first-present case where claiming first responder mid-transition drops the keyboard.
-    private func focusMessageField() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isMessageFieldFocused = true }
-    }
+    private func focusMessageField() { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isMessageFieldFocused = true } }
 
     private var attachmentStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -80,7 +78,7 @@ struct TerminalComposerSheet: View {
         }.accessibilityIdentifier("composer.attachment.\(index)")
     }
 
-    private var bottomBar: some View {
+    private var actionBar: some View {
         HStack(spacing: 12) {
             if let staged = stagedScreenshots.staged {
                 Button {
@@ -95,12 +93,11 @@ struct TerminalComposerSheet: View {
             }
 
             Button {
-                pasteClipboardImage()
+                pasteClipboard()
             } label: {
                 Image(systemName: "doc.on.clipboard").font(.system(size: 18)).foregroundStyle(
-                    hasPasteableImage && !model.isSendingComposedMessage ? Theme.accent : Theme.muted)
-            }.disabled(model.isSendingComposedMessage || !hasPasteableImage).accessibilityLabel("Paste image").accessibilityIdentifier(
-                "composer.paste")
+                    hasPasteableContent && !model.isSendingComposedMessage ? Theme.accent : Theme.muted)
+            }.disabled(model.isSendingComposedMessage || !hasPasteableContent).accessibilityLabel("Paste").accessibilityIdentifier("composer.paste")
 
             Spacer(minLength: 0)
 
@@ -127,14 +124,26 @@ struct TerminalComposerSheet: View {
         }
     }
 
-    private func refreshPasteState() { hasPasteableImage = TerminalUIPasteboardImageReader.hasImage() }
+    /// Both probes read declared pasteboard types only, so the button's enabled state costs no paste
+    /// prompt; the data is read in `pasteClipboard()` once the user commits.
+    private func refreshPasteState() { hasPasteableContent = TerminalUIPasteboardImageReader.hasImage() || UIPasteboard.general.hasStrings }
 
-    private func pasteClipboardImage() {
+    /// Pastes whatever the clipboard holds: an image becomes an attachment, otherwise text is appended to
+    /// the draft.
+    private func pasteClipboard() {
         guard !model.isSendingComposedMessage else { return }
         switch TerminalUIPasteboardImageReader.readImage() {
         case .image(let attachment): model.attachComposerImage(attachment)
         case .rejected(let message): model.composerErrorMessage = message
-        case .noImage: model.composerErrorMessage = "No image was found on the clipboard."
+        case .noImage: pasteClipboardText()
         }
+    }
+
+    private func pasteClipboardText() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            model.composerErrorMessage = "There was nothing on the clipboard to paste."
+            return
+        }
+        model.composerDraftText += text
     }
 }
