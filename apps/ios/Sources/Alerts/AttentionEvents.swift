@@ -103,15 +103,20 @@ enum SpacesMobileAttention {
     ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. Overview
     ///     polling is paused while a detail is open, so a bell rung during a watch is first seen after
     ///     that watch ended — a bell inside any of them is one the user saw ring.
+    ///   - includingHiddenWorkspaces: when true, hidden workspaces' events are derived too instead of
+    ///     being skipped. Defaults to false so the Alerts tab and its badge stay unaffected; the only
+    ///     caller that opts in is `retainedDismissedEventIDs`, which needs a hidden workspace's events
+    ///     to still be derivable so their dismissals survive hiding (see that function's doc comment).
     static func events(
-        in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]
+        in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]],
+        includingHiddenWorkspaces: Bool = false
     ) -> [SpacesMobileAttentionEvent] {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
-        let invisibleWorkspaceIDs = Set(overview.workspaces.lazy.filter(\.isHidden).map(\.id))
+        let invisibleWorkspaceIDs = includingHiddenWorkspaces ? [] : Set(overview.workspaces.lazy.filter(\.isHidden).map(\.id))
 
-        for workspace in overview.workspaces where !workspace.isHidden {
+        for workspace in overview.workspaces where includingHiddenWorkspaces || !workspace.isHidden {
             for agent in workspace.codingAgentRows {
                 if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
                 let kind: SpacesMobileAttentionEvent.Kind?
@@ -209,11 +214,14 @@ enum SpacesMobileAttention {
     /// so the stored set is trimmed to the identities `overview` still produces. Without this, dismissals
     /// accumulate forever across launches.
     ///
-    /// Derivation here deliberately suppresses nothing — no focused session, no watch windows — because a
-    /// temporarily suppressed event is still one this overview describes, and pruning its dismissal would
-    /// make it alert again once the suppression lapsed.
+    /// Derivation here deliberately suppresses nothing — no focused session, no watch windows, and hidden
+    /// workspaces included — because a temporarily suppressed event is still one this overview describes,
+    /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace
+    /// is exactly such a suppression: it is reversible from iOS, and unhiding it must not resurface alerts
+    /// the user already dismissed while it was hidden.
     static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
-        dismissed.intersection(Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).map(\.id)))
+        dismissed.intersection(
+            Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true).map(\.id)))
     }
 
     /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux

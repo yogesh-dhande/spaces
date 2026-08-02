@@ -233,6 +233,47 @@
             XCTAssertEqual(retained, [liveID])
         }
 
+        /// Hiding a workspace is a reversible suppression, the same as a focused session or a watch
+        /// window: `retainedDismissedEventIDs` must keep deriving a hidden workspace's events (it opts
+        /// into `includingHiddenWorkspaces`), or hiding it would prune the dismissal and unhiding it would
+        /// resurface an alert the user already dismissed even though nothing about the source changed.
+        /// This covers an agent-derived event.
+        func testRetainedDismissalsSurviveWhenAnAgentsWorkspaceIsHidden() {
+            let visibleOverview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+                XCTFail("Expected a derived event.")
+                return
+            }
+            let hiddenOverview = makeOverview(workspaces: [
+                makeWorkspace(
+                    id: "workspace-feature", branch: "feature", isHidden: true,
+                    codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
+            ])
+
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+
+            XCTAssertEqual(retained, [liveID])
+        }
+
+        /// The same guarantee for a session-derived event: an exited loose terminal whose identity comes
+        /// from the loose-session branch of `events(...)`, not a workspace row.
+        func testRetainedDismissalsSurviveWhenASessionsWorkspaceIsHidden() {
+            let session = makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:04:00Z")
+            let visibleOverview = makeOverview(sessions: [session])
+            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+                XCTFail("Expected a derived event.")
+                return
+            }
+            let hiddenOverview = makeOverview(
+                workspaces: [makeWorkspace(id: "workspace-feature", branch: "feature", isHidden: true)], sessions: [session])
+
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+
+            XCTAssertEqual(retained, [liveID])
+        }
+
         /// A dismissal for an event the overview still produces survives a refresh, and one for an event
         /// the device stopped reporting is pruned out of the model's set.
         func testRefreshPrunesStaleDismissalsAndKeepsLiveOnes() async {
@@ -247,6 +288,43 @@
             let liveID = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
             model.dismissedAlertIDs = [liveID ?? "", "agent:agent-gone|finished|1"]
 
+            await model.refresh()
+
+            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+        }
+
+        /// End-to-end through the model: a dismissal must survive a refresh that reports its workspace
+        /// hidden and a later refresh that reports it visible again. Only a genuinely new state change (a
+        /// later timestamp, minting a new event identity) may bring the alert back.
+        func testDismissalSurvivesHidingAndUnhidingItsWorkspaceAcrossRefreshes() async {
+            let overviewBox = OverviewBox(
+                makeOverview(codingAgentRows: [
+                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+                ]))
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewBox.get()))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let liveID = SpacesMobileAttention.events(in: overviewBox.get(), focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id
+            model.dismissedAlertIDs = [liveID ?? ""]
+
+            overviewBox.set(
+                makeOverview(workspaces: [
+                    makeWorkspace(
+                        id: "workspace-feature", branch: "feature", isHidden: true,
+                        codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
+                ]))
+            await model.refresh()
+
+            XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
+            XCTAssertEqual(model.undismissedAlertCount, 0)
+
+            overviewBox.set(
+                makeOverview(codingAgentRows: [
+                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+                ]))
             await model.refresh()
 
             XCTAssertEqual(model.dismissedAlertIDs, [liveID ?? ""])
@@ -741,6 +819,28 @@
             @discardableResult func advance(_ seconds: TimeInterval) -> Date {
                 now = now.addingTimeInterval(seconds)
                 return now
+            }
+        }
+
+        /// Lock-guarded overview box so a fake bridge client's `@Sendable` closure can hand back whatever
+        /// overview the test most recently set, letting successive `model.refresh()` calls see different
+        /// payloads (e.g. a workspace going hidden, then visible again).
+        private final class OverviewBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var overview: SpacesDeviceOverviewPayload
+
+            init(_ overview: SpacesDeviceOverviewPayload) { self.overview = overview }
+
+            func set(_ overview: SpacesDeviceOverviewPayload) {
+                lock.lock()
+                self.overview = overview
+                lock.unlock()
+            }
+
+            func get() -> SpacesDeviceOverviewPayload {
+                lock.lock()
+                defer { lock.unlock() }
+                return overview
             }
         }
 
