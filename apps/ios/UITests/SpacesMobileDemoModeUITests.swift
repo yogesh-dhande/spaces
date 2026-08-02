@@ -131,7 +131,7 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
     private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
         app.launchArguments += [
             "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "unset", "-spaces.mobile.connection-settings", "unset",
-            "-spaces.mobile.dismissed-alert-ids", "unset",
+            "-spaces.mobile.dismissed-alert-ids-by-device", "unset",
         ]
     }
 
