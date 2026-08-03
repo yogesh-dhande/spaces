@@ -174,7 +174,21 @@ extension WorkspaceOrchestrator {
         _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
     }
 
+    /// Under the project gate, resolving the record inside it. This is a read-modify-write of the project
+    /// row: a delete landing between an unprotected read and the `upsert` would put the deleted project
+    /// straight back, and `ensureDefaultWorkspace` would then recreate a default workspace pointing at
+    /// directories the teardown had already removed. Only the project key is claimed — the per-workspace
+    /// writes below all belong to workspaces of this project, which no teardown can be touching while the
+    /// project key is held — so the project-then-workspace order is preserved.
     @discardableResult public func updateProjectConfig(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        try withProjectLifecycleLock(projectID: projectID) {
+            try updateProjectConfigUnlocked(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces, update: update)
+        }
+    }
+
+    private func updateProjectConfigUnlocked(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
         -> ProjectRecord
     {
         guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }

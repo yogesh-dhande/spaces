@@ -77,6 +77,81 @@ extension OrchestratorTests {
         ]
     }
 
+    /// Updating a project's settings is a read-modify-write of its record, so it runs under the project
+    /// gate: a delete landing between the read and the write would put the deleted project straight back,
+    /// and its default-workspace ensure would rebuild rows under directories the teardown had removed. A
+    /// resurrected project is the failure here — the delete must stay done.
+    func testUpdatingProjectConfigFailsLoudlyWhileTheProjectIsBeingDeletedAndCannotResurrectIt() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-config-update")
+        let otherRepo = try makeTempGitRepo(name: "teardown-gate-config-update-other")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the project delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try deleter.addProject(dir: repo.path)
+        let otherProject = try deleter.addProject(dir: otherRepo.path)
+        let workspace = try deleter.createWorkspace(projectID: project.id, branch: "feature-config")
+        let timestamp = "2026-08-03T00:00:00Z"
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-config", workspaceID: workspace.id, provider: .spaces, label: "codex", terminalTrackingID: "session-config",
+                sessionKey: nil, status: .spinning, createdAt: timestamp, updatedAt: timestamp))
+
+        Thread.detachNewThread {
+            try? deleter.removeProject(id: project.id)
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        XCTAssertThrowsError(try contender.updateProjectConfig(projectID: project.id) { $0.setupScript = "echo late" }) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        // A project the delete does not touch keeps taking configuration updates.
+        XCTAssertNoThrow(try contender.updateProjectConfig(projectID: otherProject.id) { $0.setupScript = "echo fine" })
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+        XCTAssertNil(try store.project(id: project.id), "a rejected config update must not resurrect the deleted project")
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty, "no default workspace may be rebuilt for a deleted project")
+    }
+
+    /// A setup script can run for minutes and a delete has to stay possible throughout, so setup takes no
+    /// lifecycle gate and its workspace can disappear mid-run. Finishing against a deleted workspace has
+    /// to be a silent no-op: the settings foreign key rejects the write, so an unguarded setup ends by
+    /// throwing a raw `FOREIGN KEY constraint failed` at whoever triggered it rather than accepting that
+    /// the delete won.
+    func testSetupFinishingAfterItsWorkspaceWasDeletedWritesNoState() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-setup-write")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-setup")
+        // A normal setup records its outcome.
+        try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
+        XCTAssertEqual(try store.workspaceSetupState(workspaceID: workspace.id)?.status, .succeeded)
+
+        // The delete wins the race: everything the setup writes afterwards is for a workspace that is gone.
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        try orchestrator.runWorkspaceSetup(project: project, workspace: workspace)
+
+        XCTAssertNil(try store.workspace(id: workspace.id), "the delete stands")
+        XCTAssertNil(try store.workspaceSetupState(workspaceID: workspace.id), "no setup state may outlive the workspace it describes")
+    }
+
     /// A project delete holds its gate from before it reads its workspace list until every worktree is
     /// gone, so no workspace can be added to the project inside that window and every workspace the
     /// project has is torn down — record, worktree and all. The end state is the point: a workspace whose
