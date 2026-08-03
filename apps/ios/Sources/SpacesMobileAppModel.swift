@@ -1731,7 +1731,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
             workspaceIDsPendingDeletion.remove(workspace.id)
             guard identity == overviewIdentity else { return }
-            if workspaceStillPresent { handleBridgeError(error) }
+            if workspaceStillPresent {
+                handleBridgeError(error)
+            } else if deleteLocalBranch || deleteRemoteBranch {
+                // The delete landed, but the branch-deletion report existed only in the response that was
+                // lost — reconciliation can prove the workspace is gone, not what happened to branches the
+                // user explicitly asked to delete. Say so rather than silently succeeding.
+                deletedWorkspaceNotice =
+                    "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+            }
         }
     }
 

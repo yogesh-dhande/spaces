@@ -429,6 +429,31 @@
             XCTAssertNil(model.errorMessage)
             XCTAssertEqual(model.overview, overviewWithoutFeature)
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.deletedWorkspaceNotice, "no branch deletion was requested, so a reconciled delete stays silent")
+        }
+
+        /// The branch-deletion report exists only in the archive response, so when that response is lost
+        /// and reconciliation proves only that the workspace is gone, a delete that asked for branch
+        /// deletion says the result is unknown instead of silently succeeding.
+        func testDeleteWorkspaceTimeoutReconciliationReportsUnknownBranchOutcome() async {
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.deletedWorkspaceNotice, "a lost branch-deletion result must be reported, not silently dropped")
+            XCTAssertTrue(model.deletedWorkspaceNotice?.contains("branch") == true)
         }
 
         /// The point of reconciling rather than reporting failure: the row stays marked for deletion for
