@@ -145,5 +145,7 @@ struct TerminalComposerSheet: View {
             return
         }
         model.composerDraftText += text
+        // A successful paste supersedes whatever a prior attempt reported, same as image attach.
+        model.composerErrorMessage = nil
     }
 }

@@ -7,6 +7,33 @@ import systembridge
 
 extension OrchestratorTests {
 
+    // The Device API builds a fresh orchestrator per request and runs workspace/project teardown on its
+    // own queue with another one, so the per-workspace lifecycle gate must span instances: a mutation
+    // racing a teardown fails loudly instead of interleaving with it.
+    func testWorkspaceLifecycleLockSerializesAcrossOrchestratorInstances() throws {
+        let store = try makeTemporaryStore()
+        let holder = makeTestOrchestrator(store: store)
+        let contender = makeTestOrchestrator(store: store)
+
+        let lockHeld = expectation(description: "holder entered the lifecycle lock")
+        let releaseLock = DispatchSemaphore(value: 0)
+        let workspaceID = "lifecycle-gate-cross-instance-\(UUID().uuidString)"
+        Thread.detachNewThread {
+            try? holder.withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 5)
+        defer { releaseLock.signal() }
+
+        XCTAssertThrowsError(try contender.withWorkspaceLifecycleLock(workspaceID: workspaceID) {}) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        // Another workspace's lifecycle is not held hostage by the in-flight teardown.
+        XCTAssertNoThrow(try contender.withWorkspaceLifecycleLock(workspaceID: "\(workspaceID)-other") {})
+    }
+
     // Tests workspace stop script is seeded from project and can be overridden by arranging representative inputs and asserting the expected result.
     func testWorkspaceStopScriptIsSeededFromProjectAndCanBeOverridden() throws {
         let repo = try makeTempGitRepo(name: "stop-script-seed")
@@ -579,7 +606,6 @@ extension OrchestratorTests {
 
     // Tests update workspace settings removing browser sessions closes tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
-
     // MARK: - workspaceSetupState from orchestrator
 
     // Tests workspaceSetupState returns current state by arranging representative inputs and asserting the expected result.
@@ -844,8 +870,8 @@ extension OrchestratorTests {
         let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main")
         try store.upsert(project: projectRecord)
         let workspaceRecord = WorkspaceRecord(
-            id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true,
-            isRunning: false, lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
 
         // removeProject exercises isManagedRepositoryDirectory; the temp path is outside the managed root so nothing gets deleted.

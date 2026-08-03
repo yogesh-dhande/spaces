@@ -242,7 +242,11 @@ public final class WorkspaceOrchestrator {
     let daemonHandoffInProgress: @Sendable () -> Bool
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
-    private let workspaceLifecycleGate = PerKeyGate()
+    /// Process-wide, not per-instance: the Device API builds a fresh orchestrator per request — and runs
+    /// workspace/project teardown on its own queue with yet another instance — so an instance-scoped gate
+    /// would never serialize two requests. Sharing the gate makes a lifecycle mutation racing a teardown
+    /// fail loudly with "already in progress" regardless of which queue or orchestrator carries it.
+    private static let workspaceLifecycleGate = PerKeyGate()
     let workspaceSetupGate = PerKeyGate()
 
     public init(
@@ -322,8 +326,8 @@ public final class WorkspaceOrchestrator {
         let records = try store.workspaces(projectID: projectID)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
+                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
+                isDefault: $0.isDefault, notes: $0.notes)
         }
     }
 
@@ -455,8 +459,8 @@ public final class WorkspaceOrchestrator {
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden, isRunning: workspace.isRunning,
+            lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
         try store.upsert(workspace: updatedWorkspace)
     }
 
@@ -668,8 +672,7 @@ public final class WorkspaceOrchestrator {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: worktree.branchName,
                         baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes
-                    )
+                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes)
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
@@ -686,8 +689,8 @@ public final class WorkspaceOrchestrator {
                 guard let branchName = worktree.branchName else { continue }
                 let workspace = WorkspaceRecord(
                     id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
-                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false,
-                    isRunning: false, lastLaunchedAt: nil)
+                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
                 try seedWorkspaceSettings(project: project, workspace: workspace)
                 try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
@@ -1050,7 +1053,7 @@ public final class WorkspaceOrchestrator {
     }
 
     func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
-        try workspaceLifecycleGate.withKey(
+        try Self.workspaceLifecycleGate.withKey(
             workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace action is already in progress.") }, operation: operation)
     }
 
@@ -2076,9 +2079,7 @@ public final class WorkspaceOrchestrator {
     > {
         let records = try store.workspaces(projectID: project.id)
         var used = Set<String>()
-        for record in records {
-            if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) }
-        }
+        for record in records { if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) } }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
             for entry in entries where entry != excludingDirname && entry != excludingFilesystemDirname { used.insert(entry) }
