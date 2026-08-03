@@ -595,6 +595,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
     /// instead of sleeping through the production wait.
     @ObservationIgnored private let refreshFailureAlertDelay: Duration
+    /// Wait between the overview refetches that reconcile a timed-out workspace delete (production
+    /// default 2s, matching the ordinary poll cadence). Injectable so tests exercise the reconciliation
+    /// loop without sleeping through it.
+    @ObservationIgnored private let workspaceDeletionReconciliationInterval: Duration
     /// Source of "now" for the refresh-failure streak's start time and elapsed-time check. The streak is
     /// pure bookkeeping against a clock — no real waiting happens between reading it twice — so tests
     /// inject a fake that advances on command instead of sleeping past `refreshFailureAlertDelay` in
@@ -620,6 +624,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonUpdatePollInterval = .seconds(3)
         daemonUpdateTimeout = .seconds(30)
         refreshFailureAlertDelay = .seconds(5)
+        workspaceDeletionReconciliationInterval = .seconds(2)
         now = { ContinuousClock.now }
         wallClock = { Date() }
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
@@ -655,8 +660,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
-        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
-        wallClock: @escaping @Sendable () -> Date = { Date() }
+        refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.settings = settings
         pairedDevices = []
@@ -668,6 +673,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
         self.refreshFailureAlertDelay = refreshFailureAlertDelay
+        self.workspaceDeletionReconciliationInterval = workspaceDeletionReconciliationInterval
         self.now = now
         self.wallClock = wallClock
     }
@@ -1655,6 +1661,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Reconciliation attempts after an `archiveWorkspace` timeout (see `deleteWorkspace`). The daemon
+    /// runs the delete on its own teardown queue and can keep going well past this request's timeout, so
+    /// refetching the overview a few times gives a delete that is still finishing a chance to resolve to
+    /// success instead of a spurious error. Five attempts at `workspaceDeletionReconciliationInterval`
+    /// give the daemon a settle window on the order of the poll cadence rather than an instant verdict.
+    private static let workspaceDeletionReconciliationAttempts = 5
+
     /// Deletes the workspace, optionally deleting the branch it was created on locally and/or on the
     /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
     /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
@@ -1665,20 +1678,84 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let identity = overviewIdentity
         // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
         // (which no longer carries the workspace) is published, so the band never flicks back to looking
-        // untouched on its way out; on failure lifting it restores the ordinary band beside the error.
+        // untouched on its way out; on a definitive failure lifting it restores the ordinary band beside
+        // the error. A timeout is neither of those — see the catch block below — so the mark's removal
+        // is handled explicitly per outcome instead of by an unconditional `defer`.
         workspaceIDsPendingDeletion.insert(workspace.id)
-        defer { workspaceIDsPendingDeletion.remove(workspace.id) }
+
+        // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
+        // The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own queue, so
+        // it can take many seconds — far longer than the 8s the poll allows itself. The transport does
+        // not serialize whole request/response round trips on a connection (issue #248): the poll and
+        // this request can interleave on one connection, and when the poll's own request times out,
+        // `SpacesDeviceNetworkRequestTransport.send` closes the shared connection out from under whatever
+        // else is using it, aborting this request client-side while the daemon keeps deleting regardless.
+        // A private channel, created for this mutation and closed after it — mirroring
+        // `requestDaemonUpdate` above — keeps the delete off the shared connection for its whole life,
+        // including the reconciliation reads below.
+        let deleteChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await deleteChannel.close() } }
+
         do {
             let response = try await bridgeClient.archiveWorkspace(
-                workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch,
-                commandChannel: commandChannel)
+                workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, commandChannel: deleteChannel
+            )
+            // Lifted only after the refreshed overview (which no longer carries the workspace) is
+            // published, so the band never flicks back to looking untouched on its way out.
+            defer { workspaceIDsPendingDeletion.remove(workspace.id) }
             await applyMutationResponse(response, identity: identity)
             guard identity == overviewIdentity else { return }
             if let notice = response.mutationNotice, !notice.isEmpty { deletedWorkspaceNotice = notice }
         } catch {
             guard identity == overviewIdentity else { return }
-            handleBridgeError(error)
+            guard isMutationTimeout(error) else {
+                // A definitive rejection (the daemon answered and said no): the workspace was never
+                // touched, so un-mark it immediately and surface the error like any other failed mutation.
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                handleBridgeError(error)
+                return
+            }
+            // A timeout does not mean the daemon rejected the delete — it may still be tearing the
+            // workspace down (see the channel comment above). Un-marking and reporting failure here would
+            // let the user retry-delete a workspace that is already doomed. Reconcile against fresh
+            // overviews instead: if the workspace stops appearing, treat the delete as successful and
+            // surface no error; only report the timeout as a failure once the reconciliation budget is
+            // spent and the workspace is still listed.
+            let workspaceStillPresent = await reconcileWorkspaceDeletionAfterTimeout(
+                workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
+            workspaceIDsPendingDeletion.remove(workspace.id)
+            guard identity == overviewIdentity else { return }
+            if workspaceStillPresent { handleBridgeError(error) }
         }
+    }
+
+    /// Refetches the overview a bounded number of times after an `archiveWorkspace` timeout, looking for
+    /// the workspace to stop being listed. Returns whether the workspace is still present once the
+    /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
+    /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
+    /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
+    private func reconcileWorkspaceDeletionAfterTimeout(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
+        -> Bool
+    {
+        for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
+            guard identity == overviewIdentity else { return false }
+            guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
+                if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
+                continue
+            }
+            guard identity == overviewIdentity else { return false }
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            guard identity == overviewIdentity else { return false }
+            publishOverview(refreshedOverview)
+            guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
+                errorMessage = nil
+                connectionNotice = nil
+                refreshFailureStreak = nil
+                return false
+            }
+            if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
+        }
+        return true
     }
 
     func dismissDeletedWorkspaceNotice() { deletedWorkspaceNotice = nil }

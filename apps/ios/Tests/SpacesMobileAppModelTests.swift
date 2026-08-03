@@ -401,6 +401,112 @@
             XCTAssertTrue(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
         }
 
+        /// A timeout on `archiveWorkspace` does not mean the daemon rejected the delete -- it can still be
+        /// tearing the workspace down on its own queue past the request's own timeout. When the very next
+        /// reconciliation overview no longer lists the workspace, the delete is treated as complete: no
+        /// error, the fresh overview is published, and the pending-deletion mark lifts silently.
+        func testDeleteWorkspaceTimeoutReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "overview"],
+                "reconciliation must stop as soon as the first refetch shows the workspace gone")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// The point of reconciling rather than reporting failure: the row stays marked for deletion for
+        /// the whole reconciliation, so a workspace the daemon is still tearing down never goes back to
+        /// looking normal — and offering Delete again — while it is doomed.
+        func testDeleteWorkspaceTimeoutKeepsThePendingMarkWhileReconciling() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                await gate.wait()
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+            // The archive has already failed with a timeout and the reconciliation refetch is parked here.
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the timed-out delete keeps its mark while it reconciles")
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// If the workspace is still listed in every reconciliation overview once the retry budget runs
+        /// out, the timeout is a genuine failure: the error surfaces and the pending-deletion mark lifts so
+        /// the row looks normal -- and deletable again -- beside it.
+        func testDeleteWorkspaceTimeoutSurfacesErrorWhenWorkspaceStillPresent() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            // Zero interval so the loop runs its whole budget without sleeping through the production wait.
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "overview", "overview", "overview", "overview", "overview"],
+                "reconciliation must give up after its fixed attempt budget")
+        }
+
+        /// A definitive rejection (the daemon answered and said no) is not a timeout: no reconciliation
+        /// runs, the mark lifts immediately, and the error surfaces exactly like any other failed mutation.
+        func testDeleteWorkspaceDefinitiveRejectionSkipsReconciliation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"], "a definitive rejection must not trigger reconciliation")
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {

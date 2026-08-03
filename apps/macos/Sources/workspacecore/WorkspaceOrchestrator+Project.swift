@@ -218,8 +218,20 @@ extension WorkspaceOrchestrator {
         try removeProject(project)
     }
 
+    /// Deleting a project stops and removes every workspace in it, so it holds the project's gate and
+    /// every one of those workspaces' lifecycle gates for the whole teardown. The project key blocks a
+    /// `createWorkspace` from adding a workspace to a project that is going away (no workspace key could
+    /// cover a workspace that does not exist yet); the workspace keys block a launch, stop, process or
+    /// agent start, or terminal open from stranding runtime in a workspace being removed. Both are
+    /// claimed before any destructive work, so a conflict rejects the delete instead of half-doing it.
     private func removeProject(_ project: ProjectRecord) throws {
         let workspaces = try store.workspaces(projectID: project.id)
+        try withProjectLifecycleLock(projectID: project.id) {
+            try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) { try removeProjectUnlocked(project, workspaces: workspaces) }
+        }
+    }
+
+    private func removeProjectUnlocked(_ project: ProjectRecord, workspaces: [WorkspaceRecord]) throws {
         // Finalize every coding-agent row in the project through the termination chokepoint BEFORE the
         // bulk store delete. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so
         // `deleteProject`'s raw `DELETE FROM agent_sessions` throws if the scope still holds any agent

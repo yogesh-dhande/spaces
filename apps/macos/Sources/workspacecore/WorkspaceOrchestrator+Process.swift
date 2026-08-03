@@ -488,8 +488,10 @@ extension WorkspaceOrchestrator {
     }
 
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+        }
     }
 
     public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
@@ -499,7 +501,19 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Starts (or restarts) a configured process, under the lifecycle gate: launching a process into a
+    /// workspace whose teardown had already snapshotted its rows would leave a live terminal behind with
+    /// no record and no worktree. Both `runConfiguredProcess` overloads route through here, so the gate
+    /// covers every configured-process start.
     @discardableResult public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws
+        -> RunningProcessRecord
+    {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try recoverMissingConfiguredProcessUnlocked(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
+        }
+    }
+
+    private func recoverMissingConfiguredProcessUnlocked(workspaceID: String, processKey: String, processTemplateID: String?) throws
         -> RunningProcessRecord
     {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)

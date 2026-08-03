@@ -7,6 +7,143 @@ import systembridge
 
 extension OrchestratorTests {
 
+    /// Workspace teardown runs off the Device API's serial request queue, so it no longer excludes other
+    /// requests by construction — every workspace-scoped mutation has to be gated against it. A process,
+    /// coding agent, or terminal started after the teardown snapshotted the workspace's rows but before it
+    /// deleted the record would survive as a live terminal in a worktree that has been removed, with no
+    /// row left to stop it by.
+    func testWorkspaceMutationsFailLoudlyWhileThatWorkspaceIsBeingDeleted() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-workspace")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        // Two instances stand in for two Device API requests: the server opens a fresh orchestrator per
+        // request and runs teardown on its own queue with yet another one.
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try deleter.addProject(dir: repo.path)
+        let workspace = try deleter.createWorkspace(projectID: project.id, branch: "feature-deleting")
+        let bystander = try deleter.createWorkspace(projectID: project.id, branch: "feature-bystander")
+        // A running process gives the delete a terminal to tear down, which is where it parks.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-deleting", workspaceID: workspace.id, templateName: "api", command: "npm start",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-deleting", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+        Thread.detachNewThread {
+            _ = try? deleter.archiveWorkspace(workspaceID: workspace.id)
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        for (label, mutation) in busyWorkspaceMutations(on: contender, workspaceID: workspace.id) {
+            XCTAssertThrowsError(try mutation(), label) { error in
+                XCTAssertTrue("\(error)".contains("already in progress"), "\(label) should report the busy error, got: \(error)")
+            }
+        }
+        // A workspace the delete does not touch is not held hostage by it.
+        XCTAssertNoThrow(try contender.updateWorkspaceNotes(workspaceID: bystander.id, notes: "still editable"))
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 30), .success)
+        XCTAssertNil(try store.workspace(id: workspace.id))
+    }
+
+    /// Every workspace-scoped mutation that creates or changes runtime or configuration state, named once
+    /// so the teardown test asserts the whole surface rather than a sample of it.
+    private func busyWorkspaceMutations(on orchestrator: WorkspaceOrchestrator, workspaceID: String) -> [(String, () throws -> Void)] {
+        [
+            ("runConfiguredProcess", { _ = try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processKey: "api") }),
+            ("restartWorkspaceProcess", { try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: "process-deleting") }),
+            ("launchAgentLauncher", { _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: "codex") }),
+            ("reserveWorkspaceTerminalLaunch", { _ = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID) }),
+            (
+                "createWorkspaceTerminalSession",
+                { _ = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspaceID, title: nil, command: nil) }
+            ), ("updateWorkspaceNotes", { try orchestrator.updateWorkspaceNotes(workspaceID: workspaceID, notes: "note") }),
+            ("updateWorkspaceHidden", { try orchestrator.updateWorkspaceHidden(workspaceID: workspaceID, isHidden: true) }),
+            ("updateWorkspaceSettings", { try orchestrator.updateWorkspaceSettings(workspaceID: workspaceID) { $0.stopScript = "echo stop" } }),
+        ]
+    }
+
+    /// Deleting a project tears down every workspace in it, so it claims each of their lifecycle gates —
+    /// and claims them all before any destructive work. A workspace already busy makes the whole delete
+    /// reject rather than leaving the project half-removed.
+    func testDeletingAProjectIsRejectedWholeWhileOneOfItsWorkspacesIsBusy() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-project-busy")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let holder = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try holder.addProject(dir: repo.path)
+        let busyWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-busy")
+        let otherWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-other")
+        let workspaceCountBeforeDelete = try store.workspaces(projectID: project.id).count
+
+        let lockHeld = expectation(description: "a workspace action is in flight")
+        let releaseLock = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? holder.withWorkspaceLifecycleLock(workspaceID: busyWorkspace.id) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 15)
+        defer { releaseLock.signal() }
+
+        XCTAssertThrowsError(try contender.removeProject(id: project.id)) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        XCTAssertNotNil(try store.project(id: project.id), "the project survives a rejected delete")
+        XCTAssertEqual(try store.workspaces(projectID: project.id).count, workspaceCountBeforeDelete, "no workspace record is dropped")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: otherWorkspace.dir), "no worktree is removed by a rejected delete")
+    }
+
+    /// A workspace created while its project is being deleted would outlive the project as an orphan, and
+    /// no workspace gate can cover it because the workspace does not exist yet — hence the project gate.
+    func testCreatingAWorkspaceFailsLoudlyWhileItsProjectIsBeingDeleted() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-project-create")
+        let otherRepo = try makeTempGitRepo(name: "teardown-gate-project-create-other")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let holder = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try holder.addProject(dir: repo.path)
+        let otherProject = try holder.addProject(dir: otherRepo.path)
+
+        let lockHeld = expectation(description: "a project teardown is in flight")
+        let releaseLock = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? holder.withProjectLifecycleLock(projectID: project.id) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 15)
+        defer { releaseLock.signal() }
+
+        XCTAssertThrowsError(try contender.createWorkspace(projectID: project.id, branch: "feature-late")) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        // Another project's creates are unaffected.
+        XCTAssertNoThrow(try contender.createWorkspace(projectID: otherProject.id, branch: "feature-elsewhere"))
+    }
+
     // The Device API builds a fresh orchestrator per request and runs workspace/project teardown on its
     // own queue with another one, so the per-workspace lifecycle gate must span instances: a mutation
     // racing a teardown fails loudly instead of interleaving with it.

@@ -247,6 +247,16 @@ public final class WorkspaceOrchestrator {
     /// would never serialize two requests. Sharing the gate makes a lifecycle mutation racing a teardown
     /// fail loudly with "already in progress" regardless of which queue or orchestrator carries it.
     private static let workspaceLifecycleGate = PerKeyGate()
+    /// Guards project-scoped structural change — deleting a project, adding a workspace to one — which no
+    /// single workspace's gate can cover: a project teardown and a `createWorkspace` in the same project
+    /// touch different workspaces (one of which does not exist yet) and would otherwise interleave.
+    /// Process-wide for the same reason as the workspace gate.
+    ///
+    /// Lock order is project-then-workspace and never the reverse: `removeProject` claims the project key
+    /// and then every one of its workspaces' keys, and nothing claims a workspace key before a project
+    /// key. Both gates fail fast rather than waiting, so a cycle could not deadlock even if one existed;
+    /// the order is what keeps a project teardown from stalling half-done behind a workspace action.
+    private static let projectLifecycleGate = PerKeyGate()
     let workspaceSetupGate = PerKeyGate()
 
     public init(
@@ -367,6 +377,10 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try updateWorkspaceSettingsUnlocked(workspaceID: workspaceID, update: update) }
+    }
+
+    private func updateWorkspaceSettingsUnlocked(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw WorkspaceError.missingProject(dir: project.dir)
@@ -394,17 +408,27 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceNotes(workspaceID: String, notes: String?) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (_, workspace) = try resolveWorkspace(id: workspaceID)
+            try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
+        }
     }
 
     public func updateWorkspaceHidden(workspaceID: String, isHidden: Bool) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard workspace.isHidden != isHidden else { return }
-        try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (_, workspace) = try resolveWorkspace(id: workspaceID)
+            guard workspace.isHidden != isHidden else { return }
+            try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
+        }
     }
 
     public func updateWorkspaceMetadata(workspaceID: String, branch: String? = nil, directoryName: String? = nil, notes: String?? = nil) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try updateWorkspaceMetadataUnlocked(workspaceID: workspaceID, branch: branch, directoryName: directoryName, notes: notes)
+        }
+    }
+
+    private func updateWorkspaceMetadataUnlocked(workspaceID: String, branch: String?, directoryName: String?, notes: String??) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         var updatedBranch = workspace.branch
         var updatedDirname = workspace.dirname
@@ -505,6 +529,21 @@ public final class WorkspaceOrchestrator {
     public func createWorkspace(
         projectID: String, branch: String? = nil, baseBranch: String? = nil, directoryName: String? = nil, runSetupScript: Bool = true,
         allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false, replaceExistingManagedDirectory: Bool = false
+    ) throws -> WorkspaceRecord {
+        // Under the project gate so a create cannot land in a project being deleted: `removeProject` holds
+        // the same key while it drops the project's records and worktrees, and a workspace created inside
+        // that window would outlive the project as an orphan.
+        try withProjectLifecycleLock(projectID: projectID) {
+            try createWorkspaceUnlocked(
+                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName, runSetupScript: runSetupScript,
+                allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse,
+                replaceExistingManagedDirectory: replaceExistingManagedDirectory)
+        }
+    }
+
+    private func createWorkspaceUnlocked(
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, runSetupScript: Bool, allowRemoteBranchLookup: Bool,
+        allowExistingBranchReuse: Bool, replaceExistingManagedDirectory: Bool
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -807,7 +846,7 @@ public final class WorkspaceOrchestrator {
             for launcher in config.agentLaunchers {
                 let trimmedName = launcher.name.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmedName.isEmpty else { continue }
-                _ = try launchAgentLauncher(workspaceID: workspace.id, name: trimmedName, background: background)
+                _ = try launchAgentLauncherUnlocked(workspaceID: workspace.id, name: trimmedName, background: background)
             }
             newWindows.append(
                 contentsOf: try trackedTerminalWindowsForAgents(
@@ -1057,6 +1096,26 @@ public final class WorkspaceOrchestrator {
             workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace action is already in progress.") }, operation: operation)
     }
 
+    /// Runs `operation` holding every listed workspace's lifecycle gate, claiming them all before any work
+    /// starts. A project teardown that took them one at a time as it went could destroy half a project and
+    /// then fail on a workspace another request was already acting on; claiming up front makes it either
+    /// run whole or reject whole. Sorted so the claim order is deterministic.
+    func withWorkspaceLifecycleLocks<T>(workspaceIDs: [String], operation: () throws -> T) throws -> T {
+        try withRemainingWorkspaceLifecycleLocks(workspaceIDs: workspaceIDs.sorted(), operation: operation)
+    }
+
+    private func withRemainingWorkspaceLifecycleLocks<T>(workspaceIDs: [String], operation: () throws -> T) throws -> T {
+        guard let next = workspaceIDs.first else { return try operation() }
+        return try withWorkspaceLifecycleLock(workspaceID: next) {
+            try withRemainingWorkspaceLifecycleLocks(workspaceIDs: Array(workspaceIDs.dropFirst()), operation: operation)
+        }
+    }
+
+    func withProjectLifecycleLock<T>(projectID: String, operation: () throws -> T) throws -> T {
+        try Self.projectLifecycleGate.withKey(
+            projectID, busyError: { WorkspaceError.invalidArgument(message: "Project action is already in progress.") }, operation: operation)
+    }
+
     #if canImport(UserNotifications)
         public static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
             guard NSClassFromString("XCTest") == nil else { return }
@@ -1216,6 +1275,18 @@ public final class WorkspaceOrchestrator {
     @discardableResult private func launchWorkspaceCommandSession(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
     ) throws -> TerminalServiceSessionSummary {
+        // Creating runtime for a workspace is a lifecycle action: without the gate a session started while
+        // a teardown was between its row snapshot and its record delete would survive as a live terminal
+        // in a directory that no longer exists.
+        try withWorkspaceLifecycleLock(workspaceID: workspace.id) {
+            try launchWorkspaceCommandSessionUnlocked(
+                project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: kind, defaultTitle: defaultTitle)
+        }
+    }
+
+    @discardableResult private func launchWorkspaceCommandSessionUnlocked(
+        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
+    ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1268,7 +1339,18 @@ public final class WorkspaceOrchestrator {
         return matched.id
     }
 
+    /// Reserves the session id and window record for a workspace terminal, under the lifecycle gate so the
+    /// record cannot be written into a workspace being torn down.
+    ///
+    /// `finishReservedWorkspaceTerminalLaunch` deliberately runs outside the gate: it is the slow half and
+    /// runs on a background queue after the request has answered, and it re-checks that its window record
+    /// still exists both before and after launching — a teardown that lands in between leaves it nothing to
+    /// attach to, so it terminates the session it just started instead of stranding it.
     public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try reserveWorkspaceTerminalLaunchUnlocked(workspaceID: workspaceID) }
+    }
+
+    private func reserveWorkspaceTerminalLaunchUnlocked(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
