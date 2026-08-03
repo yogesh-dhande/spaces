@@ -487,14 +487,15 @@
                 "reconciliation must give up after its fixed attempt budget")
         }
 
-        /// A definitive rejection (the daemon answered and said no) is not a timeout: no reconciliation
-        /// runs, the mark lifts immediately, and the error surfaces exactly like any other failed mutation.
+        /// A definitive rejection — the daemon answered and said no, which its error code is the proof of —
+        /// needs no reconciliation: the mark lifts immediately and the error surfaces exactly like any
+        /// other failed mutation.
         func testDeleteWorkspaceDefinitiveRejectionSkipsReconciliation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                return SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+                return SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = makeOverview()
@@ -505,6 +506,83 @@
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"], "a definitive rejection must not trigger reconciliation")
+        }
+
+        /// The app being backgrounded closes the transport's socket, which surfaces as a plain
+        /// `requestFailed` carrying no daemon error code. That is not a verdict — the daemon may have
+        /// received the delete and be finishing it — so it reconciles exactly like a timeout and resolves
+        /// silently once the workspace stops being listed.
+        func testDeleteWorkspacePostSendTransportFailureReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage, "a delete the daemon finished must not report the dropped connection as a failure")
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
+        }
+
+        /// The other half of the same rule: a codeless failure whose workspace is still listed once the
+        /// budget is spent — including a failure that never reached the daemon — reports the error and
+        /// puts the row back.
+        func testDeleteWorkspacePostSendTransportFailureSurfacesErrorWhenWorkspaceStillPresent() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// Switching device mid-delete makes the model drop the failure (it belongs to the old connection),
+        /// but the pending mark is keyed by workspace id, not by connection — leaving it set would dim that
+        /// row for the rest of the run the moment the user switched back.
+        func testDeleteWorkspaceLeavesNoStaleMarkWhenTheDeviceChangesMidDelete() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            let workspace = makeOverview().workspaces[0]
+            model.overview = makeOverview()
+
+            let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+            // A real connection change while the delete is still parked in its request: this rebuilds the
+            // client and channel and bumps the overview identity, exactly as a device switch does.
+            model.handleAuthenticationFailure(message: "Pair this device again.")
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "the mark must not outlive a delete abandoned by a device switch")
         }
 
         /// A browser session has no run state, so its row draws no status dot — while the process and

@@ -595,7 +595,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
     /// instead of sleeping through the production wait.
     @ObservationIgnored private let refreshFailureAlertDelay: Duration
-    /// Wait between the overview refetches that reconcile a timed-out workspace delete (production
+    /// Wait between the overview refetches that reconcile an indeterminate workspace delete (production
     /// default 2s, matching the ordinary poll cadence). Injectable so tests exercise the reconciliation
     /// loop without sleeping through it.
     @ObservationIgnored private let workspaceDeletionReconciliationInterval: Duration
@@ -1661,7 +1661,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Reconciliation attempts after an `archiveWorkspace` timeout (see `deleteWorkspace`). The daemon
+    /// Reconciliation attempts after an indeterminate `archiveWorkspace` failure (see `deleteWorkspace`
+    /// and `isIndeterminateDeleteOutcome`). The daemon
     /// runs the delete on its own teardown queue and can keep going well past this request's timeout, so
     /// refetching the overview a few times gives a delete that is still finishing a chance to resolve to
     /// success instead of a spurious error. Five attempts at `workspaceDeletionReconciliationInterval`
@@ -1707,21 +1708,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard identity == overviewIdentity else { return }
             if let notice = response.mutationNotice, !notice.isEmpty { deletedWorkspaceNotice = notice }
         } catch {
-            guard identity == overviewIdentity else { return }
-            guard isMutationTimeout(error) else {
-                // A definitive rejection (the daemon answered and said no): the workspace was never
-                // touched, so un-mark it immediately and surface the error like any other failed mutation.
+            guard identity == overviewIdentity else {
+                // The connection changed under the delete. The mark is keyed by workspace id rather than
+                // by connection, so clearing it is always safe — and leaving it behind would dim that row
+                // for the rest of the run if the user ever switched back to this device.
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                return
+            }
+            guard isIndeterminateDeleteOutcome(error) else {
+                // The daemon answered and refused: the workspace was never touched, so un-mark it
+                // immediately and surface the error like any other failed mutation.
                 workspaceIDsPendingDeletion.remove(workspace.id)
                 handleBridgeError(error)
                 return
             }
-            // A timeout does not mean the daemon rejected the delete — it may still be tearing the
-            // workspace down (see the channel comment above). Un-marking and reporting failure here would
-            // let the user retry-delete a workspace that is already doomed. Reconcile against fresh
-            // overviews instead: if the workspace stops appearing, treat the delete as successful and
-            // surface no error; only report the timeout as a failure once the reconciliation budget is
-            // spent and the workspace is still listed.
-            let workspaceStillPresent = await reconcileWorkspaceDeletionAfterTimeout(
+            // The delete's fate is unknown — the daemon may still be tearing the workspace down (see the
+            // channel comment above). Un-marking and reporting failure here would let the user retry-delete
+            // a workspace that is already doomed. Reconcile against fresh overviews instead: if the
+            // workspace stops appearing, treat the delete as successful and surface no error; only report
+            // the failure once the reconciliation budget is spent and the workspace is still listed.
+            let workspaceStillPresent = await reconcileWorkspaceDeletionOutcome(
                 workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
             workspaceIDsPendingDeletion.remove(workspace.id)
             guard identity == overviewIdentity else { return }
@@ -1729,14 +1735,27 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Refetches the overview a bounded number of times after an `archiveWorkspace` timeout, looking for
+    /// Whether a failed delete leaves the workspace's fate unknown, so it has to be reconciled against
+    /// fresh overviews instead of being reported as a failure.
+    ///
+    /// Only a verdict from the daemon is definitive, and the one thing that proves the daemon produced a
+    /// verdict is a Device API error code: `SpacesDeviceAPIClient` attaches one exactly where it turns an
+    /// `ok: false` response into an error, and the daemon fills one in for every failure it reports. Every
+    /// other failure the request can throw carries no code — a client-side timeout, an unreachable host,
+    /// or the socket being closed under it when the app was backgrounded, which arrives as an ordinary
+    /// `requestFailed` — and none of them says anything about whether the daemon accepted the delete.
+    ///
+    /// The transport cannot report whether a failure happened before or after the request went out, so
+    /// every codeless failure reconciles. That costs nothing when it was pre-send: the first refetch finds
+    /// the workspace still listed and the error surfaces then.
+    private func isIndeterminateDeleteOutcome(_ error: Error) -> Bool { (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode == nil }
+
+    /// Refetches the overview a bounded number of times after an indeterminate delete, looking for
     /// the workspace to stop being listed. Returns whether the workspace is still present once the
     /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
     /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
-    private func reconcileWorkspaceDeletionAfterTimeout(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
-        -> Bool
-    {
+    private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async -> Bool {
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
             guard identity == overviewIdentity else { return false }
             guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {

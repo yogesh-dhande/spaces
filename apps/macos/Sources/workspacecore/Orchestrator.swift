@@ -1234,16 +1234,21 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func createWorkspaceTerminalSession(workspaceID: String, title: String?, command: String?) throws
         -> TerminalServiceSessionSummary
     {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
-        // virtue of the terminal); with one, the command runs through that same interactive login shell
-        // so it resolves exactly the tools the bare session would.
-        let shellCommand =
-            (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
-        return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
-            defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+        // Resolved inside the gate, not before it: records read first and locked second are already stale
+        // by the time the lock is held, so an archive that completed in between would let this launch a
+        // shell in a removed worktree. `resolveWorkspace` throws once the record is gone.
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+            // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
+            // virtue of the terminal); with one, the command runs through that same interactive login shell
+            // so it resolves exactly the tools the bare session would.
+            let shellCommand =
+                (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
+            return try launchWorkspaceCommandSession(
+                project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
+                defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+        }
     }
 
     /// Creates an ad-hoc coding-agent terminal session. Mirrors `createWorkspaceTerminalSession` but
@@ -1257,34 +1262,28 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?) throws
         -> TerminalServiceSessionSummary
     {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
-        let defaultTitle =
-            SupportedCodingAgentHook.matching(command: command)?.displayName
-            ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
-        return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
-            defaultTitle: defaultTitle)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
+            let defaultTitle =
+                SupportedCodingAgentHook.matching(command: command)?.displayName
+                ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+            return try launchWorkspaceCommandSession(
+                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
+                defaultTitle: defaultTitle)
+        }
     }
 
     /// Shared launch path for ad-hoc command and agent sessions: builds the workspace environment,
     /// prefixes `shellCommand` (already in its shell form) with that environment, persists the tracked
     /// terminal window, and marks the workspace running. The only per-caller differences are the launch
     /// `kind` and the fallback title.
+    ///
+    /// Both callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
+    /// runtime is a lifecycle action, and a session started while a teardown was between its row snapshot
+    /// and its record delete would survive as a live terminal in a directory that no longer exists.
     @discardableResult private func launchWorkspaceCommandSession(
-        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
-    ) throws -> TerminalServiceSessionSummary {
-        // Creating runtime for a workspace is a lifecycle action: without the gate a session started while
-        // a teardown was between its row snapshot and its record delete would survive as a live terminal
-        // in a directory that no longer exists.
-        try withWorkspaceLifecycleLock(workspaceID: workspace.id) {
-            try launchWorkspaceCommandSessionUnlocked(
-                project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: kind, defaultTitle: defaultTitle)
-        }
-    }
-
-    @discardableResult private func launchWorkspaceCommandSessionUnlocked(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)

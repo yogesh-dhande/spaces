@@ -77,6 +77,83 @@ extension OrchestratorTests {
         ]
     }
 
+    /// A project delete holds its gate from before it reads its workspace list until every worktree is
+    /// gone, so no workspace can be added to the project inside that window and every workspace the
+    /// project has is torn down — record, worktree and all. The end state is the point: a workspace whose
+    /// record is cascaded away by the project delete but whose worktree survives is the failure this
+    /// guards, and it is invisible from the record count alone.
+    func testDeletingAProjectRejectsConcurrentCreatesAndLeavesNoWorktreeBehind() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-project-whole")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the project delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try deleter.addProject(dir: repo.path)
+        let workspace = try deleter.createWorkspace(projectID: project.id, branch: "feature-doomed")
+        let workspaceDir = workspace.dir
+        // An agent row gives the delete a terminal to tear down, which is where it parks — past the point
+        // where it has read the project's workspace list.
+        let timestamp = "2026-08-03T00:00:00Z"
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-doomed", workspaceID: workspace.id, provider: .spaces, label: "codex", terminalTrackingID: "session-doomed",
+                sessionKey: nil, status: .spinning, createdAt: timestamp, updatedAt: timestamp))
+
+        var deleteError: (any Error)?
+        Thread.detachNewThread {
+            do { try deleter.removeProject(id: project.id) } catch { deleteError = error }
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        XCTAssertThrowsError(try contender.createWorkspace(projectID: project.id, branch: "feature-slipped-in")) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+        XCTAssertNil(deleteError, "the delete should have run to completion")
+        XCTAssertNil(try store.project(id: project.id))
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir), "no worktree may outlive the project that owned it")
+    }
+
+    /// A session create resolves its workspace under the lifecycle gate, so it can never launch against a
+    /// record a delete has already removed: it fails loudly and starts no terminal at all. A launch that
+    /// went ahead would leave a live shell in a directory that is gone, with no row to stop it by.
+    func testCreatingATerminalSessionForADeletedWorkspaceFailsLoudlyAndLaunchesNothing() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-session-create")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let didLaunch = LockedBox(false)
+        let orchestrator = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionLauncher: { _ in
+                didLaunch.set(true)
+                throw WorkspaceError.invalidArgument(message: "no terminal launch was expected")
+            })
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-session")
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+
+        XCTAssertThrowsError(try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil))
+        XCTAssertThrowsError(try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: nil))
+        XCTAssertFalse(didLaunch.get(), "no terminal may be launched for a workspace that is gone")
+    }
+
     /// Deleting a project tears down every workspace in it, so it claims each of their lifecycle gates —
     /// and claims them all before any destructive work. A workspace already busy makes the whole delete
     /// reject rather than leaving the project half-removed.

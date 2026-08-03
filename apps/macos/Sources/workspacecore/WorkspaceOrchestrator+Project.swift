@@ -225,9 +225,16 @@ extension WorkspaceOrchestrator {
     /// agent start, or terminal open from stranding runtime in a workspace being removed. Both are
     /// claimed before any destructive work, so a conflict rejects the delete instead of half-doing it.
     private func removeProject(_ project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id)
         try withProjectLifecycleLock(projectID: project.id) {
-            try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) { try removeProjectUnlocked(project, workspaces: workspaces) }
+            // Both reads happen under the project gate, never before it. A workspace list read outside the
+            // gate can miss a `createWorkspace` that lands between the read and the claim: its record would
+            // be cascaded away by `store.deleteProject` while its runtime and worktree — which only this
+            // teardown removes, and only for the workspaces it snapshotted — were left behind. Re-reading
+            // the project itself keeps a second delete that queued behind this one from working off a
+            // record that has already been removed.
+            guard let project = try store.project(id: project.id) else { return }
+            let workspaces = try store.workspaces(projectID: project.id)
+            return try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) { try removeProjectUnlocked(project, workspaces: workspaces) }
         }
     }
 
