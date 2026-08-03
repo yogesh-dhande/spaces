@@ -38,7 +38,7 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll)
 REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
@@ -114,6 +114,8 @@ Scenarios:
   ctrl-c-final-frame
   ctrl-c-final-frame-codex-survivor
   ownership-guard
+  workspace-delete-scroll
+  workspace-hide-scroll
 EOF
 }
 
@@ -1261,12 +1263,8 @@ PY
   SCENARIO_CREATED_SESSIONS=()
 }
 
-reset_mobile_app() {
-  local launch_env=()
-  local assignment
-  while IFS= read -r assignment; do
-    [[ -n "$assignment" ]] && launch_env+=("$assignment")
-  done < <(python3 - "$UI_TEST_CONFIG" <<'PY'
+mobile_launch_environment_assignments() {
+  python3 - "$UI_TEST_CONFIG" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1314,15 +1312,37 @@ if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
     print(f"SIMCTL_CHILD_SPACES_MOBILE_TEST_DEVICE_SEED_JSON={json.dumps(seed, separators=(',', ':'))}")
 print(f"SIMCTL_CHILD_SPACES_MOBILE_UI_TEST_CONFIG_PATH={config_path}")
 PY
-  )
+}
+
+reset_mobile_app() {
+  local launch_env=()
+  local assignment
+  while IFS= read -r assignment; do
+    [[ -n "$assignment" ]] && launch_env+=("$assignment")
+  done < <(mobile_launch_environment_assignments)
   xcrun simctl terminate "$MOBILE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
-  env \
-    "${launch_env[@]}" \
-    SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
-    SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
-    SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
-    xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
-  sleep 2
+  if [[ "${MOBILE_APP_LAUNCH_MODE:-default}" == "console-capture" ]]; then
+    # Attached to a pty so the app's stdout/stderr land in the scenario directory. An uncaught
+    # NSException prints its reason there and nowhere else — the .ips crash report carries the
+    # backtrace but not the assertion text.
+    env \
+      "${launch_env[@]}" \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
+      SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_LIST_IDENTITY_DUMP="${SPACES_MOBILE_LIST_IDENTITY_DUMP:-0}" \
+      xcrun simctl launch --console-pty "$MOBILE_UDID" "$BUNDLE_ID" \
+      >"$SCENARIO_DIR/app-stdout.log" 2>"$SCENARIO_DIR/app-stderr.log" </dev/null &
+    sleep 4
+  else
+    env \
+      "${launch_env[@]}" \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
+      SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
+      xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
+    sleep 2
+  fi
 }
 
 write_ui_test_config() {
@@ -1331,6 +1351,7 @@ write_ui_test_config() {
   local secondary_session_id="${3:-}"
   python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1502,6 +1523,13 @@ elif scenario == "two-session":
         "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
     })
+elif scenario in ("workspace-delete-scroll", "workspace-hide-scroll"):
+    payload.update({
+        "targetWorkspaceID": os.environ.get("SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID", ""),
+        "removalScrollSeconds": 12.0,
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-failure.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-after-scroll.png"),
+    })
 elif scenario in ("ctrl-c-final-frame", "ctrl-c-final-frame-codex-survivor"):
     expected_secondary_text = "" if scenario == "ctrl-c-final-frame-codex-survivor" else "__spaces_survivor_peer_ready__"
     payload.update({
@@ -1535,6 +1563,14 @@ run_ui_test() {
       -derivedDataPath "$IOS_DERIVED_DATA" \
       -only-testing:"$test_name" \
       test-without-building >"$UI_TEST_LOG" 2>&1; then
+    tail -40 "$UI_TEST_LOG" 2>/dev/null | grep -E "error:|failed" || true
+    # An uncaught NSException's reason text appears only in the app's captured stderr — the .ips crash
+    # report carries the backtrace but not the assertion text — so print it before failing.
+    if [[ -s "$SCENARIO_DIR/app-stderr.log" ]]; then
+      printf '\n--- SpacesMobile app stderr ---\n'
+      cat "$SCENARIO_DIR/app-stderr.log"
+      printf -- '--- end SpacesMobile app stderr ---\n\n'
+    fi
     fail "UI test failed: $test_name"
   fi
 }
@@ -3908,6 +3944,141 @@ PY
   printf 'Mobile scenario passed: ownership-guard\n'
 }
 
+demo_project_id() {
+  local project_dir="$1"
+  local listing="$SCENARIO_DIR/project-list.txt"
+  demo_env "$SPACES_CLI_BIN" project list >"$listing" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$listing" "$project_dir" <<'PY'
+import os
+import sys
+
+listing = open(sys.argv[1], encoding="utf-8").read().splitlines()
+wanted = os.path.realpath(sys.argv[2])
+for line in listing:
+    fields = line.split("\t")
+    if not fields or not fields[0]:
+        continue
+    directory = ""
+    for field in fields[1:]:
+        if field.startswith("dir="):
+            directory = field[4:]
+    if directory and os.path.realpath(directory) == wanted:
+        print(fields[0])
+        break
+else:
+    raise SystemExit(f"No Spaces project registered for {wanted}. Listing:\n" + "\n".join(listing))
+PY
+}
+
+# Prints "<id>\t<branch>" for every workspace of the project whose branch carries the given prefix.
+demo_workspaces_with_branch_prefix() {
+  local project_id="$1"
+  local prefix="$2"
+  local listing="$SCENARIO_DIR/workspace-list.txt"
+  demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$listing" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$listing" "$prefix" "$DB_PATH" <<'PY'
+import sqlite3
+import sys
+
+listing = open(sys.argv[1], encoding="utf-8").read().splitlines()
+prefix = sys.argv[2]
+# `workspace list` does not report hidden state, and a hidden workspace has no band in the Spaces
+# list, so it cannot be the target of a swipe.
+with sqlite3.connect(sys.argv[3]) as db:
+    hidden = {row[0] for row in db.execute("SELECT id FROM workspaces WHERE is_hidden = 1")}
+for line in listing:
+    fields = line.split("\t")
+    if not fields or not fields[0] or fields[0] in hidden:
+        continue
+    branch = ""
+    for field in fields[1:]:
+        if field.startswith("branch="):
+            branch = field[7:]
+    if branch.startswith(prefix):
+        print(f"{fields[0]}\t{branch}")
+PY
+}
+
+# Regression lane for removing a workspace while the Spaces list is being scrolled: its rows are diffed
+# out from under a moving collection view, which must stay a consistent batch update. Populates the
+# project with extra workspaces so the list is long enough to scroll, starts the target so the daemon's
+# stop-then-remove takes real time, then drives the swipe -> Delete/Hide -> confirm -> keep scrolling
+# flow from the simulator and verifies the workspace really was removed or hidden.
+run_workspace_removal_scroll_scenario() {
+  local scenario="$1"
+  local action="delete"
+  local ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteWhileScrollingList"
+  if [[ "$scenario" == "workspace-hide-scroll" ]]; then
+    action="hide"
+    ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testWorkspaceHideWhileScrollingList"
+  fi
+  begin_scenario "$scenario"
+
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  printf 'Removal-scroll project: %s (%s)\n' "$project_id" "$PROJECT_DIR" >>"$SCENARIO_LOG"
+
+  local branch_prefix="e2e-removal-scroll-"
+  local existing_count
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | wc -l | tr -d ' ')"
+  local wanted=4
+  local stamp
+  stamp="$(date +%s)"
+  local index=0
+  while (( existing_count + index < wanted )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${branch_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to create removal-scroll workspace ${branch_prefix}${stamp}-${index}."
+  done
+
+  local target_workspace_id
+  target_workspace_id="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | head -1 | cut -f1)"
+  [[ -n "$target_workspace_id" ]] || fail "No removal-scroll workspace was available to remove."
+  printf 'Removal target workspace: %s\n' "$target_workspace_id" >>"$SCENARIO_LOG"
+
+  # A running workspace makes the daemon's stop-then-remove path take seconds, so the removal lands
+  # well inside the scroll window rather than before the list has started moving.
+  demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to start removal-scroll workspace $target_workspace_id."
+
+  local session_id
+  session_id="$(new_terminal_session "e2e-$scenario")"
+  track_current_scenario_session "$session_id"
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "$scenario" "$session_id"
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "$ui_test_name"
+  MOBILE_APP_LAUNCH_MODE="default"
+
+  if [[ "$action" == "delete" ]]; then
+    local post_listing="$SCENARIO_DIR/workspace-list-after-delete.txt"
+    demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$post_listing" 2>>"$SCENARIO_LOG" \
+      || fail "Unable to list workspaces after the delete."
+    python3 - "$post_listing" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id still exists after the delete."
+import sys
+
+workspace_id = sys.argv[2]
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if line.split("\t")[0] == workspace_id:
+        raise SystemExit(f"Workspace {workspace_id} still exists after the delete.")
+PY
+  else
+    python3 - "$DB_PATH" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id is not hidden after the hide."
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute("SELECT is_hidden FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+if row is None:
+    raise SystemExit(f"Workspace {workspace_id} not found after the hide.")
+if row[0] != 1:
+    raise SystemExit(f"Workspace {workspace_id} is not hidden after the hide (is_hidden={row[0]}).")
+PY
+  fi
+  printf 'Mobile scenario passed: %s\n' "$scenario"
+}
+
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
@@ -3943,6 +4114,9 @@ run_selected_scenarios() {
         ;;
       ownership-guard)
         run_ownership_guard_scenario
+        ;;
+      workspace-delete-scroll|workspace-hide-scroll)
+        run_workspace_removal_scroll_scenario "$scenario"
         ;;
       *)
         fail "unknown scenario: $scenario"

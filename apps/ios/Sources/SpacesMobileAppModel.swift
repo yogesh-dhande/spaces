@@ -191,12 +191,22 @@ enum SpacesMobileTab: String, Hashable, Sendable {
     case settings
 }
 
+/// A band of terminal sessions that belong to a workspace but are not among its runtime rows, listed
+/// after the projects on the Spaces tab.
 struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
-    let id: String
+    let workspaceID: String
     let projectName: String
     let workspaceTitle: String
     let workspaceDirectory: String
     let sessions: [SpacesDeviceTerminalSessionSummary]
+
+    /// Deliberately not the workspace id. A workspace with loose sessions is listed twice on the Spaces
+    /// tab — once as its own band among the projects, once as this band — and both rows live in the same
+    /// list section, so identifying this one by the workspace id would give two different rows the same
+    /// identity. The list then diffs a state with fewer distinct identities than it has rows, and every
+    /// batch update it performs is one item short of the count its data source reports, which is an
+    /// inconsistent update and crashes the collection view.
+    var id: String { "loose:\(workspaceID)" }
 }
 
 enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
@@ -486,6 +496,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// `collapsedWorkspaceIDs`; a fresh launch starts collapsed since it exists to be checked
     /// occasionally, not browsed by default.
     var isHiddenSectionExpanded = false
+    /// Workspaces whose delete mutation is in flight. The daemon takes seconds to stop the workspace and
+    /// remove its worktree, and every overview published in that window still lists it, so the Spaces tab
+    /// marks the workspace as deleting instead of leaving it looking untouched (see
+    /// `isWorkspacePendingDeletion`). In-memory and per-run, like `collapsedWorkspaceIDs`: the device is
+    /// authoritative about whether a delete landed, and a relaunch reads it fresh.
+    private var workspaceIDsPendingDeletion: Set<String> = []
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -686,27 +702,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspaces = visibleWorkspaces
         let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
-        // A hidden workspace's loose sessions are hidden with it; otherwise hiding a workspace would just
-        // move its terminals into a loose group instead of removing them from the list.
-        let hiddenWorkspaceIDs = Set((overview?.workspaces ?? []).filter(\.isHidden).map(\.id))
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A loose group is a band belonging to a workspace this list is showing, so only that workspace's
+        // sessions can form one. That drops a hidden workspace's sessions (otherwise hiding a workspace
+        // would just move its terminals into a loose group instead of removing them from the list) and
+        // sessions whose workspace record the overview no longer carries at all — a deleted workspace's
+        // ended sessions linger for a refresh or two, and they must not raise a band named for a
+        // workspace that no longer exists beside the band being removed.
         let sessions = (overview?.sessions ?? []).filter { session in
-            !hiddenWorkspaceIDs.contains(session.workspaceID) && !representedSessionIDs.contains(session.id)
+            workspaceByID[session.workspaceID] != nil && !representedSessionIDs.contains(session.id)
                 && terminalSessionMatchesFilters(session, query: query)
         }
         let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
-        return grouped.values.compactMap { sessions in
-            guard let firstSession = sessions.first else { return nil }
-            let workspace = workspaceByID[firstSession.workspaceID]
-            let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
-            let workspaceTitle = workspace?.displayName ?? firstSession.workspaceTitle ?? "Unassigned"
-            let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
-            let orderedSessions = sessions.sorted(by: sessionSort)
-
+        return grouped.values.compactMap { sessions -> SpacesMobileTerminalWorkspaceGroup? in
+            // Both lookups hold by construction: the group's key came from a session that passed the
+            // `workspaceByID` filter above.
+            guard let firstSession = sessions.first, let workspace = workspaceByID[firstSession.workspaceID] else { return nil }
             return SpacesMobileTerminalWorkspaceGroup(
-                id: firstSession.workspaceID, projectName: projectName, workspaceTitle: workspaceTitle, workspaceDirectory: workspaceDirectory,
-                sessions: orderedSessions)
+                workspaceID: workspace.id, projectName: workspace.projectName, workspaceTitle: workspace.displayName,
+                workspaceDirectory: workspace.dir, sessions: sessions.sorted(by: sessionSort))
         }.sorted(by: groupSort)
     }
 
@@ -830,6 +845,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard let overview else { return [] }
         return SpacesMobileAgentGrouping.groups(in: overview)
     }
+
+    /// Whether this workspace's delete is in flight. The Spaces tab dims its band and rows, puts a spinner
+    /// where the band's collapse chevron goes, and stops accepting anything on them — the feedback for a
+    /// delete the daemon takes seconds to complete.
+    func isWorkspacePendingDeletion(_ workspaceID: String) -> Bool { workspaceIDsPendingDeletion.contains(workspaceID) }
 
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
         if collapsedWorkspaceIDs.contains(workspaceID) {
@@ -1643,6 +1663,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isMutating = true
         defer { isMutating = false }
         let identity = overviewIdentity
+        // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
+        // (which no longer carries the workspace) is published, so the band never flicks back to looking
+        // untouched on its way out; on failure lifting it restores the ordinary band beside the error.
+        workspaceIDsPendingDeletion.insert(workspace.id)
+        defer { workspaceIDsPendingDeletion.remove(workspace.id) }
         do {
             let response = try await bridgeClient.archiveWorkspace(
                 workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch,

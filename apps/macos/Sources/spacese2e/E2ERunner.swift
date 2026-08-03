@@ -190,6 +190,8 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(name: "ctrl-c-final-frame", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ctrl-c-final-frame-codex-survivor", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ownership-guard", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-delete-scroll", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-hide-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ios-input-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(name: "ios-scrollback-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(

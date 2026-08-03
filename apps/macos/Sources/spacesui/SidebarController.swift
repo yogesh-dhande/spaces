@@ -169,6 +169,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 return true
             }
             if case .workspace(_, let workspace) = ref.item {
+                // A row marked as deleting swallows the click: it neither selects nor expands, so the
+                // click cannot pin open a workspace that is being removed.
+                guard self.workspaceRowState(workspace.id).isInteractive else { return true }
                 // A mouse click on a workspace row is an explicit expand: pin it open so it stays
                 // expanded after the selection moves away. Arrow-key navigation routes through
                 // selectWorkspace without this handler and so expands the workspace only transiently.
@@ -1023,6 +1026,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return outlineItemRef(for: .project(project))
     }
 
+    /// How a workspace's sidebar row renders and responds: normal, or marked while its delete runs.
+    /// Every surface that treats a deleting row differently — the row cell, its children, selection, the
+    /// context menu, the row click — reads this one state.
+    private func workspaceRowState(_ workspaceID: String) -> AppKitController.SidebarWorkspaceRowState {
+        AppKitController.sidebarWorkspaceRowState(isPendingDeletion: host.workspaceIDsPendingDeletion.contains(workspaceID))
+    }
+
     /// The runtime-target rows shown under a workspace, memoized per workspace id.
     func runtimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         if let cached = runtimeTargetItemsCache[workspaceID] { return cached }
@@ -1050,8 +1060,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             return max(visibleWorkspaces(projectID: project.id).count, 1)
         }
-        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return runtimeTargetItems(workspaceID: workspace.id).count }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return workspaceRuntimeTargetChildren(workspace).count }
         return 0
+    }
+
+    /// The runtime targets listed as a workspace row's children. A row marked as deleting lists none, so
+    /// its children are hidden whatever the user's expansion state.
+    private func workspaceRuntimeTargetChildren(_ workspace: WorkspaceSummary) -> [SidebarRuntimeTargetItem] {
+        guard workspaceRowState(workspace.id).listsRuntimeTargetChildren else { return [] }
+        return runtimeTargetItems(workspaceID: workspace.id)
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -1063,7 +1080,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             return true
         }
-        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !runtimeTargetItems(workspaceID: workspace.id).isEmpty }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !workspaceRuntimeTargetChildren(workspace).isEmpty }
         return false
     }
 
@@ -1072,6 +1089,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         switch (item as? OutlineItemRef)?.item {
         case .device, .emptyProject, .runtimeTarget: return false
+        // A row marked as deleting is inert: it refuses selection here, which also covers arrow-key
+        // navigation and window cycling, since both select through the outline view.
+        case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive
         default: return true
         }
     }
@@ -1097,7 +1117,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             return outlineItemRef(for: .workspace(project, workspace))
         }
         if case .workspace(let project, let workspace) = (item as? OutlineItemRef)?.item {
-            let items = runtimeTargetItems(workspaceID: workspace.id)
+            let items = workspaceRuntimeTargetChildren(workspace)
             if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
         }
         return outlineItemRef(for: .project(host.projects.first ?? Self.placeholderProject))
@@ -1393,6 +1413,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func workspaceRowCell(project: ProjectSummary, workspace: WorkspaceSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-workspace-\(workspace.id)")
+        let rowState = workspaceRowState(workspace.id)
+        cell.alphaValue = rowState.alpha
 
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
@@ -1417,20 +1439,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         titleRow.spacing = 6
         titleRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let statusIcon = NSImageView()
-        statusIcon.translatesAutoresizingMaskIntoConstraints = false
         let runtimeStatus =
             host.workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
                 workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
-        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
-        statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
+        // its way out and says nothing the user can act on, so the row reports the delete instead.
+        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
+        statusIndicator.translatesAutoresizingMaskIntoConstraints = false
+        statusIndicator.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -1440,7 +1460,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        titleRow.addArrangedSubview(statusIcon)
+        titleRow.addArrangedSubview(statusIndicator)
         titleRow.addArrangedSubview(nameLabel)
         if let warningSummary = runtimeStatus.warningSummary {
             let warningIcon = NSImageView()
@@ -1455,21 +1475,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let gearSpacer = NSView()
         gearSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleRow.addArrangedSubview(gearSpacer)
-        let settingsButton = host.sidebarRowIconButton(
-            symbol: "gearshape", tooltip: "Workspace settings for \(workspace.displayName)",
-            action: #selector(AppKitController.showWorkspaceSettings(_:)))
-        settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
-        titleRow.addArrangedSubview(settingsButton)
-        // A workspace with no runtime targets has nothing to expand, so it carries no chevron.
-        if !runtimeTargetItems(workspaceID: workspace.id).isEmpty {
-            let isExpanded = isWorkspaceExpanded(workspace.id)
-            let chevron = host.sidebarRowChevronButton(
-                expanded: isExpanded, tooltip: isExpanded ? "Collapse \(workspace.displayName)" : "Expand \(workspace.displayName)",
-                action: #selector(AppKitController.toggleSidebarWorkspaceDisclosure(_:)))
-            chevron.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-            chevron.setAccessibilityIdentifier("sidebar-workspace-disclosure-\(workspace.id)")
-            titleRow.addArrangedSubview(chevron)
+        // A marked row carries no controls: opening settings for, or expanding, a workspace that is being
+        // deleted are interactions the row refuses.
+        if rowState.isInteractive {
+            let settingsButton = host.sidebarRowIconButton(
+                symbol: "gearshape", tooltip: "Workspace settings for \(workspace.displayName)",
+                action: #selector(AppKitController.showWorkspaceSettings(_:)))
+            settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
+            titleRow.addArrangedSubview(settingsButton)
+            // A workspace with no runtime targets has nothing to expand, so it carries no chevron.
+            if !runtimeTargetItems(workspaceID: workspace.id).isEmpty {
+                let isExpanded = isWorkspaceExpanded(workspace.id)
+                let chevron = host.sidebarRowChevronButton(
+                    expanded: isExpanded, tooltip: isExpanded ? "Collapse \(workspace.displayName)" : "Expand \(workspace.displayName)",
+                    action: #selector(AppKitController.toggleSidebarWorkspaceDisclosure(_:)))
+                chevron.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+                chevron.setAccessibilityIdentifier("sidebar-workspace-disclosure-\(workspace.id)")
+                titleRow.addArrangedSubview(chevron)
+            }
         }
         contentStack.addArrangedSubview(titleRow)
         titleRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
@@ -1490,6 +1514,28 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         ])
 
         return cell
+    }
+
+    /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
+    private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
+        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+        let statusIcon = NSImageView()
+        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
+        return statusIcon
+    }
+
+    /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
+    /// mini spinning indicator the agent rows use for in-flight work.
+    private func deletingProgressIndicator(workspaceID: String) -> NSView {
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .mini
+        spinner.toolTip = "Deleting…"
+        spinner.setAccessibilityIdentifier("sidebar-workspace-deleting-\(workspaceID)")
+        spinner.startAnimation(nil)
+        return spinner
     }
 
     /// The SF Symbol conveying a runtime target's kind in the sidebar list, matching the
@@ -1643,7 +1689,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { return nil }
         switch ref.item {
         case .runtimeTarget(_, let workspace, let item): return runtimeTargetMenu(workspace: workspace, item: item)
-        case .workspace(_, let workspace): return workspaceContextMenu(workspace: workspace)
+        // A row marked as deleting offers no actions: everything in the menu targets a workspace that is
+        // being removed, and the delete already running is the one thing happening to it.
+        case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive ? workspaceContextMenu(workspace: workspace) : nil
         // A non-git project's row stands in for its single workspace, so its right-click menu offers
         // the same workspace actions, resolved to that lone visible workspace.
         case .project(let project) where !project.isGitRepo:
@@ -2218,9 +2266,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// Whether a workspace's runtime-target list should be shown: pinned open by an explicit
-    /// mouse interaction, or expanded transiently because it is the current arrow-key selection.
+    /// mouse interaction, or expanded transiently because it is the current arrow-key selection. A row
+    /// marked as deleting shows none, without clearing either piece of state, so a failed delete restores
+    /// exactly what the user had open.
     private func isWorkspaceExpanded(_ workspaceID: String) -> Bool {
-        pinnedWorkspaceIDs.contains(workspaceID) || transientlyExpandedWorkspaceID == workspaceID
+        guard workspaceRowState(workspaceID).listsRuntimeTargetChildren else { return false }
+        return pinnedWorkspaceIDs.contains(workspaceID) || transientlyExpandedWorkspaceID == workspaceID
     }
 
     /// Marks a workspace as explicitly pinned open in response to a mouse interaction (clicking

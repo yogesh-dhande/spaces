@@ -350,6 +350,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
+    /// Workspaces whose delete mutation is in flight. Deleting a workspace takes seconds on the owning
+    /// daemon — it stops the workspace, then removes the git worktree — and every overview that lands in
+    /// that window still lists the workspace, so removing the row up front would let the next background
+    /// refresh put it back for a beat before it finally disappears. The row stays and renders marked as
+    /// deleting instead (see `sidebarWorkspaceRowState`), whatever rebuilds happen meanwhile.
+    /// In-memory and per-run, like `pendingNewTerminalSessionWorkspaceIDs`: a relaunch reloads from the
+    /// daemons, which are authoritative about whether the delete landed.
+    private(set) var workspaceIDsPendingDeletion: Set<String> = []
 
     @discardableResult func beginNewTerminalSessionCreation(workspaceID: String) -> Bool {
         pendingNewTerminalSessionWorkspaceIDs.insert(workspaceID).inserted
@@ -2580,6 +2588,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// this merged data (which device owns a workspace, which overview a row belongs to) keep resolving
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
+    ///
+    /// A workspace whose delete is in flight stays in this data: it keeps its sidebar row, which renders
+    /// marked as deleting (see `sidebarWorkspaceRowState`) until the mutation resolves, rather than
+    /// disappearing and — because the owning daemon still reports it — coming back on the next refresh.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
         projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
         alertsGroups: [AlertsGroup]
@@ -2597,6 +2609,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return (mergedProjects, mergedWorkspaces, mergedRuntime, mergedAlerts)
     }
 
+    /// How a sidebar workspace row renders and responds while its delete mutation runs. A delete takes
+    /// seconds on the owning daemon (it stops the workspace, then removes the git worktree), so the row
+    /// stays listed and is marked for that whole window instead of vanishing and reappearing on the next
+    /// overview refresh: dimmed, carrying a progress indicator, its runtime-target children hidden, and
+    /// inert — no selection, no context menu, no expansion. It leaves the sidebar exactly once, when the
+    /// post-delete overview stops carrying it.
+    struct SidebarWorkspaceRowState: Equatable, Sendable {
+        /// Row opacity. Assigned independently of the owning device's dimming, which uses the same value,
+        /// so a marked row under an unreachable device is dimmed once rather than twice.
+        let alpha: CGFloat
+        let showsDeletingProgress: Bool
+        /// Whether the row's runtime targets are listed as children at all. False while deleting, so the
+        /// children are hidden whatever the user's expansion state — there is nothing to do under a row
+        /// that is going away — and the expansion state itself is left untouched, so a failed delete
+        /// restores exactly what the user had open.
+        let listsRuntimeTargetChildren: Bool
+        /// Whether the row accepts selection, its context menu, and expansion.
+        let isInteractive: Bool
+    }
+
+    /// The row treatment for a workspace, keyed on whether its delete is in flight. Pure so the
+    /// marked-row contract is directly testable.
+    nonisolated static func sidebarWorkspaceRowState(isPendingDeletion: Bool) -> SidebarWorkspaceRowState {
+        guard isPendingDeletion else {
+            return SidebarWorkspaceRowState(alpha: 1, showsDeletingProgress: false, listsRuntimeTargetChildren: true, isInteractive: true)
+        }
+        return SidebarWorkspaceRowState(
+            alpha: unreachableDeviceAlpha, showsDeletingProgress: true, listsRuntimeTargetChildren: false, isInteractive: false)
+    }
+
     /// The opacity a row inherits from its owning device's load state. A device that is not loaded —
     /// unreachable, or reconnecting after an outage — keeps its rows listed but dimmed, so the subtree
     /// reads as browsable-but-not-actionable. This is the same treatment the add-project device picker
@@ -2604,7 +2646,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// extra per-row icon. Pure so the rule is directly testable.
     nonisolated static func sidebarRowAlpha(loadState: SidebarDeviceLoadState) -> CGFloat { loadState == .loaded ? 1 : unreachableDeviceAlpha }
 
-    /// The dimming an unreachable device's rows and its add-project picker row share.
+    /// The dimming every listed-but-not-actionable row shares: an unreachable device's rows, its
+    /// add-project picker row, and a workspace row marked as deleting.
     nonisolated static let unreachableDeviceAlpha: CGFloat = 0.55
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -8726,12 +8769,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
-        // Resolve the owning device before the optimistic removal below; once the row
-        // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
-        // find it and would fall back to the local device, misrouting remote deletes.
+        // Route the delete to the daemon that owns the workspace's project rather than the local
+        // device, so a remote workspace is deleted where it actually lives.
         let device = deviceForMutation(deviceID: project.deviceID)
-        let didOptimisticallyRemove = optimisticallyRemoveWorkspaceFromSidebar(workspaceID: id)
-        if !didOptimisticallyRemove { button?.isEnabled = false }
+        beginPendingWorkspaceDeletion(workspaceID: id, projectID: project.id)
+        button?.isEnabled = false
         showOperationProgressOverlay(
             message: "Deleting workspace...", detail: "Stopping runtime state and cleaning up workspace files.", context: .workspace(id))
         Task { @MainActor [weak self, weak button] in
@@ -8748,7 +8790,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    // Install the post-delete overview first, then clear the marking: the workspace is
+                    // already absent from that overview, so its row leaves the sidebar exactly once.
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
+                    self.endPendingWorkspaceDeletion(workspaceID: id)
                     // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
                     // remote that refused), so its report is shown; a delete with no branch boxes ticked
                     // carries no notice and stays silent.
@@ -8756,12 +8801,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         self.showInfoMessage(title: "Deleted workspace", message: notice)
                     }
                 case .failure(let error):
+                    // The delete did not land, so the row goes back to normal — its expansion state
+                    // included — and the reload re-syncs whatever the daemon did get through.
+                    self.endPendingWorkspaceDeletion(workspaceID: id)
                     requestSidebarReload()
                     button?.isEnabled = true
                     showError(error)
                 }
             } else {
-                if didOptimisticallyRemove { requestSidebarReload() }
+                self.endPendingWorkspaceDeletion(workspaceID: id)
                 button?.isEnabled = true
                 showDeviceNotLoadedError()
             }
@@ -9212,22 +9260,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
 
-    private func optimisticallyRemoveWorkspaceFromSidebar(workspaceID: String) -> Bool {
-        guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
-        guard var workspaces = workspacesByProject[project.id] else { return false }
-        let originalCount = workspaces.count
-        workspaces.removeAll(where: { $0.id == workspaceID })
-        guard workspaces.count != originalCount else { return false }
-
-        workspacesByProject[project.id] = workspaces
+    /// Marks a workspace whose delete the user just confirmed, and moves the selection off it: a marked
+    /// row is inert, so it must not stay selected with its detail pane open. The marking is read on every
+    /// row build, so overview refreshes that land while the daemon works through the delete keep showing
+    /// the row as deleting instead of restoring it to normal.
+    private func beginPendingWorkspaceDeletion(workspaceID: String, projectID: String) {
+        workspaceIDsPendingDeletion.insert(workspaceID)
         if selectedWorkspaceID == workspaceID {
             selectedWorkspaceID = nil
-            selectedProjectID = project.id
+            selectedProjectID = projectID
         }
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Clears the marking once the delete resolves. After a successful delete the workspace is already
+    /// gone from the refreshed overview, so the row leaves once; after a failed one the row returns to
+    /// normal, with the user's expansion state intact because marking never touched it.
+    private func endPendingWorkspaceDeletion(workspaceID: String) {
+        guard workspaceIDsPendingDeletion.remove(workspaceID) != nil else { return }
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Rebuilds the rows against the current marking. The sidebar data itself is unchanged — a workspace
+    /// being deleted keeps its row — so only the row views and the expansion state (a marked row hides
+    /// its runtime targets) have to be reapplied.
+    private func applyPendingWorkspaceDeletionMarking() {
         outlineView.reloadData()
         applySidebarProjectExpansionState()
         refreshSelection()
-        return true
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }

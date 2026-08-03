@@ -194,7 +194,36 @@
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-loose")], featureIsHidden: true)
 
-            XCTAssertFalse(model.terminalGroups.contains { $0.id == "workspace-feature" })
+            XCTAssertFalse(model.terminalGroups.contains { $0.workspaceID == "workspace-feature" })
+        }
+
+        /// Deleting a workspace drops its record from the overview while its ended sessions linger for a
+        /// refresh or two. Those orphaned sessions must not re-home into a loose group named for a
+        /// workspace the list no longer has.
+        func testSessionsOfAWorkspaceMissingFromTheOverviewFormNoTerminalGroup() {
+            let model = makeModel()
+            let populated = makeOverview(sessions: [makeSession(id: "session-loose")])
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: populated.projects, workspaces: populated.workspaces.filter { $0.id != "workspace-feature" }, sessions: populated.sessions,
+                daemonStatus: populated.daemonStatus)
+
+            XCTAssertFalse(model.terminalGroups.contains { $0.workspaceID == "workspace-feature" })
+            XCTAssertTrue(model.terminalGroups.flatMap(\.sessions).isEmpty)
+        }
+
+        /// A workspace whose sessions are not all among its runtime rows is listed twice on the Spaces tab:
+        /// once as its own band among the projects, once as a loose-session band after them. Those are two
+        /// rows of one list, so they must not answer to the same identity — a list holding fewer distinct
+        /// identities than it has rows miscounts every batch update it performs and crashes.
+        func testLooseSessionGroupDoesNotShareItsWorkspaceBandIdentity() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-loose")])
+
+            let looseGroup = model.terminalGroups.first { $0.workspaceID == "workspace-feature" }
+
+            XCTAssertNotNil(looseGroup, "Expected the unrepresented session to form a loose group.")
+            XCTAssertTrue(model.workspaceGroups.contains { $0.id == "workspace-feature" })
+            XCTAssertTrue(Set(model.terminalGroups.map(\.id)).isDisjoint(with: Set(model.workspaceGroups.map(\.id))))
         }
 
         func testHideWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
@@ -325,6 +354,51 @@
 
             XCTAssertNotNil(model.errorMessage)
             XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        /// The daemon takes seconds to stop a workspace and remove its worktree, and it stays in every
+        /// overview until then, so the workspace is marked as deleting for the whole mutation — that mark
+        /// is the feedback the Spaces tab renders on the band.
+        func testWorkspaceIsMarkedPendingDeletionWhileTheDeleteIsInFlight() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let workspace = makeOverview().workspaces[0]
+
+            let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
+        /// band goes back to normal beside the error.
+        func testFailedDeleteClearsThePendingDeletionMark() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertTrue(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
         }
 
         /// A browser session has no run state, so its row draws no status dot — while the process and

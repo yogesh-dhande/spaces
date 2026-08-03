@@ -92,6 +92,23 @@
             XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
         }
 
+        /// A deleted workspace's sessions outlive its record by a refresh or two. An event grouped under a
+        /// workspace the overview no longer describes would band under an id nothing else on screen carries,
+        /// so those sessions raise no loose-session and no bell event.
+        func testSkipsLooseSessionsAndBellsOfAWorkspaceMissingFromTheOverview() {
+            let overview = makeOverview(
+                workspaces: [makeWorkspace(id: "workspace-docs", branch: "docs")],
+                sessions: [
+                    makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
+                    makeSession(id: "session-bell", title: "zsh", state: .running, updatedAt: "2026-01-01T00:05:00Z", bellAt: "2026-01-01T00:05:00Z"),
+                ])
+
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+            XCTAssertTrue(
+                SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true)
+                    .isEmpty)
+        }
+
         func testGroupsSortNewestFirstAndEventsWithinGroupNewestFirst() {
             let overview = makeOverview(workspaces: [
                 makeWorkspace(

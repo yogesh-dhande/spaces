@@ -48,8 +48,8 @@ struct SpacesTabView: View {
         } message: { workspace in
             Text(
                 workspace.isRunning
-                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and removes it from this list and the Mac sidebar. Unhide it from the Mac."
-                    : "\"\(workspace.displayName)\" will be removed from this list and the Mac sidebar. Unhide it from the Mac.")
+                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
+                    : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
         }.sheet(item: $pendingDeleteWorkspace) { workspace in
             WorkspaceDeleteSheet(workspace: workspace) { deleteLocalBranch, deleteRemoteBranch in
                 Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
@@ -105,28 +105,76 @@ struct SpacesTabView: View {
                 }
             } else {
                 List {
-                    homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow()
+                    #if DEBUG
+                        let _ = SpacesListIdentityDump.record(listIdentityRows)
+                    #endif
+                    Section {
+                        homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
+                    }
                     if model.isActiveDeviceBlocked {
                         // Fully blocked, scoped to this device: the banner in homeControls is the only
                         // surface. Switch to another paired device or restart this device's daemon.
                         EmptyView()
                     } else if model.isLoading && model.overview == nil {
-                        ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow()
+                        Section {
+                            ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.loading)
+                        }
                     } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
-                        ContentUnavailableView(
-                            "No Workspaces", systemImage: "rectangle.stack", description: Text("Create a workspace or adjust the current filters.")
-                        ).frame(maxWidth: .infinity, minHeight: 360).bandListRow()
+                        Section {
+                            ContentUnavailableView(
+                                "No Workspaces", systemImage: "rectangle.stack",
+                                description: Text("Create a workspace or adjust the current filters.")
+                            ).frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.empty)
+                        }
                     } else {
                         ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
-                        ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
+                        ForEach(model.terminalGroups) { group in Section { terminalGroupSection(group) } }
                     }
-                    if !model.isActiveDeviceBlocked { hiddenSection }
-                }.listStyle(.plain).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden).refreshable {
-                    await model.refresh()
-                }
+                    if !model.isActiveDeviceBlocked { Section { hiddenSection } }
+                }.listStyle(.plain).listSectionSpacing(0).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden)
+                    .refreshable { await model.refresh() }
             }
         }.background(Theme.bg.ignoresSafeArea())
     }
+
+    #if DEBUG
+        /// The identity of every row `homeView`'s list is about to render, in the same order and under the
+        /// same conditions, for `SpacesListIdentityDump`. Built from the same `SpacesListRowID` values the
+        /// rows themselves carry, so the dump reports what the list actually identifies rows by rather than
+        /// a second description of it that could drift.
+        private var listIdentityRows: [String] {
+            var rows = ["controls@\(SpacesListRowID.controls)"]
+            if model.isActiveDeviceBlocked {
+                // No rows: the compatibility banner in homeControls is the whole surface.
+            } else if model.isLoading && model.overview == nil {
+                rows.append("loading@\(SpacesListRowID.loading)")
+            } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
+                rows.append("empty@\(SpacesListRowID.empty)")
+            } else {
+                for projectGroup in projectGroups {
+                    rows.append("projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))")
+                    for group in projectGroup.workspaceGroups {
+                        rows.append("band@\(SpacesListRowID.workspaceBand(group.id))")
+                        guard !model.collapsedWorkspaceIDs.contains(group.id) else { continue }
+                        rows.append("controlBar@\(SpacesListRowID.workspaceControlBar(group.id))")
+                        if group.rows.isEmpty { rows.append("noRows@\(SpacesListRowID.workspaceEmptyRows(group.id))") }
+                        rows.append(contentsOf: group.rows.map { "runtimeRow@\(SpacesListRowID.runtimeRow($0.id))" })
+                    }
+                }
+                for group in model.terminalGroups {
+                    rows.append("looseBand@\(SpacesListRowID.looseBand(group.workspaceID))")
+                    rows.append(contentsOf: group.sessions.map { "looseSession@\(SpacesListRowID.looseSession($0.id))" })
+                }
+            }
+            if !model.isActiveDeviceBlocked, isHiddenSectionVisible {
+                rows.append("hiddenHeader@\(SpacesListRowID.hiddenHeader)")
+                if model.isHiddenSectionExpanded {
+                    rows.append(contentsOf: model.hiddenWorkspaces.map { "hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))" })
+                }
+            }
+            return rows
+        }
+    #endif
 
     private var homeControls: some View {
         VStack(spacing: 8) {
@@ -232,17 +280,39 @@ struct SpacesTabView: View {
         }
     }
 
+    /// One list section for the project's caption and one for each of its workspaces.
+    ///
+    /// The sections are what keep the list's bookkeeping sound rather than a visual device — they carry no
+    /// header and `listSectionSpacing(0)` keeps them from adding any spacing of their own, so the caption
+    /// and bands look exactly as they did when the whole tab was a single section. Every workspace being
+    /// its own section means adding or removing one is an insert or delete of a whole section instead of a
+    /// run of rows inside a 49-row section, which is the update the collection view was miscounting.
     @ViewBuilder private func projectSection(_ projectGroup: ProjectGroup) -> some View {
-        Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-            .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow()
+        Section {
+            Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow().id(
+                    SpacesListRowID.projectCaption(projectGroup.id))
+        }
         ForEach(Array(projectGroup.workspaceGroups.enumerated()), id: \.element.id) { index, group in
             // The project caption already separates the first workspace from what is above it, so only
             // the workspaces after it carry the full band lead-in gap.
-            workspaceSection(group, topGap: index == 0 ? 8 : 14)
+            Section { workspaceSection(group, topGap: index == 0 ? 8 : 14) }
         }
     }
 
+    /// A workspace's band plus, when it is expanded, its control bar and runtime rows.
+    ///
+    /// Marking a workspace as deleting changes only what its rows draw and what they accept — it adds no
+    /// row and takes none away. Collapsing the workspace for the duration would read better, and was tried
+    /// twice, but removing its control bar and runtime rows at the moment the delete is confirmed makes
+    /// the list's batch update inconsistent with its own data and crashes the collection view
+    /// (`attempt to delete item 6 from section 3 which only contains 6 items before the update`) — the
+    /// collection view counts one item fewer than the section actually holds, so a removal inside a
+    /// section walks off its end. Removing the whole section, which is what the daemon confirming the
+    /// delete does, is sound; removing rows within one is not. The only structural change a delete makes
+    /// is therefore the one the daemon confirms, when the workspace leaves the overview.
     @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup, topGap: CGFloat) -> some View {
+        let isDeleting = model.isWorkspacePendingDeletion(group.id)
         let isCollapsed = model.collapsedWorkspaceIDs.contains(group.id)
         Button {
             withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
@@ -250,30 +320,44 @@ struct SpacesTabView: View {
             HeaderBand {
                 WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
                 Spacer(minLength: 0)
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
-                    Theme.mutedSecondary)
-            }.contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").bandListHeaderRow(topGap: topGap).modifier(
+                // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
+                // than merely collapsed.
+                if isDeleting {
+                    ProgressView().controlSize(.small).tint(Theme.mutedSecondary)
+                } else {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
+                        Theme.mutedSecondary)
+                }
+            }.contentShape(Rectangle()).opacity(isDeleting ? 0.5 : 1)
+        }.buttonStyle(.plain).disabled(isDeleting).accessibilityIdentifier("workspace.band.\(group.id)").accessibilityValue(
+            isDeleting ? "Deleting" : ""
+        ).bandListHeaderRow(topGap: topGap).modifier(
             WorkspaceBandActions(
                 model: model, workspace: group.workspace, onHide: { pendingHideWorkspace = group.workspace },
-                onDelete: { pendingDeleteWorkspace = group.workspace }))
+                onDelete: { pendingDeleteWorkspace = group.workspace })
+        ).id(SpacesListRowID.workspaceBand(group.id))
         if !isCollapsed {
+            // Dimmed and inert with the band while the delete runs: the rows stay listed (removing them is
+            // the structural change this deliberately avoids) but nothing under a workspace on its way out
+            // is worth acting on.
             WorkspaceControlBar(
-                workspace: group.workspace, isMutating: model.isMutating, onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                workspace: group.workspace, isMutating: model.isMutating || isDeleting,
+                onStart: { Task { await model.launchWorkspace(group.workspace) } },
                 onRestart: { Task { await model.restartWorkspace(group.workspace) } },
                 onStop: { Task { await model.stopWorkspace(group.workspace) } },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
                 onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
-            ).bandListRow()
+            ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
             if group.rows.isEmpty {
                 Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 9).padding(.horizontal, 20).bandListRow()
+                    .padding(.vertical, 9).padding(.horizontal, 20).bandListRow().id(SpacesListRowID.workspaceEmptyRows(group.id))
             }
             ForEach(group.rows) { row in
                 // Lifecycle actions reach a row two ways: a long press opens the full menu (Rename
                 // included), a trailing swipe offers the lifecycle subset. Full swipe is off so an
                 // over-swipe cannot run or stop something on its own.
-                runtimeRow(row).bandListRow().swipeActions(edge: .trailing, allowsFullSwipe: false) { runtimeSwipeActions(for: row) }
+                runtimeRow(row).disabled(isDeleting).opacity(isDeleting ? 0.5 : 1).bandListRow().swipeActions(edge: .trailing, allowsFullSwipe: false)
+                { runtimeSwipeActions(for: row) }.id(SpacesListRowID.runtimeRow(row.id))
             }
         }
     }
@@ -437,7 +521,7 @@ struct SpacesTabView: View {
                     Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.mutedSecondary)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow()
+            }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
             if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in hiddenWorkspaceRow(workspace) } }
         }
     }
@@ -447,7 +531,7 @@ struct SpacesTabView: View {
             dotKind: nil, tile: TypeIconTile(systemName: workspace.isGitWorkspace ? "arrow.triangle.branch" : "folder"), title: workspace.displayName,
             detail: workspace.projectName, detailIsMonospaced: false
         ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu { unhideButton(workspace) }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideButton(workspace) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideButton(workspace) }.id(SpacesListRowID.hiddenWorkspace(workspace.id))
     }
 
     /// No confirmation: unlike Hide (which can stop a running workspace), unhiding only changes
@@ -463,14 +547,17 @@ struct SpacesTabView: View {
     // MARK: - Loose terminal-session groups
 
     @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
-        let workspace = model.overview?.workspaces.first { $0.id == group.id }
+        let workspace = model.overview?.workspaces.first { $0.id == group.workspaceID }
         HeaderBand {
             WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
             Spacer(minLength: 0)
             Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
                 .lineLimit(1)
-        }.accessibilityIdentifier("workspace.band.\(group.id)").bandListHeaderRow()
-        ForEach(group.sessions) { session in terminalSessionRow(session).bandListRow() }
+            // Identified as the loose band it is, not as the workspace: the workspace's own band already
+            // carries `workspace.band.<id>`, and two rows answering to one identifier is what
+            // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
+        }.accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
+        ForEach(group.sessions) { session in terminalSessionRow(session).bandListRow().id(SpacesListRowID.looseSession(session.id)) }
     }
 
     private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
@@ -483,6 +570,35 @@ struct SpacesTabView: View {
         }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
             "terminal.row.\(session.id)")
     }
+}
+
+/// The identity of every row in the Spaces list.
+///
+/// Each row states its own identity with `.id(…)` rather than leaving SwiftUI to infer one from where the
+/// row sits in the builder. The Spaces list is one section assembled from sibling `ForEach`es and
+/// multi-row builder functions, and inferred identity there proved unstable: with the list's rows and
+/// their order provably unchanged (see `SpacesListIdentityDump`), the collection view was still told 15
+/// rows had been deleted and 15 inserted, and it counted one item fewer than the list actually had. An
+/// update against that mismatched bookkeeping is the inconsistent batch update that crashed the app while
+/// a workspace was being deleted.
+///
+/// A row's identity must therefore be unique across the whole list, not merely within its own `ForEach` —
+/// every case here is prefixed by the kind of row it is, so an id the daemon reuses across row families
+/// (a workspace id naming both a band and a loose band, say) still yields two distinct rows.
+private enum SpacesListRowID {
+    static let controls = "controls"
+    static let loading = "loading"
+    static let empty = "empty"
+    static let hiddenHeader = "hidden.header"
+
+    static func projectCaption(_ projectID: String) -> String { "project.caption.\(projectID)" }
+    static func workspaceBand(_ workspaceID: String) -> String { "workspace.band.\(workspaceID)" }
+    static func workspaceControlBar(_ workspaceID: String) -> String { "workspace.controlBar.\(workspaceID)" }
+    static func workspaceEmptyRows(_ workspaceID: String) -> String { "workspace.noRows.\(workspaceID)" }
+    static func runtimeRow(_ rowID: String) -> String { "runtime.row.\(rowID)" }
+    static func looseBand(_ workspaceID: String) -> String { "loose.band.\(workspaceID)" }
+    static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
+    static func hiddenWorkspace(_ workspaceID: String) -> String { "hidden.workspace.\(workspaceID)" }
 }
 
 /// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.
@@ -600,3 +716,53 @@ struct WorkspaceCreateSheet: View {
         }
     }
 }
+
+#if DEBUG
+    /// Test-support diagnostic, not product behavior: prints the identity of every row the Spaces list is
+    /// about to render, in render order, once per content evaluation.
+    ///
+    /// It exists because `UICollectionView`'s inconsistent-update exception reports only counts ("after the
+    /// update (42) must be (41)"), which cannot say *which* row the list lost or gained. Dumping the
+    /// flattened identity list on every evaluation makes the two publishes either side of a crash directly
+    /// diffable, and makes a duplicate identity — two rows the list counts as one — visible at a glance.
+    ///
+    /// Each row is logged as `label@identity`: `label` is where the row sits in the builder, `identity` is
+    /// the value SwiftUI identifies it by (`-` for rows carrying structural identity only, which have no id
+    /// of their own). Duplicates are therefore judged on the `identity` half, across the whole flattened
+    /// list rather than per `ForEach`.
+    ///
+    /// Lives beside `SpacesTabView.listIdentityRows`, the mirror of the list body it dumps, so the two are
+    /// edited together. Off unless `SPACES_MOBILE_LIST_IDENTITY_DUMP=1` is set in the app's environment,
+    /// and compiled out of release builds entirely.
+    @MainActor enum SpacesListIdentityDump {
+        static let isEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_LIST_IDENTITY_DUMP"] == "1"
+
+        private static var sequence = 0
+
+        /// `rows` is an autoclosure so a disabled dump costs nothing but the flag read — the list body is
+        /// re-evaluated constantly while scrolling, and this runs inside that evaluation.
+        static func record(_ rows: @autoclosure () -> [String]) {
+            guard isEnabled else { return }
+            sequence += 1
+            let identities = rows()
+            let duplicates = duplicateIdentities(in: identities)
+            let line =
+                "LISTDUMP seq=\(sequence) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) count=\(identities.count) "
+                + "duplicates=\(duplicates.isEmpty ? "none" : duplicates.joined(separator: ",")) rows=\(identities.joined(separator: " "))\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+
+        /// The identities carried by more than one row, which is exactly what makes a batch update
+        /// inconsistent: the list then holds fewer distinct identities than it has rows. Structural-only
+        /// rows (`-`) are excluded — they are told apart by position, not by value.
+        private static func duplicateIdentities(in rows: [String]) -> [String] {
+            var seen: Set<String> = []
+            var duplicates: [String] = []
+            for row in rows {
+                guard let identity = row.split(separator: "@", maxSplits: 1).last.map(String.init), identity != "-" else { continue }
+                if !seen.insert(identity).inserted, !duplicates.contains(identity) { duplicates.append(identity) }
+            }
+            return duplicates
+        }
+    }
+#endif

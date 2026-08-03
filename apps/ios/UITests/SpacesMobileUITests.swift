@@ -22,6 +22,10 @@ final class SpacesMobileUITests: XCTestCase {
 
     func testTerminalTapLocalImagePathOpensPreview() throws { try runTerminalLinkPreviewScenario() }
 
+    func testWorkspaceDeleteWhileScrollingList() throws { try runWorkspaceBandRemovalWhileScrollingScenario(action: .delete) }
+
+    func testWorkspaceHideWhileScrollingList() throws { try runWorkspaceBandRemovalWhileScrollingScenario(action: .hide) }
+
     func testAttachedAppConfigurationDoesNotRequireCertificateFingerprint() throws {
         let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: configURL) }
@@ -210,6 +214,189 @@ final class SpacesMobileUITests: XCTestCase {
             waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
             "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))")
         captureScreenshot(app, name: "terminal-link-preview", filePath: configuration.linkPreviewScreenshotPath)
+    }
+
+    // MARK: - Workspace removal while scrolling
+
+    private enum WorkspaceBandRemovalAction: String {
+        case delete
+        case hide
+    }
+
+    /// Permanent regression coverage: removing a workspace band while the list is being scrolled must not
+    /// crash the list and must actually remove the workspace. A delete takes seconds on the daemon — the
+    /// band is marked as deleting for that whole window and leaves the list only when the refreshed
+    /// overview drops the workspace — so the scroll keeps the list moving across the publish that removes
+    /// it, which is where the list's batch update has to stay consistent.
+    private func runWorkspaceBandRemovalWhileScrollingScenario(action: WorkspaceBandRemovalAction) throws {
+        let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
+        let app = launchConfiguredApp(configuration)
+        XCUIDevice.shared.orientation = .portrait
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        let workspaceID = configuration.targetWorkspaceID
+        XCTAssertFalse(workspaceID.isEmpty, "Missing targetWorkspaceID in the UI test configuration")
+
+        let band = app.buttons["workspace.band.\(workspaceID)"]
+        XCTAssertTrue(band.waitForExistence(timeout: 40), "Workspace band \(workspaceID) never appeared in the Spaces list")
+
+        let actionIdentifier = "workspace.\(action.rawValue).\(workspaceID)"
+        let actionLabel = action == .delete ? "Delete" : "Hide"
+        guard openBandAction(actionIdentifier, label: actionLabel, band: band, in: app) else {
+            captureScreenshot(app, name: "workspace-band-actions-missing", filePath: configuration.immediateScreenshotPath)
+            XCTFail("Swipe action \(actionIdentifier) never became available")
+            return
+        }
+
+        let confirmedAt: Date
+        switch action {
+        case .delete:
+            // Identifier-only: the swipe action behind the sheet also reads "Delete", and a label match
+            // would re-fire it instead of confirming.
+            guard tapButton(in: app, identifier: "workspace.delete.confirm", fallbackLabel: "workspace.delete.confirm", timeout: 15) else {
+                captureScreenshot(app, name: "workspace-delete-confirm-missing", filePath: configuration.immediateScreenshotPath)
+                XCTFail("The delete confirmation sheet never offered a confirm button")
+                return
+            }
+            confirmedAt = Date()
+        case .hide:
+            // The hide dialog's confirm label depends on whether the workspace is running.
+            let confirmed =
+                tapButton(in: app, identifier: "Stop and Hide", fallbackLabel: "Stop and Hide", timeout: 6)
+                || tapButton(in: app, identifier: "Hide", fallbackLabel: "Hide", timeout: 6)
+            guard confirmed else {
+                captureScreenshot(app, name: "workspace-hide-confirm-missing", filePath: configuration.immediateScreenshotPath)
+                XCTFail("The hide confirmation dialog never offered a confirm button")
+                return
+            }
+            confirmedAt = Date()
+        }
+
+        // Scroll continuously across the whole mutation window. The removal publishes somewhere inside it,
+        // so the diff always lands while the collection view is mid-scroll.
+        let scrollDeadline = confirmedAt.addingTimeInterval(configuration.removalScrollSeconds)
+        var inverted = false
+        var connectionErrorAlerts = 0
+        while Date() < scrollDeadline {
+            guard app.state == .runningForeground else {
+                XCTFail(
+                    "The app stopped running while scrolling during the workspace \(action.rawValue). "
+                        + "state=\(app.state.rawValue) elapsed=\(Date().timeIntervalSince(confirmedAt))s")
+                return
+            }
+            if dismissConnectionErrorAlertIfPresent(in: app) { connectionErrorAlerts += 1 }
+            scrollList(in: app, duration: 0.0, startInverted: inverted)
+            inverted.toggle()
+        }
+
+        XCTAssertEqual(app.state, .runningForeground, "The app was not running in the foreground after the scroll window")
+        if dismissConnectionErrorAlertIfPresent(in: app) { connectionErrorAlerts += 1 }
+
+        // The band stays on screen (marked as deleting) for the whole mutation, so it disappearing is the
+        // workspace actually leaving the list rather than the mark being applied.
+        let removalDeadline = Date().addingTimeInterval(60)
+        while Date() < removalDeadline, band.exists {
+            guard app.state == .runningForeground else {
+                XCTFail("The app stopped running while waiting for the workspace band to disappear")
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            if dismissConnectionErrorAlertIfPresent(in: app) { connectionErrorAlerts += 1 }
+        }
+        XCTAssertFalse(
+            band.exists,
+            "Workspace band \(workspaceID) never disappeared after the \(action.rawValue). "
+                + "connectionErrorAlerts=\(connectionErrorAlerts) (a non-zero count means the device went unreachable, "
+                + "so the mutation itself may have failed rather than the list having kept the band)")
+
+        captureScreenshot(app, name: "workspace-\(action.rawValue)-after-scroll", filePath: configuration.finalScreenshotPath)
+    }
+
+    /// Clears the connection-error alert if the app raised one, so the scroll can carry on, and reports
+    /// whether it had to.
+    ///
+    /// Removing a workspace makes the daemon stop it and tear its worktree down, and while it is busy an
+    /// overview poll can time out for long enough that the app reports the device unreachable. That says
+    /// nothing about what this scenario tests — the list surviving a workspace being removed underneath a
+    /// scroll — but an alert over the list blocks every gesture, and XCUITest's own interruption handling
+    /// then fails the swipe instead of scrolling. The caller carries the fact into its failure message
+    /// rather than dropping it, because the same alert is also how a mutation that genuinely failed shows
+    /// up, and that is worth telling apart from a band that stayed for any other reason.
+    private func dismissConnectionErrorAlertIfPresent(in app: XCUIApplication) -> Bool {
+        let alert = app.alerts["Connection Error"]
+        guard alert.exists else { return false }
+        alert.buttons["OK"].tap()
+        return true
+    }
+
+    /// One scroll pass. `duration` of 0 performs a single swipe; a positive duration keeps swiping for
+    /// that long. Alternating direction keeps the list moving instead of parking at an edge.
+    private func scrollList(in app: XCUIApplication, duration: TimeInterval, startInverted: Bool) {
+        let deadline = Date().addingTimeInterval(duration)
+        var inverted = startInverted
+        repeat {
+            let target = scrollContainer(in: app)
+            if inverted { target.swipeDown(velocity: .fast) } else { target.swipeUp(velocity: .fast) }
+            inverted.toggle()
+        } while Date() < deadline
+    }
+
+    /// Brings the element into the middle band of the screen. A row parked under the translucent
+    /// navigation bar reports as hittable but swallows the swipe, so vertical position matters as much
+    /// as existence here.
+    private func positionElementForSwipe(_ element: XCUIElement, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let appFrame = app.frame
+        let comfortableTop = appFrame.minY + appFrame.height * 0.28
+        let comfortableBottom = appFrame.minY + appFrame.height * 0.72
+        var inverted = false
+        while Date() < deadline {
+            if element.exists, element.isHittable {
+                let midY = element.frame.midY
+                if midY >= comfortableTop, midY <= comfortableBottom { return true }
+                // Drag the content the short distance that moves the row into the comfortable band.
+                let towardBottom = midY < comfortableTop
+                let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: towardBottom ? 0.35 : 0.65))
+                let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: towardBottom ? 0.55 : 0.45))
+                start.press(forDuration: 0.05, thenDragTo: end)
+            } else {
+                let target = scrollContainer(in: app)
+                if inverted { target.swipeDown() } else { target.swipeUp() }
+                inverted.toggle()
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        return element.exists && element.isHittable
+    }
+
+    /// Opens the band's trailing swipe actions and taps one. The swipe is retried because a list that is
+    /// still settling (or a row that drifted under the navigation bar) can swallow the gesture entirely.
+    private func openBandAction(_ identifier: String, label: String, band: XCUIElement, in app: XCUIApplication) -> Bool {
+        for _ in 0..<5 {
+            guard positionElementForSwipe(band, in: app, timeout: 20) else { continue }
+            band.swipeLeft()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            if tapButton(in: app, identifier: identifier, fallbackLabel: label, timeout: 3) { return true }
+            // Close a half-open swipe before retrying so the next gesture starts from a settled row.
+            band.swipeRight()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        // Long press opens the same Hide/Delete pair as the swipe; the real-device report reached Delete
+        // either way, so this keeps the reproduction going when the gesture recognizer refuses the swipe.
+        if positionElementForSwipe(band, in: app, timeout: 10) {
+            band.press(forDuration: 1.2)
+            RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+            if tapButton(in: app, identifier: identifier, fallbackLabel: label, timeout: 5) { return true }
+        }
+        return false
+    }
+
+    private func scrollContainer(in app: XCUIApplication) -> XCUIElement {
+        let collectionView = app.collectionViews.firstMatch
+        if collectionView.exists { return collectionView }
+        let scrollView = app.scrollViews.firstMatch
+        if scrollView.exists { return scrollView }
+        return app
     }
 
     private func launchConfiguredApp(_ configuration: UITestConfiguration) -> XCUIApplication {
@@ -844,6 +1031,8 @@ private struct UITestConfiguration: Decodable {
     let maximumTerminalTopBlankRatio: Double
     let attachToExistingApp: Bool
     let bundleID: String
+    let targetWorkspaceID: String
+    let removalScrollSeconds: Double
 
     var deviceSeedJSON: String? {
         guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (1...65_535).contains(port),
@@ -913,6 +1102,8 @@ private struct UITestConfiguration: Decodable {
         case maximumTerminalTopBlankRatio
         case attachToExistingApp
         case bundleID
+        case targetWorkspaceID
+        case removalScrollSeconds
     }
 
     init(from decoder: any Decoder) throws {
@@ -968,6 +1159,8 @@ private struct UITestConfiguration: Decodable {
         minimumVisibleTerminalInkBands = try container.decodeIfPresent(Int.self, forKey: .minimumVisibleTerminalInkBands) ?? 0
         maximumTerminalTopBlankRatio = try container.decodeIfPresent(Double.self, forKey: .maximumTerminalTopBlankRatio) ?? 0
         bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
+        targetWorkspaceID = try container.decodeIfPresent(String.self, forKey: .targetWorkspaceID) ?? ""
+        removalScrollSeconds = try container.decodeIfPresent(Double.self, forKey: .removalScrollSeconds) ?? 12
     }
 
     func manualRetakeoverObservedPath(for attemptIndex: Int) -> String? {
