@@ -20,9 +20,7 @@ struct E2ECommand: ParsableCommand {
 
     @Flag(name: .long, help: "Preserve the runner root and scenario roots where supported.") var keepRoot = false
 
-    @Flag(
-        name: .long,
-        help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
+    @Flag(name: .long, help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
     var local = false
 
     func run() throws {
@@ -192,6 +190,7 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(name: "ownership-guard", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "workspace-delete-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "workspace-hide-scroll", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "session-end-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ios-input-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(name: "ios-scrollback-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(

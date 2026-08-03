@@ -128,9 +128,9 @@ struct SpacesTabView: View {
                         }
                     } else {
                         ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
-                        ForEach(model.terminalGroups) { group in Section { terminalGroupSection(group) } }
+                        ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
                     }
-                    if !model.isActiveDeviceBlocked { Section { hiddenSection } }
+                    if !model.isActiveDeviceBlocked { hiddenSection }
                 }.listStyle(.plain).listSectionSpacing(0).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden)
                     .refreshable { await model.refresh() }
             }
@@ -304,13 +304,13 @@ struct SpacesTabView: View {
     ///
     /// Marking a workspace as deleting changes only what its rows draw and what they accept — it adds no
     /// row and takes none away. Collapsing the workspace for the duration would read better, and was tried
-    /// twice, but removing its control bar and runtime rows at the moment the delete is confirmed makes
-    /// the list's batch update inconsistent with its own data and crashes the collection view
-    /// (`attempt to delete item 6 from section 3 which only contains 6 items before the update`) — the
-    /// collection view counts one item fewer than the section actually holds, so a removal inside a
-    /// section walks off its end. Removing the whole section, which is what the daemon confirming the
-    /// delete does, is sound; removing rows within one is not. The only structural change a delete makes
-    /// is therefore the one the daemon confirms, when the workspace leaves the overview.
+    /// three times, but removing its control bar and runtime rows at the moment the delete is confirmed
+    /// crashes the collection view (`attempt to delete item 6 from section 3 which only contains 6 items
+    /// before the update`): it counts one item fewer than the section actually holds, so a removal inside
+    /// a section walks off its end. Wrapping the publishes in an animation, which is the one code path
+    /// that never crashed, does not change that. Removing a whole section — what the daemon confirming
+    /// the delete does — is sound; removing rows within one is not. The only structural change a delete
+    /// makes is therefore the one the daemon confirms, when the workspace leaves the overview.
     @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup, topGap: CGFloat) -> some View {
         let isDeleting = model.isWorkspacePendingDeletion(group.id)
         let isCollapsed = model.collapsedWorkspaceIDs.contains(group.id)
@@ -509,20 +509,27 @@ struct SpacesTabView: View {
     /// likewise stays on screen while a search is active instead of hiding.
     private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && !model.hiddenWorkspaces.isEmpty }
 
+    /// The Hidden header and each hidden workspace are separate list sections rather than rows of one
+    /// section, for the same reason each workspace is its own section: hiding and unhiding add and remove
+    /// a row while the section around it survives, and a row leaving a surviving section is the update the
+    /// collection view miscounts (see `workspaceSection`). A whole section arriving or leaving is sound,
+    /// so every row that can come and go independently owns one.
     @ViewBuilder private var hiddenSection: some View {
         if isHiddenSectionVisible {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { model.toggleHiddenSectionExpanded() }
-            } label: {
-                HeaderBand {
-                    Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text("\(model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
-                    Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.mutedSecondary)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
-            if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in hiddenWorkspaceRow(workspace) } }
+            Section {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { model.toggleHiddenSectionExpanded() }
+                } label: {
+                    HeaderBand {
+                        Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("\(model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+                        Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.mutedSecondary)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
+            }
+            if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in Section { hiddenWorkspaceRow(workspace) } } }
         }
     }
 
@@ -546,18 +553,23 @@ struct SpacesTabView: View {
 
     // MARK: - Loose terminal-session groups
 
+    /// The band and each loose session are separate sections, like the Hidden section's rows: a session
+    /// ending drops its row while the band around it stays, and a row leaving a surviving section is what
+    /// the collection view miscounts.
     @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
         let workspace = model.overview?.workspaces.first { $0.id == group.workspaceID }
-        HeaderBand {
-            WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
-            Spacer(minLength: 0)
-            Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                .lineLimit(1)
-            // Identified as the loose band it is, not as the workspace: the workspace's own band already
-            // carries `workspace.band.<id>`, and two rows answering to one identifier is what
-            // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
-        }.accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
-        ForEach(group.sessions) { session in terminalSessionRow(session).bandListRow().id(SpacesListRowID.looseSession(session.id)) }
+        Section {
+            HeaderBand {
+                WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
+                Spacer(minLength: 0)
+                Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+                    .lineLimit(1)
+                // Identified as the loose band it is, not as the workspace: the workspace's own band
+                // already carries `workspace.band.<id>`, and two rows answering to one identifier is what
+                // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
+            }.accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
+        }
+        ForEach(group.sessions) { session in Section { terminalSessionRow(session).bandListRow().id(SpacesListRowID.looseSession(session.id)) } }
     }
 
     private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {

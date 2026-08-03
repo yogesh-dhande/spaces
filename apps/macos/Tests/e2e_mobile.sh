@@ -38,7 +38,7 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll session-end-scroll)
 REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
@@ -116,6 +116,7 @@ Scenarios:
   ownership-guard
   workspace-delete-scroll
   workspace-hide-scroll
+  session-end-scroll
 EOF
 }
 
@@ -1522,6 +1523,13 @@ elif scenario == "two-session":
         "longDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
         "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
+    })
+elif scenario == "session-end-scroll":
+    payload.update({
+        "targetWorkspaceID": os.environ.get("SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID", ""),
+        "terminalRowRemovalTimeoutSeconds": 55.0,
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-failure.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-after-scroll.png"),
     })
 elif scenario in ("workspace-delete-scroll", "workspace-hide-scroll"):
     payload.update({
@@ -4079,6 +4087,77 @@ PY
   printf 'Mobile scenario passed: %s\n' "$scenario"
 }
 
+# Prints the workspace id whose directory is `$1`.
+demo_workspace_id_for_dir() {
+  python3 - "$DB_PATH" "$1" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path, wanted = sys.argv[1], os.path.realpath(sys.argv[2])
+with sqlite3.connect(db_path) as db:
+    for workspace_id, directory in db.execute("SELECT id, dir FROM workspaces"):
+        if directory and os.path.realpath(directory) == wanted:
+            print(workspace_id)
+            break
+    else:
+        raise SystemExit(f"No workspace registered for {wanted}.")
+PY
+}
+
+# Regression lane for the other way the Spaces list loses a row: a terminal session ends and its runtime
+# row drops out from under a workspace band that stays listed. The session is ended from the daemon side
+# on a delay so the removal lands while the simulator is mid-scroll, which is when the list's batch update
+# has to stay consistent.
+run_session_end_scroll_scenario() {
+  begin_scenario "session-end-scroll"
+
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  local branch_prefix="e2e-removal-scroll-"
+  local existing_count
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | wc -l | tr -d ' ')"
+  local stamp
+  stamp="$(date +%s)"
+  local index=0
+  # The list has to be long enough that scrolling it means something.
+  while (( existing_count + index < 4 )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${branch_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1       || fail "Failed to create session-end workspace ${branch_prefix}${stamp}-${index}."
+  done
+
+  local target_workspace_id
+  target_workspace_id="$(demo_workspace_id_for_dir "$PROJECT_DIR")" || fail "Unable to resolve the workspace owning $PROJECT_DIR."
+  printf 'Session-end target workspace: %s
+' "$target_workspace_id" >>"$SCENARIO_LOG"
+
+  local session_id
+  session_id="$(new_terminal_session "e2e-session-end-scroll")"
+  printf 'Session-end target session: %s
+' "$session_id" >>"$SCENARIO_LOG"
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "session-end-scroll" "$session_id"
+
+  # Ends the session while the UI test is already scrolling: the app needs time to launch, pair and
+  # render the list first, and the test scrolls until the row goes or its own timeout expires.
+  (
+    sleep 30
+    demo_env "$SPACES_E2E_BIN" terminate-terminal-session "$session_id" >>"$SCENARIO_LOG" 2>&1 || true
+  ) &
+  local terminator_pid=$!
+
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalRowRemovedWhileScrollingList"
+  MOBILE_APP_LAUNCH_MODE="default"
+  wait "$terminator_pid" 2>/dev/null || true
+
+  # No database assertion here: ending a session stops it but leaves its record until the daemon
+  # collects it, so the record says nothing about what the list did. What matters is what the UI test
+  # already asserted — the row left the list while its workspace band stayed, and the app survived
+  # the scroll.
+  printf 'Mobile scenario passed: session-end-scroll\n'
+}
+
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
@@ -4117,6 +4196,9 @@ run_selected_scenarios() {
         ;;
       workspace-delete-scroll|workspace-hide-scroll)
         run_workspace_removal_scroll_scenario "$scenario"
+        ;;
+      session-end-scroll)
+        run_session_end_scroll_scenario
         ;;
       *)
         fail "unknown scenario: $scenario"

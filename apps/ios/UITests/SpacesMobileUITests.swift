@@ -26,6 +26,8 @@ final class SpacesMobileUITests: XCTestCase {
 
     func testWorkspaceHideWhileScrollingList() throws { try runWorkspaceBandRemovalWhileScrollingScenario(action: .hide) }
 
+    func testTerminalRowRemovedWhileScrollingList() throws { try runTerminalRowRemovalWhileScrollingScenario() }
+
     func testAttachedAppConfigurationDoesNotRequireCertificateFingerprint() throws {
         let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: configURL) }
@@ -310,6 +312,56 @@ final class SpacesMobileUITests: XCTestCase {
                 + "so the mutation itself may have failed rather than the list having kept the band)")
 
         captureScreenshot(app, name: "workspace-\(action.rawValue)-after-scroll", filePath: configuration.finalScreenshotPath)
+    }
+
+    /// Permanent regression coverage for the other way the Spaces list loses a row: a terminal session
+    /// ending takes its runtime row out from under the workspace band, which stays listed. That is a row
+    /// leaving a band that survives — the shape a workspace delete deliberately avoids — and it happens
+    /// without the user doing anything, so it has to hold up under a scroll too. The lane ends the session
+    /// from the daemon side while this test keeps the list moving.
+    private func runTerminalRowRemovalWhileScrollingScenario() throws {
+        let configuration = try UITestConfiguration.load(environment: ProcessInfo.processInfo.environment)
+        let app = launchConfiguredApp(configuration)
+        XCUIDevice.shared.orientation = .portrait
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        let workspaceID = configuration.targetWorkspaceID
+        XCTAssertFalse(workspaceID.isEmpty, "Missing targetWorkspaceID in the UI test configuration")
+
+        let band = app.buttons["workspace.band.\(workspaceID)"]
+        XCTAssertTrue(band.waitForExistence(timeout: 40), "Workspace band \(workspaceID) never appeared in the Spaces list")
+        let row = app.buttons["terminal.row.\(configuration.sessionID)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 40), "Terminal row for session \(configuration.sessionID) never appeared under its workspace")
+
+        // Scroll for the whole window rather than stopping when the row goes: the lane ends the session on
+        // a delay, and a list cell that has scrolled out of the collection view's rendered range reports as
+        // absent, so the row vanishing mid-scroll says nothing on its own. Surviving the scroll is what is
+        // being measured here, and it is measured for the whole window.
+        var connectionErrorAlerts = 0
+        var inverted = false
+        let deadline = Date().addingTimeInterval(configuration.terminalRowRemovalTimeoutSeconds)
+        while Date() < deadline {
+            guard app.state == .runningForeground else {
+                XCTFail("The app stopped running while scrolling as the terminal row was removed. state=\(app.state.rawValue)")
+                return
+            }
+            if dismissConnectionErrorAlertIfPresent(in: app) { connectionErrorAlerts += 1 }
+            scrollList(in: app, duration: 0.0, startInverted: inverted)
+            inverted.toggle()
+        }
+
+        XCTAssertEqual(app.state, .runningForeground, "The app was not running in the foreground after the terminal row was removed")
+
+        // Settle the list back at the top so both checks below are made against rendered cells rather than
+        // against whatever the scroll happened to leave on screen.
+        for _ in 0..<10 { scrollContainer(in: app).swipeDown(velocity: .fast) }
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        XCTAssertFalse(
+            row.exists, "Terminal row for session \(configuration.sessionID) never disappeared. connectionErrorAlerts=\(connectionErrorAlerts)")
+        // The band is the point: the row left a section that had to survive it.
+        XCTAssertTrue(band.exists, "Workspace band \(workspaceID) disappeared along with its terminal row")
+        captureScreenshot(app, name: "session-end-after-scroll", filePath: configuration.finalScreenshotPath)
     }
 
     /// Clears the connection-error alert if the app raised one, so the scroll can carry on, and reports
@@ -1033,6 +1085,7 @@ private struct UITestConfiguration: Decodable {
     let bundleID: String
     let targetWorkspaceID: String
     let removalScrollSeconds: Double
+    let terminalRowRemovalTimeoutSeconds: Double
 
     var deviceSeedJSON: String? {
         guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (1...65_535).contains(port),
@@ -1104,6 +1157,7 @@ private struct UITestConfiguration: Decodable {
         case bundleID
         case targetWorkspaceID
         case removalScrollSeconds
+        case terminalRowRemovalTimeoutSeconds
     }
 
     init(from decoder: any Decoder) throws {
@@ -1161,6 +1215,7 @@ private struct UITestConfiguration: Decodable {
         bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID) ?? Self.defaultBundleID
         targetWorkspaceID = try container.decodeIfPresent(String.self, forKey: .targetWorkspaceID) ?? ""
         removalScrollSeconds = try container.decodeIfPresent(Double.self, forKey: .removalScrollSeconds) ?? 12
+        terminalRowRemovalTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .terminalRowRemovalTimeoutSeconds) ?? 90
     }
 
     func manualRetakeoverObservedPath(for attemptIndex: Int) -> String? {
