@@ -4058,6 +4058,14 @@ run_workspace_removal_scroll_scenario() {
   run_ui_test "$ui_test_name"
   MOBILE_APP_LAUNCH_MODE="default"
 
+  # The UI test dismisses any connection-error alert so the scroll can continue and reports how many it
+  # had to. Surface the count on a pass as well: a non-zero count means overview polls went unanswered
+  # while the daemon tore the workspace down.
+  local connection_error_alerts
+  connection_error_alerts="$(grep -o "spaces-mobile-e2e workspace-${action}-scroll connection_error_alerts=[0-9]*" "$UI_TEST_LOG" \
+    | tail -1 | sed 's/.*=//')"
+  printf 'Connection-error alerts during the %s scroll: %s\n' "$action" "${connection_error_alerts:-unreported}" | tee -a "$SCENARIO_LOG"
+
   if [[ "$action" == "delete" ]]; then
     local post_listing="$SCENARIO_DIR/workspace-list-after-delete.txt"
     demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$post_listing" 2>>"$SCENARIO_LOG" \

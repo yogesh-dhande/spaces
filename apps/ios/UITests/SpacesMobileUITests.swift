@@ -311,6 +311,10 @@ final class SpacesMobileUITests: XCTestCase {
                 + "connectionErrorAlerts=\(connectionErrorAlerts) (a non-zero count means the device went unreachable, "
                 + "so the mutation itself may have failed rather than the list having kept the band)")
 
+        // Report the count on a pass too: it is the lane's measure of whether polls kept being answered
+        // while the daemon tore the workspace down, and a pass that needed dismissals is a pass that saw
+        // the device go unreachable. The runner reads this line out of the UI test log.
+        print("spaces-mobile-e2e workspace-\(action.rawValue)-scroll connection_error_alerts=\(connectionErrorAlerts)")
         captureScreenshot(app, name: "workspace-\(action.rawValue)-after-scroll", filePath: configuration.finalScreenshotPath)
     }
 
