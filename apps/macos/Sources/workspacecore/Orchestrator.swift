@@ -533,19 +533,30 @@ public final class WorkspaceOrchestrator {
         projectID: String, branch: String? = nil, baseBranch: String? = nil, directoryName: String? = nil, runSetupScript: Bool = true,
         allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false, replaceExistingManagedDirectory: Bool = false
     ) throws -> WorkspaceRecord {
-        // Under the project gate so a create cannot land in a project being deleted: `removeProject` holds
-        // the same key while it drops the project's records and worktrees, and a workspace created inside
-        // that window would outlive the project as an orphan.
-        try withProjectLifecycleLock(projectID: projectID) {
+        // Structure under the project gate — the record, the worktree, the seeded settings and ports — so a
+        // create cannot land in a project being deleted: `removeProject` holds the same key while it drops
+        // the project's records and worktrees, and a workspace created inside that window would outlive the
+        // project as an orphan.
+        let workspace = try withProjectLifecycleLock(projectID: projectID) {
             try createWorkspaceUnlocked(
-                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName, runSetupScript: runSetupScript,
+                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse,
                 replaceExistingManagedDirectory: replaceExistingManagedDirectory)
         }
+        // The setup script deliberately runs outside the gate. It is user-authored and can take minutes,
+        // and holding the project key across it would make deleting this workspace — or any sibling in the
+        // project — fail with "Project action is already in progress", the opposite of the contract
+        // `runWorkspaceSetup` documents: a delete stays possible while setup runs. So the workspace is
+        // created with setup deferred (`.pending`) and the script is run after the key is released, which
+        // is the shape the Device API's create path already had. A setup failure still throws out of
+        // `createWorkspace` with the record left in place and its `.failed` state recorded, exactly as when
+        // setup ran inline.
+        if runSetupScript { try runWorkspaceSetup(workspaceID: workspace.id) }
+        return workspace
     }
 
     private func createWorkspaceUnlocked(
-        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, runSetupScript: Bool, allowRemoteBranchLookup: Bool,
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, allowRemoteBranchLookup: Bool,
         allowExistingBranchReuse: Bool, replaceExistingManagedDirectory: Bool
     ) throws -> WorkspaceRecord {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
@@ -626,7 +637,8 @@ public final class WorkspaceOrchestrator {
             baseBranch: resolvedBaseBranch, isDefault: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
+        // Setup is always deferred here: `createWorkspace` runs it after releasing the project key.
+        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: false)
 
         return workspace
     }

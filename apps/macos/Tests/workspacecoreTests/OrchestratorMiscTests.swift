@@ -77,6 +77,60 @@ extension OrchestratorTests {
         ]
     }
 
+    /// A setup script is user-authored and can run for minutes. Creating a workspace holds the project key
+    /// only for the structural half — record, worktree, seeded settings and ports — and releases it before
+    /// running the script, so a delete anywhere in the project stays possible while setup runs. Holding the
+    /// key across the script would make every sibling delete fail with "Project action is already in
+    /// progress", contradicting the contract `runWorkspaceSetup` documents.
+    func testWorkspaceSetupDoesNotBlockDeletingASiblingWorkspace() throws {
+        let repo = try makeTempGitRepo(name: "setup-gate-sibling-delete")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let creator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let deleter = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try creator.addProject(dir: repo.path)
+        // Created before the project has a setup script, so its own create returns immediately.
+        let sibling = try creator.createWorkspace(projectID: project.id, branch: "feature-sibling")
+
+        // A real setup script that parks until the test releases it: the delete has to land while it runs.
+        let startedMarker = root.appendingPathComponent("setup-started")
+        let releaseMarker = root.appendingPathComponent("setup-release")
+        _ = try creator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: false) {
+            $0.setupScript = "touch '\(startedMarker.path)'; while [ ! -f '\(releaseMarker.path)' ]; do sleep 0.05; done"
+        }
+
+        var createError: (any Error)?
+        let createFinished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            do { _ = try creator.createWorkspace(projectID: project.id, branch: "feature-slow-setup") } catch { createError = error }
+            createFinished.signal()
+        }
+        XCTAssertTrue(waitForFile(at: startedMarker, timeout: 60), "the setup script never started")
+
+        // The point: a sibling delete, which claims the same project key, is not blocked by the setup.
+        XCTAssertNoThrow(try deleter.archiveWorkspace(workspaceID: sibling.id))
+        XCTAssertNil(try store.workspace(id: sibling.id))
+
+        XCTAssertTrue(FileManager.default.createFile(atPath: releaseMarker.path, contents: nil))
+        XCTAssertEqual(createFinished.wait(timeout: .now() + 120), .success)
+        XCTAssertNil(createError, "the create should still have succeeded")
+
+        // The parked setup records its outcome normally once it finishes.
+        let created = try XCTUnwrap(try store.workspaces(projectID: project.id).first { $0.branch == "feature-slow-setup" })
+        XCTAssertEqual(try store.workspaceSetupState(workspaceID: created.id)?.status, .succeeded)
+    }
+
+    private func waitForFile(at url: URL, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return false
+    }
+
     /// Deleting a workspace removes a git worktree and can delete branches — writes to the project's
     /// repository, not just to the workspace. So it claims the project key too, and a `createWorkspace`
     /// in the same project (which adds a worktree holding only that key) cannot run alongside it. One of
