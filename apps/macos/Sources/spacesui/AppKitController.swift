@@ -528,7 +528,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
                 self.enterSetupFlow()
-                self.ensureMainWindowVisibleOnLaunch()
+                self.ensureMainWindowVisible()
             }
         }
         prewarmTerminalServiceAfterStartup()
@@ -543,6 +543,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let reason = persistentTerminationPolicyReason()
         processInfo.disableAutomaticTermination(reason)
         processInfo.disableSuddenTermination()
+    }
+
+    /// Clicking the Dock icon (or otherwise reopening the app) restores the main window whenever it is
+    /// not visible, even if another Spaces window (a panel window) is visible: `hasVisibleWindows` counts
+    /// every app window, so relying on it alone would leave the main window hidden behind a visible
+    /// panel. When the main window is already visible, AppKit's default reopen handling stands.
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard let window, !window.isVisible else { return true }
+        ensureMainWindowVisible()
+        return false
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -4022,6 +4032,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func buildShellWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        // AppKit releases a titled, closable window on close by default, which would deallocate the
+        // window this controller still strongly references. Close is intercepted below as hide (see
+        // windowShouldClose), but a programmatic close() must also never deallocate it.
+        window.isReleasedWhenClosed = false
         window.title = "Spaces"
         // No window title or titlebar chrome: the titlebar strip keeps its native
         // behavior (traffic lights, dragging, double-click zoom) and the panel tab
@@ -4044,7 +4058,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     static func configureWorkspacePanelTabStripAccessory(_ accessory: NSTitlebarAccessoryViewController) { accessory.layoutAttribute = .left }
 
-    private func ensureMainWindowVisibleOnLaunch() {
+    private func ensureMainWindowVisible() {
         guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
@@ -5167,6 +5181,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func closeSettingsWindow() { settings.closeSettingsWindow() }
+
+    /// Closing the main window (the red traffic-light button, or a programmatic `performClose`) hides it
+    /// instead of tearing it down: Spaces keeps running with its hotkeys, panel windows, and background
+    /// services, and `applicationShouldHandleReopen` brings the same window back. Every other window this
+    /// controller is delegate for (add-project/add-workspace/project-settings/workspace-settings/settings)
+    /// keeps AppKit's normal close behavior; their cleanup lives in `windowWillClose` above.
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        window.orderOut(nil)
+        return false
+    }
 
     public func windowWillClose(_ notification: Notification) {
         let closingWindow = notification.object as? NSWindow
