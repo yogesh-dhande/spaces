@@ -422,8 +422,11 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    /// Takes the project key as well as the workspace's: renaming a workspace's branch is a write to the
+    /// project's shared ref store, so it races `createWorkspace`, which validates that a branch name is
+    /// free and then creates a worktree on it while holding only the project key.
     public func updateWorkspaceMetadata(workspaceID: String, branch: String? = nil, directoryName: String? = nil, notes: String?? = nil) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+        try withProjectAndWorkspaceLifecycleLocks(workspaceID: workspaceID) {
             try updateWorkspaceMetadataUnlocked(workspaceID: workspaceID, branch: branch, directoryName: directoryName, notes: notes)
         }
     }
@@ -957,10 +960,20 @@ public final class WorkspaceOrchestrator {
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
+    /// Claims the project key as well as the workspace's own, because the teardown reaches past the
+    /// workspace into the project's git repository: it removes a worktree and can delete branches, both of
+    /// which race `createWorkspace` (worktree add) and `updateProjectConfig(updateAllWorkspaces: true)`
+    /// (settings written for a workspace this delete is removing, whose rollback then fails on the missing
+    /// row) — and those two hold only the project key, so the workspace key alone excludes neither.
+    ///
+    /// Two deletes never contend for the project key: every Device API teardown request runs on the one
+    /// serial teardown queue, so archives are already serialized against each other. The project key is
+    /// there for the genuinely concurrent case — a project-scoped mutation arriving on the state queue
+    /// while a teardown runs.
     public func archiveWorkspace(workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false) throws
         -> WorkspaceArchiveOutcome
     {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+        try withProjectAndWorkspaceLifecycleLocks(workspaceID: workspaceID) {
             try archiveWorkspaceUnlocked(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
         }
     }
@@ -1114,6 +1127,21 @@ public final class WorkspaceOrchestrator {
     func withProjectLifecycleLock<T>(projectID: String, operation: () throws -> T) throws -> T {
         try Self.projectLifecycleGate.withKey(
             projectID, busyError: { WorkspaceError.invalidArgument(message: "Project action is already in progress.") }, operation: operation)
+    }
+
+    /// Claims the workspace's project key and then its own, in the documented project-then-workspace
+    /// order. For the workspace mutations that reach past the workspace into the project's git repository
+    /// — removing a worktree, deleting or renaming a branch — where the workspace key alone leaves them
+    /// racing the project-keyed operations that touch the same repository.
+    ///
+    /// The project id is read without a lock on purpose: it only decides which key to claim, and the
+    /// operation resolves both records again under the claims. A workspace whose project was deleted while
+    /// this waited resolves to the ordinary "Workspace not found." rather than anything exotic.
+    func withProjectAndWorkspaceLifecycleLocks<T>(workspaceID: String, operation: () throws -> T) throws -> T {
+        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
+        return try withProjectLifecycleLock(projectID: workspace.projectID) {
+            try withWorkspaceLifecycleLock(workspaceID: workspaceID, operation: operation)
+        }
     }
 
     #if canImport(UserNotifications)

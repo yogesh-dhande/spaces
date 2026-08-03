@@ -77,6 +77,108 @@ extension OrchestratorTests {
         ]
     }
 
+    /// Deleting a workspace removes a git worktree and can delete branches — writes to the project's
+    /// repository, not just to the workspace. So it claims the project key too, and a `createWorkspace`
+    /// in the same project (which adds a worktree holding only that key) cannot run alongside it. One of
+    /// the two fails loudly; the git operations never overlap.
+    func testDeletingAWorkspaceBlocksAConcurrentCreateInTheSameProject() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-archive-create")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try deleter.addProject(dir: repo.path)
+        let otherProject = try deleter.addProject(dir: try makeTempGitRepo(name: "teardown-gate-archive-create-other").path)
+        let workspace = try deleter.createWorkspace(projectID: project.id, branch: "feature-archived")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-archived", workspaceID: workspace.id, templateName: "api", command: "npm start",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-archived", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+        Thread.detachNewThread {
+            _ = try? deleter.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: false)
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        XCTAssertThrowsError(try contender.createWorkspace(projectID: project.id, branch: "feature-concurrent")) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        // A rename is the other write into the project's shared ref store, and it is excluded too.
+        XCTAssertThrowsError(try contender.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "feature-renamed")) { error in
+            XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)")
+        }
+        // A delete in one project must not hold another project's creates hostage.
+        XCTAssertNoThrow(try contender.createWorkspace(projectID: otherProject.id, branch: "feature-elsewhere"))
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertNil(try store.workspace(dir: workspacesRoot.appendingPathComponent("feature-concurrent", isDirectory: true).path))
+        XCTAssertFalse(GitClient().branchExists(path: repo.path, branch: "feature-concurrent"), "the rejected create left no branch behind")
+    }
+
+    /// Applying a project template to every workspace writes settings for each of them, so it must not run
+    /// while one of those workspaces is being deleted: the write would land on a row the delete is about to
+    /// remove, and its rollback would then fail on the missing row and leave the project half-configured.
+    /// Whichever order the two arrive in, the project's configuration ends up whole.
+    func testDeletingAWorkspaceAndApplyingProjectConfigToAllWorkspacesCannotOverlap() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-archive-config")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try deleter.addProject(dir: repo.path)
+        let doomed = try deleter.createWorkspace(projectID: project.id, branch: "feature-doomed-config")
+        let survivor = try deleter.createWorkspace(projectID: project.id, branch: "feature-survivor")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-doomed-config", workspaceID: doomed.id, templateName: "api", command: "npm start",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-doomed-config", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+        Thread.detachNewThread {
+            _ = try? deleter.archiveWorkspace(workspaceID: doomed.id)
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        XCTAssertThrowsError(
+            try contender.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { $0.stopScript = "echo mid-delete" }
+        ) { error in XCTAssertTrue("\(error)".contains("already in progress"), "expected the busy error, got: \(error)") }
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+        XCTAssertNil(try store.workspace(id: doomed.id))
+        // The rejected update wrote nothing, and the same update run after the delete lands whole.
+        XCTAssertNil(try store.workspaceStopScript(workspaceID: survivor.id))
+        _ = try contender.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { $0.stopScript = "echo after-delete" }
+        XCTAssertEqual(try store.workspaceStopScript(workspaceID: survivor.id), "echo after-delete")
+    }
+
     /// Updating a project's settings is a read-modify-write of its record, so it runs under the project
     /// gate: a delete landing between the read and the write would put the deleted project straight back,
     /// and its default-workspace ensure would rebuild rows under directories the teardown had removed. A
@@ -202,6 +304,11 @@ extension OrchestratorTests {
         XCTAssertNil(try store.project(id: project.id))
         XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: workspaceDir), "no worktree may outlive the project that owned it")
+        // A workspace delete that queued behind the project delete finds nothing left and says so plainly,
+        // rather than failing somewhere inside the teardown it can no longer resolve.
+        XCTAssertThrowsError(try contender.archiveWorkspace(workspaceID: workspace.id)) { error in
+            XCTAssertTrue("\(error)".contains("Workspace not found."), "expected the not-found error, got: \(error)")
+        }
     }
 
     /// A session create resolves its workspace under the lifecycle gate, so it can never launch against a
