@@ -953,6 +953,26 @@
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "the mark must not outlive a delete abandoned by a device switch")
         }
 
+        /// A delete does not have to have been issued here to matter: the daemon reports every teardown it
+        /// is running, so a workspace deleted from the Mac (or taken by a project delete) marks its row on
+        /// this device too — dimmed and inert for as long as the teardown is reported — and returns to an
+        /// ordinary row the moment an overview stops reporting it.
+        func testWorkspaceTornDownByAnotherClientIsMarkedFromTheOverviewAlone() {
+            let model = makeModel()
+            let overview = makeOverview()
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the daemon reports its teardown running, whoever started it")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "only the workspace being torn down is marked")
+
+            // The teardown finished (or failed): the workspace is listed with nothing queued behind it.
+            model.overview = overview
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "no teardown reported and no local delete: an ordinary row")
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {

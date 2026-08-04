@@ -1326,6 +1326,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// while it runs reports them (see `SpacesDeviceOverviewPayload.workspaceIDsWithTeardownInFlight`).
     /// Registered before any teardown work starts and released in a `defer`, so a teardown that throws
     /// cannot leave a workspace reported as forever deleting.
+    ///
+    /// Registration happens inside the handler, after `workspaceTeardownQueue` dequeues the request, so a
+    /// teardown queued behind an in-flight one waits without its ids registered and is absent from
+    /// overviews until it starts. Accepted: the client that issued it marks the row locally for the whole
+    /// mutation regardless, and the only misread is another client's timed-out request reconciling the
+    /// still-listed workspace as a failed delete. That un-marks a row which disappears from the very next
+    /// overview once the queued teardown runs, so it self-heals.
     private func withTeardownRegistered<T>(workspaceIDs: [String], teardown: () throws -> T) rethrows -> T {
         workspaceTeardownRegistry.register(workspaceIDs: workspaceIDs)
         defer { workspaceTeardownRegistry.release(workspaceIDs: workspaceIDs) }

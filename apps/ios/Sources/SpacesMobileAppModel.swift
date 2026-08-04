@@ -874,7 +874,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Whether this workspace's delete is in flight. The Spaces tab dims its band and rows, puts a spinner
     /// where the band's collapse chevron goes, and stops accepting anything on them — the feedback for a
     /// delete the daemon takes seconds to complete.
-    func isWorkspacePendingDeletion(_ workspaceID: String) -> Bool { workspaceIDsPendingDeletion.contains(workspaceID) }
+    ///
+    /// The union of the deletes this app issued (`workspaceIDsPendingDeletion`) and the teardowns the
+    /// daemon reports running (`workspaceIDsWithTeardownInFlight`), so a delete started on the Mac — or a
+    /// project delete taking its workspaces with it — marks the row here too rather than leaving it
+    /// looking ordinary and actionable while its worktree is being removed.
+    func isWorkspacePendingDeletion(_ workspaceID: String) -> Bool {
+        workspaceIDsPendingDeletion.contains(workspaceID) || overview?.workspaceIDsWithTeardownInFlight.contains(workspaceID) == true
+    }
 
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
         if collapsedWorkspaceIDs.contains(workspaceID) {
@@ -1674,8 +1681,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
         // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving;
-        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`.
-        guard !workspaceIDsPendingDeletion.contains(workspace.id) else { return }
+        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`. The
+        // marked predicate, not the local set: a delete started on another client is just as much a row
+        // on its way out.
+        guard !isWorkspacePendingDeletion(workspace.id) else { return }
         await performWorkspaceMutation {
             let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
@@ -1710,8 +1719,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // this: a delete whose outcome could not be confirmed leaves the mark on with the mutation over,
         // so without the second guard the row could be deleted a second time while the first is unresolved.
         // The Spaces tab suppresses the actions too; this is the same rule enforced where it cannot be
-        // bypassed by a view that forgets to ask.
-        guard !isMutating, !workspaceIDsPendingDeletion.contains(workspace.id) else { return }
+        // bypassed by a view that forgets to ask. The marked predicate, not the local set: a workspace the
+        // daemon reports it is already tearing down (a delete issued from another client) must not be
+        // deleted a second time from here either.
+        guard !isMutating, !isWorkspacePendingDeletion(workspace.id) else { return }
         isMutating = true
         defer { isMutating = false }
         let identity = overviewIdentity

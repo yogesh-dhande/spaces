@@ -74,6 +74,33 @@ import workspacecore
         #expect(merged.projects.map(\.id) == ["proj"])
     }
 
+    /// A delete does not have to have been issued from this Mac to mark a row. The owning daemon reports
+    /// every teardown it is running, so a workspace deleted from the iPhone — or taken by a project
+    /// delete — renders marked here too, with nothing in this app's own pending set, and goes back to an
+    /// ordinary row once its device's overview stops reporting the teardown.
+    @Test func aWorkspaceTheDaemonReportsTearingDownIsMarkedWithNoLocalDelete() {
+        let tearingDown = SpacesDeviceOverviewPayload(
+            workspaces: [deviceWorkspaceSummary(id: "ws-deleting"), deviceWorkspaceSummary(id: "ws-keep")], sessions: [],
+            workspaceIDsWithTeardownInFlight: ["ws-deleting"])
+
+        #expect(AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-deleting", pendingDeletionWorkspaceIDs: [], deviceOverview: tearingDown))
+        #expect(!AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-keep", pendingDeletionWorkspaceIDs: [], deviceOverview: tearingDown))
+
+        let settled = SpacesDeviceOverviewPayload(workspaces: [deviceWorkspaceSummary(id: "ws-deleting")], sessions: [])
+        #expect(!AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-deleting", pendingDeletionWorkspaceIDs: [], deviceOverview: settled))
+
+        // A device with no overview installed (offline, not yet loaded) still marks this app's own deletes.
+        #expect(
+            AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-deleting", pendingDeletionWorkspaceIDs: ["ws-deleting"], deviceOverview: nil))
+        #expect(!AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-deleting", pendingDeletionWorkspaceIDs: [], deviceOverview: nil))
+    }
+
+    private func deviceWorkspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {
+        SpacesDeviceWorkspaceSummary(
+            id: id, projectID: "proj", projectName: "Project", branch: id, baseBranch: "main", dir: "/project-\(id)", isRunning: false,
+            isHidden: false, isDefault: false, sessionCount: 0)
+    }
+
     /// One project with the workspace being deleted and a sibling that must survive, plus the runtime
     /// state and alerts group each of them owns.
     private func deviceSection() -> AppKitController.DeviceSection {

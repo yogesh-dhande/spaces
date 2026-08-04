@@ -1036,7 +1036,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Every surface that treats a deleting row differently — the row cell, its children, selection, the
     /// context menu, the row click — reads this one state.
     private func workspaceRowState(_ workspaceID: String) -> AppKitController.SidebarWorkspaceRowState {
-        AppKitController.sidebarWorkspaceRowState(isPendingDeletion: host.workspaceIDsPendingDeletion.contains(workspaceID))
+        AppKitController.sidebarWorkspaceRowState(isPendingDeletion: host.isWorkspaceMarkedDeleting(workspaceID))
     }
 
     /// The runtime-target rows shown under a workspace, memoized per workspace id.

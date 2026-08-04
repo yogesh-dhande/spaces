@@ -362,6 +362,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// deleting instead (see `sidebarWorkspaceRowState`), whatever rebuilds happen meanwhile.
     /// In-memory and per-run, like `pendingNewTerminalSessionWorkspaceIDs`: a relaunch reloads from the
     /// daemons, which are authoritative about whether the delete landed.
+    ///
+    /// Deletes issued from this app only. What the row renders is `isWorkspaceMarkedDeleting`, which
+    /// unions this with the teardowns the owning daemon reports; this set stays exactly the deletes this
+    /// app has to see through, since it is what the reconciliation paths key their outcome on.
     private(set) var workspaceIDsPendingDeletion: Set<String> = []
 
     /// What `deleteWorkspace` held back when `WorkspaceDeletionReconciler` returned `.unknown` — every
@@ -2692,6 +2696,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let listsRuntimeTargetChildren: Bool
         /// Whether the row accepts selection, its context menu, and expansion.
         let isInteractive: Bool
+    }
+
+    /// Whether a workspace's row is marked as deleting: the union of the deletes this app issued
+    /// (`workspaceIDsPendingDeletion`) and the teardowns the owning daemon reports running
+    /// (`deviceOverview.workspaceIDsWithTeardownInFlight`). A delete started on the iPhone — or a project
+    /// delete taking its workspaces with it — has to mark the row here too, rather than leaving it looking
+    /// ordinary and actionable while its worktree is being removed. `deviceOverview` is whatever
+    /// `deviceSections` has installed for the workspace's owning device, `nil` when that device has none
+    /// (offline, not yet loaded, or a wire-incompatible placeholder), which reports only the local set.
+    /// Pure so the union is directly testable without a live `AppKitController`.
+    nonisolated static func isWorkspaceMarkedDeleting(
+        workspaceID: String, pendingDeletionWorkspaceIDs: Set<String>, deviceOverview: SpacesDeviceOverviewPayload?
+    ) -> Bool { pendingDeletionWorkspaceIDs.contains(workspaceID) || deviceOverview?.workspaceIDsWithTeardownInFlight.contains(workspaceID) == true }
+
+    /// `isWorkspaceMarkedDeleting` against this controller's live state: the local pending set and the
+    /// overview installed for the workspace's owning device.
+    func isWorkspaceMarkedDeleting(_ workspaceID: String) -> Bool {
+        let deviceOverview = deviceID(forWorkspaceID: workspaceID).flatMap { deviceSection(id: $0)?.overview }
+        return Self.isWorkspaceMarkedDeleting(
+            workspaceID: workspaceID, pendingDeletionWorkspaceIDs: workspaceIDsPendingDeletion, deviceOverview: deviceOverview)
     }
 
     /// The row treatment for a workspace, keyed on whether its delete is in flight. Pure so the
