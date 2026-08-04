@@ -2055,10 +2055,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
     /// must not overwrite the new connection's state with the previous backend's overview.
     private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
+        // The identity check comes first: a mutation that outlived its connection describes a backend this
+        // model no longer shows, and letting it bump the generation would make the NEW device's in-flight
+        // refresh discard a perfectly current overview.
+        guard identity == overviewIdentity else { return }
         // Bumped for every applied mutation, including one that carried no overview: the daemon's state
         // changed either way, so any poll already in flight is describing the world before it.
         mutationGeneration &+= 1
-        guard let overview = response.overview, identity == overviewIdentity else { return }
+        guard let overview = response.overview else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
         publishOverview(overview)

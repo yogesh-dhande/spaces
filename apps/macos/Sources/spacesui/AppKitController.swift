@@ -8815,6 +8815,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
                     // Install the post-delete overview first, then clear the marking: the workspace is
                     // already absent from that overview, so its row leaves the sidebar exactly once.
+                    //
+                    // Accepted risk: a remote overview pull that began before this response can land after
+                    // the marking clears and re-add the row for one refresh cycle. That needs a pull in
+                    // flight inside the seconds-wide delete window, shows a ghost row the next pull
+                    // removes, and the fix — a mutation-generation fence across every overview install
+                    // path like the iOS model's — is disproportionate to a self-healing flicker.
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
                     self.endPendingWorkspaceDeletion(workspaceID: id)
                     // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
@@ -8854,7 +8860,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // not sit stale beside the error.
                         requestSidebarReload()
                         showError(error)
-                    } else if deleteLocalBranch || deleteRemoteBranch {
+                        return
+                    }
+                    // Reconciliation confirmed the delete landed, so the workspace gets the same client
+                    // cleanup a direct success performs — otherwise its browser windows would outlive it
+                    // indefinitely.
+                    self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                    self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    if deleteLocalBranch || deleteRemoteBranch {
                         // The delete landed, but the branch-deletion report existed only in the response
                         // that was lost — reconciliation can prove the workspace is gone, not what
                         // happened to branches the user explicitly asked to delete. Say so rather than
