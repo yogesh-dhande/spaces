@@ -43,7 +43,6 @@ remote_demo_profile_name="remote-mobile-demo"
 remote_demo_profile_root="~/.spaces-dev/profiles/spaces/$remote_demo_profile_name"
 remote_demo_cli="$remote_demo_profile_root/daemon/current/bin/spaces"
 remote_demo_daemon_port=""
-remote_demo_device_api_host=""
 remote_demo_install_root="~/.spaces/remote-demo-e2e"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
@@ -770,10 +769,12 @@ pair_remote_demo_device() {
   fi
 
   prepare_remote_demo_daemon
+  # The forward is established before anything pairs, and every endpoint the demo hands a client is
+  # the forward's. The demo must work from a network where the remote's Device API port is not
+  # reachable at all, so nothing here -- not even this Mac's own pairing -- dials that port directly;
+  # SSH is the only route to the daemon.
+  start_remote_device_forward
   echo "Pairing Mac client with the remote demo profile at $remote_ssh_host..."
-  # This first window still points at the daemon's own address: the SSH forward is started below,
-  # once pairing has proven the daemon reachable, and update_remote_demo_device_endpoint then moves
-  # this device record and every later window onto the forwarded endpoint.
   open_remote_demo_pairing_window
   local pair_output
   if ! pair_output="$(run_demo_env HOME="$demo_home" "$spaces_cli" device pair --link "$remote_pairing_link")"; then
@@ -786,8 +787,6 @@ pair_remote_demo_device() {
     echo "spaces device pair did not print a device id: $pair_output" >&2
     exit 1
   }
-  start_remote_device_forward
-  update_remote_demo_device_endpoint
 }
 
 remote_ssh_destination() {
@@ -839,15 +838,6 @@ raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
 }
 
-# The address this Mac dials for the remote demo daemon's Device API: the SSH destination's effective
-# HostName, not the destination as typed, which may be an ssh_config alias. It reaches the pairing link
-# and the paired-device record, both of which are redeemed and used before the SSH forward exists.
-resolve_remote_demo_device_api_host() {
-  local -a args=()
-  while IFS= read -r arg; do args+=("$arg"); done < <(remote_ssh_args)
-  remote_demo_device_api_host="$(resolve_ssh_hostname "$(remote_ssh_destination)" "${args[@]}")"
-}
-
 # The Device API port the daemon assigned itself for this profile and persisted at first start. The
 # lane never picks a port, so every remote endpoint it builds comes from here.
 resolve_remote_demo_daemon_port() {
@@ -897,13 +887,16 @@ prepare_remote_demo_daemon() {
   quoted_install="$(shell_quote "$install_root")"
   quoted_profile_name="$(shell_quote "$remote_demo_profile_name")"
   remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
-  resolve_remote_demo_device_api_host
   resolve_remote_demo_daemon_port
   wait_for_remote_demo_daemon
 }
 
+# Forwards the remote demo daemon's Device API to a local port and makes that loopback endpoint the
+# one every demo client addresses the daemon by -- this Mac's CLI, the paired-device record it writes,
+# the iOS simulator seeds, and every pairing link. The forward is the demo's only route to the daemon,
+# so the lane works from a network where the remote's Device API port is unreachable and only SSH gets
+# through. The remote side of the tunnel is the port the profile assigned itself.
 start_remote_device_forward() {
-  [[ -n "$remote_device_host" && -n "$remote_device_port" ]] || return 0
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to forward the remote demo Device API." >&2
     exit 1
@@ -917,13 +910,13 @@ start_remote_device_forward() {
     -o BatchMode=yes
     -o ExitOnForwardFailure=yes
     -o StrictHostKeyChecking=yes
-    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_device_port"
+    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_demo_daemon_port"
   )
   if [[ -n "$remote_ssh_port" ]]; then
     ssh_args+=(-p "$remote_ssh_port")
   fi
 
-  echo "Forwarding remote Device API $remote_device_host:$remote_device_port through $remote_forward_host:$remote_forward_port..."
+  echo "Forwarding remote Device API port $remote_demo_daemon_port through $remote_forward_host:$remote_forward_port..."
   ssh "${ssh_args[@]}" "$destination" &
   remote_forward_pid=$!
   if ! wait_for_tcp_connect "$remote_forward_host" "$remote_forward_port" "remote Device API SSH forward"; then
@@ -931,35 +924,16 @@ start_remote_device_forward() {
     remote_forward_pid=""
     exit 1
   fi
-}
-
-update_remote_demo_device_endpoint() {
-  [[ -n "$remote_forward_port" ]] || return 0
   remote_device_host="$remote_forward_host"
   remote_device_port="$remote_forward_port"
-  if [[ -n "$remote_pairing_link" ]]; then
-    remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_forward_host" "$remote_forward_port")"
-  fi
-  python3 - "$spaces_client_db_path" "$remote_device_id" "$remote_device_host" "$remote_device_port" <<'PY'
-import sqlite3
-import sys
-from datetime import datetime, timezone
-
-db_path, device_id, host, port = sys.argv[1:5]
-updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-with sqlite3.connect(db_path) as db:
-    db.execute(
-        "UPDATE paired_devices SET host = ?, port = ?, updated_at = ? WHERE id = ?",
-        (host, int(port), updated_at, device_id),
-    )
-PY
 }
 
 # Opens a one-time pairing window on the remote demo daemon through that profile's own CLI, which
 # resolves the profile from where it lives -- so no profile environment is passed and the installed
 # profile's CLI is never involved. The daemon writes its link with the interface address it sees
-# itself on, which this Mac cannot route, so only that endpoint is rewritten; the link is otherwise
-# the daemon's own.
+# itself on, which the demo never dials, so the link is pointed at the SSH forward; it is otherwise
+# the daemon's own. Pinned TLS authenticates the daemon by the certificate fingerprint the link
+# carries and never by hostname, so redeeming through the forward's loopback endpoint is equivalent.
 open_remote_demo_pairing_window() {
   local pair_json parsed
   if ! pair_json="$(remote_ssh "$remote_demo_cli device pair --json")"; then
@@ -988,10 +962,7 @@ print(f"remote_device_name={shlex.quote(payload['name'])}")
 PY
   )"
   eval "$parsed"
-  remote_device_host="$remote_demo_device_api_host"
-  remote_device_port="$remote_demo_daemon_port"
   remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_device_host" "$remote_device_port")"
-  update_remote_demo_device_endpoint
 }
 
 # Creates a project (and its default workspace) on the paired remote demo daemon so the remote

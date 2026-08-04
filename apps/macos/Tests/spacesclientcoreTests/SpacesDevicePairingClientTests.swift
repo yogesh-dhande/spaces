@@ -575,14 +575,43 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(helper.contains("substituted.append(parameter)"))
         XCTAssertFalse(helper.contains("urlencode"))
 
-        // The endpoint a link is pointed at is the SSH destination's effective HostName, which only ssh can
-        // report: a configured host may be an ssh_config alias, and a link carrying the alias fails DNS when
-        // the client redeems it — before any SSH forward exists to stand in for the address.
+        // A lane that dials a daemon's Device API directly addresses it by the SSH destination's effective
+        // HostName, which only ssh can report: a configured host may be an ssh_config alias, and a link
+        // carrying the alias fails DNS the moment the client redeems it.
         XCTAssertTrue(helper.contains(#"ssh -G -T "$@" "$destination""#))
         XCTAssertTrue(helper.contains(#"tolower($1) == "hostname""#))
-        let demo = try String(contentsOf: testsRoot.appendingPathComponent("run_mobile_terminal_demo.sh"), encoding: .utf8)
-        XCTAssertTrue(demo.contains(#"remote_device_host="$remote_demo_device_api_host""#))
-        XCTAssertFalse(demo.contains(#"remote_device_host="$remote_ssh_host""#))
+        let directLane = try String(contentsOf: testsRoot.appendingPathComponent("e2e_remote_terminal_send.sh"), encoding: .utf8)
+        XCTAssertTrue(directLane.contains(#"REMOTE_DAEMON_HOST="$(resolve_ssh_hostname "$(remote_destination)" "${ssh_option_args[@]}")""#))
+    }
+
+    /// The mobile demo reaches its remote daemon through the SSH forward and nothing else: the forward is
+    /// established before anything pairs, and the endpoint every client is handed — this Mac's CLI, the
+    /// paired-device record it writes, the simulator seeds, and every pairing link — is the forward's
+    /// loopback address.
+    ///
+    /// The lane has to work from a network where the remote's Device API port is unreachable and SSH is the
+    /// only route in, so a step that dialed that port directly would quietly narrow the supported envelope
+    /// to whatever the remote's firewall happens to open. Pairing through the forward is equivalent because
+    /// pinned TLS authenticates the daemon by the certificate fingerprint the link carries, never by
+    /// hostname.
+    func testMobileDemoReachesRemoteDaemonOnlyThroughSSHForward() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
+            "run_mobile_terminal_demo.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        let prepareRange = try XCTUnwrap(script.range(of: "  prepare_remote_demo_daemon"))
+        let forwardRange = try XCTUnwrap(script.range(of: "  start_remote_device_forward"))
+        let pairRange = try XCTUnwrap(script.range(of: #""$spaces_cli" device pair --link "$remote_pairing_link""#))
+        XCTAssertLessThan(prepareRange.lowerBound, forwardRange.lowerBound)
+        XCTAssertLessThan(forwardRange.lowerBound, pairRange.lowerBound)
+
+        // The tunnel's remote side is the port the profile assigned itself, and its local side is the only
+        // endpoint the lane ever hands a client.
+        XCTAssertTrue(script.contains(#"-L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_demo_daemon_port""#))
+        XCTAssertTrue(script.contains(#"remote_device_host="$remote_forward_host""#))
+        XCTAssertTrue(script.contains(#"remote_device_port="$remote_forward_port""#))
+        XCTAssertTrue(script.contains(#"rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_device_host" "$remote_device_port""#))
+        XCTAssertFalse(script.contains(#"remote_device_host="$remote_ssh_host""#))
     }
 
     /// The remote development daemon a repo-local build deploys is the same profile this Mac's pairing
