@@ -2623,14 +2623,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         private(set) var overviewInstallGeneration = 0
         var overview: SpacesDeviceOverviewPayload? { didSet { overviewInstallGeneration += 1 } }
 
-        /// Carries `previous`'s install generation into this freshly built section, counting one new
-        /// install only when the overview it carries actually differs from the one it replaces. An outage
-        /// rebuild that re-installs the retained (stale) overview is deliberately not an install: it is the
-        /// same evidence, and a deferred delete must not be settled by it.
-        func adoptingOverviewInstallGeneration(from previous: DeviceSection?) -> DeviceSection {
-            guard let previous else { return self }
+        /// Carries `previous`'s install generation into this freshly built section, counting one new install
+        /// when `carriesFreshInstall` says this rebuild is carrying an overview the daemon actually just
+        /// returned.
+        ///
+        /// The caller states that fact rather than letting this infer it from payload equality. A fresh
+        /// fetch that happens to be byte-identical to the cached one is real evidence — it is exactly what
+        /// a delete that never reached the daemon looks like — and treating it as "nothing happened" would
+        /// leave that deferred delete unresolvable for the rest of the run. Conversely an outage rebuild
+        /// re-renders the retained overview without asking the daemon anything, and must not count.
+        func adoptingOverviewInstallGeneration(from previous: DeviceSection?, carriesFreshInstall: Bool) -> DeviceSection {
             var section = self
-            section.overviewInstallGeneration = previous.overviewInstallGeneration + (overview == previous.overview ? 0 : 1)
+            section.overviewInstallGeneration = (previous?.overviewInstallGeneration ?? 0) + (carriesFreshInstall ? 1 : 0)
             return section
         }
         /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
@@ -2963,8 +2967,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         branchDeletionRequested: Bool
     ) -> AwaitingWorkspaceDeletionResolutionVerdict {
         guard let overview, overviewInstallGeneration > overviewInstallGenerationAtDefer else { return .stillAwaiting }
-        if overview.workspaces.contains(where: { $0.id == workspaceID }) { return .present }
-        return .gone(showsBranchOutcomeNotice: branchDeletionRequested)
+        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return .gone(showsBranchOutcomeNotice: branchDeletionRequested) }
+        // Listed, but the daemon reports it is still tearing this workspace down: that is not the delete
+        // having failed, it is the delete still running. Keep waiting rather than telling the user a
+        // workspace survived that the daemon is about to remove.
+        return overview.workspaceIDsWithTeardownInFlight.contains(workspaceID) ? .stillAwaiting : .present
     }
 
     /// The delete landed, but the branch-deletion report existed only in the response that was lost —

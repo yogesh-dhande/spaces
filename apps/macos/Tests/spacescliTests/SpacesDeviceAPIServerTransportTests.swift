@@ -188,6 +188,86 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    /// A client whose delete response was lost probes the overview to learn what happened, and a workspace
+    /// still listed means two very different things: the delete failed, or a slow stop script is still
+    /// running and the daemon is about to remove it. Only the daemon knows which, so it reports the
+    /// workspaces it is currently tearing down — and stops reporting one the moment its teardown ends.
+    func testOverviewReportsAWorkspaceAsTearingDownOnlyWhileItsDeleteIsRunning() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let teardownStarted = DispatchSemaphore(value: 0)
+            let releaseTeardown = DispatchSemaphore(value: 0)
+            let deleteFinished = DispatchSemaphore(value: 0)
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionTerminator: { _ in
+                    teardownStarted.signal()
+                    releaseTeardown.wait()
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("teardown-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("teardown-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-teardown", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-teardown", name: "Teardown", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            try store.upsert(project: project)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-teardown", projectID: project.id, dir: worktreeDir.path, dirname: "teardown-worktree", branch: "feature-teardown",
+                    baseBranch: "main", isDefault: false, isRunning: true, lastLaunchedAt: nil))
+            // A running process gives the delete a terminal to tear down, which is where it parks.
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "process-teardown", workspaceID: "workspace-teardown", templateName: "api", command: "npm start",
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-teardown", pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-TEARDOWN-SET", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { deleteFinished.signal() }
+                _ = try? self.sendTLSRequest(
+                    SpacesDeviceAPIRequest(
+                        command: .archiveWorkspace(.init(workspaceID: "workspace-teardown", deleteLocalBranch: false, deleteRemoteBranch: false)),
+                        authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint)
+            }
+            XCTAssertEqual(teardownStarted.wait(timeout: .now() + 30), .success, "the delete must reach the workspace teardown")
+
+            let duringDelete = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(duringDelete.ok, duringDelete.message)
+            let midOverview = try XCTUnwrap(duringDelete.overview)
+            XCTAssertEqual(
+                midOverview.workspaceIDsWithTeardownInFlight, ["workspace-teardown"],
+                "a workspace still listed while its delete runs must be reported as tearing down")
+            XCTAssertTrue(midOverview.workspaces.contains { $0.id == "workspace-teardown" }, "and it is still listed, which is the whole ambiguity")
+
+            releaseTeardown.signal()
+            XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+
+            let afterDelete = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+            let finalOverview = try XCTUnwrap(afterDelete.overview)
+            XCTAssertTrue(finalOverview.workspaceIDsWithTeardownInFlight.isEmpty, "the id is released once the teardown ends")
+            XCTAssertNil(try store.workspace(id: "workspace-teardown"))
+        }
+    }
+
     func testAgentHookStatusDoesNotBlockOtherDeviceAPIRequests() throws {
         try withTemporaryProfile { _ in
             let identity = try testTLSIdentity()

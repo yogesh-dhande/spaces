@@ -263,26 +263,26 @@ import workspacecore
     /// `overview`'s `didSet`. Without carrying the counter over, the local generation would reset to zero
     /// each time and a deferred local delete could never observe fresh evidence. Carrying it over must also
     /// not manufacture evidence: re-installing the same (retained, stale) overview is not a new install.
-    @Test func rebuildingASectionWholeCarriesItsInstallGenerationAndCountsOnlyRealChanges() {
-        let firstOverview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+    @Test func rebuildingASectionWholeCarriesItsInstallGenerationAndCountsEveryFreshInstall() {
+        let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
         var previous = AppKitController.DeviceSection(deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded)
-        previous.overview = firstOverview
+        previous.overview = overview
         let generationAfterFirstInstall = previous.overviewInstallGeneration
 
-        // An outage rebuild re-installs the retained overview unchanged: same evidence, same generation.
+        // An outage rebuild re-renders the retained overview without the daemon answering: not an install.
         let retainedRebuild = AppKitController.DeviceSection(
-            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded, overview: firstOverview
-        ).adoptingOverviewInstallGeneration(from: previous)
+            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded, overview: overview
+        ).adoptingOverviewInstallGeneration(from: previous, carriesFreshInstall: false)
         #expect(retainedRebuild.overviewInstallGeneration == generationAfterFirstInstall)
 
-        // A rebuild carrying a genuinely new overview counts as one install.
-        let freshRebuild = AppKitController.DeviceSection(
-            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded,
-            overview: SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
-        ).adoptingOverviewInstallGeneration(from: previous)
-        #expect(freshRebuild.overviewInstallGeneration == generationAfterFirstInstall + 1)
+        // A fresh fetch that happens to be byte-identical to the cached payload IS evidence — it is what a
+        // delete that never reached the daemon looks like — so it counts.
+        let identicalFreshRebuild = AppKitController.DeviceSection(
+            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded, overview: overview
+        ).adoptingOverviewInstallGeneration(from: previous, carriesFreshInstall: true)
+        #expect(identicalFreshRebuild.overviewInstallGeneration == generationAfterFirstInstall + 1)
 
-        // And that is what lets a deferred delete captured at the earlier generation finally settle.
+        // And that is what lets the deferred delete settle instead of staying inert for the rest of the run.
         #expect(
             AppKitController.resolveAwaitingWorkspaceDeletion(
                 overview: retainedRebuild.overview, overviewInstallGeneration: retainedRebuild.overviewInstallGeneration,
@@ -290,9 +290,40 @@ import workspacecore
                 == .stillAwaiting)
         #expect(
             AppKitController.resolveAwaitingWorkspaceDeletion(
-                overview: freshRebuild.overview, overviewInstallGeneration: freshRebuild.overviewInstallGeneration,
-                overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false)
-                == .gone(showsBranchOutcomeNotice: false))
+                overview: identicalFreshRebuild.overview, overviewInstallGeneration: identicalFreshRebuild.overviewInstallGeneration,
+                overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false) == .present
+        )
+    }
+
+    /// A workspace the daemon reports it is still tearing down is not evidence the delete failed, however
+    /// many probes see it listed — a slow user stop script outlives the whole budget. Settling "present"
+    /// there would tell the user a workspace survived that the daemon removes moments later.
+    @Test func aWorkspaceStillTearingDownIsNeverEvidenceOfAFailedDelete() async {
+        let reconciler = WorkspaceDeletionReconciler()
+        reconciler.interval = .zero
+        let tearingDown = SpacesDeviceOverviewPayload(
+            workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [], workspaceIDsWithTeardownInFlight: ["ws-deleting"])
+
+        let outcome = await reconciler.reconcile(workspaceID: "ws-deleting", fetchOverview: { tearingDown }, applyOverview: { _ in })
+
+        #expect(outcome == .unknown, "still deleting is unknown, not failed")
+    }
+
+    /// The same fact drives the deferred settle path: an entry must not resolve to `present` while the
+    /// daemon still owns the teardown, and must resolve once it no longer does.
+    @Test func aDeferralDoesNotSettlePresentWhileTheDaemonIsStillTearingTheWorkspaceDown() {
+        let tearingDown = SpacesDeviceOverviewPayload(
+            workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [], workspaceIDsWithTeardownInFlight: ["ws-deleting"])
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: tearingDown, overviewInstallGeneration: 2, overviewInstallGenerationAtDefer: 1, workspaceID: "ws-deleting",
+                branchDeletionRequested: false) == .stillAwaiting)
+
+        let noLongerTearingDown = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: noLongerTearingDown, overviewInstallGeneration: 2, overviewInstallGenerationAtDefer: 1, workspaceID: "ws-deleting",
+                branchDeletionRequested: false) == .present)
     }
 
     @Test func aRebuildWithNoFreshInstallForTheOwningDeviceStaysAwaitingEvenWithStaleOverviewListingIt() {

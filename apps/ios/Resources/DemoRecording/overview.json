@@ -1,556 +1,519 @@
 {
-  "message" : "Loaded device overview.",
-  "ok" : true,
-  "result" : {
-    "overview" : {
-      "daemonStatus" : {
-        "activeAgents" : 0,
-        "activeSessionCount" : 4,
-        "operatingSystem" : "macOS",
-        "protocolVersion" : 14,
-        "runningProcesses" : 3,
-        "version" : "0.1.0",
-        "waitingAgents" : 1
+  "message": "Loaded device overview.",
+  "ok": true,
+  "result": {
+    "overview": {
+      "daemonStatus": {
+        "activeAgents": 0,
+        "activeSessionCount": 4,
+        "operatingSystem": "macOS",
+        "protocolVersion": 14,
+        "runningProcesses": 3,
+        "version": "0.1.0",
+        "waitingAgents": 1
       },
-      "projects" : [
+      "projects": [
         {
-          "config" : {
-            "agentLaunchers" : [
-
-            ],
-            "ports" : [
+          "config": {
+            "agentLaunchers": [],
+            "ports": [
               {
-                "id" : "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
-                "name" : "app"
+                "id": "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
+                "name": "app"
               },
               {
-                "id" : "54EC72DC-A3C4-43FE-860C-BBB314823B55",
-                "name" : "api"
+                "id": "54EC72DC-A3C4-43FE-860C-BBB314823B55",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "98C3DF49-E91C-498F-96D2-96A826286562",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "98C3DF49-E91C-498F-96D2-96A826286562",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "6433599A-F370-4048-BC80-18B9EDA8758A",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "6433599A-F370-4048-BC80-18B9EDA8758A",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "defaultBranch" : "main",
-          "dir" : "/Users/lighthouse/Projects/atlas-docs",
-          "id" : "5B0A01BD-7B7C-4F78-A462-857DFBD637EB",
-          "isGitRepo" : true,
-          "name" : "atlas-docs"
+          "defaultBranch": "main",
+          "dir": "/Users/lighthouse/Projects/atlas-docs",
+          "id": "5B0A01BD-7B7C-4F78-A462-857DFBD637EB",
+          "isGitRepo": true,
+          "name": "atlas-docs"
         },
         {
-          "config" : {
-            "agentLaunchers" : [
+          "config": {
+            "agentLaunchers": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-                "id" : "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-                "name" : "Fix checkout 500"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
+                "id": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
+                "name": "Fix checkout 500"
               }
             ],
-            "ports" : [
+            "ports": [
               {
-                "id" : "F746B1B6-031D-41B1-BA05-94680D5555CF",
-                "name" : "app"
+                "id": "F746B1B6-031D-41B1-BA05-94680D5555CF",
+                "name": "app"
               },
               {
-                "id" : "9F05B181-BDCD-411B-AF2B-E330E5A7343C",
-                "name" : "api"
+                "id": "9F05B181-BDCD-411B-AF2B-E330E5A7343C",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "6FCE56F6-4E7E-43F8-821C-6CB33F6E020E",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "6FCE56F6-4E7E-43F8-821C-6CB33F6E020E",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "96DAF342-C780-4676-9A9A-6734051135FC",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "96DAF342-C780-4676-9A9A-6734051135FC",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "defaultBranch" : "main",
-          "dir" : "/Users/lighthouse/Projects/harbor-web",
-          "id" : "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
-          "isGitRepo" : true,
-          "name" : "harbor-web"
+          "defaultBranch": "main",
+          "dir": "/Users/lighthouse/Projects/harbor-web",
+          "id": "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
+          "isGitRepo": true,
+          "name": "harbor-web"
         },
         {
-          "config" : {
-            "agentLaunchers" : [
-
-            ],
-            "ports" : [
+          "config": {
+            "agentLaunchers": [],
+            "ports": [
               {
-                "id" : "789DC866-048B-44E9-9D88-9D314BAD8A2E",
-                "name" : "app"
+                "id": "789DC866-048B-44E9-9D88-9D314BAD8A2E",
+                "name": "app"
               },
               {
-                "id" : "1E85FD64-335E-4AFE-91AF-2159144CD020",
-                "name" : "api"
+                "id": "1E85FD64-335E-4AFE-91AF-2159144CD020",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "3BADC456-64E8-47D5-B842-6645675E3D55",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "3BADC456-64E8-47D5-B842-6645675E3D55",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "CEEA8AD5-E547-458B-91D6-CDDD342227C1",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "CEEA8AD5-E547-458B-91D6-CDDD342227C1",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "defaultBranch" : "main",
-          "dir" : "/Users/lighthouse/Projects/lantern-api",
-          "id" : "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
-          "isGitRepo" : true,
-          "name" : "lantern-api"
+          "defaultBranch": "main",
+          "dir": "/Users/lighthouse/Projects/lantern-api",
+          "id": "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
+          "isGitRepo": true,
+          "name": "lantern-api"
         }
       ],
-      "retainedTerminalSessionIDs" : [
+      "retainedTerminalSessionIDs": [
         "demo-harbor-frontend",
         "demo-harbor-agent",
         "demo-lantern-backend",
         "demo-harbor-backend",
         "demo-lantern-frontend"
       ],
-      "sessions" : [
+      "sessions": [
         {
-          "attachmentSnapshot" : {
-            "attachments" : [
-
-            ],
-            "clients" : [
-
-            ]
+          "attachmentSnapshot": {
+            "attachments": [],
+            "clients": []
           },
-          "backend" : "ghostty-embedded",
-          "childPID" : 15190,
-          "command" : "python3 -m spaces_e2e_demo backend",
-          "createdAt" : "-8",
-          "hasFinalRender" : false,
-          "id" : "demo-harbor-backend",
-          "isControlAvailable" : true,
-          "isSubscriptionAvailable" : true,
-          "lifetimePolicy" : "persistent",
-          "projectID" : "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
-          "projectName" : "harbor-web",
-          "rowKind" : "process",
-          "rowSourceID" : "4AAD8245-BC8D-4A2D-BD40-2127EFE321F8",
-          "servicePID" : 15004,
-          "shell" : "/bin/zsh",
-          "state" : "running",
-          "title" : "backend",
-          "updatedAt" : "-7",
-          "workingDirectory" : "/Users/lighthouse/Projects/harbor-web",
-          "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7",
-          "workspaceTitle" : "main"
+          "backend": "ghostty-embedded",
+          "childPID": 15190,
+          "command": "python3 -m spaces_e2e_demo backend",
+          "createdAt": "-8",
+          "hasFinalRender": false,
+          "id": "demo-harbor-backend",
+          "isControlAvailable": true,
+          "isSubscriptionAvailable": true,
+          "lifetimePolicy": "persistent",
+          "projectID": "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
+          "projectName": "harbor-web",
+          "rowKind": "process",
+          "rowSourceID": "4AAD8245-BC8D-4A2D-BD40-2127EFE321F8",
+          "servicePID": 15004,
+          "shell": "/bin/zsh",
+          "state": "running",
+          "title": "backend",
+          "updatedAt": "-7",
+          "workingDirectory": "/Users/lighthouse/Projects/harbor-web",
+          "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7",
+          "workspaceTitle": "main"
         },
         {
-          "attachmentSnapshot" : {
-            "attachments" : [
-
-            ],
-            "clients" : [
-
-            ]
+          "attachmentSnapshot": {
+            "attachments": [],
+            "clients": []
           },
-          "backend" : "ghostty-embedded",
-          "childPID" : 15193,
-          "command" : "python3 -m spaces_e2e_demo agent",
-          "createdAt" : "-8",
-          "hasFinalRender" : false,
-          "id" : "demo-harbor-agent",
-          "isControlAvailable" : true,
-          "isSubscriptionAvailable" : true,
-          "lifetimePolicy" : "persistent",
-          "projectID" : "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
-          "projectName" : "harbor-web",
-          "rowKind" : "agent",
-          "rowSourceID" : "EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
-          "servicePID" : 15004,
-          "shell" : "/bin/zsh",
-          "state" : "running",
-          "title" : "Fix checkout 500",
-          "updatedAt" : "-7",
-          "workingDirectory" : "/Users/lighthouse/Projects/harbor-web",
-          "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7",
-          "workspaceTitle" : "main"
+          "backend": "ghostty-embedded",
+          "childPID": 15193,
+          "command": "python3 -m spaces_e2e_demo agent",
+          "createdAt": "-8",
+          "hasFinalRender": false,
+          "id": "demo-harbor-agent",
+          "isControlAvailable": true,
+          "isSubscriptionAvailable": true,
+          "lifetimePolicy": "persistent",
+          "projectID": "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
+          "projectName": "harbor-web",
+          "rowKind": "agent",
+          "rowSourceID": "EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
+          "servicePID": 15004,
+          "shell": "/bin/zsh",
+          "state": "running",
+          "title": "Fix checkout 500",
+          "updatedAt": "-7",
+          "workingDirectory": "/Users/lighthouse/Projects/harbor-web",
+          "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7",
+          "workspaceTitle": "main"
         },
         {
-          "attachmentSnapshot" : {
-            "attachments" : [
-
-            ],
-            "clients" : [
-
-            ]
+          "attachmentSnapshot": {
+            "attachments": [],
+            "clients": []
           },
-          "backend" : "ghostty-embedded",
-          "childPID" : 15186,
-          "command" : "python3 -m spaces_e2e_demo frontend",
-          "createdAt" : "-8",
-          "hasFinalRender" : false,
-          "id" : "demo-harbor-frontend",
-          "isControlAvailable" : true,
-          "isSubscriptionAvailable" : true,
-          "lifetimePolicy" : "persistent",
-          "projectID" : "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
-          "projectName" : "harbor-web",
-          "rowKind" : "process",
-          "rowSourceID" : "256998F5-B62F-461B-BC4E-CCEF403B7849",
-          "servicePID" : 15004,
-          "shell" : "/bin/zsh",
-          "state" : "running",
-          "title" : "frontend",
-          "updatedAt" : "-7",
-          "workingDirectory" : "/Users/lighthouse/Projects/harbor-web",
-          "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7",
-          "workspaceTitle" : "main"
+          "backend": "ghostty-embedded",
+          "childPID": 15186,
+          "command": "python3 -m spaces_e2e_demo frontend",
+          "createdAt": "-8",
+          "hasFinalRender": false,
+          "id": "demo-harbor-frontend",
+          "isControlAvailable": true,
+          "isSubscriptionAvailable": true,
+          "lifetimePolicy": "persistent",
+          "projectID": "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
+          "projectName": "harbor-web",
+          "rowKind": "process",
+          "rowSourceID": "256998F5-B62F-461B-BC4E-CCEF403B7849",
+          "servicePID": 15004,
+          "shell": "/bin/zsh",
+          "state": "running",
+          "title": "frontend",
+          "updatedAt": "-7",
+          "workingDirectory": "/Users/lighthouse/Projects/harbor-web",
+          "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7",
+          "workspaceTitle": "main"
         },
         {
-          "attachmentSnapshot" : {
-            "attachments" : [
-
-            ],
-            "clients" : [
-
-            ]
+          "attachmentSnapshot": {
+            "attachments": [],
+            "clients": []
           },
-          "backend" : "ghostty-embedded",
-          "childPID" : 15241,
-          "command" : "python3 -m spaces_e2e_demo backend",
-          "createdAt" : "-7",
-          "hasFinalRender" : true,
-          "id" : "demo-lantern-backend",
-          "isControlAvailable" : false,
-          "isSubscriptionAvailable" : false,
-          "lifetimePolicy" : "persistent",
-          "projectID" : "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
-          "projectName" : "lantern-api",
-          "rowKind" : "process",
-          "rowSourceID" : "DB7ABA83-31DA-49DA-BDC5-F4116C0E1D36",
-          "servicePID" : 15004,
-          "shell" : "/bin/zsh",
-          "state" : "exited",
-          "title" : "backend",
-          "updatedAt" : "-4",
-          "workingDirectory" : "/Users/lighthouse/Projects/lantern-api",
-          "workspaceID" : "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
-          "workspaceTitle" : "main"
+          "backend": "ghostty-embedded",
+          "childPID": 15241,
+          "command": "python3 -m spaces_e2e_demo backend",
+          "createdAt": "-7",
+          "hasFinalRender": true,
+          "id": "demo-lantern-backend",
+          "isControlAvailable": false,
+          "isSubscriptionAvailable": false,
+          "lifetimePolicy": "persistent",
+          "projectID": "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
+          "projectName": "lantern-api",
+          "rowKind": "process",
+          "rowSourceID": "DB7ABA83-31DA-49DA-BDC5-F4116C0E1D36",
+          "servicePID": 15004,
+          "shell": "/bin/zsh",
+          "state": "exited",
+          "title": "backend",
+          "updatedAt": "-4",
+          "workingDirectory": "/Users/lighthouse/Projects/lantern-api",
+          "workspaceID": "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
+          "workspaceTitle": "main"
         },
         {
-          "attachmentSnapshot" : {
-            "attachments" : [
-
-            ],
-            "clients" : [
-
-            ]
+          "attachmentSnapshot": {
+            "attachments": [],
+            "clients": []
           },
-          "backend" : "ghostty-embedded",
-          "childPID" : 15238,
-          "command" : "python3 -m spaces_e2e_demo frontend",
-          "createdAt" : "-7",
-          "hasFinalRender" : false,
-          "id" : "demo-lantern-frontend",
-          "isControlAvailable" : true,
-          "isSubscriptionAvailable" : true,
-          "lifetimePolicy" : "persistent",
-          "projectID" : "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
-          "projectName" : "lantern-api",
-          "rowKind" : "process",
-          "rowSourceID" : "B5DF0EB2-B38B-4845-97A5-170CB1BF9FA4",
-          "servicePID" : 15004,
-          "shell" : "/bin/zsh",
-          "state" : "running",
-          "title" : "frontend",
-          "updatedAt" : "-6",
-          "workingDirectory" : "/Users/lighthouse/Projects/lantern-api",
-          "workspaceID" : "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
-          "workspaceTitle" : "main"
+          "backend": "ghostty-embedded",
+          "childPID": 15238,
+          "command": "python3 -m spaces_e2e_demo frontend",
+          "createdAt": "-7",
+          "hasFinalRender": false,
+          "id": "demo-lantern-frontend",
+          "isControlAvailable": true,
+          "isSubscriptionAvailable": true,
+          "lifetimePolicy": "persistent",
+          "projectID": "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
+          "projectName": "lantern-api",
+          "rowKind": "process",
+          "rowSourceID": "B5DF0EB2-B38B-4845-97A5-170CB1BF9FA4",
+          "servicePID": 15004,
+          "shell": "/bin/zsh",
+          "state": "running",
+          "title": "frontend",
+          "updatedAt": "-6",
+          "workingDirectory": "/Users/lighthouse/Projects/lantern-api",
+          "workspaceID": "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
+          "workspaceTitle": "main"
         }
       ],
-      "workspaces" : [
+      "workspaces": [
         {
-          "baseBranch" : "main",
-          "branch" : "main",
-          "codingAgentRows" : [
-
-          ],
-          "config" : {
-            "agentLaunchers" : [
-
-            ],
-            "ports" : [
+          "baseBranch": "main",
+          "branch": "main",
+          "codingAgentRows": [],
+          "config": {
+            "agentLaunchers": [],
+            "ports": [
               {
-                "id" : "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
-                "name" : "app"
+                "id": "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
+                "name": "app"
               },
               {
-                "id" : "54EC72DC-A3C4-43FE-860C-BBB314823B55",
-                "name" : "api"
+                "id": "54EC72DC-A3C4-43FE-860C-BBB314823B55",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "044D237E-876C-4BE7-AA6B-199675B327F8",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "044D237E-876C-4BE7-AA6B-199675B327F8",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "dir" : "/Users/lighthouse/Projects/atlas-docs",
-          "id" : "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE",
-          "isArchived" : false,
-          "isDefault" : true,
-          "isHidden" : false,
-          "isRunning" : false,
-          "processRows" : [
+          "dir": "/Users/lighthouse/Projects/atlas-docs",
+          "id": "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE",
+          "isArchived": false,
+          "isDefault": true,
+          "isHidden": false,
+          "isRunning": false,
+          "processRows": [
             {
-              "canRestart" : false,
-              "canRun" : true,
-              "canStop" : false,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-              "id" : "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
-              "name" : "frontend",
-              "runState" : "notStarted",
-              "templateID" : "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
-              "workspaceID" : "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE"
+              "canRestart": false,
+              "canRun": true,
+              "canStop": false,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+              "id": "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
+              "name": "frontend",
+              "runState": "notStarted",
+              "templateID": "A0698FAB-4E2B-45F0-B51B-6C88510B689A",
+              "workspaceID": "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE"
             },
             {
-              "canRestart" : false,
-              "canRun" : true,
-              "canStop" : false,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-              "id" : "044D237E-876C-4BE7-AA6B-199675B327F8",
-              "name" : "backend",
-              "runState" : "notStarted",
-              "templateID" : "044D237E-876C-4BE7-AA6B-199675B327F8",
-              "workspaceID" : "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE"
+              "canRestart": false,
+              "canRun": true,
+              "canStop": false,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+              "id": "044D237E-876C-4BE7-AA6B-199675B327F8",
+              "name": "backend",
+              "runState": "notStarted",
+              "templateID": "044D237E-876C-4BE7-AA6B-199675B327F8",
+              "workspaceID": "0E7CC5AC-114D-43FF-ADDE-700BB2683CBE"
             }
           ],
-          "projectID" : "5B0A01BD-7B7C-4F78-A462-857DFBD637EB",
-          "projectName" : "atlas-docs",
-          "sessionCount" : 0,
-          "setupState" : {
-            "status" : "succeeded"
+          "projectID": "5B0A01BD-7B7C-4F78-A462-857DFBD637EB",
+          "projectName": "atlas-docs",
+          "sessionCount": 0,
+          "setupState": {
+            "status": "succeeded"
           },
-          "terminalRows" : [
-
-          ]
+          "terminalRows": []
         },
         {
-          "baseBranch" : "main",
-          "branch" : "main",
-          "codingAgentRows" : [
+          "baseBranch": "main",
+          "branch": "main",
+          "codingAgentRows": [
             {
-              "activityState" : "waiting",
-              "agentID" : "EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
-              "canRestart" : true,
-              "canRun" : false,
-              "canStop" : true,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-              "id" : "configured-agent:42A4B12F-B617-462F-9539-B230C72B04D7:AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-              "isConfigured" : true,
-              "launcherID" : "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-              "name" : "Fix checkout 500",
-              "runState" : "running",
-              "sessionID" : "demo-harbor-agent",
-              "updatedAt" : "-7",
-              "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7"
+              "activityState": "waiting",
+              "agentID": "EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
+              "canRestart": true,
+              "canRun": false,
+              "canStop": true,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
+              "id": "configured-agent:42A4B12F-B617-462F-9539-B230C72B04D7:AA681503-5E13-4AB4-A7D0-19DC39F7805E",
+              "isConfigured": true,
+              "launcherID": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
+              "name": "Fix checkout 500",
+              "runState": "running",
+              "sessionID": "demo-harbor-agent",
+              "updatedAt": "-7",
+              "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7"
             }
           ],
-          "config" : {
-            "agentLaunchers" : [
+          "config": {
+            "agentLaunchers": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-                "id" : "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-                "name" : "Fix checkout 500"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
+                "id": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
+                "name": "Fix checkout 500"
               }
             ],
-            "ports" : [
+            "ports": [
               {
-                "id" : "F746B1B6-031D-41B1-BA05-94680D5555CF",
-                "name" : "app"
+                "id": "F746B1B6-031D-41B1-BA05-94680D5555CF",
+                "name": "app"
               },
               {
-                "id" : "9F05B181-BDCD-411B-AF2B-E330E5A7343C",
-                "name" : "api"
+                "id": "9F05B181-BDCD-411B-AF2B-E330E5A7343C",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "4285FA1B-8E93-4424-8D00-1BEBA3643742",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "4285FA1B-8E93-4424-8D00-1BEBA3643742",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "51867A26-65E6-4924-B91F-204160D01B25",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "51867A26-65E6-4924-B91F-204160D01B25",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "dir" : "/Users/lighthouse/Projects/harbor-web",
-          "id" : "42A4B12F-B617-462F-9539-B230C72B04D7",
-          "isArchived" : false,
-          "isDefault" : true,
-          "isHidden" : false,
-          "isRunning" : true,
-          "processRows" : [
+          "dir": "/Users/lighthouse/Projects/harbor-web",
+          "id": "42A4B12F-B617-462F-9539-B230C72B04D7",
+          "isArchived": false,
+          "isDefault": true,
+          "isHidden": false,
+          "isRunning": true,
+          "processRows": [
             {
-              "canRestart" : true,
-              "canRun" : false,
-              "canStop" : true,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-              "id" : "4285FA1B-8E93-4424-8D00-1BEBA3643742",
-              "name" : "frontend",
-              "processID" : "256998F5-B62F-461B-BC4E-CCEF403B7849",
-              "runState" : "running",
-              "sessionID" : "demo-harbor-frontend",
-              "templateID" : "4285FA1B-8E93-4424-8D00-1BEBA3643742",
-              "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7"
+              "canRestart": true,
+              "canRun": false,
+              "canStop": true,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+              "id": "4285FA1B-8E93-4424-8D00-1BEBA3643742",
+              "name": "frontend",
+              "processID": "256998F5-B62F-461B-BC4E-CCEF403B7849",
+              "runState": "running",
+              "sessionID": "demo-harbor-frontend",
+              "templateID": "4285FA1B-8E93-4424-8D00-1BEBA3643742",
+              "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7"
             },
             {
-              "canRestart" : true,
-              "canRun" : false,
-              "canStop" : true,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-              "id" : "51867A26-65E6-4924-B91F-204160D01B25",
-              "name" : "backend",
-              "processID" : "4AAD8245-BC8D-4A2D-BD40-2127EFE321F8",
-              "runState" : "running",
-              "sessionID" : "demo-harbor-backend",
-              "templateID" : "51867A26-65E6-4924-B91F-204160D01B25",
-              "workspaceID" : "42A4B12F-B617-462F-9539-B230C72B04D7"
+              "canRestart": true,
+              "canRun": false,
+              "canStop": true,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+              "id": "51867A26-65E6-4924-B91F-204160D01B25",
+              "name": "backend",
+              "processID": "4AAD8245-BC8D-4A2D-BD40-2127EFE321F8",
+              "runState": "running",
+              "sessionID": "demo-harbor-backend",
+              "templateID": "51867A26-65E6-4924-B91F-204160D01B25",
+              "workspaceID": "42A4B12F-B617-462F-9539-B230C72B04D7"
             }
           ],
-          "projectID" : "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
-          "projectName" : "harbor-web",
-          "sessionCount" : 3,
-          "setupState" : {
-            "status" : "succeeded"
+          "projectID": "B9BA8676-50AA-4744-AE09-DF51162C4FE0",
+          "projectName": "harbor-web",
+          "sessionCount": 3,
+          "setupState": {
+            "status": "succeeded"
           },
-          "terminalRows" : [
-
-          ]
+          "terminalRows": []
         },
         {
-          "baseBranch" : "main",
-          "branch" : "main",
-          "codingAgentRows" : [
-
-          ],
-          "config" : {
-            "agentLaunchers" : [
-
-            ],
-            "ports" : [
+          "baseBranch": "main",
+          "branch": "main",
+          "codingAgentRows": [],
+          "config": {
+            "agentLaunchers": [],
+            "ports": [
               {
-                "id" : "789DC866-048B-44E9-9D88-9D314BAD8A2E",
-                "name" : "app"
+                "id": "789DC866-048B-44E9-9D88-9D314BAD8A2E",
+                "name": "app"
               },
               {
-                "id" : "1E85FD64-335E-4AFE-91AF-2159144CD020",
-                "name" : "api"
+                "id": "1E85FD64-335E-4AFE-91AF-2159144CD020",
+                "name": "api"
               }
             ],
-            "processes" : [
+            "processes": [
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-                "id" : "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
-                "name" : "frontend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+                "id": "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
+                "name": "frontend",
+                "onExit": "none"
               },
               {
-                "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-                "id" : "73D82D5F-2313-4495-83BD-E93287029DF8",
-                "name" : "backend",
-                "onExit" : "none"
+                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+                "id": "73D82D5F-2313-4495-83BD-E93287029DF8",
+                "name": "backend",
+                "onExit": "none"
               }
             ],
-            "stopScript" : "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
+            "stopScript": "bash -lc 'for port in \"$SPACES_APP_PORT\" \"$SPACES_API_PORT\"; do if [ -n \"$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"$pid\" ] && pids+=(\"$pid\"); done < <(lsof -tiTCP:\"$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"${pids[@]}\"; do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"${pids[@]}\"; do kill -0 \"$pid\" >/dev/null 2>&1 && kill -9 \"$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"project-stop:%s\\n\" \"${SPACES_WORKSPACE_DIR}\" >> \"${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}\"'"
           },
-          "dir" : "/Users/lighthouse/Projects/lantern-api",
-          "id" : "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
-          "isArchived" : false,
-          "isDefault" : true,
-          "isHidden" : false,
-          "isRunning" : true,
-          "processRows" : [
+          "dir": "/Users/lighthouse/Projects/lantern-api",
+          "id": "8CB5A6B5-FE99-492E-A43D-A582084FAB4D",
+          "isArchived": false,
+          "isDefault": true,
+          "isHidden": false,
+          "isRunning": true,
+          "processRows": [
             {
-              "canRestart" : true,
-              "canRun" : false,
-              "canStop" : true,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
-              "id" : "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
-              "name" : "frontend",
-              "processID" : "B5DF0EB2-B38B-4845-97A5-170CB1BF9FA4",
-              "runState" : "running",
-              "sessionID" : "demo-lantern-frontend",
-              "templateID" : "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
-              "workspaceID" : "8CB5A6B5-FE99-492E-A43D-A582084FAB4D"
+              "canRestart": true,
+              "canRun": false,
+              "canStop": true,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'frontend' '--port' $SPACES_APP_PORT '--site-dir' '.spaces-e2e-demo/site' '--backend-url' http://127.0.0.1:$SPACES_API_PORT",
+              "id": "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
+              "name": "frontend",
+              "processID": "B5DF0EB2-B38B-4845-97A5-170CB1BF9FA4",
+              "runState": "running",
+              "sessionID": "demo-lantern-frontend",
+              "templateID": "4B2F50AD-EC2F-45E1-A4ED-3DA0C794C8E1",
+              "workspaceID": "8CB5A6B5-FE99-492E-A43D-A582084FAB4D"
             },
             {
-              "canRestart" : false,
-              "canRun" : true,
-              "canStop" : false,
-              "command" : "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
-              "exitedAt" : "-4",
-              "id" : "73D82D5F-2313-4495-83BD-E93287029DF8",
-              "name" : "backend",
-              "processID" : "DB7ABA83-31DA-49DA-BDC5-F4116C0E1D36",
-              "runState" : "exited",
-              "sessionID" : "demo-lantern-backend",
-              "templateID" : "73D82D5F-2313-4495-83BD-E93287029DF8",
-              "workspaceID" : "8CB5A6B5-FE99-492E-A43D-A582084FAB4D"
+              "canRestart": false,
+              "canRun": true,
+              "canStop": false,
+              "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'backend' '--port' $SPACES_API_PORT '--data-dir' '.spaces-e2e-demo/api'",
+              "exitedAt": "-4",
+              "id": "73D82D5F-2313-4495-83BD-E93287029DF8",
+              "name": "backend",
+              "processID": "DB7ABA83-31DA-49DA-BDC5-F4116C0E1D36",
+              "runState": "exited",
+              "sessionID": "demo-lantern-backend",
+              "templateID": "73D82D5F-2313-4495-83BD-E93287029DF8",
+              "workspaceID": "8CB5A6B5-FE99-492E-A43D-A582084FAB4D"
             }
           ],
-          "projectID" : "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
-          "projectName" : "lantern-api",
-          "sessionCount" : 2,
-          "setupState" : {
-            "status" : "succeeded"
+          "projectID": "440B3E3C-BCDB-40CA-8046-7ED6325CD5EB",
+          "projectName": "lantern-api",
+          "sessionCount": 2,
+          "setupState": {
+            "status": "succeeded"
           },
-          "terminalRows" : [
-
-          ]
+          "terminalRows": []
         }
-      ]
+      ],
+      "workspaceIDsWithTeardownInFlight": []
     }
   }
 }

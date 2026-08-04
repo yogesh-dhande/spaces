@@ -821,6 +821,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// cannot stall every other client's overview polls behind it. Serial rather than concurrent because
     /// two teardowns in the same repository would otherwise race on the same git index lock.
     private let workspaceTeardownQueue = DispatchQueue(label: "spaces.device.api.workspace-teardown", qos: .userInitiated)
+    /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
+    /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
+    /// written from the teardown queue and read from whichever queue is building an overview, and both
+    /// operations are a single set mutation.
+    private let workspaceTeardownRegistry = WorkspaceTeardownRegistry()
     /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
     /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
     let queue: DispatchQueue
@@ -1317,6 +1322,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Publishes `workspaceIDs` as being torn down for the duration of `teardown`, so an overview built
+    /// while it runs reports them (see `SpacesDeviceOverviewPayload.workspaceIDsWithTeardownInFlight`).
+    /// Registered before any teardown work starts and released in a `defer`, so a teardown that throws
+    /// cannot leave a workspace reported as forever deleting.
+    private func withTeardownRegistered<T>(workspaceIDs: [String], teardown: () throws -> T) rethrows -> T {
+        workspaceTeardownRegistry.register(workspaceIDs: workspaceIDs)
+        defer { workspaceTeardownRegistry.release(workspaceIDs: workspaceIDs) }
+        return try teardown()
+    }
+
     #if canImport(Network) && canImport(Security)
         private func handleWorkspaceTeardownRequestAsync(
             _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
@@ -1769,7 +1784,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
         let daemonStatus = makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
         return SpacesDeviceOverviewBuilder.build(
-            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus)
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
+            workspaceIDsWithTeardownInFlight: workspaceTeardownRegistry.snapshot(), daemonStatus: daemonStatus)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -2143,7 +2159,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let project = try store.project(id: request.projectID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Project not found.", errorCode: .notFound)
         }
-        try orchestrator.removeProject(id: project.id)
+        // Every workspace of the project is torn down by this, so every one of them is reported as
+        // deleting — a client watching any of them sees the same fact an archive publishes.
+        let workspaceIDs = try store.workspaces(projectID: project.id).map(\.id)
+        try withTeardownRegistered(workspaceIDs: workspaceIDs) { try orchestrator.removeProject(id: project.id) }
         return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
     }
 
@@ -2232,8 +2251,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         // The outcome carries what happened to each branch the request asked to delete, which the user is
         // owed whether it succeeded, found nothing, skipped a protected branch, or failed.
-        let outcome = try context.orchestrator().archiveWorkspace(
-            workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
+        //
+        // Registered as torn down for the whole archive: a client whose delete response was lost probes the
+        // overview to find out what happened, and while this runs it must read "still being deleted" rather
+        // than mistaking a slow stop script for a failed delete.
+        let outcome = try withTeardownRegistered(workspaceIDs: [request.workspaceID]) {
+            try context.orchestrator().archiveWorkspace(
+                workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
+        }
         return try refreshedMutationResponse(
             context: context, message: "Deleted workspace.", workspaceID: request.workspaceID, notice: outcome.notice)
     }

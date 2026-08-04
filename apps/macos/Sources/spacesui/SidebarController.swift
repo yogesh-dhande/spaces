@@ -315,8 +315,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
             // Whole-struct assignment bypasses `overview`'s `didSet`, so the install generation is carried
             // over explicitly — otherwise it would reset to zero here on every local refresh and a deferred
-            // workspace delete would never observe fresh evidence for the local device.
-            host.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(from: previousLocalSection)
+            // workspace delete would never observe fresh evidence for the local device. `retainedContent`
+            // is exactly the offline case where this re-renders the cached overview without the daemon
+            // having answered; every other rebuild is carrying a freshly read one, identical payload or not.
+            host.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(
+                from: previousLocalSection, carriesFreshInstall: retainedContent == nil)
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }

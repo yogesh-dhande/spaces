@@ -428,10 +428,10 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
 
     public init(
         id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isHidden: Bool,
-        isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
-        environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
-        config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:],
+        setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
+        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
+        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
     ) {
         self.id = id
         self.projectID = projectID
@@ -665,15 +665,27 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
     /// every refresh.
     public let daemonStatus: TerminalServiceDaemonStatus
+    /// Workspaces whose teardown this daemon is running right now — the archive work is on its teardown
+    /// queue, or queued to start on it, and has not finished. Includes every workspace of a project being
+    /// deleted. Ids are whitespace-trimmed and sorted.
+    ///
+    /// This exists because a client cannot tell the two reasons a workspace is still listed apart on its
+    /// own. After a delete whose response was lost, a client probes the overview; seeing the workspace
+    /// still there could mean the delete failed, or that a slow user stop script is still running and the
+    /// daemon will remove it shortly. Guessing "failed" is the destructive one — the client tells the user
+    /// the workspace survived, and the daemon deletes it moments later. Only the daemon knows which is
+    /// happening, so it reports it here rather than leaving clients to infer it from timing.
+    public let workspaceIDsWithTeardownInFlight: [String]
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
-        retainedTerminalSessionIDs: [String] = [], daemonStatus: TerminalServiceDaemonStatus
+        retainedTerminalSessionIDs: [String] = [], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
         self.retainedTerminalSessionIDs = retainedTerminalSessionIDs
+        self.workspaceIDsWithTeardownInFlight = workspaceIDsWithTeardownInFlight
         self.daemonStatus = daemonStatus
     }
 }

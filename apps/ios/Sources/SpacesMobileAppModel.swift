@@ -1782,11 +1782,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 // user explicitly asked to delete. Say so rather than silently succeeding.
                 if requestedBranchDeletion { deletedWorkspaceNotice = Self.unknownBranchOutcomeNotice }
             case .unknown:
-                // Nothing was ever observed: the response was lost and every refetch failed too, so the
-                // device has said nothing about this workspace at all. Clearing the marking and reporting
-                // failure here would be a verdict the client never reached — the row would go back to
-                // looking ordinary and offering Delete again, for a workspace the daemon may have deleted.
-                // The marking stays and the error is held until an overview can answer (see
+                // No genuine verdict was reached: either every refetch failed, or every refetch that
+                // succeeded found the workspace listed with its teardown still reported in flight — the
+                // daemon still working, not a failure. Clearing the marking and reporting failure here
+                // would be a verdict the client never reached — the row would go back to looking ordinary
+                // and offering Delete again, for a workspace the daemon may still finish deleting. The
+                // marking stays and the error is held until an overview can answer (see
                 // `resolveDeferredWorkspaceDeletions`). `isMutating` still clears on return, so only this
                 // row stays inert, not the whole UI.
                 workspaceDeletionsAwaitingOverview[workspace.id] = DeferredWorkspaceDeletion(
@@ -1818,10 +1819,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// What reconciliation was able to establish about a delete whose response was lost.
     ///
-    /// `unknown` is not a synonym for `present`: it means no overview ever resolved, so nothing has been
-    /// observed either way. Reporting it as `present` would be a fabricated verdict — the client would put
-    /// the cached pre-delete row back and call the delete failed while the daemon may well have completed
-    /// it — so it defers instead, to the first overview that can actually answer.
+    /// `unknown` is not a synonym for `present`: it means no overview ever resolved with a genuine verdict
+    /// either way. That covers both a fetch that never resolved and one that resolved but found the
+    /// workspace still listed with its teardown reported in flight (`workspaceIDsWithTeardownInFlight`) on
+    /// every attempt — the daemon saying it is still working, not that the delete failed. Reporting either
+    /// as `present` would be a fabricated verdict — the client would put the cached pre-delete row back and
+    /// call the delete failed while the daemon may well complete it moments later — so both defer instead,
+    /// to the first overview that can actually answer.
     private enum WorkspaceDeletionReconciliation {
         case gone
         case present
@@ -1848,6 +1852,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
     /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
+    ///
+    /// A refetch that still lists the workspace is not automatically evidence of failure: the daemon runs
+    /// the delete's teardown on its own queue and reports which workspaces are still on it via
+    /// `workspaceIDsWithTeardownInFlight`. While the workspace's id is in that set, its continued presence
+    /// only means the daemon has not finished landing the delete yet, so those attempts do not count toward
+    /// `.present` — only a listing with no teardown queued behind it is a genuine sign the delete never
+    /// happened. If every attempt in the budget is spent this way the outcome is `.unknown`, deferring to
+    /// `resolveDeferredWorkspaceDeletions` instead of reporting a guessed failure.
     private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
         -> WorkspaceDeletionReconciliation
     {
@@ -1871,8 +1883,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 refreshFailureStreak = nil
                 return .gone
             }
-            // An overview resolved and still lists it, so the answer is known even if the budget runs out.
-            resolvedAtLeastOnce = true
+            // Still listed, but that alone is not proof the delete failed — see the doc comment above.
+            // Only count this attempt toward `.present` when the daemon is not still working on it.
+            if !refreshedOverview.workspaceIDsWithTeardownInFlight.contains(workspaceID) { resolvedAtLeastOnce = true }
             if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
         }
         return resolvedAtLeastOnce ? .present : .unknown
@@ -2164,13 +2177,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// place an overview becomes the app's state.
     ///
     /// Absent means the delete landed: the marking is dropped silently, and the unknown-branch-outcome
-    /// notice is owed if the user had asked for branches to go too. Present means it did not: the marking
-    /// is dropped and the error the client held back is surfaced now, against a row the user can act on
-    /// again. Either way the entry is consumed, so an overview only ever answers once.
+    /// notice is owed if the user had asked for branches to go too. Listed with no teardown queued behind
+    /// it means the delete did not land: the marking is dropped and the error the client held back is
+    /// surfaced now, against a row the user can act on again. Listed WITH its id in
+    /// `workspaceIDsWithTeardownInFlight` is not a verdict at all — the daemon is still tearing it down —
+    /// so that entry is left in place for a later overview to answer instead of being consumed here.
+    /// Otherwise the entry is consumed, so an overview only ever answers it once.
     private func resolveDeferredWorkspaceDeletions(against payload: SpacesDeviceOverviewPayload) {
         guard !workspaceDeletionsAwaitingOverview.isEmpty else { return }
         let listedWorkspaceIDs = Set(payload.workspaces.map(\.id))
+        let teardownInFlightWorkspaceIDs = Set(payload.workspaceIDsWithTeardownInFlight)
         for (workspaceID, deferred) in workspaceDeletionsAwaitingOverview {
+            if listedWorkspaceIDs.contains(workspaceID), teardownInFlightWorkspaceIDs.contains(workspaceID) {
+                // Still listed, but the daemon reports its teardown still running — not a verdict. Leave
+                // the deferral in place for a later overview to settle.
+                continue
+            }
             workspaceDeletionsAwaitingOverview.removeValue(forKey: workspaceID)
             workspaceIDsPendingDeletion.remove(workspaceID)
             if listedWorkspaceIDs.contains(workspaceID) {

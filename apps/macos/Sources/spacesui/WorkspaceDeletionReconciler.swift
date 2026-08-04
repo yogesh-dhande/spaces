@@ -48,20 +48,28 @@ import spacesdevicecore
     /// is handed to `applyOverview` so the caller can publish it through its normal refresh path,
     /// exactly like an ordinary overview refresh — this type never applies state itself. See `Outcome`
     /// for what the return value means.
+    ///
+    /// Only an overview that lists the workspace while the daemon reports NO teardown in flight for it
+    /// counts as evidence the delete failed. A workspace the daemon says it is still tearing down is not
+    /// failure evidence at all, however many probes see it — the budget then ends in `.unknown`, and the
+    /// caller keeps deferring rather than telling the user a workspace survived that is about to go.
     func reconcile(workspaceID: String, fetchOverview: () async -> SpacesDeviceOverviewPayload?, applyOverview: (SpacesDeviceOverviewPayload) -> Void)
         async -> Outcome
     {
-        var anyOverviewResolved = false
+        var sawWorkspaceListedWithNoTeardownRunning = false
         for attempt in 0..<Self.attempts {
             guard let overview = await fetchOverview() else {
                 if attempt + 1 < Self.attempts { try? await Task.sleep(for: interval) }
                 continue
             }
-            anyOverviewResolved = true
             applyOverview(overview)
             guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return .gone }
+            // Still listed, but the daemon says it is tearing this workspace down right now — a slow stop
+            // script outliving this budget looks exactly like a failed delete from here, and only the
+            // daemon can tell them apart. Not evidence of failure, so it does not make this `.present`.
+            if !overview.workspaceIDsWithTeardownInFlight.contains(workspaceID) { sawWorkspaceListedWithNoTeardownRunning = true }
             if attempt + 1 < Self.attempts { try? await Task.sleep(for: interval) }
         }
-        return anyOverviewResolved ? .present : .unknown
+        return sawWorkspaceListedWithNoTeardownRunning ? .present : .unknown
     }
 }
