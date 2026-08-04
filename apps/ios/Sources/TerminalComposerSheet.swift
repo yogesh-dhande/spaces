@@ -132,11 +132,8 @@ struct TerminalComposerSheet: View {
     /// the draft.
     private func pasteClipboard() {
         guard !model.isSendingComposedMessage else { return }
-        switch TerminalUIPasteboardImageReader.readImage() {
-        case .image(let attachment): model.attachComposerImage(attachment)
-        case .rejected(let message): model.composerErrorMessage = message
-        case .noImage: pasteClipboardText()
-        }
+        guard !model.pasteClipboardImageIntoComposer() else { return }
+        pasteClipboardText()
     }
 
     private func pasteClipboardText() {

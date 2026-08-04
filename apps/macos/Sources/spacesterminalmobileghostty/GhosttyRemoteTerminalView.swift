@@ -95,6 +95,7 @@ import Foundation
         public let onSendMouseButton: @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
+        public let onPasteClipboardImage: (@MainActor () -> Bool)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -104,7 +105,8 @@ import Foundation
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseButton: @escaping @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void = { _, _, _ in },
-            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
+            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -123,6 +125,7 @@ import Foundation
             self.onSendMouseButton = onSendMouseButton
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
+            self.onPasteClipboardImage = onPasteClipboardImage
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -145,6 +148,10 @@ import Foundation
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
+            // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
+            // handler's answer (did the clipboard image claim this paste?) before deciding whether to
+            // fall through to the text paste. UIKit delivers the paste on the main thread.
+            hostView.onPasteClipboardImage = onPasteClipboardImage.map { callback in { MainActor.assumeIsolated { callback() } } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -239,9 +246,11 @@ import Foundation
         private var lastMomentumTimestamp: CFTimeInterval = 0
         private var lastScrollPointerPosition: TerminalScrollPointerPosition?
         private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
-        /// Clipboard read seam: production reads the system pasteboard, tests substitute the contents so
-        /// the paste paths can be exercised without mutating the device pasteboard.
+        /// Clipboard read seams: production reads the system pasteboard, tests substitute the contents so
+        /// the paste paths can be exercised without mutating the device pasteboard. The image probe reads
+        /// declared pasteboard types only, so it costs no paste prompt on the common text-only path.
         private var clipboardTextReader: () -> String? = { UIPasteboard.general.string }
+        private var clipboardHasImageReader: () -> Bool = { UIPasteboard.general.hasImages }
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
         private var openedLinkDuringTapProbe = false
@@ -271,6 +280,10 @@ import Foundation
         public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
+        /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
+        /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
+        /// declared image carried nothing readable, so the text paste runs instead.
+        public var onPasteClipboardImage: (() -> Bool)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -532,10 +545,15 @@ import Foundation
 
         public override func paste(_ sender: Any?) { pasteFromClipboard() }
 
-        /// Sends the clipboard as a bracketed paste. Shared by the system Paste command, the accessory
-        /// Paste button, and the accessory cmd+v chord so all three behave identically.
+        /// Pastes the clipboard, image first: an image belongs in the composer as an attachment the user
+        /// then sends deliberately, never in the terminal as bytes, so `onPasteClipboardImage` takes the
+        /// paste when the clipboard holds one. Text is sent as a bracketed paste. Shared by the system
+        /// Paste command, the accessory Paste button, and the accessory cmd+v chord so all three behave
+        /// identically.
         private func pasteFromClipboard() {
-            guard acceptsTerminalInput, let text = clipboardTextReader() else { return }
+            guard acceptsTerminalInput else { return }
+            if clipboardHasImageReader(), onPasteClipboardImage?() == true { return }
+            guard let text = clipboardTextReader() else { return }
             pasteText(text)
         }
 
@@ -545,6 +563,8 @@ import Foundation
         }
 
         func setClipboardTextForTesting(_ text: String?) { clipboardTextReader = { text } }
+
+        func setClipboardHasImageForTesting(_ hasImage: Bool) { clipboardHasImageReader = { hasImage } }
 
         private func pasteText(_ text: String) {
             guard !text.isEmpty else { return }

@@ -1923,6 +1923,104 @@
             XCTAssertEqual(sentKeys, [])
         }
 
+        /// An image on the clipboard belongs in the composer, not in the session: every paste route hands
+        /// the paste to the image handler and sends nothing, even when the clipboard also carries text.
+        func testRemoteTerminalAccessoryPasteButtonWithClipboardImageDefersToImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(imageHandlerCallCount, 1)
+            XCTAssertEqual(sentText.count, 0, "a clipboard image must not be pasted into the terminal")
+
+            // The system Paste command shares the same route.
+            hostView.paste(nil)
+            XCTAssertEqual(imageHandlerCallCount, 2)
+            XCTAssertEqual(sentText.count, 0)
+        }
+
+        func testRemoteTerminalAccessoryCommandVWithClipboardImageDefersToImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let commandButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Command" })
+
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(imageHandlerCallCount, 1)
+            XCTAssertEqual(sentText.count, 0, "cmd+v with a clipboard image must consume the keystroke without pasting")
+            XCTAssertEqual(sentKeys, [])
+        }
+
+        /// The cheap type probe can declare an image the handler cannot actually read; the paste then falls
+        /// through to the text path rather than doing nothing.
+        func testRemoteTerminalPasteFallsThroughToTextWhenImageHandlerDeclines() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = { false }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        /// A text-only clipboard must never reach the image handler: the probe gates it, so no paste
+        /// prompt for image data is triggered on the common path.
+        func testRemoteTerminalPasteWithoutClipboardImageSkipsImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(false)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(imageHandlerCallCount, 0)
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+        }
+
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
