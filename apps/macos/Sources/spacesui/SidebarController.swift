@@ -592,6 +592,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         deviceReachabilityWatchdogTimer = timer
     }
 
+    /// Whether a pull that reports a device as reachable-but-blocked has to rebuild the outline. The
+    /// watchdog re-pulls a blocked device on every tick, so the steady case — the same verdict on an
+    /// already-blocked section that has already had its rows cleared — must touch nothing, or the user
+    /// would lose scroll position and project expansion every 15s while they read the block. Pure so the
+    /// rule is directly testable.
+    nonisolated static func blockedSectionRebuildsOutline(wasLoaded: Bool, statusUnchanged: Bool, hadOverview: Bool) -> Bool {
+        !wasLoaded || !statusUnchanged || hadOverview
+    }
+
+    /// Whether a remote section is re-pulled on a watchdog tick.
+    ///
+    /// Any section that is not loaded is re-probed: offline, and equally a section left at "loading…" by
+    /// an attempt whose result never arrived. A section only returns to loaded when an overview arrives,
+    /// so this pull is the only way back for a device whose stream is healthy but silent.
+    ///
+    /// A blocked device is pulled as well, even though its section is loaded. It is deliberately loaded —
+    /// reachable, just unusable — and its subscription is parked, so nothing else would ever touch it: it
+    /// would keep offering Resolve long after the machine was powered off, and a daemon updated on that
+    /// machine would stay blocked in the app until the user reloaded. The pull answers both, since it is
+    /// what reads the verdict in the first place: it fails once the device stops answering (offline, with
+    /// a Reconnect action), and it reports a compatible daemon once one is running, which clears the block
+    /// and puts the device back in the subscription's desired set.
+    ///
+    /// A healthy loaded device is left alone — its stream is what keeps it current, and dialing every
+    /// paired remote every 15s to learn nothing is exactly the cost this rule exists to avoid.
+    /// Pure so the rule is directly testable.
+    nonisolated static func watchdogShouldPullSection(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
+        loadState != .loaded || compatibility?.isCompatible == false
+    }
+
     /// One reconciliation pass over device reachability. Everything that brings a device back —
     /// a disconnect callback firing, an overview arriving on a stream, the local snapshot succeeding —
     /// is a single event that can simply not happen: a stream can be reconnected yet never deliver
@@ -603,12 +633,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         refreshRemoteOverviewSubscriptions()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
-            // Any section that is not loaded is re-probed: offline, and equally a section left at
-            // "loading…" by an attempt whose result never arrived. Deliberately bypasses the freshness
-            // gate — such a section holds no data worth protecting, and a section only returns to loaded
-            // when an overview arrives, so this pull is the only way back for a device whose stream is
-            // healthy but silent.
-            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }), section.loadState != .loaded else { continue }
+            // Pulling here deliberately skips the freshness gate `loadRemoteDeviceSections` applies: an
+            // eligible section either holds no data worth protecting or holds a verdict that is exactly
+            // what this tick exists to re-check. The pull's own failure backoff still paces a device that
+            // has stopped answering.
+            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }),
+                Self.watchdogShouldPullSection(loadState: section.loadState, compatibility: section.compatibility)
+            else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: false)
         }
@@ -649,12 +680,31 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
+    /// The remote devices that should hold a live overview subscription, out of the credentialed paired
+    /// remotes.
+    ///
+    /// A device the sidebar knows is wire-incompatible is parked: its daemon speaks a different protocol,
+    /// so the overview it pushes cannot decode and the stream dies as soon as it delivers one. Reopening
+    /// it on the retry backoff buys nothing but another disconnect every few seconds. Its pull is what
+    /// describes such a device — the pull falls back to the frozen-core handshake and reads the verdict
+    /// from there — and a pull reporting a compatible daemon puts the device back in this set, so the
+    /// next reconcile reopens its subscription with no separate recovery path.
+    ///
+    /// Only a verdict parks a device. One with no section yet, and one that is merely offline (the
+    /// offline transition drops the verdict), both stay wanted: the subscription is how they recover.
+    /// Pure so the rule is directly testable.
+    nonisolated static func overviewSubscriptionDesiredIDs(credentialedRemoteIDs: [String], sections: [DeviceSection]) -> Set<String> {
+        let incompatibleIDs = Set(sections.filter { $0.compatibility?.isCompatible == false }.map(\.deviceID))
+        return Set(credentialedRemoteIDs).subtracting(incompatibleIDs)
+    }
+
     /// Reconciles open subscriptions to the set of credentialed paired remotes:
     /// drops gone devices and opens one per newly present device.
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptions.isEnabled else { return }
         let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(device: $0) }
-        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: Set(remotes.map(\.id)))
+        let desiredIDs = Self.overviewSubscriptionDesiredIDs(credentialedRemoteIDs: remotes.map(\.id), sections: host.deviceSections)
+        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: desiredIDs)
         for removal in outcome.removed {
             removal.client.stop()
             host.stopRemoteBrowserForwards(deviceID: removal.deviceID)
@@ -752,11 +802,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
     }
 
+    /// Whether a dropped overview stream is evidence that the device it belonged to went away.
+    ///
+    /// A stream to a wire-incompatible daemon dies by design — the overview it pushes cannot decode —
+    /// so its disconnect only restates the protocol gap the pull already reported. Letting it run the
+    /// offline transition would wipe that verdict, and the two paths then alternate: the header flips
+    /// between "Resolve" and "Reconnect" and the compatibility block is pulled out of the detail pane
+    /// every time the verdict goes away. The pull, not the disconnect, describes such a device, and a
+    /// pull that fails is never filtered here, so a genuine outage still reports one.
+    /// Pure so the rule is directly testable.
+    nonisolated static func streamDisconnectReportsAnOutage(compatibility: SpacesWireCompatibility?) -> Bool { compatibility?.isCompatible != false }
+
     /// A stream that dropped means the remote daemon or network went away. With no periodic remote
     /// refresh to fall back on, transition the section to offline now — the same way a failed pull
     /// does — so the sidebar shows the offline caption instead of stale projects/alerts. A graceful
     /// stream close carries no error, so fall back to a descriptive reason for the offline tooltip.
+    ///
+    /// The single chokepoint for both disconnect paths: a live stream dropping, and a stream that died
+    /// before the connect that opened it handed its client back.
     private func markRemoteOverviewSectionOffline(deviceID: String, error: (any Error)?) {
+        guard Self.streamDisconnectReportsAnOutage(compatibility: host.deviceCompatibility(forDeviceID: deviceID)) else {
+            DeviceLinkTrace.log(deviceID: deviceID, event: "stream_disconnect_ignored_incompatible")
+            return
+        }
         applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
     }
 
@@ -816,7 +884,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     host.selectedWorkspaceID.map { wsID in
                         host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
                     } ?? false
-                let changed = !wasLoaded || !statusUnchanged || host.deviceSections[index].overview != nil
+                let changed = Self.blockedSectionRebuildsOutline(
+                    wasLoaded: wasLoaded, statusUnchanged: statusUnchanged, hadOverview: host.deviceSections[index].overview != nil)
                 host.deviceSections[index].projects = []
                 host.deviceSections[index].workspacesByProject = [:]
                 host.deviceSections[index].workspaceRuntimeStatusByID = [:]
@@ -886,7 +955,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // and asks for a sidebar reload, which against a dead device is a reload loop. It is also
             // what keeps an open pane's session resolving to its workspace while the device is away.
             // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
-            // button / restart block from when it was last reachable-but-incompatible.
+            // button / restart block from when it was last reachable-but-incompatible. Only a failed
+            // pull reaches this for an incompatible device — its stream's disconnects are filtered out
+            // by `streamDisconnectReportsAnOutage` — so the verdict is dropped on evidence the device
+            // stopped answering at all, never on the stream dying the way an old daemon's always does.
             host.deviceSections[index].compatibility = nil
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(reason)
