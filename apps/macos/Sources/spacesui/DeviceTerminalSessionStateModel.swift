@@ -209,7 +209,7 @@
             { [weak self] payload in Task { @MainActor [weak self] in self?.applyControlResponseState(payload) } }
         }
 
-        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) async throws -> TerminalControlResponse {
+        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64?) async throws -> TerminalControlResponse {
             let sessionID = self.sessionID
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox

@@ -1611,10 +1611,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Only the active owner can paste images into the terminal.", errorCode: .ownershipRejected)
         }
-        if let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch, ownerEpoch != payload.ownerEpoch
+        // Epoch-gate only when the client sent an epoch: a request without one is not stale, it was
+        // composed by a client whose cached session payload carries no render owner epoch (the same
+        // contract the other input paths follow).
+        if let requestedOwnerEpoch = payload.ownerEpoch,
+            let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch,
+            ownerEpoch != requestedOwnerEpoch
         {
             return SpacesDeviceAPIResponse(
-                ok: false, message: "Ignoring stale owner epoch \(payload.ownerEpoch); current owner epoch is \(ownerEpoch).",
+                ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).",
                 errorCode: .ownershipRejected)
         }
 

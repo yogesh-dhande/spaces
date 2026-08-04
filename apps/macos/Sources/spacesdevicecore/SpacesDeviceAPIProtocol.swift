@@ -1232,11 +1232,15 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
 public struct SpacesDeviceTerminalPasteImageRequest: Codable, Sendable, Equatable {
     public let sessionID: String
     public let clientID: String
-    public let ownerEpoch: UInt64
+    /// The owner generation the client composed this paste against, or `nil` when the client holds no
+    /// cached render owner epoch — the same contract every other terminal input path uses, where `nil`
+    /// means "do not epoch-gate this input". A client's cache is legitimately empty in normal operation,
+    /// so an absent epoch must not read as epoch 0.
+    public let ownerEpoch: UInt64?
     public let fileExtension: String
     public let imageData: Data
 
-    public init(sessionID: String, clientID: String, ownerEpoch: UInt64, fileExtension: String, imageData: Data) {
+    public init(sessionID: String, clientID: String, ownerEpoch: UInt64?, fileExtension: String, imageData: Data) {
         self.sessionID = sessionID
         self.clientID = clientID
         self.ownerEpoch = ownerEpoch

@@ -375,7 +375,7 @@ struct SpacesDeviceAPIClient: Sendable {
     /// longer to transmit than ordinary text/key input, so this uses a 30 s default timeout instead
     /// of the 6 s timeout used elsewhere for interactive input.
     func pasteImage(
-        sessionID: String, clientID: String, ownerEpoch: UInt64, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
+        sessionID: String, clientID: String, ownerEpoch: UInt64?, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
