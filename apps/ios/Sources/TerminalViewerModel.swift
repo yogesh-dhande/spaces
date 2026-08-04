@@ -630,6 +630,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         composerErrorMessage = nil
     }
 
+    /// Stages a clipboard image in the composer: a valid image becomes an attachment, a rejected one
+    /// surfaces its reason. Returns whether the clipboard actually held an image, so a caller that pastes
+    /// text otherwise (the composer's own paste, the terminal's paste routes) can fall through.
+    func pasteClipboardImageIntoComposer(from pasteboard: UIPasteboard = .general) -> Bool {
+        switch TerminalUIPasteboardImageReader.readImage(from: pasteboard) {
+        case .image(let attachment):
+            attachComposerImage(attachment)
+            return true
+        case .rejected(let message):
+            composerErrorMessage = message
+            return true
+        case .noImage: return false
+        }
+    }
+
     func removeComposerAttachment(id: UUID) {
         guard !isSendingComposedMessage else { return }
         composerAttachments.removeAll { $0.id == id }

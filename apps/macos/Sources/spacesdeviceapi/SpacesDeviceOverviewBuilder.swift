@@ -45,7 +45,7 @@ struct SpacesDeviceOverviewBuilder {
 
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus
+        liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -75,10 +75,10 @@ struct SpacesDeviceOverviewBuilder {
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
                 branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
-                isRunning: descriptor.workspace.isRunning, isHidden: descriptor.workspace.isHidden,
-                isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
-                sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
-                environment: descriptor.environment, setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
+                isRunning: descriptor.workspace.isRunning, isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault,
+                notes: descriptor.workspace.notes, sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0,
+                assignedPorts: descriptor.assignedPorts, environment: descriptor.environment,
+                setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
                 processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
         }
@@ -113,7 +113,8 @@ struct SpacesDeviceOverviewBuilder {
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
-            retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces), daemonStatus: daemonStatus)
+            retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces),
+            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus)
     }
 
     /// The keep-set the daemon publishes on `SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`:

@@ -48,6 +48,10 @@ struct RootTabView: View {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
+        }.alert("Deleted Workspace", isPresented: deletedWorkspaceNoticeBinding) {
+            Button("OK", role: .cancel) { model.dismissDeletedWorkspaceNotice() }
+        } message: {
+            Text(model.deletedWorkspaceNotice ?? "")
         }.onChange(of: model.isShowingConnectionSettings) { _, isShowing in if isShowing { model.selectedTab = .settings } }.onOpenURL { url in
             switch SpacesIncomingLinkRoute.route(for: url) {
             case .pairing(let url): model.preparePairingLink(url)
@@ -90,6 +94,10 @@ struct RootTabView: View {
     }
 
     private var errorAlertBinding: Binding<Bool> { Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.dismissError() } }) }
+
+    private var deletedWorkspaceNoticeBinding: Binding<Bool> {
+        Binding(get: { model.deletedWorkspaceNotice != nil }, set: { if !$0 { model.dismissDeletedWorkspaceNotice() } })
+    }
 
     /// Slim accent-tinted strip pinned above every tab while Demo Mode is on, so the sample-data context
     /// stays visible on all four tabs and one tap turns it off. Absent (zero height) when Demo Mode is off.

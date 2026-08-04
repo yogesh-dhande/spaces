@@ -26,6 +26,19 @@ struct WorkspaceBandLabel: View {
     }
 }
 
+// MARK: - List rows
+
+/// The band design lives inside a `List` so rows can carry swipe actions, but it owns its own spacing
+/// and background: every row is full-bleed on `Theme.bg` with no list insets, separators, or row fill.
+extension View {
+    func bandListRow() -> some View { listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear) }
+
+    /// A header band as a list row, carrying the gap that separates it from the group above and the
+    /// smaller gap to the first row beneath it. Both are drawn on the app background, so the band's own
+    /// `surface2` fill stays full-bleed.
+    func bandListHeaderRow(topGap: CGFloat = 14) -> some View { padding(.top, topGap).padding(.bottom, 4).bandListRow() }
+}
+
 // MARK: - Band row
 
 /// Shared row anatomy: leading status dot, type-icon tile, title + detail, trailing slot.

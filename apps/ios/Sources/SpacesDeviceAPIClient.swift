@@ -185,6 +185,19 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Deletes a workspace: the daemon stops it, removes its git worktree, and drops the workspace and its
+    /// settings. Branch deletion is opt-in and is the one part that can partly fail (a protected branch, a
+    /// remote that refused), so its report comes back as the response's `mutationNotice`.
+    func archiveWorkspace(
+        workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .archiveWorkspace(
+                    .init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Hides or unhides a workspace. `isHidden` is daemon-owned workspace state, so this is the same flag
     /// the Mac sidebar's Hide action and Workspace Visibility dialog toggle — hiding here hides it there.
     func setWorkspaceHidden(workspaceID: String, isHidden: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws

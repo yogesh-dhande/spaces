@@ -139,10 +139,30 @@ extension WorkspaceOrchestrator {
             break
         case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
-            // Restart the process
-            Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
-            notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+            // The one exit action that LAUNCHES, and it runs on the detached process-exit monitor rather
+            // than inside any lifecycle action — so it needs the workspace's gate. A teardown terminates
+            // the workspace's processes and only afterwards deletes their rows; a monitor tick landing in
+            // between sees the process dead, marks the still-present row exited, and would relaunch it into
+            // a worktree the delete is about to remove, leaving a live process whose record is then dropped.
+            // (`markRunningProcessExited` is what closes the same window once the rows are gone: its
+            // conditional update matches nothing, so this never runs.)
+            //
+            // The gate is taken here rather than inside `restartProcessInTerminal` because the deliberate
+            // restart paths — `restartWorkspaceProcess`, `recoverMissingConfiguredProcess` — already hold
+            // it and would re-enter.
+            //
+            // A busy gate means some lifecycle action owns the workspace right now, and this skips
+            // silently: if that action was a teardown the process must stay dead, and if the workspace
+            // survives it the row is still `.exited` for the next monitor tick to restart. `upWorkspace`
+            // also reaches here while holding the gate, and skipping is right there too — it calls
+            // `restartExitedProcesses` on the very next line, under the gate it already owns.
+            do {
+                try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                    Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
+                    notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
+                    try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+                }
+            } catch  where WorkspaceOrchestrator.isWorkspaceLifecycleBusyError(error) { return }
         }
     }
 
@@ -488,8 +508,10 @@ extension WorkspaceOrchestrator {
     }
 
     public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
+            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+        }
     }
 
     public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
@@ -499,7 +521,19 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Starts (or restarts) a configured process, under the lifecycle gate: launching a process into a
+    /// workspace whose teardown had already snapshotted its rows would leave a live terminal behind with
+    /// no record and no worktree. Both `runConfiguredProcess` overloads route through here, so the gate
+    /// covers every configured-process start.
     @discardableResult public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws
+        -> RunningProcessRecord
+    {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try recoverMissingConfiguredProcessUnlocked(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
+        }
+    }
+
+    private func recoverMissingConfiguredProcessUnlocked(workspaceID: String, processKey: String, processTemplateID: String?) throws
         -> RunningProcessRecord
     {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)

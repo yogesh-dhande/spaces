@@ -242,7 +242,21 @@ public final class WorkspaceOrchestrator {
     let daemonHandoffInProgress: @Sendable () -> Bool
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
-    private let workspaceLifecycleGate = PerKeyGate()
+    /// Process-wide, not per-instance: the Device API builds a fresh orchestrator per request — and runs
+    /// workspace/project teardown on its own queue with yet another instance — so an instance-scoped gate
+    /// would never serialize two requests. Sharing the gate makes a lifecycle mutation racing a teardown
+    /// fail loudly with "already in progress" regardless of which queue or orchestrator carries it.
+    private static let workspaceLifecycleGate = PerKeyGate()
+    /// Guards project-scoped structural change — deleting a project, adding a workspace to one — which no
+    /// single workspace's gate can cover: a project teardown and a `createWorkspace` in the same project
+    /// touch different workspaces (one of which does not exist yet) and would otherwise interleave.
+    /// Process-wide for the same reason as the workspace gate.
+    ///
+    /// Lock order is project-then-workspace and never the reverse: `removeProject` claims the project key
+    /// and then every one of its workspaces' keys, and nothing claims a workspace key before a project
+    /// key. Both gates fail fast rather than waiting, so a cycle could not deadlock even if one existed;
+    /// the order is what keeps a project teardown from stalling half-done behind a workspace action.
+    private static let projectLifecycleGate = PerKeyGate()
     let workspaceSetupGate = PerKeyGate()
 
     public init(
@@ -322,8 +336,8 @@ public final class WorkspaceOrchestrator {
         let records = try store.workspaces(projectID: projectID)
         return records.map {
             WorkspaceSummary(
-                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
+                id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
+                isDefault: $0.isDefault, notes: $0.notes)
         }
     }
 
@@ -363,6 +377,10 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try updateWorkspaceSettingsUnlocked(workspaceID: workspaceID, update: update) }
+    }
+
+    private func updateWorkspaceSettingsUnlocked(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
             throw WorkspaceError.missingProject(dir: project.dir)
@@ -390,17 +408,30 @@ public final class WorkspaceOrchestrator {
     }
 
     public func updateWorkspaceNotes(workspaceID: String, notes: String?) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (_, workspace) = try resolveWorkspace(id: workspaceID)
+            try store.updateWorkspaceNotes(id: workspace.id, notes: notes)
+        }
     }
 
     public func updateWorkspaceHidden(workspaceID: String, isHidden: Bool) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard workspace.isHidden != isHidden else { return }
-        try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (_, workspace) = try resolveWorkspace(id: workspaceID)
+            guard workspace.isHidden != isHidden else { return }
+            try store.updateWorkspaceHidden(id: workspace.id, isHidden: isHidden)
+        }
     }
 
+    /// Takes the project key as well as the workspace's: renaming a workspace's branch is a write to the
+    /// project's shared ref store, so it races `createWorkspace`, which validates that a branch name is
+    /// free and then creates a worktree on it while holding only the project key.
     public func updateWorkspaceMetadata(workspaceID: String, branch: String? = nil, directoryName: String? = nil, notes: String?? = nil) throws {
+        try withProjectAndWorkspaceLifecycleLocks(workspaceID: workspaceID) {
+            try updateWorkspaceMetadataUnlocked(workspaceID: workspaceID, branch: branch, directoryName: directoryName, notes: notes)
+        }
+    }
+
+    private func updateWorkspaceMetadataUnlocked(workspaceID: String, branch: String?, directoryName: String?, notes: String??) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         var updatedBranch = workspace.branch
         var updatedDirname = workspace.dirname
@@ -455,8 +486,8 @@ public final class WorkspaceOrchestrator {
         }
         let updatedWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: updatedDirname, branch: updatedBranch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-            isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden, isRunning: workspace.isRunning,
+            lastLaunchedAt: workspace.lastLaunchedAt, notes: updatedNotes)
         try store.upsert(workspace: updatedWorkspace)
     }
 
@@ -502,6 +533,42 @@ public final class WorkspaceOrchestrator {
         projectID: String, branch: String? = nil, baseBranch: String? = nil, directoryName: String? = nil, runSetupScript: Bool = true,
         allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false, replaceExistingManagedDirectory: Bool = false
     ) throws -> WorkspaceRecord {
+        // Structure under the project gate — the record, the worktree, the seeded settings and ports — so a
+        // create cannot land in a project being deleted: `removeProject` holds the same key while it drops
+        // the project's records and worktrees, and a workspace created inside that window would outlive the
+        // project as an orphan.
+        let created = try withProjectLifecycleLock(projectID: projectID) {
+            try createWorkspaceUnlocked(
+                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
+                allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse,
+                replaceExistingManagedDirectory: replaceExistingManagedDirectory)
+        }
+        // The setup script deliberately runs outside the gate. It is user-authored and can take minutes,
+        // and holding the project key across it would make deleting this workspace — or any sibling in the
+        // project — fail with "Project action is already in progress", the opposite of the contract
+        // `runWorkspaceSetup` documents: a delete stays possible while setup runs. So the workspace is
+        // created with setup deferred (`.pending`) and the script is run after the key is released, which
+        // is the shape the Device API's create path already had. A setup failure still throws out of
+        // `createWorkspace` with the record left in place and its `.failed` state recorded, exactly as when
+        // setup ran inline. Setup runs only for a workspace this call actually created: a repeat create
+        // against a non-git project returns the existing record, and rerunning the project's setup script
+        // over an already-provisioned workspace would make a retried create re-execute an arbitrary script.
+        if runSetupScript, created.didCreate { try runWorkspaceSetup(workspaceID: created.workspace.id) }
+        return created.workspace
+    }
+
+    /// A `createWorkspace` outcome paired with whether this call created the record. A non-git project owns
+    /// exactly one workspace, so a repeat create returns the existing one — which the caller must be able
+    /// to tell apart from a fresh create before it runs any provisioning.
+    private struct CreatedWorkspace {
+        let workspace: WorkspaceRecord
+        let didCreate: Bool
+    }
+
+    private func createWorkspaceUnlocked(
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, allowRemoteBranchLookup: Bool,
+        allowExistingBranchReuse: Bool, replaceExistingManagedDirectory: Bool
+    ) throws -> CreatedWorkspace {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let replacesExplicitManagedDirectory = replaceExistingManagedDirectory && trimmedDirectoryName?.isEmpty == false
@@ -540,8 +607,10 @@ public final class WorkspaceOrchestrator {
         }
         if !project.isGitRepo, let existing = try store.workspace(dir: project.dir) {
             // A non-git project owns exactly one workspace (the project directory), so an existing record for
-            // that directory is returned rather than duplicated into a second, indistinguishable one.
-            return existing
+            // that directory is returned rather than duplicated into a second, indistinguishable one. It is
+            // reported as not created so the caller does not rerun the project's setup script over a
+            // workspace that was already set up — a repeat create is a no-op, not a re-provision.
+            return CreatedWorkspace(workspace: existing, didCreate: false)
         }
         let workspaceDir: String
         let workspaceDirname: String?
@@ -580,9 +649,10 @@ public final class WorkspaceOrchestrator {
             baseBranch: resolvedBaseBranch, isDefault: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
-        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
+        // Setup is always deferred here: `createWorkspace` runs it after releasing the project key.
+        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: false)
 
-        return workspace
+        return CreatedWorkspace(workspace: workspace, didCreate: true)
     }
 
     public func createWorkspaceOnDevice(
@@ -668,8 +738,7 @@ public final class WorkspaceOrchestrator {
                     let updatedWorkspace = WorkspaceRecord(
                         id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: worktree.branchName,
                         baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes
-                    )
+                        isRunning: workspace.isRunning, lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes)
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
@@ -686,8 +755,8 @@ public final class WorkspaceOrchestrator {
                 guard let branchName = worktree.branchName else { continue }
                 let workspace = WorkspaceRecord(
                     id: UUID().uuidString, projectID: project.id, dir: normalizedPath,
-                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false,
-                    isRunning: false, lastLaunchedAt: nil)
+                    dirname: URL(fileURLWithPath: normalizedPath).lastPathComponent, branch: branchName, isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil)
                 try store.upsert(workspace: workspace)
                 try seedWorkspaceSettings(project: project, workspace: workspace)
                 try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: true)
@@ -804,7 +873,7 @@ public final class WorkspaceOrchestrator {
             for launcher in config.agentLaunchers {
                 let trimmedName = launcher.name.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmedName.isEmpty else { continue }
-                _ = try launchAgentLauncher(workspaceID: workspace.id, name: trimmedName, background: background)
+                _ = try launchAgentLauncherUnlocked(workspaceID: workspace.id, name: trimmedName, background: background)
             }
             newWindows.append(
                 contentsOf: try trackedTerminalWindowsForAgents(
@@ -915,10 +984,20 @@ public final class WorkspaceOrchestrator {
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
+    /// Claims the project key as well as the workspace's own, because the teardown reaches past the
+    /// workspace into the project's git repository: it removes a worktree and can delete branches, both of
+    /// which race `createWorkspace` (worktree add) and `updateProjectConfig(updateAllWorkspaces: true)`
+    /// (settings written for a workspace this delete is removing, whose rollback then fails on the missing
+    /// row) — and those two hold only the project key, so the workspace key alone excludes neither.
+    ///
+    /// Two deletes never contend for the project key: every Device API teardown request runs on the one
+    /// serial teardown queue, so archives are already serialized against each other. The project key is
+    /// there for the genuinely concurrent case — a project-scoped mutation arriving on the state queue
+    /// while a teardown runs.
     public func archiveWorkspace(workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false) throws
         -> WorkspaceArchiveOutcome
     {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+        try withProjectAndWorkspaceLifecycleLocks(workspaceID: workspaceID) {
             try archiveWorkspaceUnlocked(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
         }
     }
@@ -1049,9 +1128,55 @@ public final class WorkspaceOrchestrator {
         return missingCount
     }
 
+    /// The message a contended workspace lifecycle gate reports. Named rather than written twice: the
+    /// automatic process restart matches on it to tell "someone else owns this workspace right now" from
+    /// a real failure, and a drifting copy would turn that skip into a thrown error on a background queue.
+    static let workspaceLifecycleBusyMessage = "Workspace action is already in progress."
+
+    /// Whether `error` is the busy rejection from `withWorkspaceLifecycleLock` rather than a real failure.
+    static func isWorkspaceLifecycleBusyError(_ error: any Error) -> Bool {
+        guard case .invalidArgument(let message)? = error as? WorkspaceError else { return false }
+        return message == workspaceLifecycleBusyMessage
+    }
+
     func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
-        try workspaceLifecycleGate.withKey(
-            workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace action is already in progress.") }, operation: operation)
+        try Self.workspaceLifecycleGate.withKey(
+            workspaceID, busyError: { WorkspaceError.invalidArgument(message: Self.workspaceLifecycleBusyMessage) }, operation: operation)
+    }
+
+    /// Runs `operation` holding every listed workspace's lifecycle gate, claiming them all before any work
+    /// starts. A project teardown that took them one at a time as it went could destroy half a project and
+    /// then fail on a workspace another request was already acting on; claiming up front makes it either
+    /// run whole or reject whole. Sorted so the claim order is deterministic.
+    func withWorkspaceLifecycleLocks<T>(workspaceIDs: [String], operation: () throws -> T) throws -> T {
+        try withRemainingWorkspaceLifecycleLocks(workspaceIDs: workspaceIDs.sorted(), operation: operation)
+    }
+
+    private func withRemainingWorkspaceLifecycleLocks<T>(workspaceIDs: [String], operation: () throws -> T) throws -> T {
+        guard let next = workspaceIDs.first else { return try operation() }
+        return try withWorkspaceLifecycleLock(workspaceID: next) {
+            try withRemainingWorkspaceLifecycleLocks(workspaceIDs: Array(workspaceIDs.dropFirst()), operation: operation)
+        }
+    }
+
+    func withProjectLifecycleLock<T>(projectID: String, operation: () throws -> T) throws -> T {
+        try Self.projectLifecycleGate.withKey(
+            projectID, busyError: { WorkspaceError.invalidArgument(message: "Project action is already in progress.") }, operation: operation)
+    }
+
+    /// Claims the workspace's project key and then its own, in the documented project-then-workspace
+    /// order. For the workspace mutations that reach past the workspace into the project's git repository
+    /// — removing a worktree, deleting or renaming a branch — where the workspace key alone leaves them
+    /// racing the project-keyed operations that touch the same repository.
+    ///
+    /// The project id is read without a lock on purpose: it only decides which key to claim, and the
+    /// operation resolves both records again under the claims. A workspace whose project was deleted while
+    /// this waited resolves to the ordinary "Workspace not found." rather than anything exotic.
+    func withProjectAndWorkspaceLifecycleLocks<T>(workspaceID: String, operation: () throws -> T) throws -> T {
+        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
+        return try withProjectLifecycleLock(projectID: workspace.projectID) {
+            try withWorkspaceLifecycleLock(workspaceID: workspaceID, operation: operation)
+        }
     }
 
     #if canImport(UserNotifications)
@@ -1172,16 +1297,21 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func createWorkspaceTerminalSession(workspaceID: String, title: String?, command: String?) throws
         -> TerminalServiceSessionSummary
     {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
-        // virtue of the terminal); with one, the command runs through that same interactive login shell
-        // so it resolves exactly the tools the bare session would.
-        let shellCommand =
-            (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
-        return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
-            defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+        // Resolved inside the gate, not before it: records read first and locked second are already stale
+        // by the time the lock is held, so an archive that completed in between would let this launch a
+        // shell in a removed worktree. `resolveWorkspace` throws once the record is gone.
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+            // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
+            // virtue of the terminal); with one, the command runs through that same interactive login shell
+            // so it resolves exactly the tools the bare session would.
+            let shellCommand =
+                (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
+            return try launchWorkspaceCommandSession(
+                project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
+                defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+        }
     }
 
     /// Creates an ad-hoc coding-agent terminal session. Mirrors `createWorkspaceTerminalSession` but
@@ -1195,21 +1325,27 @@ public final class WorkspaceOrchestrator {
     @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?) throws
         -> TerminalServiceSessionSummary
     {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
-        let defaultTitle =
-            SupportedCodingAgentHook.matching(command: command)?.displayName
-            ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
-        return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
-            defaultTitle: defaultTitle)
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
+            let defaultTitle =
+                SupportedCodingAgentHook.matching(command: command)?.displayName
+                ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+            return try launchWorkspaceCommandSession(
+                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
+                defaultTitle: defaultTitle)
+        }
     }
 
     /// Shared launch path for ad-hoc command and agent sessions: builds the workspace environment,
     /// prefixes `shellCommand` (already in its shell form) with that environment, persists the tracked
     /// terminal window, and marks the workspace running. The only per-caller differences are the launch
     /// `kind` and the fallback title.
+    ///
+    /// Both callers hold the workspace's lifecycle gate and resolve `workspace` inside it — creating
+    /// runtime is a lifecycle action, and a session started while a teardown was between its row snapshot
+    /// and its record delete would survive as a live terminal in a directory that no longer exists.
     @discardableResult private func launchWorkspaceCommandSession(
         project: ProjectRecord, workspace: WorkspaceRecord, title: String?, shellCommand: String, kind: TerminalSessionKind, defaultTitle: String
     ) throws -> TerminalServiceSessionSummary {
@@ -1265,7 +1401,18 @@ public final class WorkspaceOrchestrator {
         return matched.id
     }
 
+    /// Reserves the session id and window record for a workspace terminal, under the lifecycle gate so the
+    /// record cannot be written into a workspace being torn down.
+    ///
+    /// `finishReservedWorkspaceTerminalLaunch` deliberately runs outside the gate: it is the slow half and
+    /// runs on a background queue after the request has answered, and it re-checks that its window record
+    /// still exists both before and after launching — a teardown that lands in between leaves it nothing to
+    /// attach to, so it terminates the session it just started instead of stranding it.
     public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try reserveWorkspaceTerminalLaunchUnlocked(workspaceID: workspaceID) }
+    }
+
+    private func reserveWorkspaceTerminalLaunchUnlocked(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
@@ -2076,9 +2223,7 @@ public final class WorkspaceOrchestrator {
     > {
         let records = try store.workspaces(projectID: project.id)
         var used = Set<String>()
-        for record in records {
-            if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) }
-        }
+        for record in records { if let dirname = record.dirname, !dirname.isEmpty, dirname != excludingDirname { used.insert(dirname) } }
         let root = try worktreeRoot(project: project)
         if let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) {
             for entry in entries where entry != excludingDirname && entry != excludingFilesystemDirname { used.insert(entry) }

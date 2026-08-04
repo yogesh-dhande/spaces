@@ -95,6 +95,7 @@ import Foundation
         public let onSendMouseButton: @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
+        public let onPasteClipboardImage: (@MainActor () -> Bool)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -104,7 +105,8 @@ import Foundation
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onSendMouseButton: @escaping @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void = { _, _, _ in },
-            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
+            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -123,6 +125,7 @@ import Foundation
             self.onSendMouseButton = onSendMouseButton
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
+            self.onPasteClipboardImage = onPasteClipboardImage
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -145,6 +148,10 @@ import Foundation
             }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
+            // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
+            // handler's answer (did the clipboard image claim this paste?) before deciding whether to
+            // fall through to the text paste. UIKit delivers the paste on the main thread.
+            hostView.onPasteClipboardImage = onPasteClipboardImage.map { callback in { MainActor.assumeIsolated { callback() } } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -239,6 +246,11 @@ import Foundation
         private var lastMomentumTimestamp: CFTimeInterval = 0
         private var lastScrollPointerPosition: TerminalScrollPointerPosition?
         private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
+        /// Clipboard read seams: production reads the system pasteboard, tests substitute the contents so
+        /// the paste paths can be exercised without mutating the device pasteboard. The image probe reads
+        /// declared pasteboard types only, so it costs no paste prompt on the common text-only path.
+        private var clipboardTextReader: () -> String? = { UIPasteboard.general.string }
+        private var clipboardHasImageReader: () -> Bool = { UIPasteboard.general.hasImages }
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
         private var openedLinkDuringTapProbe = false
@@ -249,8 +261,8 @@ import Foundation
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
-            onComposer: { [weak self] in self?.onOpenComposer?() }, onText: { [weak self] text in self?.sendAccessoryText(text) },
-            onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onComposer: { [weak self] in self?.onOpenComposer?() }, onPaste: { [weak self] in self?.pasteFromClipboard() },
+            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
@@ -268,6 +280,10 @@ import Foundation
         public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
+        /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
+        /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
+        /// declared image carried nothing readable, so the text paste runs instead.
+        public var onPasteClipboardImage: (() -> Bool)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -527,8 +543,17 @@ import Foundation
             onSendText?(text, false)
         }
 
-        public override func paste(_ sender: Any?) {
-            guard acceptsTerminalInput, let text = UIPasteboard.general.string else { return }
+        public override func paste(_ sender: Any?) { pasteFromClipboard() }
+
+        /// Pastes the clipboard, image first: an image belongs in the composer as an attachment the user
+        /// then sends deliberately, never in the terminal as bytes, so `onPasteClipboardImage` takes the
+        /// paste when the clipboard holds one. Text is sent as a bracketed paste. Shared by the system
+        /// Paste command, the accessory Paste button, and the accessory cmd+v chord so all three behave
+        /// identically.
+        private func pasteFromClipboard() {
+            guard acceptsTerminalInput else { return }
+            if clipboardHasImageReader(), onPasteClipboardImage?() == true { return }
+            guard let text = clipboardTextReader() else { return }
             pasteText(text)
         }
 
@@ -536,6 +561,10 @@ import Foundation
             guard acceptsTerminalInput else { return }
             pasteText(text)
         }
+
+        func setClipboardTextForTesting(_ text: String?) { clipboardTextReader = { text } }
+
+        func setClipboardHasImageForTesting(_ hasImage: Bool) { clipboardHasImageReader = { hasImage } }
 
         private func pasteText(_ text: String) {
             guard !text.isEmpty else { return }
@@ -1102,7 +1131,15 @@ import Foundation
             guard !pendingAccessoryModifiers.isEmpty else { return false }
             defer { clearAccessoryModifiers() }
             guard text.count == 1, let scalar = text.unicodeScalars.first, scalar.properties.isAlphabetic else { return false }
-            guard let keySpec = modifiedKeySpec(for: String(scalar).lowercased()) else { return false }
+            let key = String(scalar).lowercased()
+            // cmd+v is a client-side clipboard action, not a chord the terminal resolves: the key resolver
+            // drops non-line-editing command chords, so without this the keystroke would fall through and
+            // type a literal "v". The keystroke is consumed either way, including on an empty clipboard.
+            if pendingAccessoryModifiers == [.command], key == "v" {
+                pasteFromClipboard()
+                return true
+            }
+            guard let keySpec = modifiedKeySpec(for: key) else { return false }
             onSendKey?(keySpec)
             return true
         }
@@ -1273,6 +1310,7 @@ import Foundation
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
 
             private let onComposer: () -> Void
+            private let onPaste: () -> Void
             private let onText: (String) -> Void
             private let onKey: (String) -> Void
             private let onModifier: (AccessoryModifier) -> Void
@@ -1300,10 +1338,11 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onComposer: @escaping () -> Void, onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void,
-                onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
+                onComposer: @escaping () -> Void, onPaste: @escaping () -> Void, onText: @escaping (String) -> Void,
+                onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
             ) {
                 self.onComposer = onComposer
+                self.onPaste = onPaste
                 self.onText = onText
                 self.onKey = onKey
                 self.onModifier = onModifier
@@ -1368,6 +1407,9 @@ import Foundation
                     contentStackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
                 ])
 
+                addIconButton(imageName: "doc.on.clipboard", accessibilityLabel: "Paste", accessibilityIdentifier: "terminal.accessory.paste") {
+                    [weak self] in self?.onPaste()
+                }
                 addTextButton("tab") { [weak self] in self?.onKey("tab") }
                 addTextButton("/") { [weak self] in self?.onText("/") }
                 addTextButton("~") { [weak self] in self?.onText("~") }
@@ -1416,6 +1458,15 @@ import Foundation
                 keyboardButton.accessibilityLabel = "Hide keyboard"
                 keyboardButton.addAction(UIAction { [weak self] _ in self?.onKeyboardToggle() }, for: .touchUpInside)
                 pinnedStackView.addArrangedSubview(keyboardButton)
+            }
+
+            private func addIconButton(imageName: String, accessibilityLabel: String, accessibilityIdentifier: String, action: @escaping () -> Void) {
+                let button = UIButton(type: .system)
+                configureButton(button, imageName: imageName)
+                button.accessibilityLabel = accessibilityLabel
+                button.accessibilityIdentifier = accessibilityIdentifier
+                button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+                contentStackView.addArrangedSubview(button)
             }
 
             private func addTextButton(_ title: String, action: @escaping () -> Void) {

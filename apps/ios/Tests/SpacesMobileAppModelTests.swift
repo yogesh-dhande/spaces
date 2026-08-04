@@ -194,7 +194,36 @@
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-loose")], featureIsHidden: true)
 
-            XCTAssertFalse(model.terminalGroups.contains { $0.id == "workspace-feature" })
+            XCTAssertFalse(model.terminalGroups.contains { $0.workspaceID == "workspace-feature" })
+        }
+
+        /// Deleting a workspace drops its record from the overview while its ended sessions linger for a
+        /// refresh or two. Those orphaned sessions must not re-home into a loose group named for a
+        /// workspace the list no longer has.
+        func testSessionsOfAWorkspaceMissingFromTheOverviewFormNoTerminalGroup() {
+            let model = makeModel()
+            let populated = makeOverview(sessions: [makeSession(id: "session-loose")])
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: populated.projects, workspaces: populated.workspaces.filter { $0.id != "workspace-feature" }, sessions: populated.sessions,
+                daemonStatus: populated.daemonStatus)
+
+            XCTAssertFalse(model.terminalGroups.contains { $0.workspaceID == "workspace-feature" })
+            XCTAssertTrue(model.terminalGroups.flatMap(\.sessions).isEmpty)
+        }
+
+        /// A workspace whose sessions are not all among its runtime rows is listed twice on the Spaces tab:
+        /// once as its own band among the projects, once as a loose-session band after them. Those are two
+        /// rows of one list, so they must not answer to the same identity — a list holding fewer distinct
+        /// identities than it has rows miscounts every batch update it performs and crashes.
+        func testLooseSessionGroupDoesNotShareItsWorkspaceBandIdentity() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-loose")])
+
+            let looseGroup = model.terminalGroups.first { $0.workspaceID == "workspace-feature" }
+
+            XCTAssertNotNil(looseGroup, "Expected the unrepresented session to form a loose group.")
+            XCTAssertTrue(model.workspaceGroups.contains { $0.id == "workspace-feature" })
+            XCTAssertTrue(Set(model.terminalGroups.map(\.id)).isDisjoint(with: Set(model.workspaceGroups.map(\.id))))
         }
 
         func testHideWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
@@ -213,6 +242,754 @@
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
+        }
+
+        /// `hiddenWorkspaces` is the mirror image of the `workspaceGroups` exclusion above: a hidden
+        /// workspace is absent from the filtered browse list but present in the recovery list.
+        func testHiddenWorkspaceIsExcludedFromVisibleButPresentInHiddenWorkspaces() {
+            let model = makeModel()
+            model.overview = makeOverview(featureIsHidden: true)
+
+            XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
+            XCTAssertEqual(model.hiddenWorkspaces.map(\.id), ["workspace-feature"])
+        }
+
+        /// With no hidden workspaces, the recovery list is empty regardless of what else the overview has.
+        func testHiddenWorkspacesIsEmptyWhenNoneAreHidden() {
+            let model = makeModel()
+            model.overview = makeOverview()
+
+            XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
+        }
+
+        /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike `hideWorkspace`, never checks
+        /// or stops anything first — there is nothing running to stop on a workspace that is already hidden.
+        func testUnhideWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsHidden: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let hiddenWorkspace = makeOverview(featureIsHidden: true).workspaces[0]
+
+            await model.unhideWorkspace(hiddenWorkspace)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["updateWorkspaceMetadata"])
+            guard case .updateWorkspaceMetadata(let payload)? = requests.first?.command else {
+                XCTFail("Expected an updateWorkspaceMetadata command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertEqual(payload.isHidden, false)
+            XCTAssertEqual(model.overview, refreshedOverview)
+        }
+
+        /// Delete sends one `archiveWorkspace` carrying the branch choices, and publishes the refreshed
+        /// overview the daemon returns with it.
+        func testDeleteWorkspaceSendsArchiveWithBranchChoicesAndPublishesRefreshedOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let workspace = makeOverview().workspaces[0]
+
+            await model.deleteWorkspace(workspace, deleteLocalBranch: true, deleteRemoteBranch: false)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"])
+            guard case .archiveWorkspace(let payload)? = requests.first?.command else {
+                XCTFail("Expected an archiveWorkspace command.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertTrue(payload.deleteLocalBranch)
+            XCTAssertFalse(payload.deleteRemoteBranch)
+            XCTAssertEqual(model.overview, refreshedOverview)
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        /// Branch deletion is the one part of a delete that can partly fail, so the notice it comes back
+        /// with is surfaced; a delete with no branch to report stays silent (covered above).
+        func testDeleteWorkspaceSurfacesBranchDeletionNotice() async {
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: refreshedOverview, workspaceID: "workspace-feature", notice: "Skipped protected branch \"main\".")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: true)
+
+            XCTAssertEqual(model.deletedWorkspaceNotice, "Skipped protected branch \"main\".")
+
+            model.dismissDeletedWorkspaceNotice()
+
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        func testDeleteWorkspaceSurfacesFailure() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                // The daemon codes every failure it reports; a refusal is what this models.
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertNil(model.deletedWorkspaceNotice)
+        }
+
+        /// The daemon takes seconds to stop a workspace and remove its worktree, and it stays in every
+        /// overview until then, so the workspace is marked as deleting for the whole mutation — that mark
+        /// is the feedback the Spaces tab renders on the band.
+        func testWorkspaceIsMarkedPendingDeletionWhileTheDeleteIsInFlight() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let workspace = makeOverview().workspaces[0]
+
+            let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
+        /// band goes back to normal beside the error.
+        func testFailedDeleteClearsThePendingDeletionMark() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                // The daemon codes every failure it reports; a refusal is what this models.
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertTrue(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
+        }
+
+        /// A timeout on `archiveWorkspace` does not mean the daemon rejected the delete -- it can still be
+        /// tearing the workspace down on its own queue past the request's own timeout. When the very next
+        /// reconciliation overview no longer lists the workspace, the delete is treated as complete: no
+        /// error, the fresh overview is published, and the pending-deletion mark lifts silently.
+        func testDeleteWorkspaceTimeoutReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "overview"],
+                "reconciliation must stop as soon as the first refetch shows the workspace gone")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.deletedWorkspaceNotice, "no branch deletion was requested, so a reconciled delete stays silent")
+        }
+
+        /// The branch-deletion report exists only in the archive response, so when that response is lost
+        /// and reconciliation proves only that the workspace is gone, a delete that asked for branch
+        /// deletion says the result is unknown instead of silently succeeding.
+        func testDeleteWorkspaceTimeoutReconciliationReportsUnknownBranchOutcome() async {
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.deletedWorkspaceNotice, "a lost branch-deletion result must be reported, not silently dropped")
+            XCTAssertTrue(model.deletedWorkspaceNotice?.contains("branch") == true)
+        }
+
+        /// An overview poll is a snapshot of the moment its fetch was issued. One that started before a
+        /// mutation and lands after it still carries the pre-mutation world, so publishing it would put the
+        /// deleted workspace back on screen as an ordinary actionable row until the next poll. It is
+        /// discarded instead — the same rule `overviewIdentity` applies to a connection change.
+        func testOverviewPollBegunBeforeAMutationIsDiscardedWhenItLandsAfterIt() async {
+            let pollGate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleOverview = makeOverview()
+            let postDeleteOverview = SpacesDeviceOverviewPayload(
+                projects: staleOverview.projects, workspaces: staleOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: staleOverview.sessions, daemonStatus: staleOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "overview" {
+                    // The poll's fetch is parked until the delete below has been applied.
+                    await pollGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
+                }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: postDeleteOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = staleOverview
+
+            let poll = Task { await model.refresh() }
+            while !model.isLoading { await Task.yield() }
+
+            await model.deleteWorkspace(staleOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertEqual(model.overview, postDeleteOverview, "the delete publishes the post-delete overview")
+
+            await pollGate.open()
+            await poll.value
+
+            XCTAssertEqual(model.overview, postDeleteOverview, "the stale poll must not republish the deleted workspace")
+            XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
+        }
+
+        /// The other half of the rule: a poll whose fetch begins after the mutation carries current state
+        /// and publishes normally.
+        func testOverviewPollBegunAfterAMutationPublishesNormally() async {
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let postDeleteOverview = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let laterOverview = SpacesDeviceOverviewPayload(
+                projects: postDeleteOverview.projects, workspaces: postDeleteOverview.workspaces, sessions: [],
+                daemonStatus: postDeleteOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "overview" { return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(laterOverview)) }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: postDeleteOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            await model.refresh()
+
+            XCTAssertEqual(model.overview, laterOverview, "a poll issued after the mutation is current and publishes")
+        }
+
+        /// The point of reconciling rather than reporting failure: the row stays marked for deletion for
+        /// the whole reconciliation, so a workspace the daemon is still tearing down never goes back to
+        /// looking normal — and offering Delete again — while it is doomed.
+        func testDeleteWorkspaceTimeoutKeepsThePendingMarkWhileReconciling() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                await gate.wait()
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+            // The archive has already failed with a timeout and the reconciliation refetch is parked here.
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the timed-out delete keeps its mark while it reconciles")
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// If the workspace is still listed in every reconciliation overview once the retry budget runs
+        /// out, the timeout is a genuine failure: the error surfaces and the pending-deletion mark lifts so
+        /// the row looks normal -- and deletable again -- beside it.
+        func testDeleteWorkspaceTimeoutSurfacesErrorWhenWorkspaceStillPresent() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            // Zero interval so the loop runs its whole budget without sleeping through the production wait.
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "overview", "overview", "overview", "overview", "overview"],
+                "reconciliation must give up after its fixed attempt budget")
+        }
+
+        /// A definitive rejection — the daemon answered and said no, which its error code is the proof of —
+        /// needs no reconciliation: the mark lifts immediately and the error surfaces exactly like any
+        /// other failed mutation.
+        func testDeleteWorkspaceDefinitiveRejectionSkipsReconciliation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+
+            await model.deleteWorkspace(makeOverview().workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"], "a definitive rejection must not trigger reconciliation")
+        }
+
+        /// The app being backgrounded closes the transport's socket, which surfaces as a plain
+        /// `requestFailed` carrying no daemon error code. That is not a verdict — the daemon may have
+        /// received the delete and be finishing it — so it reconciles exactly like a timeout and resolves
+        /// silently once the workspace stops being listed.
+        func testDeleteWorkspacePostSendTransportFailureReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage, "a delete the daemon finished must not report the dropped connection as a failure")
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
+        }
+
+        /// The daemon answers with a coded `internalError` both for a failure part-way through the delete
+        /// and for a delete that SUCCEEDED and then failed while building the refreshed overview it answers
+        /// with. Only codes that are verdicts on the request are definitive, so this reconciles — and when
+        /// the workspace turns out to be gone, the user is told nothing failed.
+        func testDeleteWorkspaceCodedInternalErrorReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Failed to build overview.", errorCode: .internalError)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage, "a delete the daemon completed must not be reported as failed")
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
+        }
+
+        /// The archive's response was lost AND every reconciliation refetch failed too — the device went
+        /// unreachable exactly while the delete was in flight. Nothing has been observed, so reporting the
+        /// delete as failed would be a verdict the client never reached. The marking stays and the error
+        /// is held back until an overview can answer.
+        func testDeleteWorkspaceWithNoReachableOverviewKeepsTheMarkAndHoldsTheError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "an unconfirmed delete keeps its row inert")
+            XCTAssertNil(model.errorMessage, "no verdict was reached, so nothing is reported yet")
+            XCTAssertFalse(model.isMutating, "only the row is inert — the model is not stuck mid-mutation")
+        }
+
+        /// While a delete's outcome is unresolved the mark is on but `isMutating` is false, so `isMutating`
+        /// alone no longer keeps the row inert. A second delete of the same workspace must be refused at
+        /// the model, not only suppressed in the view: the workspace is already on its way out, and the
+        /// daemon may well have finished removing it.
+        func testASecondDeleteOfAWorkspaceAlreadyPendingDeletionIsRefused() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isMutating, "the mutation is over — only the mark keeps the row inert")
+            let requestsAfterFirstDelete = await recorder.snapshot()
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            let requestsAfterSecondDelete = await recorder.snapshot()
+            XCTAssertEqual(requestsAfterSecondDelete.count, requestsAfterFirstDelete.count, "the second delete must issue nothing")
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "and must not disturb the unresolved first delete")
+        }
+
+        /// The same rule for Hide: a workspace whose delete is unresolved is leaving, so hiding it would
+        /// act on a row that is already going.
+        func testHidingAWorkspaceAlreadyPendingDeletionIsRefused() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            let requestsAfterDelete = await recorder.snapshot()
+
+            await model.hideWorkspace(overview.workspaces[0])
+
+            let requestsAfterHide = await recorder.snapshot()
+            XCTAssertEqual(requestsAfterHide.count, requestsAfterDelete.count, "the hide must issue nothing")
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// The deferred delete is settled by the next overview that publishes: the workspace is gone, so it
+        /// landed. The marking clears silently, and because branch deletion had been requested the user is
+        /// told the branch outcome is unknown.
+        func testDeferredDeleteResolvesSilentlyWhenALaterOverviewNoLongerListsTheWorkspace() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces.filter { $0.id != "workspace-feature" }, sessions: overview.sessions,
+                daemonStatus: overview.daemonStatus)
+            let counter = SpacesMobilePollCounter()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                // Every request during the delete fails; the poll that follows it succeeds.
+                guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "the overview settled it: the delete landed")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.deletedWorkspaceNotice, SpacesMobileAppModel.unknownBranchOutcomeNotice)
+        }
+
+        /// The other side: the next overview still lists the workspace, so the delete really did fail and
+        /// the error the client held back is surfaced then, against a row the user can act on again.
+        func testDeferredDeleteSurfacesTheHeldErrorWhenALaterOverviewStillListsTheWorkspace() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let counter = SpacesMobilePollCounter()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.errorMessage, "the workspace is still there, so the delete failed after all")
+        }
+
+        /// An unconfirmed delete belongs to the connection it was issued against: another device's overview
+        /// cannot answer it. Switching devices drops the marking and the held error without reporting a
+        /// verdict nobody can reach.
+        func testDeviceSwitchDuringADeferredDeleteClearsItWithoutSurfacingAnError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            // A real connection change: `applyConnectionSettings` is one of the chokepoints — with
+            // `selectDevice`, `removeDevice`, and the Demo Mode toggles — that reload per-connection state.
+            model.applyConnectionSettings(SpacesMobileConnectionSettings())
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// The other half of the same rule: a codeless failure whose workspace is still listed once the
+        /// budget is spent — including a failure that never reached the daemon — reports the error and
+        /// puts the row back.
+        func testDeleteWorkspacePostSendTransportFailureSurfacesErrorWhenWorkspaceStillPresent() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "archiveWorkspace" {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// A workspace still listed after a timed-out delete is not automatically a failed delete: the
+        /// daemon reports which workspaces are still on its teardown queue via
+        /// `workspaceIDsWithTeardownInFlight`, and while this workspace's id is in that set every attempt,
+        /// its continued presence only means the daemon has not finished landing the delete yet.
+        /// Reconciliation must spend its whole budget without ever counting the workspace as `.present`,
+        /// landing on `.unknown` — the mark stays and no error is surfaced.
+        func testDeleteWorkspaceTimeoutKeepsThePendingMarkAndSurfacesNoErrorWhileTeardownStaysInFlight() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let overviewWithTeardownInFlight = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithTeardownInFlight))
+            }
+            // Zero interval so the loop runs its whole budget without sleeping through the production wait.
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the delete is still running behind the daemon's teardown queue")
+            XCTAssertNil(model.errorMessage, "still being listed while its own teardown is in flight is not evidence the delete failed")
+            XCTAssertFalse(model.isMutating, "only the row stays inert while it awaits a later overview, not the whole model")
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "overview", "overview", "overview", "overview", "overview"],
+                "reconciliation must spend its whole budget when every refetch reports the teardown still in flight")
+        }
+
+        /// The other half of the same rule: the workspace being listed while some OTHER workspace's
+        /// teardown is in flight is no excuse — this workspace's own delete really did fail, so
+        /// reconciliation must still report it once the budget runs out.
+        func testDeleteWorkspaceTimeoutSurfacesErrorWhenWorkspaceStillPresentAndItsOwnTeardownIsNotInFlight() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let overviewWithUnrelatedTeardown = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-docs"], daemonStatus: overview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" { throw SpacesDeviceAPIClientError.requestTimedOut }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithUnrelatedTeardown))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNotNil(model.errorMessage, "the workspace is listed and its own teardown is not in flight, so the delete genuinely failed")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview", "overview", "overview", "overview", "overview"])
+        }
+
+        /// A deferred delete (see `testDeleteWorkspaceWithNoReachableOverviewKeepsTheMarkAndHoldsTheError`)
+        /// must not settle against an overview that lists the workspace with its teardown reported in
+        /// flight — that overview is not a verdict, only a progress report. Once a later overview lists it
+        /// with no teardown queued behind it, the deferral settles as a genuine failure.
+        func testDeferredDeleteDoesNotSettleWhileTeardownIsInFlightAndSettlesAsFailedOnceItStops() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let overviewWithTeardownInFlight = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+            let counter = SpacesMobilePollCounter()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                let call = await counter.increment()
+                // The archive request and every reconciliation refetch fail, deferring the outcome.
+                guard call > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                // The next overview still lists the workspace but with its teardown in flight: not a
+                // verdict. The one after that lists it with no teardown queued: a genuine failure.
+                if call == SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 2 {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithTeardownInFlight))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            await model.refresh()
+            XCTAssertTrue(
+                model.isWorkspacePendingDeletion("workspace-feature"),
+                "still listed only because its teardown is in flight; the deferral must not settle")
+            XCTAssertNil(model.errorMessage)
+
+            await model.refresh()
+            XCTAssertFalse(
+                model.isWorkspacePendingDeletion("workspace-feature"), "teardown is no longer in flight and it is still listed: a genuine failure")
+            XCTAssertNotNil(model.errorMessage)
+        }
+
+        /// Switching device mid-delete makes the model drop the failure (it belongs to the old connection),
+        /// but the pending mark is keyed by workspace id, not by connection — leaving it set would dim that
+        /// row for the rest of the run the moment the user switched back.
+        func testDeleteWorkspaceLeavesNoStaleMarkWhenTheDeviceChangesMidDelete() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            let workspace = makeOverview().workspaces[0]
+            model.overview = makeOverview()
+
+            let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isMutating { await Task.yield() }
+            // A real connection change while the delete is still parked in its request: this rebuilds the
+            // client and channel and bumps the overview identity, exactly as a device switch does.
+            model.handleAuthenticationFailure(message: "Pair this device again.")
+
+            await gate.open()
+            await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "the mark must not outlive a delete abandoned by a device switch")
+        }
+
+        /// A delete does not have to have been issued here to matter: the daemon reports every teardown it
+        /// is running, so a workspace deleted from the Mac (or taken by a project delete) marks its row on
+        /// this device too — dimmed and inert for as long as the teardown is reported — and returns to an
+        /// ordinary row the moment an overview stops reporting it.
+        func testWorkspaceTornDownByAnotherClientIsMarkedFromTheOverviewAlone() {
+            let model = makeModel()
+            let overview = makeOverview()
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the daemon reports its teardown running, whoever started it")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "only the workspace being torn down is marked")
+
+            // The teardown finished (or failed): the workspace is listed with nothing queued behind it.
+            model.overview = overview
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "no teardown reported and no local delete: an ordinary row")
+        }
+
+        /// A workspace's unrepresented sessions form a loose band further down the same list, so a delete
+        /// running against that workspace has to mark those rows as well as its own band — they are rows
+        /// of a workspace mid-teardown, and tapping one opens a terminal in a worktree being removed. The
+        /// group stays listed for as long as the overview carries the workspace (sessions of a workspace
+        /// already dropped form no group at all), and it reads the mark from that workspace.
+        func testLooseTerminalGroupOfAWorkspaceBeingDeletedIsMarked() {
+            let model = makeModel()
+            let overview = makeOverview(sessions: [makeSession(id: "session-loose")])
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+
+            let looseGroup = model.terminalGroups.first { $0.workspaceID == "workspace-feature" }
+
+            XCTAssertNotNil(looseGroup, "the workspace is still listed, so its loose sessions still band under it")
+            XCTAssertEqual(looseGroup?.sessions.map(\.id), ["session-loose"])
+            XCTAssertTrue(model.isWorkspacePendingDeletion(looseGroup?.workspaceID ?? ""), "the loose band reads the same mark its workspace does")
         }
 
         /// A browser session has no run state, so its row draws no status dot — while the process and

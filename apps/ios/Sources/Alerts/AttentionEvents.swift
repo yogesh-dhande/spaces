@@ -103,15 +103,25 @@ enum SpacesMobileAttention {
     ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. Overview
     ///     polling is paused while a detail is open, so a bell rung during a watch is first seen after
     ///     that watch ended — a bell inside any of them is one the user saw ring.
+    ///   - includingHiddenWorkspaces: when true, hidden workspaces' events are derived too instead of
+    ///     being skipped. Defaults to false so the Alerts tab and its badge stay unaffected; the only
+    ///     caller that opts in is `retainedDismissedEventIDs`, which needs a hidden workspace's events
+    ///     to still be derivable so their dismissals survive hiding (see that function's doc comment).
     static func events(
-        in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]]
+        in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]],
+        includingHiddenWorkspaces: Bool = false
     ) -> [SpacesMobileAttentionEvent] {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
-        let invisibleWorkspaceIDs = Set(overview.workspaces.lazy.filter(\.isHidden).map(\.id))
+        // Every event is grouped under its workspace's band, so a session only produces one when this
+        // overview still describes a workspace to band it under: a hidden workspace's sessions are
+        // suppressed with it (unless `includingHiddenWorkspaces`), and a session whose workspace record is
+        // gone entirely — a deleted workspace's sessions linger for a refresh or two after its record —
+        // has no band to appear under at all.
+        let bandedWorkspaceIDs = Set(overview.workspaces.lazy.filter { includingHiddenWorkspaces || !$0.isHidden }.map(\.id))
 
-        for workspace in overview.workspaces where !workspace.isHidden {
+        for workspace in overview.workspaces where includingHiddenWorkspaces || !workspace.isHidden {
             for agent in workspace.codingAgentRows {
                 if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
                 let kind: SpacesMobileAttentionEvent.Kind?
@@ -151,7 +161,7 @@ enum SpacesMobileAttention {
         // Loose sessions: the same dedupe rule as the home tab's terminal groups — a session already
         // represented by a workspace row is that row's event (or non-event), never a second one.
         for session in overview.sessions
-        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id) && !invisibleWorkspaceIDs.contains(session.workspaceID) {
+        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id) && bandedWorkspaceIDs.contains(session.workspaceID) {
             guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
             events.append(
                 SpacesMobileAttentionEvent(
@@ -165,7 +175,7 @@ enum SpacesMobileAttention {
         // can't see client focus: a Ghostty attachment survives tab switches, and iOS backgrounding just
         // drops the socket without detaching. Each client is responsible for dropping the alert for the
         // session it currently has open.
-        for session in overview.sessions where session.id != focusedSessionID && !invisibleWorkspaceIDs.contains(session.workspaceID) {
+        for session in overview.sessions where session.id != focusedSessionID && bandedWorkspaceIDs.contains(session.workspaceID) {
             guard let date = date(fromISO8601: session.bellAt) else { continue }
             // Any window, not just the newest: one visit to a terminal is split into several by the app
             // backgrounding and returning, and the bell may belong to any of them.
@@ -203,6 +213,22 @@ enum SpacesMobileAttention {
             if lhsNewest != rhsNewest { return lhsNewest > rhsNewest }
             return lhs.workspaceID < rhs.workspaceID
         }
+    }
+
+    /// The dismissals worth keeping: a dismissal only means anything while its event is still derivable,
+    /// so the stored set is trimmed to the identities `overview` still produces. Without this, dismissals
+    /// accumulate forever across launches.
+    ///
+    /// Derivation here deliberately suppresses nothing — no focused session, no watch windows, and hidden
+    /// workspaces included — because a temporarily suppressed event is still one this overview describes,
+    /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace
+    /// is exactly such a suppression: it is reversible from iOS, and unhiding it must not resurface alerts
+    /// the user already dismissed while it was hidden. A workspace the overview has stopped describing
+    /// altogether is not suppressed but deleted, so its dismissals do prune — there is nothing left to
+    /// resurface them.
+    static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
+        dismissed.intersection(
+            Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true).map(\.id)))
     }
 
     /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux

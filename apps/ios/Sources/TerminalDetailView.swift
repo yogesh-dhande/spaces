@@ -86,7 +86,14 @@ struct TerminalDetailView: View {
                             },
                             onSendMouseButton: { button, pressed, pointerPosition in
                                 sendTerminalMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
-                            }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true }
+                            }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
+                            // A clipboard image pasted at the terminal lands in the composer pre-attached
+                            // rather than in the session: sending an image stays a deliberate composer action.
+                            onPasteClipboardImage: {
+                                guard model.pasteClipboardImageIntoComposer() else { return false }
+                                isShowingComposer = true
+                                return true
+                            }
                         ).accessibilityIdentifier("terminal.surface").allowsHitTesting(model.shouldPresentLiveSurface).accessibilityHidden(
                             !model.shouldPresentLiveSurface
                         ).background(Self.surfaceBackground)

@@ -21,6 +21,7 @@
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		2DF902CA1F62FBFCD1E80B73 /* SpacesMobileAgentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A421951CBC1E4BE4576F010F /* SpacesMobileAgentsTests.swift */; };
 		317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */; };
+		330DB982EA27EAC4042CD210 /* DismissedAlertsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ADEF2AEA32E8C44C59117E2 /* DismissedAlertsStore.swift */; };
 		33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */; };
 		33EFA63AF2EDF1F7567547EB /* ScreenshotStager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1BDE1EAB567C36A820E82C /* ScreenshotStager.swift */; };
 		34037882505238F6789EFE22 /* DemoDeviceBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E7B08D6033170F0AB8DF17 /* DemoDeviceBackendTests.swift */; };
@@ -64,6 +65,7 @@
 		B75A9EE510496D35C5549ACC /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = BF394C292B9577F991DE1AAE /* PrivacyInfo.xcprivacy */; };
 		BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */; };
 		C24148CFBBE2C8AF70320093 /* SettingsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01EA5212204832CDA41A1793 /* SettingsTabView.swift */; };
+		C6392CABE75E9726AD7A1889 /* WorkspaceDeleteSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */; };
 		C7FDBFF19E88F01DCABE05E6 /* terminal-markdown.css in Resources */ = {isa = PBXBuildFile; fileRef = 75ADBC1DFE5DC487F78D5BC2 /* terminal-markdown.css */; };
 		C86C93B403B5D24C1C907C07 /* StagedScreenshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */; };
 		C89EA4905FBBFA2C7E358961 /* TerminalComposerSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CDCD5118B25B0A1ACA33A12 /* TerminalComposerSendTests.swift */; };
@@ -120,9 +122,11 @@
 		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
 		19845234400228576231BEBB /* AttentionEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionEvents.swift; sourceTree = "<group>"; };
 		1B11B42462E003B2C51B35EE /* DemoDeviceBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoDeviceBackend.swift; sourceTree = "<group>"; };
+		1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDeleteSheet.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStore.swift; sourceTree = "<group>"; };
+		3ADEF2AEA32E8C44C59117E2 /* DismissedAlertsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DismissedAlertsStore.swift; sourceTree = "<group>"; };
 		3B48F6727BD662C4E5C4B2EE /* SpacesDeviceAPITransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPITransport.swift; sourceTree = "<group>"; };
 		3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalArtifactViewersTests.swift; sourceTree = "<group>"; };
 		4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModelTests.swift; sourceTree = "<group>"; };
@@ -338,6 +342,7 @@
 			children = (
 				6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */,
 				5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */,
+				1F212A2A4F1C77A98126476E /* WorkspaceDeleteSheet.swift */,
 			);
 			path = Spaces;
 			sourceTree = "<group>";
@@ -373,6 +378,7 @@
 			children = (
 				895AC546F077905FD8E53CF9 /* AlertsTabView.swift */,
 				19845234400228576231BEBB /* AttentionEvents.swift */,
+				3ADEF2AEA32E8C44C59117E2 /* DismissedAlertsStore.swift */,
 			);
 			path = Alerts;
 			sourceTree = "<group>";
@@ -600,6 +606,7 @@
 				C8E96C4D0660016873DBB35F /* DemoDeviceBackend.swift in Sources */,
 				80D3ABF883A2086A4640F3B2 /* DemoMode.swift in Sources */,
 				D183BA192ECF922B5E5C8ABB /* DemoRecordingLibrary.swift in Sources */,
+				330DB982EA27EAC4042CD210 /* DismissedAlertsStore.swift in Sources */,
 				8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */,
 				176185E3BF08620DB51E8901 /* PaywallView.swift in Sources */,
 				788325853D6047915FC13115 /* QRCodeScannerView.swift in Sources */,
@@ -631,6 +638,7 @@
 				CAEFA68B6F87086897B9C88D /* TerminalWebArtifactView.swift in Sources */,
 				D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */,
 				F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */,
+				C6392CABE75E9726AD7A1889 /* WorkspaceDeleteSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

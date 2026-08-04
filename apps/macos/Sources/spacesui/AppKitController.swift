@@ -179,6 +179,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceIndex = workspacesByProject.reduce(into: [:]) { index, entry in
                 for workspace in entry.value { index[workspace.id] = (projectID: entry.key, workspace: workspace) }
             }
+            // `SidebarController.rebuildFlatSidebarData()` — the single point every overview-install
+            // path (the local snapshot, a remote pull/subscription, a mutation response) funnels
+            // through — assigns this property on every call, so it is the nearest reachable proxy for
+            // that funnel from this type. See `resolveAwaitingWorkspaceDeletions`.
+            resolveAwaitingWorkspaceDeletions()
         }
     }
     private(set) var workspaceIndex: [String: (projectID: String, workspace: WorkspaceSummary)] = [:]
@@ -350,6 +355,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
+    /// Workspaces whose delete mutation is in flight. Deleting a workspace takes seconds on the owning
+    /// daemon — it stops the workspace, then removes the git worktree — and every overview that lands in
+    /// that window still lists the workspace, so removing the row up front would let the next background
+    /// refresh put it back for a beat before it finally disappears. The row stays and renders marked as
+    /// deleting instead (see `sidebarWorkspaceRowState`), whatever rebuilds happen meanwhile.
+    /// In-memory and per-run, like `pendingNewTerminalSessionWorkspaceIDs`: a relaunch reloads from the
+    /// daemons, which are authoritative about whether the delete landed.
+    ///
+    /// Deletes issued from this app only. What the row renders is `isWorkspaceMarkedDeleting`, which
+    /// unions this with the teardowns the owning daemon reports; this set stays exactly the deletes this
+    /// app has to see through, since it is what the reconciliation paths key their outcome on.
+    private(set) var workspaceIDsPendingDeletion: Set<String> = []
+
+    /// What `deleteWorkspace` held back when `WorkspaceDeletionReconciler` returned `.unknown` — every
+    /// reconciliation refetch failed, so no overview ever proved the delete's fate either way. The
+    /// workspace stays in `workspaceIDsPendingDeletion` (its row stays inert) and this is what
+    /// `resolveAwaitingWorkspaceDeletions` needs once a real overview for `deviceID` finally arrives:
+    /// which device to check, the error to surface if the workspace is still there, whether to show the
+    /// branch-outcome notice if it is gone, and the browser windows/panes a confirmed-gone resolution
+    /// still has to close (the same cleanup an immediate `.gone` verdict performs).
+    private struct AwaitingWorkspaceDeletionResolution {
+        let deviceID: String
+        let error: Error
+        let branchDeletionRequested: Bool
+        let browserSessionTargetURLs: [String]
+        /// `deviceID`'s `DeviceSection.overviewInstallGeneration` at the moment reconciliation gave up.
+        /// Resolution waits for a fresh install for this exact device — one whose generation exceeds
+        /// this snapshot — rather than settling on any `workspacesByProject` rebuild, which fires for
+        /// every device's refresh and would otherwise reread this device's own untouched cached overview
+        /// as if it were new evidence.
+        let overviewInstallGenerationAtDefer: Int
+    }
+
+    /// Workspaces whose delete reconciliation exhausted its attempt budget without a single overview
+    /// resolving (`WorkspaceDeletionReconciler.Outcome.unknown`). In-memory and per-run, like
+    /// `workspaceIDsPendingDeletion`: a relaunch always refetches reality from the daemon instead of
+    /// trusting anything held here.
+    private var workspaceIDsAwaitingDeletionResolution: [String: AwaitingWorkspaceDeletionResolution] = [:]
 
     @discardableResult func beginNewTerminalSessionCreation(workspaceID: String) -> Bool {
         pendingNewTerminalSessionWorkspaceIDs.insert(workspaceID).inserted
@@ -2573,7 +2616,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var workspacesByProject: [String: [WorkspaceSummary]] = [:]
         var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
         var alertsGroups: [AlertsGroup] = []
-        var overview: SpacesDeviceOverviewPayload?
+        /// Bumped by `overview`'s `didSet` on every reassignment after this section already exists —
+        /// once per overview-install event for this device, from whichever path installs it (a local
+        /// snapshot refresh, a remote pull/subscription in `SidebarController`, or a mutation response
+        /// in this file). A struct's own memberwise init never routes through property observers, so a
+        /// section's initial construction leaves this at its default rather than counting as an install.
+        ///
+        /// `resolveAwaitingWorkspaceDeletions` uses this to tell "fresh evidence for the owning device
+        /// arrived" apart from "some other device's refresh re-ran the `workspacesByProject` didSet,
+        /// which reread this device's untouched, possibly stale, cached overview" — the bug this guards
+        /// against: an offline owning device keeps its last-known overview, and a rebuild triggered by
+        /// any other device would otherwise draw a delete verdict from evidence that predates the
+        /// delete.
+        ///
+        /// The local device's section is not mutated in place on an ordinary refresh — it is rebuilt and
+        /// assigned whole (`SidebarController.rebuildFlatSidebarData()`), which bypasses `didSet` — so that
+        /// path carries the counter forward explicitly via `adoptingOverviewInstallGeneration(from:)`.
+        /// Without that, the local counter would reset to zero on every refresh and a deferred delete for a
+        /// local workspace would never see fresh evidence at all.
+        private(set) var overviewInstallGeneration = 0
+        var overview: SpacesDeviceOverviewPayload? { didSet { overviewInstallGeneration += 1 } }
+
+        /// Carries `previous`'s install generation into this freshly built section, counting one new install
+        /// when `carriesFreshInstall` says this rebuild is carrying an overview the daemon actually just
+        /// returned.
+        ///
+        /// The caller states that fact rather than letting this infer it from payload equality. A fresh
+        /// fetch that happens to be byte-identical to the cached one is real evidence — it is exactly what
+        /// a delete that never reached the daemon looks like — and treating it as "nothing happened" would
+        /// leave that deferred delete unresolvable for the rest of the run. Conversely an outage rebuild
+        /// re-renders the retained overview without asking the daemon anything, and must not count.
+        func adoptingOverviewInstallGeneration(from previous: DeviceSection?, carriesFreshInstall: Bool) -> DeviceSection {
+            var section = self
+            section.overviewInstallGeneration = (previous?.overviewInstallGeneration ?? 0) + (carriesFreshInstall ? 1 : 0)
+            return section
+        }
         /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
         /// the first successful handshake; drives the per-device compatibility banner and gating.
         var daemonStatus: TerminalServiceDaemonStatus?
@@ -2590,6 +2667,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// this merged data (which device owns a workspace, which overview a row belongs to) keep resolving
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
+    ///
+    /// A workspace whose delete is in flight stays in this data: it keeps its sidebar row, which renders
+    /// marked as deleting (see `sidebarWorkspaceRowState`) until the mutation resolves, rather than
+    /// disappearing and — because the owning daemon still reports it — coming back on the next refresh.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
         projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
         alertsGroups: [AlertsGroup]
@@ -2607,6 +2688,65 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return (mergedProjects, mergedWorkspaces, mergedRuntime, mergedAlerts)
     }
 
+    /// How a sidebar workspace row renders and responds while its delete mutation runs. A delete takes
+    /// seconds on the owning daemon (it stops the workspace, then removes the git worktree), so the row
+    /// stays listed and is marked for that whole window instead of vanishing and reappearing on the next
+    /// overview refresh: dimmed, carrying a progress indicator, its runtime-target children hidden, and
+    /// inert — no selection, no context menu, no expansion. It leaves the sidebar exactly once, when the
+    /// post-delete overview stops carrying it.
+    struct SidebarWorkspaceRowState: Equatable, Sendable {
+        /// Row opacity. Assigned independently of the owning device's dimming, which uses the same value,
+        /// so a marked row under an unreachable device is dimmed once rather than twice.
+        let alpha: CGFloat
+        let showsDeletingProgress: Bool
+        /// Whether the row's runtime targets are listed as children at all. False while deleting, so the
+        /// children are hidden whatever the user's expansion state — there is nothing to do under a row
+        /// that is going away — and the expansion state itself is left untouched, so a failed delete
+        /// restores exactly what the user had open.
+        let listsRuntimeTargetChildren: Bool
+        /// Whether the row accepts selection, its context menu, and expansion.
+        let isInteractive: Bool
+    }
+
+    /// Whether a workspace's row is marked as deleting: the union of the deletes this app issued
+    /// (`workspaceIDsPendingDeletion`) and the teardowns the owning daemon reports running
+    /// (`deviceOverview.workspaceIDsWithTeardownInFlight`). A delete started on the iPhone — or a project
+    /// delete taking its workspaces with it — has to mark the row here too, rather than leaving it looking
+    /// ordinary and actionable while its worktree is being removed. `deviceOverview` is whatever
+    /// `deviceSections` has installed for the workspace's owning device, `nil` when that device has none
+    /// (offline, not yet loaded, or a wire-incompatible placeholder), which reports only the local set.
+    /// Pure so the union is directly testable without a live `AppKitController`.
+    nonisolated static func isWorkspaceMarkedDeleting(
+        workspaceID: String, pendingDeletionWorkspaceIDs: Set<String>, deviceOverview: SpacesDeviceOverviewPayload?
+    ) -> Bool { pendingDeletionWorkspaceIDs.contains(workspaceID) || deviceOverview?.workspaceIDsWithTeardownInFlight.contains(workspaceID) == true }
+
+    /// `isWorkspaceMarkedDeleting` against this controller's live state: the local pending set and the
+    /// overview installed for the workspace's owning device.
+    func isWorkspaceMarkedDeleting(_ workspaceID: String) -> Bool {
+        let deviceOverview = deviceID(forWorkspaceID: workspaceID).flatMap { deviceSection(id: $0)?.overview }
+        return Self.isWorkspaceMarkedDeleting(
+            workspaceID: workspaceID, pendingDeletionWorkspaceIDs: workspaceIDsPendingDeletion, deviceOverview: deviceOverview)
+    }
+
+    /// The row treatment for a workspace, keyed on whether its delete is in flight. Pure so the
+    /// marked-row contract is directly testable.
+    nonisolated static func sidebarWorkspaceRowState(isPendingDeletion: Bool) -> SidebarWorkspaceRowState {
+        guard isPendingDeletion else {
+            return SidebarWorkspaceRowState(alpha: 1, showsDeletingProgress: false, listsRuntimeTargetChildren: true, isInteractive: true)
+        }
+        return SidebarWorkspaceRowState(
+            alpha: unreachableDeviceAlpha, showsDeletingProgress: true, listsRuntimeTargetChildren: false, isInteractive: false)
+    }
+
+    /// The row treatment for a project row, keyed on the workspace its row stands in for. A non-git
+    /// project owns exactly one workspace and has no `.workspace` row of its own — the project row is that
+    /// workspace's row — so it renders and responds to the workspace's marked state. A git project row
+    /// stands in for no workspace (`nil`) and is never marked: its own workspaces carry their marks.
+    /// Pure so the stand-in contract is directly testable.
+    nonisolated static func sidebarProjectRowState(standInWorkspaceIsPendingDeletion: Bool?) -> SidebarWorkspaceRowState {
+        sidebarWorkspaceRowState(isPendingDeletion: standInWorkspaceIsPendingDeletion == true)
+    }
+
     /// The opacity a row inherits from its owning device's load state. A device that is not loaded —
     /// unreachable, or reconnecting after an outage — keeps its rows listed but dimmed, so the subtree
     /// reads as browsable-but-not-actionable. This is the same treatment the add-project device picker
@@ -2614,7 +2754,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// extra per-row icon. Pure so the rule is directly testable.
     nonisolated static func sidebarRowAlpha(loadState: SidebarDeviceLoadState) -> CGFloat { loadState == .loaded ? 1 : unreachableDeviceAlpha }
 
-    /// The dimming an unreachable device's rows and its add-project picker row share.
+    /// The dimming every listed-but-not-actionable row shares: an unreachable device's rows, its
+    /// add-project picker row, and a workspace row marked as deleting.
     nonisolated static let unreachableDeviceAlpha: CGFloat = 0.55
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -2809,6 +2950,88 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         device: SpacesPairedDeviceRecord, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
     ) async -> Result<SpacesDeviceAPIResponse, Error> {
         await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
+    }
+
+    /// Whether a failed `deviceMutation` leaves its outcome unknown, so `deleteWorkspace` has to
+    /// reconcile against fresh overviews (`WorkspaceDeletionReconciler`) instead of reporting the
+    /// failure outright.
+    ///
+    /// Only a refusal from the daemon is definitive, and it takes two things to prove one. First a Device
+    /// API error code, which `SpacesDeviceClientError` attaches exactly where it turns an `ok: false`
+    /// response into `.requestRejected`: every other failure this request can throw carries none — a
+    /// client-side timeout (`archiveWorkspace` allows 60s, well short of what the daemon's own teardown
+    /// queue can take once it is stopping the workspace, removing its worktree, and dropping its record),
+    /// an unreachable host, a certificate pin mismatch — and none of those says anything about whether
+    /// the daemon accepted the delete.
+    ///
+    /// Second, the code has to be a verdict on the request (`SpacesDeviceErrorCode.isRequestVerdict`)
+    /// rather than a report of something going wrong. A delete that succeeded and then failed while
+    /// building its refreshed overview answers with a coded `internalError`, and reading that as a refusal
+    /// would restore a row for a workspace that is already gone.
+    ///
+    /// Mirrors `SpacesMobileAppModel.isIndeterminateDeleteOutcome` on iOS; both share the verdict list.
+    nonisolated static func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
+        guard let code = (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode else { return true }
+        return !code.isRequestVerdict
+    }
+
+    /// What a workspace awaiting deferred delete resolution (see `AwaitingWorkspaceDeletionResolution`)
+    /// should do once `resolveAwaitingWorkspaceDeletions` finds a candidate overview for its device.
+    enum AwaitingWorkspaceDeletionResolutionVerdict: Equatable {
+        /// No overview for the owning device is installed yet (it is nil — offline, not yet loaded, or a
+        /// wire-incompatible placeholder). Nothing was proved either way, so the entry keeps waiting.
+        case stillAwaiting
+        /// An overview resolved and did not list the workspace: the delete landed. Clear the marking
+        /// silently; `showsBranchOutcomeNotice` says whether the caller also has to surface the notice
+        /// that branch deletion's own result was lost.
+        case gone(showsBranchOutcomeNotice: Bool)
+        /// An overview resolved and still lists the workspace: the held-back error is real and has to be
+        /// surfaced now.
+        case present
+    }
+
+    /// The pure decision `resolveAwaitingWorkspaceDeletions` makes per entry, factored out so it is
+    /// testable without a live `AppKitController` — mirroring `WorkspaceDeletionReconciler`, an I/O-free
+    /// type driven by an injected overview rather than a live device connection. `overview` is whatever
+    /// `deviceSections` currently has installed for the workspace's owning device — `nil` until that
+    /// device's next overview install actually lands.
+    ///
+    /// `overviewInstallGeneration` and `overviewInstallGenerationAtDefer` gate the verdict on *fresh*
+    /// evidence for the owning device: `resolveAwaitingWorkspaceDeletions` is hooked off a
+    /// `workspacesByProject` rebuild that fires for every device's refresh, not just the owning device's,
+    /// and an offline owning device keeps its last-known (pre-delete) overview rather than clearing it.
+    /// Without this check, some other device's refresh would trigger a rebuild that rereads the owning
+    /// device's untouched cached overview, sees the workspace still listed, and wrongly concludes
+    /// `.present` — a verdict drawn from evidence that predates the delete. Requiring the generation to
+    /// have advanced past its captured-at-defer snapshot means the verdict is only drawn once this
+    /// specific device's overview has actually been reinstalled since the defer.
+    nonisolated static func resolveAwaitingWorkspaceDeletion(
+        overview: SpacesDeviceOverviewPayload?, overviewInstallGeneration: Int, overviewInstallGenerationAtDefer: Int, workspaceID: String,
+        branchDeletionRequested: Bool
+    ) -> AwaitingWorkspaceDeletionResolutionVerdict {
+        guard let overview, overviewInstallGeneration > overviewInstallGenerationAtDefer else { return .stillAwaiting }
+        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return .gone(showsBranchOutcomeNotice: branchDeletionRequested) }
+        // Listed, but the daemon reports it is still tearing this workspace down: that is not the delete
+        // having failed, it is the delete still running. Keep waiting rather than telling the user a
+        // workspace survived that the daemon is about to remove.
+        return overview.workspaceIDsWithTeardownInFlight.contains(workspaceID) ? .stillAwaiting : .present
+    }
+
+    /// The delete landed, but the branch-deletion report existed only in the response that was lost —
+    /// reconciliation (or, once deferred, the next installed overview) can prove the workspace is gone,
+    /// not what happened to branches the user explicitly asked to delete. Shared verbatim between the
+    /// immediate `.gone` verdict in `deleteWorkspace` and `resolveAwaitingWorkspaceDeletions`, so both
+    /// paths report the exact same thing rather than two copies of the same sentence drifting apart.
+    private static let workspaceDeletionBranchOutcomeUnknownMessage =
+        "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+
+    /// Refetches `device`'s overview for `WorkspaceDeletionReconciler`, discarding the specific
+    /// failure: a reconciliation refetch that fails is inconclusive rather than proof of anything, so
+    /// the reconciler just tries again on its next attempt.
+    nonisolated private static func deviceOverviewFetch(device: SpacesPairedDeviceRecord) async -> SpacesDeviceOverviewPayload? {
+        await Task.detached(priority: .userInitiated) {
+            (try? SpacesDeviceClient.overview(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))?.overview
+        }.value
     }
 
     nonisolated private static func deviceWorkspaceCreateOptions(projectID: String, device: SpacesPairedDeviceRecord) async -> Result<
@@ -3065,8 +3288,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
-                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                    isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
+                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
+                    isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -4284,9 +4507,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func sidebarCardBackgroundColor() -> NSColor { sidebar.sidebarCardBackgroundColor() }
     func sidebarSelectedCardBackgroundColor() -> NSColor { sidebar.sidebarSelectedCardBackgroundColor() }
     func sidebarCardBorderColor(isSelected: Bool) -> NSColor { sidebar.sidebarCardBorderColor(isSelected: isSelected) }
-    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor {
-        sidebar.sidebarPrimaryTextColor(isSelected: isSelected)
-    }
+    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarPrimaryTextColor(isSelected: isSelected) }
     func sidebarMetadataTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarMetadataTextColor(isSelected: isSelected) }
     func sidebarRunningIndicatorColor() -> NSColor { sidebar.sidebarRunningIndicatorColor() }
     func sidebarFailedIndicatorColor() -> NSColor { sidebar.sidebarFailedIndicatorColor() }
@@ -8105,8 +8326,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func presentProjectImportWorkspaceSyncPrompt() -> ProjectImportWorkspaceSyncDecision {
         let alert = NSAlert()
         alert.messageText = "Update workspaces?"
-        alert.informativeText =
-            "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project?"
+        alert.informativeText = "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project?"
         alert.addButton(withTitle: "Update All Workspaces")
         alert.addButton(withTitle: "Project Only")
         alert.addButton(withTitle: "Cancel")
@@ -8751,12 +8971,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
-        // Resolve the owning device before the optimistic removal below; once the row
-        // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
-        // find it and would fall back to the local device, misrouting remote deletes.
+        // Route the delete to the daemon that owns the workspace's project rather than the local
+        // device, so a remote workspace is deleted where it actually lives.
         let device = deviceForMutation(deviceID: project.deviceID)
-        let didOptimisticallyRemove = optimisticallyRemoveWorkspaceFromSidebar(workspaceID: id)
-        if !didOptimisticallyRemove { button?.isEnabled = false }
+        beginPendingWorkspaceDeletion(workspaceID: id, projectID: project.id)
+        button?.isEnabled = false
         showOperationProgressOverlay(
             message: "Deleting workspace...", detail: "Stopping runtime state and cleaning up workspace files.", context: .workspace(id))
         Task { @MainActor [weak self, weak button] in
@@ -8773,20 +8992,85 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    // Install the post-delete overview first, then clear the marking: the workspace is
+                    // already absent from that overview, so its row leaves the sidebar exactly once.
+                    //
+                    // Accepted risk: a remote overview pull that began before this response can land after
+                    // the marking clears and re-add the row for one refresh cycle. That needs a pull in
+                    // flight inside the seconds-wide delete window, shows a ghost row the next pull
+                    // removes, and the fix — a mutation-generation fence across every overview install
+                    // path like the iOS model's — is disproportionate to a self-healing flicker.
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
+                    self.endPendingWorkspaceDeletion(workspaceID: id)
                     // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
                     // remote that refused), so its report is shown; a delete with no branch boxes ticked
                     // carries no notice and stays silent.
-                    if let notice = response.mutationNotice, !notice.isEmpty {
-                        self.showInfoMessage(title: "Deleted workspace", message: notice)
-                    }
+                    if let notice = response.mutationNotice, !notice.isEmpty { self.showInfoMessage(title: "Deleted workspace", message: notice) }
                 case .failure(let error):
-                    requestSidebarReload()
+                    guard Self.isIndeterminateDeleteOutcome(error) else {
+                        // The daemon answered and refused: the workspace was never touched, so the row
+                        // goes back to normal — its expansion state included — and the reload re-syncs
+                        // whatever the daemon did get through.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        requestSidebarReload()
+                        button?.isEnabled = true
+                        showError(error)
+                        return
+                    }
+                    // The delete's fate is unknown — the daemon may still be tearing the workspace down
+                    // (see `isIndeterminateDeleteOutcome`). Un-marking and reporting failure here would
+                    // let the user retry-delete a workspace that is already doomed. Reconcile against
+                    // fresh overviews instead: every overview that resolves is applied through the same
+                    // path a mutation response takes, so the row already reflects reality by the time the
+                    // marking clears. If the workspace stops appearing, treat the delete as successful and
+                    // surface no error; only report the failure once the reconciliation budget is spent
+                    // and the workspace is still listed.
+                    let reconciler = WorkspaceDeletionReconciler()
+                    let outcome = await reconciler.reconcile(
+                        workspaceID: id, fetchOverview: { await Self.deviceOverviewFetch(device: device) },
+                        applyOverview: { [weak self] overview in
+                            self?.applyDeviceOverview(overview, deviceID: device.id, selectedProjectID: project.id)
+                        })
+                    // The mutation call itself is done either way, so its button re-enables now — the row
+                    // stays inert through the pending-deletion marking, not a stuck in-flight button.
                     button?.isEnabled = true
-                    showError(error)
+                    switch outcome {
+                    case .unknown:
+                        // Every reconciliation refetch failed outright — the transport never answered, so
+                        // neither `.present` nor `.gone` is provable and un-marking the row here would be a
+                        // guess dressed up as a verdict. Keep the pending-deletion marking (the row stays
+                        // inert) and hold the error and this delete's context until a real overview for
+                        // this device installs through any path — a background poll, a later reload, or
+                        // any other mutation's response — and resolves it (`resolveAwaitingWorkspaceDeletions`).
+                        self.workspaceIDsAwaitingDeletionResolution[id] = AwaitingWorkspaceDeletionResolution(
+                            deviceID: device.id, error: error, branchDeletionRequested: deleteLocalBranch || deleteRemoteBranch,
+                            browserSessionTargetURLs: browserSessionTargetURLs,
+                            overviewInstallGenerationAtDefer: self.deviceSections.first(where: { $0.deviceID == device.id })?
+                                .overviewInstallGeneration ?? 0)
+                    case .present:
+                        // An overview resolved and still lists the workspace: the row goes back to normal
+                        // and the held error is real.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        requestSidebarReload()
+                        showError(error)
+                    case .gone:
+                        // Reconciliation confirmed the delete landed, so the workspace gets the same client
+                        // cleanup a direct success performs — otherwise its browser windows would outlive it
+                        // indefinitely.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                        self.closeWorkspaceTerminalPanes(workspaceID: id)
+                        if deleteLocalBranch || deleteRemoteBranch {
+                            // The delete landed, but the branch-deletion report existed only in the response
+                            // that was lost — reconciliation can prove the workspace is gone, not what
+                            // happened to branches the user explicitly asked to delete. Say so rather than
+                            // silently succeeding.
+                            self.showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
+                        }
+                    }
                 }
             } else {
-                if didOptimisticallyRemove { requestSidebarReload() }
+                self.endPendingWorkspaceDeletion(workspaceID: id)
                 button?.isEnabled = true
                 showDeviceNotLoadedError()
             }
@@ -9237,22 +9521,86 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
 
-    private func optimisticallyRemoveWorkspaceFromSidebar(workspaceID: String) -> Bool {
-        guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
-        guard var workspaces = workspacesByProject[project.id] else { return false }
-        let originalCount = workspaces.count
-        workspaces.removeAll(where: { $0.id == workspaceID })
-        guard workspaces.count != originalCount else { return false }
-
-        workspacesByProject[project.id] = workspaces
+    /// Marks a workspace whose delete the user just confirmed, and moves the selection off it: a marked
+    /// row is inert, so it must not stay selected with its detail pane open. The marking is read on every
+    /// row build, so overview refreshes that land while the daemon works through the delete keep showing
+    /// the row as deleting instead of restoring it to normal.
+    private func beginPendingWorkspaceDeletion(workspaceID: String, projectID: String) {
+        workspaceIDsPendingDeletion.insert(workspaceID)
         if selectedWorkspaceID == workspaceID {
             selectedWorkspaceID = nil
-            selectedProjectID = project.id
+            selectedProjectID = projectID
         }
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Clears the marking once the delete resolves. After a successful delete the workspace is already
+    /// gone from the refreshed overview, so the row leaves once; after a failed one the row returns to
+    /// normal, with the user's expansion state intact because marking never touched it.
+    private func endPendingWorkspaceDeletion(workspaceID: String) {
+        guard workspaceIDsPendingDeletion.remove(workspaceID) != nil else { return }
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Rebuilds the rows against the current marking. The sidebar data itself is unchanged — a workspace
+    /// being deleted keeps its row — so only the row views and the expansion state (a marked row hides
+    /// its runtime targets) have to be reapplied.
+    private func applyPendingWorkspaceDeletionMarking() {
         outlineView.reloadData()
         applySidebarProjectExpansionState()
         refreshSelection()
-        return true
+    }
+
+    /// Resolves every entry in `workspaceIDsAwaitingDeletionResolution` whose owning device now has an
+    /// overview installed. Hooked off the `workspacesByProject` `didSet` (see its comment) because that
+    /// is the nearest point in this file every overview-install path — the local snapshot, a remote
+    /// pull/subscription, and a mutation response, including `deleteWorkspace`'s own reconciliation
+    /// refetches — is guaranteed to reach, without requiring `SidebarController` to know this feature
+    /// exists.
+    ///
+    /// Each entry is independent: an overview that resolves one device's workspace says nothing about
+    /// another device's, and a device whose current overview is `nil` — offline, not yet loaded, or the
+    /// empty placeholder a wire-incompatible daemon answers with — has proved nothing either way, so
+    /// that entry is left waiting for a later install with real data.
+    ///
+    /// This `didSet` fires for a rebuild triggered by *any* device's refresh, not just the owning
+    /// device's, so an overview alone is not enough evidence: an offline owning device keeps its
+    /// last-known (pre-delete) overview rather than clearing it, and reading that stale snapshot on a
+    /// rebuild some other device caused would draw a verdict that predates the delete. Each entry also
+    /// captures the owning device's `overviewInstallGeneration` at defer time and only resolves once
+    /// that device's own generation has advanced past it — i.e. once this specific device has actually
+    /// reinstalled an overview since the defer, not merely been read again.
+    private func resolveAwaitingWorkspaceDeletions() {
+        guard !workspaceIDsAwaitingDeletionResolution.isEmpty else { return }
+        for (workspaceID, pending) in workspaceIDsAwaitingDeletionResolution {
+            // A missing section (device unpaired mid-defer) falls back to comparing the captured
+            // generation against itself, i.e. `.stillAwaiting` — there is no fresher evidence to read.
+            let section = deviceSections.first(where: { $0.deviceID == pending.deviceID })
+            switch Self.resolveAwaitingWorkspaceDeletion(
+                overview: section?.overview,
+                overviewInstallGeneration: section?.overviewInstallGeneration ?? pending.overviewInstallGenerationAtDefer,
+                overviewInstallGenerationAtDefer: pending.overviewInstallGenerationAtDefer, workspaceID: workspaceID,
+                branchDeletionRequested: pending.branchDeletionRequested)
+            {
+            case .stillAwaiting: continue
+            case .present:
+                workspaceIDsAwaitingDeletionResolution.removeValue(forKey: workspaceID)
+                endPendingWorkspaceDeletion(workspaceID: workspaceID)
+                requestSidebarReload()
+                showError(pending.error)
+            case .gone(let showsBranchOutcomeNotice):
+                workspaceIDsAwaitingDeletionResolution.removeValue(forKey: workspaceID)
+                endPendingWorkspaceDeletion(workspaceID: workspaceID)
+                // Same client cleanup an immediate `.gone` verdict performs in `deleteWorkspace` —
+                // otherwise a deferred-but-confirmed delete would leave this workspace's browser windows
+                // and terminal panes open indefinitely.
+                closeLocalBrowserSessionWindows(workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
+                closeWorkspaceTerminalPanes(workspaceID: workspaceID)
+                if showsBranchOutcomeNotice {
+                    showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
+                }
+            }
+        }
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }

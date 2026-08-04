@@ -830,7 +830,7 @@ extension WorkspaceOrchestrator {
             }
             let launcher = try restartableCodingAgentLauncher(record)
             try stopCodingAgentRecord(record)
-            return try launchAgentLauncher(workspaceID: workspaceID, launcherID: launcher.id)
+            return try launchAgentLauncherUnlocked(workspaceID: workspaceID, launcherID: launcher.id, background: false)
         }
     }
 
@@ -1002,7 +1002,19 @@ extension WorkspaceOrchestrator {
         throw WorkspaceError.invalidArgument(message: "Unconfigured live coding agents cannot be restarted from Spaces.")
     }
 
+    /// Starts a configured coding agent in a workspace. Under the lifecycle gate: an agent started while a
+    /// teardown was mid-flight would be left running against a removed worktree with no row to stop it by.
+    ///
+    /// The `Unlocked` variants exist for the two callers that already hold the workspace's gate —
+    /// `launchWorkspaceUnlocked` (workspace launch starts every configured agent) and `restartCodingAgent`
+    /// — since the gate rejects re-entry rather than allowing it.
     @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try launchAgentLauncherUnlocked(workspaceID: workspaceID, name: name, background: background)
+        }
+    }
+
+    @discardableResult func launchAgentLauncherUnlocked(workspaceID: String, name: String, background: Bool) throws -> AgentWindowRecord {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent name is required.") }
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
@@ -1015,6 +1027,12 @@ extension WorkspaceOrchestrator {
 
     @discardableResult public func launchAgentLauncher(workspaceID: String, launcherID: String, background: Bool = false) throws -> AgentWindowRecord
     {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try launchAgentLauncherUnlocked(workspaceID: workspaceID, launcherID: launcherID, background: background)
+        }
+    }
+
+    @discardableResult func launchAgentLauncherUnlocked(workspaceID: String, launcherID: String, background: Bool) throws -> AgentWindowRecord {
         let trimmedID = launcherID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent ID is required.") }
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
