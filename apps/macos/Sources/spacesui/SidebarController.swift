@@ -649,12 +649,31 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
+    /// The remote devices that should hold a live overview subscription, out of the credentialed paired
+    /// remotes.
+    ///
+    /// A device the sidebar knows is wire-incompatible is parked: its daemon speaks a different protocol,
+    /// so the overview it pushes cannot decode and the stream dies as soon as it delivers one. Reopening
+    /// it on the retry backoff buys nothing but another disconnect every few seconds. Its pull is what
+    /// describes such a device — the pull falls back to the frozen-core handshake and reads the verdict
+    /// from there — and a pull reporting a compatible daemon puts the device back in this set, so the
+    /// next reconcile reopens its subscription with no separate recovery path.
+    ///
+    /// Only a verdict parks a device. One with no section yet, and one that is merely offline (the
+    /// offline transition drops the verdict), both stay wanted: the subscription is how they recover.
+    /// Pure so the rule is directly testable.
+    nonisolated static func overviewSubscriptionDesiredIDs(credentialedRemoteIDs: [String], sections: [DeviceSection]) -> Set<String> {
+        let incompatibleIDs = Set(sections.filter { $0.compatibility?.isCompatible == false }.map(\.deviceID))
+        return Set(credentialedRemoteIDs).subtracting(incompatibleIDs)
+    }
+
     /// Reconciles open subscriptions to the set of credentialed paired remotes:
     /// drops gone devices and opens one per newly present device.
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptions.isEnabled else { return }
         let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(device: $0) }
-        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: Set(remotes.map(\.id)))
+        let desiredIDs = Self.overviewSubscriptionDesiredIDs(credentialedRemoteIDs: remotes.map(\.id), sections: host.deviceSections)
+        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: desiredIDs)
         for removal in outcome.removed {
             removal.client.stop()
             host.stopRemoteBrowserForwards(deviceID: removal.deviceID)
@@ -752,11 +771,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
     }
 
+    /// Whether a dropped overview stream is evidence that the device it belonged to went away.
+    ///
+    /// A stream to a wire-incompatible daemon dies by design — the overview it pushes cannot decode —
+    /// so its disconnect only restates the protocol gap the pull already reported. Letting it run the
+    /// offline transition would wipe that verdict, and the two paths then alternate: the header flips
+    /// between "Resolve" and "Reconnect" and the compatibility block is pulled out of the detail pane
+    /// every time the verdict goes away. The pull, not the disconnect, describes such a device, and a
+    /// pull that fails is never filtered here, so a genuine outage still reports one.
+    /// Pure so the rule is directly testable.
+    nonisolated static func streamDisconnectReportsAnOutage(compatibility: SpacesWireCompatibility?) -> Bool { compatibility?.isCompatible != false }
+
     /// A stream that dropped means the remote daemon or network went away. With no periodic remote
     /// refresh to fall back on, transition the section to offline now — the same way a failed pull
     /// does — so the sidebar shows the offline caption instead of stale projects/alerts. A graceful
     /// stream close carries no error, so fall back to a descriptive reason for the offline tooltip.
+    ///
+    /// The single chokepoint for both disconnect paths: a live stream dropping, and a stream that died
+    /// before the connect that opened it handed its client back.
     private func markRemoteOverviewSectionOffline(deviceID: String, error: (any Error)?) {
+        guard Self.streamDisconnectReportsAnOutage(compatibility: host.deviceCompatibility(forDeviceID: deviceID)) else {
+            DeviceLinkTrace.log(deviceID: deviceID, event: "stream_disconnect_ignored_incompatible")
+            return
+        }
         applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
     }
 
@@ -886,7 +923,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // and asks for a sidebar reload, which against a dead device is a reload loop. It is also
             // what keeps an open pane's session resolving to its workspace while the device is away.
             // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
-            // button / restart block from when it was last reachable-but-incompatible.
+            // button / restart block from when it was last reachable-but-incompatible. Only a failed
+            // pull reaches this for an incompatible device — its stream's disconnects are filtered out
+            // by `streamDisconnectReportsAnOutage` — so the verdict is dropped on evidence the device
+            // stopped answering at all, never on the stream dying the way an old daemon's always does.
             host.deviceSections[index].compatibility = nil
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(reason)

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import spacesterminalcore
 
 @testable import spacesui
 
@@ -267,6 +268,108 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         _ = coordinator.applyConnectResult(deviceID: "device-a", attempt: attempt, client: StubOverviewStreamClient())
 
         #expect(Array(coordinator.reconcile(desiredIDs: ["device-a", "device-b"]).devicesToOpen.keys) == ["device-b"])
+    }
+
+    /// Parking a device that turned out to be wire-incompatible is expressed purely by dropping it from
+    /// the desired set, so the live stream it still holds has to be torn down by the removal path — a
+    /// stream left running would keep dropping and re-arming for as long as the daemon stays behind.
+    @Test func droppingADeviceFromTheDesiredSetStopsItsLiveSubscription() {
+        let (coordinator, _) = makeCoordinator()
+        let device = "device-a"
+        let attempt = openAttempt(coordinator, device: device)
+        let client = StubOverviewStreamClient()
+        _ = coordinator.applyConnectResult(deviceID: device, attempt: attempt, client: client)
+
+        let outcome = coordinator.reconcile(desiredIDs: [])
+        #expect(outcome.removed.map(\.deviceID) == [device])
+        #expect(outcome.removed.first?.client === client)
+        #expect(outcome.devicesToOpen.isEmpty)
+    }
+
+    /// A device that becomes unwanted while it is waiting out a retry must let that retry expire without
+    /// leaving anything armed behind it: the retry clears the device and asks for a reconcile, and the
+    /// reconcile that answers no longer wants it. Recovering the device later is just as plain — it
+    /// re-enters the desired set and the next reconcile opens it.
+    @Test func anArmedRetryForAnUnwantedDeviceExpiresWithoutReopeningIt() async {
+        let (coordinator, recorder) = makeCoordinator()
+        let device = "device-a"
+        let attempt = openAttempt(coordinator, device: device)
+        #expect(armedDelayAfterFailedConnect(coordinator, device: device, attempt: attempt) != nil)
+
+        await coordinator.drainPendingRetryForTesting()
+        #expect(recorder.count == 1)
+        #expect(coordinator.reconcile(desiredIDs: []).devicesToOpen.isEmpty)
+        #expect(coordinator.armedRetryDelay(deviceID: device) == nil)
+
+        openAttempt(coordinator, device: device)
+    }
+}
+
+/// Behavior of the sidebar's link to a device whose daemon speaks a different wire protocol: what its
+/// dropped overview stream is allowed to say about it, and whether the app keeps reconnecting.
+@Suite struct SidebarIncompatibleDeviceOverviewLinkTests {
+    private func section(_ deviceID: String, loadState: AppKitController.SidebarDeviceLoadState = .loaded, compatibility: SpacesWireCompatibility?)
+        -> AppKitController.DeviceSection
+    {
+        var section = AppKitController.DeviceSection(deviceID: deviceID, deviceName: deviceID, isLocal: false, loadState: loadState)
+        section.compatibility = compatibility
+        return section
+    }
+
+    /// The flapping regression: a wire-incompatible daemon's pushed overview cannot decode, so the
+    /// subscription dies every time it is opened. Letting that disconnect run the offline transition
+    /// wiped the verdict the pull had just painted, and the two paths then alternated — the header
+    /// flipped between "Resolve" and "Reconnect" every few seconds and the compatibility block was
+    /// yanked out of the detail pane each time the verdict went away.
+    @Test func aDroppedStreamIsNotAnOutageForAWireIncompatibleDevice() {
+        #expect(!SidebarController.streamDisconnectReportsAnOutage(compatibility: .daemonTooOld))
+        #expect(!SidebarController.streamDisconnectReportsAnOutage(compatibility: .clientTooOld))
+    }
+
+    /// Only the verdict silences a disconnect. A device that is compatible, or one the sidebar has no
+    /// verdict for yet, still goes offline when its stream drops — that transition is the only thing
+    /// telling the user the device is unreachable.
+    @Test func aDroppedStreamStillReportsAnOutageForEveryOtherDevice() {
+        #expect(SidebarController.streamDisconnectReportsAnOutage(compatibility: .compatible))
+        #expect(SidebarController.streamDisconnectReportsAnOutage(compatibility: nil))
+    }
+
+    /// A known-incompatible device's subscription is parked rather than retried: reopening it produces
+    /// nothing but another disconnect every backoff interval. Its pull is what keeps describing it.
+    @Test func aWireIncompatibleDeviceIsNotSubscribed() {
+        let desired = SidebarController.overviewSubscriptionDesiredIDs(
+            credentialedRemoteIDs: ["device-old", "device-ahead", "device-ok"],
+            sections: [
+                section("device-old", compatibility: .daemonTooOld), section("device-ahead", compatibility: .clientTooOld),
+                section("device-ok", compatibility: .compatible),
+            ])
+
+        #expect(desired == ["device-ok"])
+    }
+
+    /// Parking is limited to the devices actually known incompatible. A device with no section yet (just
+    /// paired) and one that is merely offline both stay wanted — the subscription is how they recover,
+    /// and an offline device carries no verdict because the offline transition drops it.
+    @Test func aDeviceWithNoVerdictIsStillSubscribed() {
+        let desired = SidebarController.overviewSubscriptionDesiredIDs(
+            credentialedRemoteIDs: ["device-fresh", "device-offline"],
+            sections: [section("device-offline", loadState: .offline("Connection refused"), compatibility: nil)])
+
+        #expect(desired == ["device-fresh", "device-offline"])
+    }
+
+    /// Recovery is self-healing: the user updates the daemon and reloads (or the in-app restart flow
+    /// forces one), the pull reports a compatible daemon, and the device re-enters the desired set so
+    /// the next reconcile opens its subscription again.
+    @Test func aDeviceThatBecomesCompatibleIsSubscribedAgain() {
+        let deviceID = "device-old"
+        #expect(
+            SidebarController.overviewSubscriptionDesiredIDs(
+                credentialedRemoteIDs: [deviceID], sections: [section(deviceID, compatibility: .daemonTooOld)]
+            ).isEmpty)
+        #expect(
+            SidebarController.overviewSubscriptionDesiredIDs(
+                credentialedRemoteIDs: [deviceID], sections: [section(deviceID, compatibility: .compatible)]) == [deviceID])
     }
 }
 
