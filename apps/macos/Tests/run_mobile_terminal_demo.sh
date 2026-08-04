@@ -43,6 +43,7 @@ remote_demo_profile_name="remote-mobile-demo"
 remote_demo_profile_root="~/.spaces-dev/profiles/spaces/$remote_demo_profile_name"
 remote_demo_cli="$remote_demo_profile_root/daemon/current/bin/spaces"
 remote_demo_daemon_port=""
+remote_demo_device_api_host=""
 remote_demo_install_root="~/.spaces/remote-demo-e2e"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
@@ -838,6 +839,15 @@ raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
 }
 
+# The address this Mac dials for the remote demo daemon's Device API: the SSH destination's effective
+# HostName, not the destination as typed, which may be an ssh_config alias. It reaches the pairing link
+# and the paired-device record, both of which are redeemed and used before the SSH forward exists.
+resolve_remote_demo_device_api_host() {
+  local -a args=()
+  while IFS= read -r arg; do args+=("$arg"); done < <(remote_ssh_args)
+  remote_demo_device_api_host="$(resolve_ssh_hostname "$(remote_ssh_destination)" "${args[@]}")"
+}
+
 # The Device API port the daemon assigned itself for this profile and persisted at first start. The
 # lane never picks a port, so every remote endpoint it builds comes from here.
 resolve_remote_demo_daemon_port() {
@@ -887,6 +897,7 @@ prepare_remote_demo_daemon() {
   quoted_install="$(shell_quote "$install_root")"
   quoted_profile_name="$(shell_quote "$remote_demo_profile_name")"
   remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
+  resolve_remote_demo_device_api_host
   resolve_remote_demo_daemon_port
   wait_for_remote_demo_daemon
 }
@@ -977,7 +988,7 @@ print(f"remote_device_name={shlex.quote(payload['name'])}")
 PY
   )"
   eval "$parsed"
-  remote_device_host="$remote_ssh_host"
+  remote_device_host="$remote_demo_device_api_host"
   remote_device_port="$remote_demo_daemon_port"
   remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_device_host" "$remote_device_port")"
   update_remote_demo_device_endpoint

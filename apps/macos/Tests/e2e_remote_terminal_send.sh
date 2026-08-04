@@ -25,7 +25,9 @@ SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 REMOTE_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
 REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_HOST}"
+# A configured daemon address is authoritative; otherwise it is derived from the SSH destination below,
+# once the SSH helpers exist, because the destination as typed may be an ssh_config alias.
+REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-}"
 # The isolated remote E2E daemon is a development profile, so this lane never touches the remote
 # account's installed profile. Its Device API port is assigned by the daemon and read back after
 # install; nothing here chooses one.
@@ -155,6 +157,12 @@ if not payload.get("ok"):
 print(json.dumps(payload, sort_keys=True))
 PY
 }
+
+if [[ -z "$REMOTE_DAEMON_HOST" ]]; then
+  ssh_option_args=()
+  while IFS= read -r arg; do ssh_option_args+=("$arg"); done < <(ssh_args)
+  REMOTE_DAEMON_HOST="$(resolve_ssh_hostname "$(remote_destination)" "${ssh_option_args[@]}")"
+fi
 
 echo "== deploying the isolated remote E2E daemon =="
 artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$REMOTE_E2E_PROFILE_NAME")"

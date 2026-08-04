@@ -574,6 +574,15 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(helper.contains(#"substituted.append("port=" + quote(port, safe=""))"#))
         XCTAssertTrue(helper.contains("substituted.append(parameter)"))
         XCTAssertFalse(helper.contains("urlencode"))
+
+        // The endpoint a link is pointed at is the SSH destination's effective HostName, which only ssh can
+        // report: a configured host may be an ssh_config alias, and a link carrying the alias fails DNS when
+        // the client redeems it — before any SSH forward exists to stand in for the address.
+        XCTAssertTrue(helper.contains(#"ssh -G -T "$@" "$destination""#))
+        XCTAssertTrue(helper.contains(#"tolower($1) == "hostname""#))
+        let demo = try String(contentsOf: testsRoot.appendingPathComponent("run_mobile_terminal_demo.sh"), encoding: .utf8)
+        XCTAssertTrue(demo.contains(#"remote_device_host="$remote_demo_device_api_host""#))
+        XCTAssertFalse(demo.contains(#"remote_device_host="$remote_ssh_host""#))
     }
 
     /// The remote development daemon a repo-local build deploys is the same profile this Mac's pairing

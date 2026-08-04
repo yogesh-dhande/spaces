@@ -1,5 +1,26 @@
 #!/usr/bin/env bash
 
+# The address an SSH destination actually resolves to, which is the address a client must dial to
+# reach a daemon on that host.
+#
+# A configured SSH host may be an ssh_config alias whose HostName carries the routable address, and
+# only ssh knows that mapping: a pairing link or paired-device record built from the destination as
+# typed would point the client at a name DNS cannot resolve, and redemption fails before any SSH
+# forward exists to stand in for it. `ssh -G` reports the effective configuration without connecting,
+# and a destination that is already an address or a real hostname resolves to itself. Callers pass
+# their own connection options so one lane's port and SSH policy are not reinvented here.
+resolve_ssh_hostname() {
+  local destination="$1"
+  shift
+  local hostname
+  hostname="$(ssh -G -T "$@" "$destination" | awk 'tolower($1) == "hostname" { print $2; exit }')"
+  if [[ -z "$hostname" ]]; then
+    echo "ssh -G reported no HostName for $destination." >&2
+    return 1
+  fi
+  printf '%s\n' "$hostname"
+}
+
 # Points a pairing link at an endpoint the running client can reach -- the SSH-configured address of
 # a remote daemon, or a local SSH forward standing in for it -- by rewriting the `host` and `port`
 # parameter values and nothing else.
