@@ -36,6 +36,26 @@
             XCTAssertEqual(payload.imageData, imageData)
         }
 
+        /// A viewer with no owner epoch to send must send none, not epoch 0: the daemon reads an absent
+        /// epoch as "not epoch-gated" and epoch 0 as a real generation to compare against, which rejects
+        /// the paste of an owner whose generation is anything else.
+        func testPasteImageSendsNoOwnerEpochWhenTheViewerHasNone() async throws {
+            let recorder = SpacesDeviceAPIClientPasteImageRequestRecorder()
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "pasted")
+            }
+
+            try await client.pasteImage(
+                sessionID: "session-shell", clientID: "client-ios", ownerEpoch: nil, fileExtension: "png", imageData: Data([0x01]))
+
+            guard case .terminalPasteImage(let payload)? = await recorder.snapshot().first?.command else {
+                XCTFail("Expected terminalPasteImage request.")
+                return
+            }
+            XCTAssertNil(payload.ownerEpoch)
+        }
+
         /// Guards the deviceName plumbing added to fix the first-launch hostName crash: a caller-supplied
         /// deviceName must reach the daemon's clientApp identity on every request, not just be stored and
         /// ignored. The initializer's default ("iOS Device") exists only so ~90 other tests can omit this

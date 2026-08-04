@@ -125,7 +125,7 @@ A single `DeviceTerminalSessionStateModel` owns one session client and one `subs
 
 Two Device API commands are token-authorized but deliberately **not** owner- or attachment-gated, because orchestrator agents drive sessions they never render: `sendTerminalInput` and `tailTerminalOutput`. The Device API is an internal first-party transport, not a stable public API.
 
-Image paste (`terminalPasteImage`) is an image-only extension of the owner input boundary. The daemon validates owner and epoch, rejects ended sessions and payloads over 10 MiB, writes a `/tmp/spaces-paste-<uuid>.<ext>` file, and injects only that path through the same owner-gated send that protects text.
+Image paste (`terminalPasteImage`) is an image-only extension of the owner input boundary. The daemon validates the owner, epoch-gates the paste on the same terms as text input (the client sends the owner epoch it has cached, and a request that carries none is not epoch-gated), rejects ended sessions and payloads over 10 MiB, writes a `/tmp/spaces-paste-<uuid>.<ext>` file, and injects only that path through the same owner-gated send that protects text.
 
 ## Tail and Metadata
 

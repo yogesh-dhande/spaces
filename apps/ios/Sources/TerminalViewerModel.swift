@@ -763,9 +763,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
-        guard let ownerEpoch = currentOwnerEpoch else {
-            throw SpacesDeviceAPIClientError.requestFailed("The terminal is not ready to receive an image.")
-        }
+        // Carries the current owner epoch when there is one and none when there is not, like every other
+        // input this viewer sends: an absent epoch means the paste is not epoch-gated, not that the
+        // terminal is unready.
+        let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
             try await bridgeClient.pasteImage(
