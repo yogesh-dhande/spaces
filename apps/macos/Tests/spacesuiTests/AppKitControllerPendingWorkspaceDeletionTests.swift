@@ -114,9 +114,21 @@ import workspacecore
     /// this request can throw carries no code, coded or not, and must reconcile instead.
     @Test func onlyADaemonCodedRejectionIsDefinitive() {
         #expect(!AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.requestRejected(message: "nope", code: .notFound)))
+        #expect(!AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.requestRejected(message: "nope", code: .invalidArgument)))
+        #expect(!AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.requestRejected(message: "nope", code: .unauthorized)))
         #expect(AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.unavailable("request timed out")))
         #expect(AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.missingOverview))
         #expect(AppKitController.isIndeterminateDeleteOutcome(NSError(domain: "test", code: 1)))
+    }
+
+    /// The daemon answers with a coded `internalError` both for a failure part-way through the delete and
+    /// for a delete that SUCCEEDED and then failed while building the refreshed overview it answers with.
+    /// Reading that as a refusal would restore a row for a workspace that is already gone, so it has to
+    /// reconcile like any other outcome the client cannot vouch for.
+    @Test func aCodedInternalErrorIsNotAVerdictAndReconciles() {
+        #expect(AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.requestRejected(message: "boom", code: .internalError)))
+        #expect(!SpacesDeviceErrorCode.internalError.isRequestVerdict)
+        #expect(SpacesDeviceErrorCode.invalidArgument.isRequestVerdict)
     }
 
     /// Reconciliation stops the moment a refetched overview no longer lists the workspace, instead of

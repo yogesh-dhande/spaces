@@ -1128,9 +1128,20 @@ public final class WorkspaceOrchestrator {
         return missingCount
     }
 
+    /// The message a contended workspace lifecycle gate reports. Named rather than written twice: the
+    /// automatic process restart matches on it to tell "someone else owns this workspace right now" from
+    /// a real failure, and a drifting copy would turn that skip into a thrown error on a background queue.
+    static let workspaceLifecycleBusyMessage = "Workspace action is already in progress."
+
+    /// Whether `error` is the busy rejection from `withWorkspaceLifecycleLock` rather than a real failure.
+    static func isWorkspaceLifecycleBusyError(_ error: any Error) -> Bool {
+        guard case .invalidArgument(let message)? = error as? WorkspaceError else { return false }
+        return message == workspaceLifecycleBusyMessage
+    }
+
     func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
         try Self.workspaceLifecycleGate.withKey(
-            workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace action is already in progress.") }, operation: operation)
+            workspaceID, busyError: { WorkspaceError.invalidArgument(message: Self.workspaceLifecycleBusyMessage) }, operation: operation)
     }
 
     /// Runs `operation` holding every listed workspace's lifecycle gate, claiming them all before any work

@@ -626,6 +626,36 @@
             XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
         }
 
+        /// The daemon answers with a coded `internalError` both for a failure part-way through the delete
+        /// and for a delete that SUCCEEDED and then failed while building the refreshed overview it answers
+        /// with. Only codes that are verdicts on the request are definitive, so this reconciles — and when
+        /// the workspace turns out to be gone, the user is told nothing failed.
+        func testDeleteWorkspaceCodedInternalErrorReconcilesToSuccessWhenWorkspaceIsGone() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "archiveWorkspace" {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Failed to build overview.", errorCode: .internalError)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertNil(model.errorMessage, "a delete the daemon completed must not be reported as failed")
+            XCTAssertEqual(model.overview, overviewWithoutFeature)
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
+        }
+
         /// The other half of the same rule: a codeless failure whose workspace is still listed once the
         /// budget is spent — including a failure that never reached the daemon — reports the error and
         /// puts the row back.

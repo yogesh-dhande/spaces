@@ -1761,17 +1761,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Whether a failed delete leaves the workspace's fate unknown, so it has to be reconciled against
     /// fresh overviews instead of being reported as a failure.
     ///
-    /// Only a verdict from the daemon is definitive, and the one thing that proves the daemon produced a
-    /// verdict is a Device API error code: `SpacesDeviceAPIClient` attaches one exactly where it turns an
-    /// `ok: false` response into an error, and the daemon fills one in for every failure it reports. Every
-    /// other failure the request can throw carries no code — a client-side timeout, an unreachable host,
-    /// or the socket being closed under it when the app was backgrounded, which arrives as an ordinary
-    /// `requestFailed` — and none of them says anything about whether the daemon accepted the delete.
+    /// Only a refusal from the daemon is definitive, and it takes two things to prove one. First a Device
+    /// API error code, which `SpacesDeviceAPIClient` attaches exactly where it turns an `ok: false`
+    /// response into an error: every other failure the request can throw carries none — a client-side
+    /// timeout, an unreachable host, or the socket being closed under it when the app was backgrounded,
+    /// which arrives as an ordinary `requestFailed` — and none of those says anything about whether the
+    /// daemon accepted the delete. The transport cannot even report whether a failure happened before or
+    /// after the request went out, so every codeless failure reconciles; that costs nothing when it was
+    /// pre-send, since the first refetch finds the workspace still listed and the error surfaces then.
     ///
-    /// The transport cannot report whether a failure happened before or after the request went out, so
-    /// every codeless failure reconciles. That costs nothing when it was pre-send: the first refetch finds
-    /// the workspace still listed and the error surfaces then.
-    private func isIndeterminateDeleteOutcome(_ error: Error) -> Bool { (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode == nil }
+    /// Second, the code has to be a verdict on the request (`SpacesDeviceErrorCode.isRequestVerdict`)
+    /// rather than a report of something going wrong. A delete that succeeded and then failed while
+    /// building its refreshed overview answers with a coded `internalError`, and reading that as a refusal
+    /// would put the deleted workspace back as an ordinary actionable row.
+    private func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
+        guard let code = (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode else { return true }
+        return !code.isRequestVerdict
+    }
 
     /// Refetches the overview a bounded number of times after an indeterminate delete, looking for
     /// the workspace to stop being listed. Returns whether the workspace is still present once the

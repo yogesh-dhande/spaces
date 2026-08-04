@@ -122,6 +122,64 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspaceSetupState(workspaceID: created.id)?.status, .succeeded)
     }
 
+    /// A process configured `onExit: .restart` is relaunched by the detached process-exit monitor, which
+    /// runs outside every lifecycle action. Deleting the workspace terminates that process, so the monitor
+    /// sees it die — and without the workspace gate it would relaunch it into a worktree the delete is
+    /// about to remove, leaving a live process whose record the delete then drops. The restart is skipped
+    /// silently instead, because a background service has nobody to report a busy gate to.
+    func testAutomaticProcessRestartIsSkippedWhileItsWorkspaceIsBeingDeleted() throws {
+        let repo = try makeTempGitRepo(name: "teardown-gate-restart-on-exit")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let teardownStarted = expectation(description: "the delete reached its terminal teardown")
+        teardownStarted.assertForOverFulfill = false
+        let releaseTeardown = DispatchSemaphore(value: 0)
+        let deleteFinished = DispatchSemaphore(value: 0)
+        let didRelaunch = LockedBox(false)
+        let deleter = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionTerminator: { _ in
+                teardownStarted.fulfill()
+                releaseTeardown.wait()
+            })
+        // The monitor runs on its own orchestrator, exactly as `ProcessExitMonitorService` does. Any
+        // relaunch would have to go through this launcher.
+        let monitor = makeTestOrchestrator(
+            store: store, workspacesRootDirectory: workspacesRoot,
+            builtInTerminalSessionLauncher: { _ in
+                didRelaunch.set(true)
+                throw WorkspaceError.invalidArgument(message: "no relaunch was expected")
+            })
+
+        let project = try deleter.addProject(dir: repo.path)
+        let workspace = try deleter.createWorkspace(projectID: project.id, branch: "feature-restarting")
+        try store.setWorkspaceProcesses(
+            workspaceID: workspace.id, processes: [ProcessTemplate(id: "template-api", name: "api", command: "echo api", onExit: .restart)])
+        // A running row whose PID is dead: the monitor's next tick sees the exit and consults `onExit`.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-restarting", workspaceID: workspace.id, templateID: "template-api", templateName: "api", command: "echo api",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-restarting", pid: 99_999, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120)), exitedAt: nil))
+
+        Thread.detachNewThread {
+            _ = try? deleter.archiveWorkspace(workspaceID: workspace.id)
+            deleteFinished.signal()
+        }
+        wait(for: [teardownStarted], timeout: 30)
+
+        // The monitor tick that lands mid-teardown, while the workspace's rows are still present.
+        XCTAssertNoThrow(try monitor.checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: true))
+        XCTAssertFalse(didRelaunch.get(), "no process may be relaunched into a workspace being deleted")
+
+        releaseTeardown.signal()
+        XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty, "nothing outlives the delete")
+        XCTAssertFalse(didRelaunch.get())
+    }
+
     /// A non-git project owns exactly one workspace, so creating one again returns the record that already
     /// exists. That repeat create must stay a no-op: the workspace was provisioned when it was created, and
     /// running the project's setup script again would re-execute an arbitrary user-authored command every

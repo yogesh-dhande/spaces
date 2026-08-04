@@ -139,10 +139,30 @@ extension WorkspaceOrchestrator {
             break
         case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
         case .restart:
-            // Restart the process
-            Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
-            notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+            // The one exit action that LAUNCHES, and it runs on the detached process-exit monitor rather
+            // than inside any lifecycle action — so it needs the workspace's gate. A teardown terminates
+            // the workspace's processes and only afterwards deletes their rows; a monitor tick landing in
+            // between sees the process dead, marks the still-present row exited, and would relaunch it into
+            // a worktree the delete is about to remove, leaving a live process whose record is then dropped.
+            // (`markRunningProcessExited` is what closes the same window once the rows are gone: its
+            // conditional update matches nothing, so this never runs.)
+            //
+            // The gate is taken here rather than inside `restartProcessInTerminal` because the deliberate
+            // restart paths — `restartWorkspaceProcess`, `recoverMissingConfiguredProcess` — already hold
+            // it and would re-enter.
+            //
+            // A busy gate means some lifecycle action owns the workspace right now, and this skips
+            // silently: if that action was a teardown the process must stay dead, and if the workspace
+            // survives it the row is still `.exited` for the next monitor tick to restart. `upWorkspace`
+            // also reaches here while holding the gate, and skipping is right there too — it calls
+            // `restartExitedProcesses` on the very next line, under the gate it already owns.
+            do {
+                try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                    Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
+                    notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
+                    try restartProcessInTerminal(workspaceID: workspaceID, process: process)
+                }
+            } catch  where WorkspaceOrchestrator.isWorkspaceLifecycleBusyError(error) { return }
         }
     }
 

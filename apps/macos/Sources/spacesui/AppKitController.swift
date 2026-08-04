@@ -2848,17 +2848,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// reconcile against fresh overviews (`WorkspaceDeletionReconciler`) instead of reporting the
     /// failure outright.
     ///
-    /// Only a verdict from the daemon is definitive, and the one thing that proves the daemon produced
-    /// a verdict is a Device API error code: `SpacesDeviceClientError` attaches one exactly where it
-    /// turns an `ok: false` response into `.requestRejected`, and the daemon fills one in for every
-    /// failure it reports (`SpacesDeviceAPIServer.errorCode(for:)`). Every other failure this request
-    /// can throw carries no code — a client-side timeout (`archiveWorkspace` allows 60s, well short of
-    /// what the daemon's own teardown queue can take once it is stopping the workspace, removing its
-    /// worktree, and dropping its record), an unreachable host, a certificate pin mismatch — and none
-    /// of them says anything about whether the daemon accepted the delete. Mirrors
-    /// `SpacesMobileAppModel.isIndeterminateDeleteOutcome` on iOS.
+    /// Only a refusal from the daemon is definitive, and it takes two things to prove one. First a Device
+    /// API error code, which `SpacesDeviceClientError` attaches exactly where it turns an `ok: false`
+    /// response into `.requestRejected`: every other failure this request can throw carries none — a
+    /// client-side timeout (`archiveWorkspace` allows 60s, well short of what the daemon's own teardown
+    /// queue can take once it is stopping the workspace, removing its worktree, and dropping its record),
+    /// an unreachable host, a certificate pin mismatch — and none of those says anything about whether
+    /// the daemon accepted the delete.
+    ///
+    /// Second, the code has to be a verdict on the request (`SpacesDeviceErrorCode.isRequestVerdict`)
+    /// rather than a report of something going wrong. A delete that succeeded and then failed while
+    /// building its refreshed overview answers with a coded `internalError`, and reading that as a refusal
+    /// would restore a row for a workspace that is already gone.
+    ///
+    /// Mirrors `SpacesMobileAppModel.isIndeterminateDeleteOutcome` on iOS; both share the verdict list.
     nonisolated static func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
-        (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode == nil
+        guard let code = (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode else { return true }
+        return !code.isRequestVerdict
     }
 
     /// Refetches `device`'s overview for `WorkspaceDeletionReconciler`, discarding the specific
