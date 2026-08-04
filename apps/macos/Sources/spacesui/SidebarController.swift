@@ -313,7 +313,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             previousLocalSection?.overview == localSection.overview && previousLocalSection?.compatibility == localSection.compatibility
             && previousLocalSection?.daemonStatus == localSection.daemonStatus && previousLocalSection?.loadState == localSection.loadState
         if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
-            host.deviceSections[localIndex] = localSection
+            // Whole-struct assignment bypasses `overview`'s `didSet`, so the install generation is carried
+            // over explicitly — otherwise it would reset to zero here on every local refresh and a deferred
+            // workspace delete would never observe fresh evidence for the local device.
+            host.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(from: previousLocalSection)
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }
@@ -1112,8 +1115,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             guard !visible.isEmpty else { return outlineItemRef(for: .emptyProject(project)) }
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
-                ?? WorkspaceSummary(
-                    id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isHidden: false, isDefault: false)
+                ?? WorkspaceSummary(id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         if case .workspace(let project, let workspace) = (item as? OutlineItemRef)?.item {

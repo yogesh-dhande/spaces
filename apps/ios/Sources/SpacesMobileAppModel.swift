@@ -1673,6 +1673,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving;
+        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`.
+        guard !workspaceIDsPendingDeletion.contains(workspace.id) else { return }
         await performWorkspaceMutation {
             let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
@@ -1703,7 +1706,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
     /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
     func deleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) async {
-        guard !isMutating else { return }
+        // A workspace already on its way out takes no further action. `isMutating` alone does not cover
+        // this: a delete whose outcome could not be confirmed leaves the mark on with the mutation over,
+        // so without the second guard the row could be deleted a second time while the first is unresolved.
+        // The Spaces tab suppresses the actions too; this is the same rule enforced where it cannot be
+        // bypassed by a view that forgets to ask.
+        guard !isMutating, !workspaceIDsPendingDeletion.contains(workspace.id) else { return }
         isMutating = true
         defer { isMutating = false }
         let identity = overviewIdentity

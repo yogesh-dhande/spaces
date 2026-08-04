@@ -215,33 +215,109 @@ import workspacecore
     /// The pure decision `resolveAwaitingWorkspaceDeletions` makes once a real overview lands for a
     /// workspace deferred to `.unknown`. No overview yet (the owning device hasn't installed one since
     /// the deferral — offline, not yet loaded, or the empty wire-incompatible placeholder) proves
-    /// nothing, so the entry keeps waiting rather than resolving on absence-of-evidence.
+    /// nothing, so the entry keeps waiting rather than resolving on absence-of-evidence. Generation is
+    /// unmoved here (0 == 0), matching "nothing has installed since the defer."
     @Test func noOverviewYetLeavesTheEntryAwaiting() {
-        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(overview: nil, workspaceID: "ws-deleting", branchDeletionRequested: false)
+        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+            overview: nil, overviewInstallGeneration: 0, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
+            branchDeletionRequested: false)
         #expect(verdict == .stillAwaiting)
     }
 
     /// An installed overview that still lists the workspace resolves the entry to `.present`: the held-
-    /// back error was real all along.
+    /// back error was real all along. Generation has advanced past its defer-time snapshot (1 > 0),
+    /// i.e. this is a fresh install for the owning device, not a stale rebuild rereading old data.
     @Test func anOverviewThatStillListsTheWorkspaceResolvesToPresent() {
         let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
         let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
-            overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: false)
+            overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
+            branchDeletionRequested: false)
         #expect(verdict == .present)
     }
 
     /// An installed overview that no longer lists the workspace resolves to `.gone` — silently unless
     /// branch deletion was requested, in which case the caller still owes the unknown-branch-outcome
     /// notice (reconciliation/deferred resolution can prove the workspace is gone, not what happened to
-    /// a branch the user explicitly asked to delete).
+    /// a branch the user explicitly asked to delete). Generation has advanced (1 > 0), so this is a
+    /// fresh install too.
     @Test func anOverviewWithoutTheWorkspaceResolvesToGoneAndCarriesTheBranchNoticeFlag() {
         let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: false)
-                == .gone(showsBranchOutcomeNotice: false))
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
+                branchDeletionRequested: false) == .gone(showsBranchOutcomeNotice: false))
         #expect(
-            AppKitController.resolveAwaitingWorkspaceDeletion(overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: true)
-                == .gone(showsBranchOutcomeNotice: true))
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: overview, overviewInstallGeneration: 1, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
+                branchDeletionRequested: true) == .gone(showsBranchOutcomeNotice: true))
+    }
+
+    /// The defect this generation gate exists to fix: `resolveAwaitingWorkspaceDeletions` is hooked off a
+    /// `workspacesByProject` rebuild that fires for *any* device's refresh, not just the owning device's,
+    /// and an offline owning device keeps its last-known (pre-delete) overview rather than clearing it.
+    /// A rebuild triggered by some other device must not settle the deferral by reading that untouched,
+    /// stale overview — even though it still lists the workspace, which without the generation gate would
+    /// read as damning `.present` evidence. Generation is unmoved (0 == 0), so nothing new has actually
+    /// been installed for this device since the defer, and the verdict must stay `.stillAwaiting`.
+    /// The local device's section is rebuilt and assigned whole on every ordinary refresh, which bypasses
+    /// `overview`'s `didSet`. Without carrying the counter over, the local generation would reset to zero
+    /// each time and a deferred local delete could never observe fresh evidence. Carrying it over must also
+    /// not manufacture evidence: re-installing the same (retained, stale) overview is not a new install.
+    @Test func rebuildingASectionWholeCarriesItsInstallGenerationAndCountsOnlyRealChanges() {
+        let firstOverview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+        var previous = AppKitController.DeviceSection(deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded)
+        previous.overview = firstOverview
+        let generationAfterFirstInstall = previous.overviewInstallGeneration
+
+        // An outage rebuild re-installs the retained overview unchanged: same evidence, same generation.
+        let retainedRebuild = AppKitController.DeviceSection(
+            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded, overview: firstOverview
+        ).adoptingOverviewInstallGeneration(from: previous)
+        #expect(retainedRebuild.overviewInstallGeneration == generationAfterFirstInstall)
+
+        // A rebuild carrying a genuinely new overview counts as one install.
+        let freshRebuild = AppKitController.DeviceSection(
+            deviceID: "local", deviceName: "Local", isLocal: true, loadState: .loaded,
+            overview: SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
+        ).adoptingOverviewInstallGeneration(from: previous)
+        #expect(freshRebuild.overviewInstallGeneration == generationAfterFirstInstall + 1)
+
+        // And that is what lets a deferred delete captured at the earlier generation finally settle.
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: retainedRebuild.overview, overviewInstallGeneration: retainedRebuild.overviewInstallGeneration,
+                overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false)
+                == .stillAwaiting)
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: freshRebuild.overview, overviewInstallGeneration: freshRebuild.overviewInstallGeneration,
+                overviewInstallGenerationAtDefer: generationAfterFirstInstall, workspaceID: "ws-deleting", branchDeletionRequested: false)
+                == .gone(showsBranchOutcomeNotice: false))
+    }
+
+    @Test func aRebuildWithNoFreshInstallForTheOwningDeviceStaysAwaitingEvenWithStaleOverviewListingIt() {
+        let staleOverview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+            overview: staleOverview, overviewInstallGeneration: 0, overviewInstallGenerationAtDefer: 0, workspaceID: "ws-deleting",
+            branchDeletionRequested: false)
+        #expect(verdict == .stillAwaiting)
+    }
+
+    /// The other side of the same gate: once the owning device's generation has actually advanced past
+    /// its defer-time snapshot — a real overview reinstalled for that device, not merely reread — the
+    /// deferral settles in both directions: gone (with the branch-notice flag preserved) or present.
+    @Test func aFreshInstallForTheOwningDeviceSettlesTheDeferralInBothDirections() {
+        let overviewWithoutWorkspace = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: overviewWithoutWorkspace, overviewInstallGeneration: 3, overviewInstallGenerationAtDefer: 2, workspaceID: "ws-deleting",
+                branchDeletionRequested: true) == .gone(showsBranchOutcomeNotice: true))
+
+        let overviewWithWorkspace = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(
+                overview: overviewWithWorkspace, overviewInstallGeneration: 3, overviewInstallGenerationAtDefer: 2, workspaceID: "ws-deleting",
+                branchDeletionRequested: false) == .present)
     }
 
     private func workspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {

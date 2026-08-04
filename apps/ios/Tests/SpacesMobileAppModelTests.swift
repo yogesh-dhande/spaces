@@ -678,6 +678,56 @@
             XCTAssertFalse(model.isMutating, "only the row is inert — the model is not stuck mid-mutation")
         }
 
+        /// While a delete's outcome is unresolved the mark is on but `isMutating` is false, so `isMutating`
+        /// alone no longer keeps the row inert. A second delete of the same workspace must be refused at
+        /// the model, not only suppressed in the view: the workspace is already on its way out, and the
+        /// daemon may well have finished removing it.
+        func testASecondDeleteOfAWorkspaceAlreadyPendingDeletionIsRefused() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isMutating, "the mutation is over — only the mark keeps the row inert")
+            let requestsAfterFirstDelete = await recorder.snapshot()
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            let requestsAfterSecondDelete = await recorder.snapshot()
+            XCTAssertEqual(requestsAfterSecondDelete.count, requestsAfterFirstDelete.count, "the second delete must issue nothing")
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "and must not disturb the unresolved first delete")
+        }
+
+        /// The same rule for Hide: a workspace whose delete is unresolved is leaving, so hiding it would
+        /// act on a row that is already going.
+        func testHidingAWorkspaceAlreadyPendingDeletionIsRefused() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            let requestsAfterDelete = await recorder.snapshot()
+
+            await model.hideWorkspace(overview.workspaces[0])
+
+            let requestsAfterHide = await recorder.snapshot()
+            XCTAssertEqual(requestsAfterHide.count, requestsAfterDelete.count, "the hide must issue nothing")
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
         /// The deferred delete is settled by the next overview that publishes: the workspace is gone, so it
         /// landed. The marking clears silently, and because branch deletion had been requested the user is
         /// told the branch outcome is unknown.

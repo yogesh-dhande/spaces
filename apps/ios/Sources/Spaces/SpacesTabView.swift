@@ -356,13 +356,18 @@ struct SpacesTabView: View {
                 // Lifecycle actions reach a row two ways: a long press opens the full menu (Rename
                 // included), a trailing swipe offers the lifecycle subset. Full swipe is off so an
                 // over-swipe cannot run or stop something on its own.
-                runtimeRow(row).disabled(isDeleting).opacity(isDeleting ? 0.5 : 1).bandListRow().swipeActions(edge: .trailing, allowsFullSwipe: false)
-                { runtimeSwipeActions(for: row) }.id(SpacesListRowID.runtimeRow(row.id))
+                // The swipe tray and the long-press menu are attached unconditionally so the row keeps its
+                // identity (a structural change here is what the collection view miscounts — see above),
+                // but they offer nothing while the workspace is deleting: `disabled` covers the row's own
+                // tap, not the action surfaces hanging off it.
+                runtimeRow(row, isDeleting: isDeleting).disabled(isDeleting).opacity(isDeleting ? 0.5 : 1).bandListRow().swipeActions(
+                    edge: .trailing, allowsFullSwipe: false
+                ) { if !isDeleting { runtimeSwipeActions(for: row) } }.id(SpacesListRowID.runtimeRow(row.id))
             }
         }
     }
 
-    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow, isDeleting: Bool) -> some View {
         if renamingRowID == row.id {
             renameRow(row)
         } else {
@@ -378,7 +383,7 @@ struct SpacesTabView: View {
             // Long-press only offers a menu when the row has something to offer. A row with neither a
             // lifecycle action nor a renamable name — an exited terminal whose session is gone, or a
             // process running without a configured entry — would otherwise open an empty menu.
-            if hasContextMenu(row) { button.contextMenu { runtimeContextMenu(for: row) } } else { button }
+            if hasContextMenu(row), !isDeleting { button.contextMenu { runtimeContextMenu(for: row) } } else { button }
         }
     }
 
@@ -537,8 +542,12 @@ struct SpacesTabView: View {
         BandRow(
             dotKind: nil, tile: TypeIconTile(systemName: workspace.isGitWorkspace ? "arrow.triangle.branch" : "folder"), title: workspace.displayName,
             detail: workspace.projectName, detailIsMonospaced: false
-        ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu { unhideButton(workspace) }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideButton(workspace) }.id(SpacesListRowID.hiddenWorkspace(workspace.id))
+        ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu {
+            // A workspace hidden from another client while this one's delete is still unresolved lands
+            // here; it is leaving either way, so it offers no unhide.
+            if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) }
+        }.swipeActions(edge: .trailing, allowsFullSwipe: false) { if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) } }.id(
+            SpacesListRowID.hiddenWorkspace(workspace.id))
     }
 
     /// No confirmation: unlike Hide (which can stop a running workspace), unhiding only changes
@@ -628,7 +637,12 @@ private struct WorkspaceBandActions: ViewModifier {
     private var canDelete: Bool { !workspace.isDefault }
 
     func body(content: Content) -> some View {
-        if model.isDemoModeEnabled {
+        // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
+        // workspace already marked for deletion is inert by contract. Disabling would still open the swipe
+        // tray and the context menu on a band whose workspace is on its way out; leaving the surfaces off
+        // entirely is what makes the row genuinely offer nothing. The mark outlives `isMutating` when a
+        // delete's outcome could not be confirmed, which is exactly when this matters.
+        if model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspace.id) {
             content
         } else {
             content.contextMenu {

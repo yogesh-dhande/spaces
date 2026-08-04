@@ -376,6 +376,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let error: Error
         let branchDeletionRequested: Bool
         let browserSessionTargetURLs: [String]
+        /// `deviceID`'s `DeviceSection.overviewInstallGeneration` at the moment reconciliation gave up.
+        /// Resolution waits for a fresh install for this exact device — one whose generation exceeds
+        /// this snapshot — rather than settling on any `workspacesByProject` rebuild, which fires for
+        /// every device's refresh and would otherwise reread this device's own untouched cached overview
+        /// as if it were new evidence.
+        let overviewInstallGenerationAtDefer: Int
     }
 
     /// Workspaces whose delete reconciliation exhausted its attempt budget without a single overview
@@ -2596,7 +2602,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var workspacesByProject: [String: [WorkspaceSummary]] = [:]
         var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
         var alertsGroups: [AlertsGroup] = []
-        var overview: SpacesDeviceOverviewPayload?
+        /// Bumped by `overview`'s `didSet` on every reassignment after this section already exists —
+        /// once per overview-install event for this device, from whichever path installs it (a local
+        /// snapshot refresh, a remote pull/subscription in `SidebarController`, or a mutation response
+        /// in this file). A struct's own memberwise init never routes through property observers, so a
+        /// section's initial construction leaves this at its default rather than counting as an install.
+        ///
+        /// `resolveAwaitingWorkspaceDeletions` uses this to tell "fresh evidence for the owning device
+        /// arrived" apart from "some other device's refresh re-ran the `workspacesByProject` didSet,
+        /// which reread this device's untouched, possibly stale, cached overview" — the bug this guards
+        /// against: an offline owning device keeps its last-known overview, and a rebuild triggered by
+        /// any other device would otherwise draw a delete verdict from evidence that predates the
+        /// delete.
+        ///
+        /// The local device's section is not mutated in place on an ordinary refresh — it is rebuilt and
+        /// assigned whole (`SidebarController.rebuildFlatSidebarData()`), which bypasses `didSet` — so that
+        /// path carries the counter forward explicitly via `adoptingOverviewInstallGeneration(from:)`.
+        /// Without that, the local counter would reset to zero on every refresh and a deferred delete for a
+        /// local workspace would never see fresh evidence at all.
+        private(set) var overviewInstallGeneration = 0
+        var overview: SpacesDeviceOverviewPayload? { didSet { overviewInstallGeneration += 1 } }
+
+        /// Carries `previous`'s install generation into this freshly built section, counting one new
+        /// install only when the overview it carries actually differs from the one it replaces. An outage
+        /// rebuild that re-installs the retained (stale) overview is deliberately not an install: it is the
+        /// same evidence, and a deferred delete must not be settled by it.
+        func adoptingOverviewInstallGeneration(from previous: DeviceSection?) -> DeviceSection {
+            guard let previous else { return self }
+            var section = self
+            section.overviewInstallGeneration = previous.overviewInstallGeneration + (overview == previous.overview ? 0 : 1)
+            return section
+        }
         /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
         /// the first successful handshake; drives the per-device compatibility banner and gating.
         var daemonStatus: TerminalServiceDaemonStatus?
@@ -2912,10 +2948,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// type driven by an injected overview rather than a live device connection. `overview` is whatever
     /// `deviceSections` currently has installed for the workspace's owning device — `nil` until that
     /// device's next overview install actually lands.
+    ///
+    /// `overviewInstallGeneration` and `overviewInstallGenerationAtDefer` gate the verdict on *fresh*
+    /// evidence for the owning device: `resolveAwaitingWorkspaceDeletions` is hooked off a
+    /// `workspacesByProject` rebuild that fires for every device's refresh, not just the owning device's,
+    /// and an offline owning device keeps its last-known (pre-delete) overview rather than clearing it.
+    /// Without this check, some other device's refresh would trigger a rebuild that rereads the owning
+    /// device's untouched cached overview, sees the workspace still listed, and wrongly concludes
+    /// `.present` — a verdict drawn from evidence that predates the delete. Requiring the generation to
+    /// have advanced past its captured-at-defer snapshot means the verdict is only drawn once this
+    /// specific device's overview has actually been reinstalled since the defer.
     nonisolated static func resolveAwaitingWorkspaceDeletion(
-        overview: SpacesDeviceOverviewPayload?, workspaceID: String, branchDeletionRequested: Bool
+        overview: SpacesDeviceOverviewPayload?, overviewInstallGeneration: Int, overviewInstallGenerationAtDefer: Int, workspaceID: String,
+        branchDeletionRequested: Bool
     ) -> AwaitingWorkspaceDeletionResolutionVerdict {
-        guard let overview else { return .stillAwaiting }
+        guard let overview, overviewInstallGeneration > overviewInstallGenerationAtDefer else { return .stillAwaiting }
         if overview.workspaces.contains(where: { $0.id == workspaceID }) { return .present }
         return .gone(showsBranchOutcomeNotice: branchDeletionRequested)
     }
@@ -8932,7 +8979,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         // any other mutation's response — and resolves it (`resolveAwaitingWorkspaceDeletions`).
                         self.workspaceIDsAwaitingDeletionResolution[id] = AwaitingWorkspaceDeletionResolution(
                             deviceID: device.id, error: error, branchDeletionRequested: deleteLocalBranch || deleteRemoteBranch,
-                            browserSessionTargetURLs: browserSessionTargetURLs)
+                            browserSessionTargetURLs: browserSessionTargetURLs,
+                            overviewInstallGenerationAtDefer: self.deviceSections.first(where: { $0.deviceID == device.id })?
+                                .overviewInstallGeneration ?? 0)
                     case .present:
                         // An overview resolved and still lists the workspace: the row goes back to normal
                         // and the held error is real.
@@ -9448,12 +9497,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// another device's, and a device whose current overview is `nil` — offline, not yet loaded, or the
     /// empty placeholder a wire-incompatible daemon answers with — has proved nothing either way, so
     /// that entry is left waiting for a later install with real data.
+    ///
+    /// This `didSet` fires for a rebuild triggered by *any* device's refresh, not just the owning
+    /// device's, so an overview alone is not enough evidence: an offline owning device keeps its
+    /// last-known (pre-delete) overview rather than clearing it, and reading that stale snapshot on a
+    /// rebuild some other device caused would draw a verdict that predates the delete. Each entry also
+    /// captures the owning device's `overviewInstallGeneration` at defer time and only resolves once
+    /// that device's own generation has advanced past it — i.e. once this specific device has actually
+    /// reinstalled an overview since the defer, not merely been read again.
     private func resolveAwaitingWorkspaceDeletions() {
         guard !workspaceIDsAwaitingDeletionResolution.isEmpty else { return }
         for (workspaceID, pending) in workspaceIDsAwaitingDeletionResolution {
-            let overview = deviceSections.first(where: { $0.deviceID == pending.deviceID })?.overview
+            // A missing section (device unpaired mid-defer) falls back to comparing the captured
+            // generation against itself, i.e. `.stillAwaiting` — there is no fresher evidence to read.
+            let section = deviceSections.first(where: { $0.deviceID == pending.deviceID })
             switch Self.resolveAwaitingWorkspaceDeletion(
-                overview: overview, workspaceID: workspaceID, branchDeletionRequested: pending.branchDeletionRequested)
+                overview: section?.overview,
+                overviewInstallGeneration: section?.overviewInstallGeneration ?? pending.overviewInstallGenerationAtDefer,
+                overviewInstallGenerationAtDefer: pending.overviewInstallGenerationAtDefer, workspaceID: workspaceID,
+                branchDeletionRequested: pending.branchDeletionRequested)
             {
             case .stillAwaiting: continue
             case .present:
