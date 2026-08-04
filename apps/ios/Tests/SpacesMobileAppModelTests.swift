@@ -973,6 +973,25 @@
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "no teardown reported and no local delete: an ordinary row")
         }
 
+        /// A workspace's unrepresented sessions form a loose band further down the same list, so a delete
+        /// running against that workspace has to mark those rows as well as its own band — they are rows
+        /// of a workspace mid-teardown, and tapping one opens a terminal in a worktree being removed. The
+        /// group stays listed for as long as the overview carries the workspace (sessions of a workspace
+        /// already dropped form no group at all), and it reads the mark from that workspace.
+        func testLooseTerminalGroupOfAWorkspaceBeingDeletedIsMarked() {
+            let model = makeModel()
+            let overview = makeOverview(sessions: [makeSession(id: "session-loose")])
+            model.overview = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces, sessions: overview.sessions,
+                workspaceIDsWithTeardownInFlight: ["workspace-feature"], daemonStatus: overview.daemonStatus)
+
+            let looseGroup = model.terminalGroups.first { $0.workspaceID == "workspace-feature" }
+
+            XCTAssertNotNil(looseGroup, "the workspace is still listed, so its loose sessions still band under it")
+            XCTAssertEqual(looseGroup?.sessions.map(\.id), ["session-loose"])
+            XCTAssertTrue(model.isWorkspacePendingDeletion(looseGroup?.workspaceID ?? ""), "the loose band reads the same mark its workspace does")
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {

@@ -153,7 +153,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     self.toggleProjectExpanded(projectID: project.id)
                     return true
                 }
-                // A non-git project row stands in for its single workspace, so it stays selectable.
+                // A non-git project row stands in for its single workspace, so it stays selectable — and
+                // swallows the click while that workspace is marked as deleting, exactly as a workspace
+                // row does: neither selecting nor expanding a project on its way out.
+                guard self.projectRowState(project).isInteractive else { return true }
                 // Also toggle its runtime-target list on click, matching how git project and workspace
                 // rows respond to a row click; returning false lets normal row selection proceed.
                 self.toggleProjectExpanded(projectID: project.id)
@@ -1054,16 +1057,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return visibleWorkspaces(projectID: project.id).first
     }
 
+    /// How a project's sidebar row renders and responds. A non-git project row is its single workspace's
+    /// row, so it reads that workspace's state and is marked while its delete runs — a project delete
+    /// reported by another client marks the row here just as a workspace delete marks a `.workspace` row.
+    private func projectRowState(_ project: ProjectSummary) -> AppKitController.SidebarWorkspaceRowState {
+        AppKitController.sidebarProjectRowState(
+            standInWorkspaceIsPendingDeletion: nonGitProjectTargetWorkspace(project).map { host.isWorkspaceMarkedDeleting($0.id) })
+    }
+
+    /// The runtime targets listed under a non-git project's stand-in row. A row marked as deleting lists
+    /// none, matching `workspaceRuntimeTargetChildren`, so the subtree of a workspace on its way out is
+    /// hidden whatever the user's expansion state.
+    private func nonGitProjectRuntimeTargetChildren(_ project: ProjectSummary) -> [SidebarRuntimeTargetItem] {
+        guard let workspace = nonGitProjectTargetWorkspace(project), projectRowState(project).listsRuntimeTargetChildren else { return [] }
+        return runtimeTargetItems(workspaceID: workspace.id)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return showsDeviceHeaders ? host.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             // Non-git projects own exactly one workspace (the project directory) and render
             // as a single flat row; their children are that workspace's runtime targets.
-            guard project.isGitRepo else {
-                guard let workspace = nonGitProjectTargetWorkspace(project) else { return 0 }
-                return runtimeTargetItems(workspaceID: workspace.id).count
-            }
+            guard project.isGitRepo else { return nonGitProjectRuntimeTargetChildren(project).count }
             return max(visibleWorkspaces(projectID: project.id).count, 1)
         }
         if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return workspaceRuntimeTargetChildren(workspace).count }
@@ -1080,10 +1096,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if case .device = (item as? OutlineItemRef)?.item { return true }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
-            guard project.isGitRepo else {
-                guard let workspace = nonGitProjectTargetWorkspace(project) else { return false }
-                return !runtimeTargetItems(workspaceID: workspace.id).isEmpty
-            }
+            guard project.isGitRepo else { return !nonGitProjectRuntimeTargetChildren(project).isEmpty }
             return true
         }
         if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !workspaceRuntimeTargetChildren(workspace).isEmpty }
@@ -1096,8 +1109,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         switch (item as? OutlineItemRef)?.item {
         case .device, .emptyProject, .runtimeTarget: return false
         // A row marked as deleting is inert: it refuses selection here, which also covers arrow-key
-        // navigation and window cycling, since both select through the outline view.
+        // navigation and window cycling, since both select through the outline view. A non-git project's
+        // row is its workspace's row, so it refuses selection on the same terms.
         case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive
+        case .project(let project) where !project.isGitRepo: return projectRowState(project).isInteractive
         default: return true
         }
     }
@@ -1111,7 +1126,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             if let workspace = nonGitProjectTargetWorkspace(project) {
-                let items = runtimeTargetItems(workspaceID: workspace.id)
+                let items = nonGitProjectRuntimeTargetChildren(project)
                 if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
             }
             let visible = visibleWorkspaces(projectID: project.id)
@@ -1272,6 +1287,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-project-\(project.id)")
         let usesGroupedWorkspaceSelection = isSelected && !project.isGitRepo && host.selectedWorkspaceID != nil
+        // A non-git project row is its single workspace's row, so it carries that workspace's delete.
+        let rowState = projectRowState(project)
+        cell.alphaValue = rowState.alpha
 
         let rowBackground = NSView()
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
@@ -1303,28 +1321,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // shows a muted connected-nodes glyph; a non-git project is a plain directory, so it shows a
         // folder tinted by its single workspace's run state — green when running, muted when stopped —
         // which is a prominent status without mimicking a workspace's leading dot.
-        let leadingIcon = NSImageView()
-        leadingIcon.translatesAutoresizingMaskIntoConstraints = false
-        leadingIcon.widthAnchor.constraint(equalToConstant: 13).isActive = true
-        leadingIcon.heightAnchor.constraint(equalToConstant: 13).isActive = true
-        if project.isGitRepo {
-            // The marketing site's project glyph (connected nodes) marks a git project without reading
-            // as the ubiquitous branch icon.
-            let glyph = RowPrimitives.projectGlyphImage()
-            glyph.accessibilityDescription = "Git project"
-            leadingIcon.image = glyph
-            leadingIcon.contentTintColor = .tertiaryLabelColor
-            leadingIcon.toolTip = "Git repository"
+        // While the stand-in row's delete runs, that slot carries a spinner instead of the folder, the way
+        // a workspace row trades its status dot for one: the run state it would report is on its way out.
+        let leadingIndicator: NSView
+        if rowState.showsDeletingProgress, let workspace = nonGitProjectTargetWorkspace(project) {
+            leadingIndicator = deletingProgressIndicator(workspaceID: workspace.id)
         } else {
-            let workspace = visibleWorkspaces(projectID: project.id).first
-            let lifecycleRunning =
-                (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
-                    ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
-            leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
-            leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-            leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+            let leadingIcon = NSImageView()
+            if project.isGitRepo {
+                // The marketing site's project glyph (connected nodes) marks a git project without reading
+                // as the ubiquitous branch icon.
+                let glyph = RowPrimitives.projectGlyphImage()
+                glyph.accessibilityDescription = "Git project"
+                leadingIcon.image = glyph
+                leadingIcon.contentTintColor = .tertiaryLabelColor
+                leadingIcon.toolTip = "Git repository"
+            } else {
+                let workspace = nonGitProjectTargetWorkspace(project)
+                let lifecycleRunning =
+                    (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
+                        ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
+                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
+                leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+                leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+            }
+            leadingIndicator = leadingIcon
         }
-        leadingStack.addArrangedSubview(leadingIcon)
+        leadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        leadingIndicator.widthAnchor.constraint(equalToConstant: 13).isActive = true
+        leadingIndicator.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        leadingStack.addArrangedSubview(leadingIndicator)
         leadingStack.addArrangedSubview(titleLabel)
 
         let accessoryStack = NSStackView()
@@ -1344,7 +1370,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
         let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo)
-        if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
+        // A marked row carries no controls, like the workspace row it stands in for: opening settings for
+        // a project whose sole workspace is being removed is an interaction the row refuses. (Add
+        // Workspace belongs to git projects only, whose rows stand in for nothing and are never marked.)
+        if projectActions.showsSettings, rowState.isInteractive { accessoryStack.addArrangedSubview(settingsButton) }
 
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
@@ -1698,9 +1727,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // being removed, and the delete already running is the one thing happening to it.
         case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive ? workspaceContextMenu(workspace: workspace) : nil
         // A non-git project's row stands in for its single workspace, so its right-click menu offers
-        // the same workspace actions, resolved to that lone visible workspace.
+        // the same workspace actions, resolved to that lone visible workspace — and offers none at all
+        // once that workspace is marked as deleting, on the same terms as a `.workspace` row.
         case .project(let project) where !project.isGitRepo:
-            guard let workspace = visibleWorkspaces(projectID: project.id).first else { return nil }
+            guard let workspace = nonGitProjectTargetWorkspace(project), projectRowState(project).isInteractive else { return nil }
             return workspaceContextMenu(workspace: workspace)
         default: return nil
         }

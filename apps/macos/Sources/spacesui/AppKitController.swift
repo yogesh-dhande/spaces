@@ -2728,6 +2728,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             alpha: unreachableDeviceAlpha, showsDeletingProgress: true, listsRuntimeTargetChildren: false, isInteractive: false)
     }
 
+    /// The row treatment for a project row, keyed on the workspace its row stands in for. A non-git
+    /// project owns exactly one workspace and has no `.workspace` row of its own — the project row is that
+    /// workspace's row — so it renders and responds to the workspace's marked state. A git project row
+    /// stands in for no workspace (`nil`) and is never marked: its own workspaces carry their marks.
+    /// Pure so the stand-in contract is directly testable.
+    nonisolated static func sidebarProjectRowState(standInWorkspaceIsPendingDeletion: Bool?) -> SidebarWorkspaceRowState {
+        sidebarWorkspaceRowState(isPendingDeletion: standInWorkspaceIsPendingDeletion == true)
+    }
+
     /// The opacity a row inherits from its owning device's load state. A device that is not loaded —
     /// unreachable, or reconnecting after an outage — keeps its rows listed but dimmed, so the subtree
     /// reads as browsable-but-not-actionable. This is the same treatment the add-project device picker

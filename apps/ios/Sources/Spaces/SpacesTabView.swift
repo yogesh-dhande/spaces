@@ -110,7 +110,8 @@ struct SpacesTabView: View {
                         let _ = SpacesListIdentityDump.record(
                             listIdentitySections,
                             state: "pendingDelete=\(pendingDeleteWorkspace?.id ?? "none") pendingHide=\(pendingHideWorkspace?.id ?? "none") "
-                                + "mutating=\(model.isMutating) marked=\(model.overview?.workspaces.filter { model.isWorkspacePendingDeletion($0.id) }.map(\.id).joined(separator: "+") ?? "")")
+                                + "mutating=\(model.isMutating) marked=\(model.overview?.workspaces.filter { model.isWorkspacePendingDeletion($0.id) }.map(\.id).joined(separator: "+") ?? "")"
+                        )
                     #endif
                     Section {
                         homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
@@ -577,6 +578,12 @@ struct SpacesTabView: View {
     /// the collection view miscounts.
     @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
         let workspace = model.overview?.workspaces.first { $0.id == group.workspaceID }
+        // A loose group belongs to a workspace this list is still showing, so a delete running against
+        // that workspace marks these rows exactly as it marks the workspace's own band: dimmed and inert,
+        // whether this device issued the delete or the daemon reports another client's teardown. Sessions
+        // of a workspace the overview has already dropped form no group at all (see `terminalGroups`), so
+        // what is marked here is always a workspace still listed beside these rows.
+        let isDeleting = model.isWorkspacePendingDeletion(group.workspaceID)
         Section {
             HeaderBand {
                 WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
@@ -586,20 +593,25 @@ struct SpacesTabView: View {
                 // Identified as the loose band it is, not as the workspace: the workspace's own band
                 // already carries `workspace.band.<id>`, and two rows answering to one identifier is what
                 // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
-            }.accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
+            }.opacity(isDeleting ? 0.5 : 1).accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").accessibilityValue(
+                isDeleting ? "Deleting" : ""
+            ).bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
         }
-        ForEach(group.sessions) { session in Section { terminalSessionRow(session).bandListRow().id(SpacesListRowID.looseSession(session.id)) } }
+        ForEach(group.sessions) { session in
+            Section { terminalSessionRow(session, isDeleting: isDeleting).bandListRow().id(SpacesListRowID.looseSession(session.id)) }
+        }
     }
 
-    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
+    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary, isDeleting: Bool) -> some View {
         Button {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
             BandRow(
                 dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""
             ) { RowChevron() }
-        }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
-            "terminal.row.\(session.id)")
+        }.buttonStyle(.plain).disabled(isDeleting || model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).opacity(
+            isDeleting ? 0.5 : 1
+        ).accessibilityIdentifier("terminal.row.\(session.id)")
     }
 }
 

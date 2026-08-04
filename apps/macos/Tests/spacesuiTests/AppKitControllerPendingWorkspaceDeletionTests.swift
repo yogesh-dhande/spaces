@@ -95,6 +95,24 @@ import workspacecore
         #expect(!AppKitController.isWorkspaceMarkedDeleting(workspaceID: "ws-deleting", pendingDeletionWorkspaceIDs: [], deviceOverview: nil))
     }
 
+    /// A non-git project owns one workspace and gives it no row of its own: the project row stands in for
+    /// it. That row therefore has to render and respond to the workspace's marked state — a project delete
+    /// reported by another client would otherwise leave its menu, selection, expansion and click intact
+    /// while the worktree is being removed. A git project's row stands in for no workspace, so nothing
+    /// marks it; the workspace rows beneath it carry their own marks.
+    @Test func aNonGitProjectStandInRowTakesItsWorkspacesMarkedState() {
+        let marked = AppKitController.sidebarProjectRowState(standInWorkspaceIsPendingDeletion: true)
+        #expect(marked == AppKitController.sidebarWorkspaceRowState(isPendingDeletion: true))
+        #expect(marked.alpha == AppKitController.unreachableDeviceAlpha)
+        #expect(marked.showsDeletingProgress)
+        #expect(!marked.listsRuntimeTargetChildren)
+        #expect(!marked.isInteractive)
+
+        let normal = AppKitController.sidebarWorkspaceRowState(isPendingDeletion: false)
+        #expect(AppKitController.sidebarProjectRowState(standInWorkspaceIsPendingDeletion: false) == normal)
+        #expect(AppKitController.sidebarProjectRowState(standInWorkspaceIsPendingDeletion: nil) == normal)
+    }
+
     private func deviceWorkspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "proj", projectName: "Project", branch: id, baseBranch: "main", dir: "/project-\(id)", isRunning: false,

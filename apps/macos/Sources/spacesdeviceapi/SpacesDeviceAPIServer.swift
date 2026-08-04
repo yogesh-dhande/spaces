@@ -2168,6 +2168,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         // Every workspace of the project is torn down by this, so every one of them is reported as
         // deleting — a client watching any of them sees the same fact an archive publishes.
+        //
+        // Accepted risk: this snapshot is read before `removeProject` claims the project gate, so a
+        // workspace created in the gap is deleted by the gated re-read inside `removeProject` without
+        // ever being registered here. Registering the gated set instead would mean registering after
+        // teardown work has begun, giving every overview built in that window an unreported teardown —
+        // a worse trade than a race that needs a same-moment create-vs-delete of one project across
+        // clients and costs only a row that stays ordinary until the next overview drops it.
         let workspaceIDs = try store.workspaces(projectID: project.id).map(\.id)
         try withTeardownRegistered(workspaceIDs: workspaceIDs) { try orchestrator.removeProject(id: project.id) }
         return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
