@@ -592,6 +592,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         deviceReachabilityWatchdogTimer = timer
     }
 
+    /// Whether a pull that reports a device as reachable-but-blocked has to rebuild the outline. The
+    /// watchdog re-pulls a blocked device on every tick, so the steady case — the same verdict on an
+    /// already-blocked section that has already had its rows cleared — must touch nothing, or the user
+    /// would lose scroll position and project expansion every 15s while they read the block. Pure so the
+    /// rule is directly testable.
+    nonisolated static func blockedSectionRebuildsOutline(wasLoaded: Bool, statusUnchanged: Bool, hadOverview: Bool) -> Bool {
+        !wasLoaded || !statusUnchanged || hadOverview
+    }
+
+    /// Whether a remote section is re-pulled on a watchdog tick.
+    ///
+    /// Any section that is not loaded is re-probed: offline, and equally a section left at "loading…" by
+    /// an attempt whose result never arrived. A section only returns to loaded when an overview arrives,
+    /// so this pull is the only way back for a device whose stream is healthy but silent.
+    ///
+    /// A blocked device is pulled as well, even though its section is loaded. It is deliberately loaded —
+    /// reachable, just unusable — and its subscription is parked, so nothing else would ever touch it: it
+    /// would keep offering Resolve long after the machine was powered off, and a daemon updated on that
+    /// machine would stay blocked in the app until the user reloaded. The pull answers both, since it is
+    /// what reads the verdict in the first place: it fails once the device stops answering (offline, with
+    /// a Reconnect action), and it reports a compatible daemon once one is running, which clears the block
+    /// and puts the device back in the subscription's desired set.
+    ///
+    /// A healthy loaded device is left alone — its stream is what keeps it current, and dialing every
+    /// paired remote every 15s to learn nothing is exactly the cost this rule exists to avoid.
+    /// Pure so the rule is directly testable.
+    nonisolated static func watchdogShouldPullSection(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
+        loadState != .loaded || compatibility?.isCompatible == false
+    }
+
     /// One reconciliation pass over device reachability. Everything that brings a device back —
     /// a disconnect callback firing, an overview arriving on a stream, the local snapshot succeeding —
     /// is a single event that can simply not happen: a stream can be reconnected yet never deliver
@@ -603,12 +633,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         refreshRemoteOverviewSubscriptions()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
-            // Any section that is not loaded is re-probed: offline, and equally a section left at
-            // "loading…" by an attempt whose result never arrived. Deliberately bypasses the freshness
-            // gate — such a section holds no data worth protecting, and a section only returns to loaded
-            // when an overview arrives, so this pull is the only way back for a device whose stream is
-            // healthy but silent.
-            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }), section.loadState != .loaded else { continue }
+            // Pulling here deliberately skips the freshness gate `loadRemoteDeviceSections` applies: an
+            // eligible section either holds no data worth protecting or holds a verdict that is exactly
+            // what this tick exists to re-check. The pull's own failure backoff still paces a device that
+            // has stopped answering.
+            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }),
+                Self.watchdogShouldPullSection(loadState: section.loadState, compatibility: section.compatibility)
+            else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: false)
         }
@@ -853,7 +884,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     host.selectedWorkspaceID.map { wsID in
                         host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
                     } ?? false
-                let changed = !wasLoaded || !statusUnchanged || host.deviceSections[index].overview != nil
+                let changed = Self.blockedSectionRebuildsOutline(
+                    wasLoaded: wasLoaded, statusUnchanged: statusUnchanged, hadOverview: host.deviceSections[index].overview != nil)
                 host.deviceSections[index].projects = []
                 host.deviceSections[index].workspacesByProject = [:]
                 host.deviceSections[index].workspaceRuntimeStatusByID = [:]

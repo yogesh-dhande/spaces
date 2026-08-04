@@ -358,9 +358,8 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(desired == ["device-fresh", "device-offline"])
     }
 
-    /// Recovery is self-healing: the user updates the daemon and reloads (or the in-app restart flow
-    /// forces one), the pull reports a compatible daemon, and the device re-enters the desired set so
-    /// the next reconcile opens its subscription again.
+    /// Recovery is self-healing: the pull reports a compatible daemon, and the device re-enters the
+    /// desired set so the next reconcile opens its subscription again.
     @Test func aDeviceThatBecomesCompatibleIsSubscribedAgain() {
         let deviceID = "device-old"
         #expect(
@@ -370,6 +369,46 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(
             SidebarController.overviewSubscriptionDesiredIDs(
                 credentialedRemoteIDs: [deviceID], sections: [section(deviceID, compatibility: .compatible)]) == [deviceID])
+    }
+
+    /// A blocked device deliberately holds a `.loaded` section — it is reachable, just unusable — so the
+    /// watchdog's "not loaded" rule would leave it with nothing probing it at all once its subscription
+    /// is parked. It would then keep showing Resolve after the machine was powered off, and a daemon
+    /// updated out-of-band would stay blocked until the user reloaded. The pull is what covers both: it
+    /// fails when the device dies (offline, Reconnect) and reports the fresh verdict when it recovers.
+    @Test func theWatchdogPullsABlockedDeviceThatIsOtherwiseUnprobed() {
+        #expect(SidebarController.watchdogShouldPullSection(loadState: .loaded, compatibility: .daemonTooOld))
+        #expect(SidebarController.watchdogShouldPullSection(loadState: .loaded, compatibility: .clientTooOld))
+    }
+
+    /// A healthy device's stream is what keeps it current, so re-pulling it every 15s would dial every
+    /// paired remote forever for nothing.
+    @Test func theWatchdogLeavesAHealthyLoadedDeviceAlone() {
+        #expect(!SidebarController.watchdogShouldPullSection(loadState: .loaded, compatibility: .compatible))
+        #expect(!SidebarController.watchdogShouldPullSection(loadState: .loaded, compatibility: nil))
+    }
+
+    /// Unchanged from the rule the watchdog always had: an offline section, and equally one left at
+    /// "loading…" by an attempt whose result never arrived, are both re-probed whatever they last knew
+    /// about compatibility — the offline transition drops the verdict, so it is `nil` by then anyway.
+    @Test func theWatchdogPullsEverySectionThatIsNotLoaded() {
+        #expect(SidebarController.watchdogShouldPullSection(loadState: .offline("Connection refused"), compatibility: nil))
+        #expect(SidebarController.watchdogShouldPullSection(loadState: .loading, compatibility: nil))
+    }
+
+    /// The tick that keeps a blocked device honest must be invisible while nothing about it changes: the
+    /// user reading the block would otherwise lose scroll position and project expansion every 15s.
+    @Test func aRepeatedBlockedPullLeavesTheOutlineAlone() {
+        #expect(!SidebarController.blockedSectionRebuildsOutline(wasLoaded: true, statusUnchanged: true, hadOverview: false))
+    }
+
+    /// Every way a blocked pull carries news does rebuild: the device crossing into blocked from offline
+    /// or loading, its verdict or daemon status moving (a staged update appearing changes the remedy the
+    /// block offers), and the first blocked pull after the device was usable, whose rows have to go.
+    @Test func aBlockedPullThatCarriesNewsRebuildsTheOutline() {
+        #expect(SidebarController.blockedSectionRebuildsOutline(wasLoaded: false, statusUnchanged: true, hadOverview: false))
+        #expect(SidebarController.blockedSectionRebuildsOutline(wasLoaded: true, statusUnchanged: false, hadOverview: false))
+        #expect(SidebarController.blockedSectionRebuildsOutline(wasLoaded: true, statusUnchanged: true, hadOverview: true))
     }
 }
 
