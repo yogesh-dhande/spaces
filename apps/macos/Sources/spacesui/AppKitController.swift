@@ -2071,8 +2071,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let clientID = remoteClientStore.current() else {
                     return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
                 }
-                let ownerEpoch = stateModel.latestRemoteStatePayload?.renderOwnerEpoch ?? 0
-                return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
+                // Send whatever owner epoch the cached payload carries, absent included: a payload with no
+                // render owner epoch (an owner change, or an input-reason payload) means this paste is not
+                // epoch-gated, exactly like every other input path this pane sends.
+                return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: stateModel.latestRemoteStatePayload?.renderOwnerEpoch)
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                 let response = try Self.sendDeviceTerminalControl(
