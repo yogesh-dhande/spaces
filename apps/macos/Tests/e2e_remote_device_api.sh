@@ -4,13 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+source "$SCRIPT_DIR/pairing_link_endpoint.sh"
 spaces_e2e_require_remote_host_env "$ROOT_DIR"
 
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 REMOTE_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
 REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_HOST}"
+REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-}"
 REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 # This lane runs its own isolated remote daemon as a development profile, so it never touches the
 # remote account's installed profile. The profile name fixes the root, the unit instance, and the
@@ -69,6 +70,12 @@ remote_ssh() {
   while IFS= read -r arg; do args+=("$arg"); done < <(ssh_args)
   ssh "${args[@]}" "$(remote_destination)" "$@"
 }
+
+if [[ -z "$REMOTE_DAEMON_HOST" ]]; then
+  ssh_option_args=()
+  while IFS= read -r arg; do ssh_option_args+=("$arg"); done < <(ssh_args)
+  REMOTE_DAEMON_HOST="$(resolve_ssh_hostname "$(remote_destination)" "${ssh_option_args[@]}")"
+fi
 
 remote_expand_path() {
   local quoted

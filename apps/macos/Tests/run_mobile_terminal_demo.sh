@@ -7,6 +7,7 @@ source "$repo_root/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$repo_root"
 source "$script_dir/terminal_harness_lock.sh"
 source "$script_dir/e2e_fixture_repos.sh"
+source "$script_dir/pairing_link_endpoint.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 source "$repo_root/scripts/ios-simulator-lifecycle.sh"
 # Drop any binding this shell was started with, before anything resolves a profile or runs a demo child.
@@ -33,11 +34,15 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-# The demo pairs with the remote account's INSTALLED daemon: pairing runs through
-# `spacese2e open-remote-device-pairing-window`, which drives the installed profile's CLI. So the
-# artifact is installed with no profile selector, and the daemon answers on the canonical Device API
-# port every installed profile binds by default. Only the extraction scratch root is E2E-scoped.
-remote_demo_daemon_port=47847
+# The demo's remote daemon is a development profile of its own, so this lane never touches the remote
+# account's installed profile -- the one real paired clients talk to. The profile name fixes the
+# profile root, the systemd instance, and the CLI this lane opens pairing windows through; the daemon
+# assigns its own Device API port and persists it, so the port is read back after install rather than
+# chosen here. Only the extraction scratch root is E2E-scoped.
+remote_demo_profile_name="remote-mobile-demo"
+remote_demo_profile_root="~/.spaces-dev/profiles/spaces/$remote_demo_profile_name"
+remote_demo_cli="$remote_demo_profile_root/daemon/current/bin/spaces"
+remote_demo_daemon_port=""
 remote_demo_install_root="~/.spaces/remote-demo-e2e"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
@@ -46,8 +51,6 @@ if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
   remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
   remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 fi
-remote_pairing_json=""
-remote_pairing_window_json=""
 pairing_link=""
 pairing_code=""
 pairing_nonce=""
@@ -765,41 +768,25 @@ pair_remote_demo_device() {
     return
   fi
 
-  local -a args=(pair-remote-device --ssh-host "$remote_ssh_host")
-  if [[ -n "$remote_ssh_user" ]]; then
-    args+=(--ssh-user "$remote_ssh_user")
-  fi
-  if [[ -n "$remote_ssh_port" ]]; then
-    args+=(--ssh-port "$remote_ssh_port")
-  fi
-
-  remote_pairing_json="$temp_root/remote-device-pairing.json"
   prepare_remote_demo_daemon
-  echo "Pairing Mac client with remote spacesd at $remote_ssh_host..."
-  if ! run_demo_env \
-    HOME="$demo_home" \
-    "$spacese2e" "${args[@]}" >"$remote_pairing_json"; then
-    echo "Failed to pair remote demo device over SSH." >&2
-    cat "$remote_pairing_json" >&2 || true
+  # The forward is established before anything pairs, and every endpoint the demo hands a client is
+  # the forward's. The demo must work from a network where the remote's Device API port is not
+  # reachable at all, so nothing here -- not even this Mac's own pairing -- dials that port directly;
+  # SSH is the only route to the daemon.
+  start_remote_device_forward
+  echo "Pairing Mac client with the remote demo profile at $remote_ssh_host..."
+  open_remote_demo_pairing_window
+  local pair_output
+  if ! pair_output="$(run_demo_env HOME="$demo_home" "$spaces_cli" device pair --link "$remote_pairing_link")"; then
+    echo "Failed to pair the Mac client with the remote demo daemon." >&2
     exit 1
   fi
-
-  local parsed
-  parsed="$(
-    python3 - "$remote_pairing_json" <<'PY'
-import json
-import shlex
-import sys
-payload = json.load(open(sys.argv[1]))
-print(f"remote_device_id={shlex.quote(payload['deviceID'])}")
-print(f"remote_device_name={shlex.quote(payload['name'])}")
-print(f"remote_device_host={shlex.quote(payload['host'])}")
-print(f"remote_device_port={shlex.quote(str(payload['port']))}")
-PY
-  )"
-  eval "$parsed"
-  start_remote_device_forward
-  update_remote_demo_device_endpoint
+  echo "$pair_output"
+  remote_device_id="$(printf '%s' "$pair_output" | tr '\t' '\n' | sed -n 's/^id=//p' | head -n 1)"
+  [[ -n "$remote_device_id" ]] || {
+    echo "spaces device pair did not print a device id: $pair_output" >&2
+    exit 1
+  }
 }
 
 remote_ssh_destination() {
@@ -851,21 +838,42 @@ raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
 }
 
+# The Device API port the daemon assigned itself for this profile and persisted at first start. The
+# lane never picks a port, so every remote endpoint it builds comes from here.
+resolve_remote_demo_daemon_port() {
+  local settings_path
+  settings_path="$(remote_expand_path "$remote_demo_profile_root/runtime/terminal/device-api.json")"
+  remote_demo_daemon_port="$(remote_ssh "python3 - $(shell_quote "$settings_path")" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    print(json.load(handle)["port"])
+PY
+  )"
+  [[ "$remote_demo_daemon_port" =~ ^[0-9]+$ ]] || {
+    echo "Remote demo profile $remote_demo_profile_name reported no numeric Device API port." >&2
+    exit 1
+  }
+}
+
 prepare_remote_demo_daemon() {
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to prepare the remote demo daemon." >&2
     exit 1
   }
 
-  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install quoted_profile_name
   echo "Preparing remote demo spacesd at $remote_ssh_host..."
+  # Clears the demo's remote workspace tree and the scratch directory the archive is extracted into.
+  # The demo profile's own root is deliberately not a cleanup root: install.sh upgrades that profile
+  # in place and restarts its unit, and removing a live profile's root under its own restarting
+  # systemd instance is exactly what cleanup avoids.
   SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
     SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_install_root" \
     "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
 
-  # This lane installs the demo host's *installed* profile (install.sh below takes no --profile), so
-  # its staging directory is keyed by that instead of a development profile name.
-  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile installed)"
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$remote_demo_profile_name")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
   [[ "$artifact_url" == file://* ]] || {
@@ -877,12 +885,18 @@ prepare_remote_demo_daemon() {
   install_root="$(remote_expand_path "$remote_demo_install_root/install")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh" >/dev/null
+  quoted_profile_name="$(shell_quote "$remote_demo_profile_name")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
+  resolve_remote_demo_daemon_port
   wait_for_remote_demo_daemon
 }
 
+# Forwards the remote demo daemon's Device API to a local port and makes that loopback endpoint the
+# one every demo client addresses the daemon by -- this Mac's CLI, the paired-device record it writes,
+# the iOS simulator seeds, and every pairing link. The forward is the demo's only route to the daemon,
+# so the lane works from a network where the remote's Device API port is unreachable and only SSH gets
+# through. The remote side of the tunnel is the port the profile assigned itself.
 start_remote_device_forward() {
-  [[ -n "$remote_device_host" && -n "$remote_device_port" ]] || return 0
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to forward the remote demo Device API." >&2
     exit 1
@@ -896,13 +910,13 @@ start_remote_device_forward() {
     -o BatchMode=yes
     -o ExitOnForwardFailure=yes
     -o StrictHostKeyChecking=yes
-    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_device_port"
+    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_demo_daemon_port"
   )
   if [[ -n "$remote_ssh_port" ]]; then
     ssh_args+=(-p "$remote_ssh_port")
   fi
 
-  echo "Forwarding remote Device API $remote_device_host:$remote_device_port through $remote_forward_host:$remote_forward_port..."
+  echo "Forwarding remote Device API port $remote_demo_daemon_port through $remote_forward_host:$remote_forward_port..."
   ssh "${ssh_args[@]}" "$destination" &
   remote_forward_pid=$!
   if ! wait_for_tcp_connect "$remote_forward_host" "$remote_forward_port" "remote Device API SSH forward"; then
@@ -910,81 +924,45 @@ start_remote_device_forward() {
     remote_forward_pid=""
     exit 1
   fi
-}
-
-rewrite_pairing_link_endpoint() {
-  local link="$1"
-  python3 - "$link" "$remote_forward_host" "$remote_forward_port" <<'PY'
-import sys
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-link, host, port = sys.argv[1:4]
-parts = urlsplit(link)
-query = dict(parse_qsl(parts.query, keep_blank_values=True))
-query["host"] = host
-query["port"] = port
-print(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
-PY
-}
-
-update_remote_demo_device_endpoint() {
-  [[ -n "$remote_forward_port" ]] || return 0
   remote_device_host="$remote_forward_host"
   remote_device_port="$remote_forward_port"
-  if [[ -n "$remote_pairing_link" ]]; then
-    remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link")"
-  fi
-  python3 - "$spaces_client_db_path" "$remote_device_id" "$remote_device_host" "$remote_device_port" <<'PY'
-import sqlite3
-import sys
-from datetime import datetime, timezone
-
-db_path, device_id, host, port = sys.argv[1:5]
-updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-with sqlite3.connect(db_path) as db:
-    db.execute(
-        "UPDATE paired_devices SET host = ?, port = ?, updated_at = ? WHERE id = ?",
-        (host, int(port), updated_at, device_id),
-    )
-PY
 }
 
-open_remote_device_pairing_window() {
-  [[ -n "$remote_device_id" ]] || return 1
-
-  local -a args=(open-remote-device-pairing-window --ssh-host "$remote_ssh_host")
-  if [[ -n "$remote_ssh_user" ]]; then
-    args+=(--ssh-user "$remote_ssh_user")
-  fi
-  if [[ -n "$remote_ssh_port" ]]; then
-    args+=(--ssh-port "$remote_ssh_port")
-  fi
-
-  remote_pairing_window_json="$temp_root/remote-device-pairing-window.json"
-  if ! run_demo_env \
-    HOME="$demo_home" \
-    "$spacese2e" "${args[@]}" >"$remote_pairing_window_json"; then
-    echo "Failed to open remote demo device pairing window over SSH." >&2
-    cat "$remote_pairing_window_json" >&2 || true
+# Opens a one-time pairing window on the remote demo daemon through that profile's own CLI, which
+# resolves the profile from where it lives -- so no profile environment is passed and the installed
+# profile's CLI is never involved. The daemon writes its link with the interface address it sees
+# itself on, which the demo never dials, so the link is pointed at the SSH forward; it is otherwise
+# the daemon's own. Pinned TLS authenticates the daemon by the certificate fingerprint the link
+# carries and never by hostname, so redeeming through the forward's loopback endpoint is equivalent.
+open_remote_demo_pairing_window() {
+  local pair_json parsed
+  if ! pair_json="$(remote_ssh "$remote_demo_cli device pair --json")"; then
+    echo "Failed to open a pairing window on the remote demo daemon." >&2
     exit 1
   fi
 
-  local parsed
   parsed="$(
-    python3 - "$remote_pairing_window_json" <<'PY'
+    SPACES_DEMO_REMOTE_PAIR_JSON="$pair_json" python3 - "$remote_demo_daemon_port" <<'PY'
 import json
+import os
 import shlex
 import sys
 
-payload = json.load(open(sys.argv[1]))
+port = sys.argv[1]
+payload = json.loads(os.environ["SPACES_DEMO_REMOTE_PAIR_JSON"])
+for key in ("pairingLink", "certificateFingerprint", "name"):
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"remote demo pairing JSON missing {key}")
+if payload.get("port") != int(port):
+    raise SystemExit(f"remote demo pairing window reports port {payload.get('port')}, not the profile's {port}")
 print(f"remote_pairing_link={shlex.quote(payload['pairingLink'])}")
 print(f"remote_certificate_fingerprint={shlex.quote(payload['certificateFingerprint'])}")
-print(f"remote_device_host={shlex.quote(payload['host'])}")
-print(f"remote_device_port={shlex.quote(str(payload['port']))}")
+print(f"remote_device_name={shlex.quote(payload['name'])}")
 PY
   )"
   eval "$parsed"
-  update_remote_demo_device_endpoint
+  remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_device_host" "$remote_device_port")"
 }
 
 # Creates a project (and its default workspace) on the paired remote demo daemon so the remote
@@ -1680,9 +1658,9 @@ iphone_token="$(pair_device "$iphone_pairing_link" "$iphone_installation_id" "$i
 ipad_remote_token=""
 iphone_remote_token=""
 if [[ -n "$remote_device_id" ]]; then
-  open_remote_device_pairing_window
+  open_remote_demo_pairing_window
   ipad_remote_token="$(pair_device "$remote_pairing_link" "$ipad_installation_id" "$ipad_name")"
-  open_remote_device_pairing_window
+  open_remote_demo_pairing_window
   iphone_remote_token="$(pair_device "$remote_pairing_link" "$iphone_installation_id" "$iphone_name")"
   create_remote_demo_project
 fi
