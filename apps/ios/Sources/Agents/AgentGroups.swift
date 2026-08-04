@@ -46,7 +46,9 @@ struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
 }
 
 /// Pure grouping of every coding-agent row across visible workspaces into activity bands.
-/// Empty bands are omitted.
+/// Empty bands are omitted, and "Not running" is never listed at all: the tab surfaces agents with a
+/// state worth acting on, while stopped agents stay reachable from their workspace's rows on the
+/// Spaces tab.
 enum SpacesMobileAgentGrouping {
     static func groups(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAgentGroup] {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
@@ -57,7 +59,7 @@ enum SpacesMobileAgentGrouping {
             }
         }
         return SpacesMobileAgentGroupKind.allCases.compactMap { kind in
-            guard let entries = entriesByKind[kind], !entries.isEmpty else { return nil }
+            guard kind != .notRunning, let entries = entriesByKind[kind], !entries.isEmpty else { return nil }
             return SpacesMobileAgentGroup(kind: kind, entries: entries)
         }
     }

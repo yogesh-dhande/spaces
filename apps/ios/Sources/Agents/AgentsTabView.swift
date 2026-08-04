@@ -19,9 +19,9 @@ struct AgentsTabView: View {
     @ViewBuilder private var content: some View {
         if model.agentGroups.isEmpty {
             ContentUnavailableView {
-                Label("No Coding Agents", systemImage: "cpu")
+                Label("No Active Agents", systemImage: "cpu")
             } description: {
-                Text("Coding agents configured in your workspaces show up here.")
+                Text("Blocked, finished, and working coding agents show up here. Launch one from its workspace on the Spaces tab.")
             }
         } else {
             List { ForEach(model.agentGroups) { group in agentGroupSection(group) } }.listStyle(.plain).scrollContentBackground(.hidden)

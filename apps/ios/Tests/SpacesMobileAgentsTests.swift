@@ -17,13 +17,24 @@
 
             let groups = SpacesMobileAgentGrouping.groups(in: overview)
 
-            XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working, .notRunning])
-            XCTAssertEqual(groups.map(\.kind.label), ["Blocked", "Done", "Working", "Not running"])
-            XCTAssertEqual(groups.map { $0.entries.count }, [1, 1, 2, 2])
+            XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
+            XCTAssertEqual(groups.map(\.kind.label), ["Blocked", "Done", "Working"])
+            XCTAssertEqual(groups.map { $0.entries.count }, [1, 1, 2])
             XCTAssertEqual(groups[0].entries.map { $0.row.id }, ["agent-waiting"])
             XCTAssertEqual(groups[1].entries.map { $0.row.id }, ["agent-done"])
             XCTAssertEqual(groups[2].entries.map { $0.row.id }, ["agent-spinning", "agent-running-idle"])
-            XCTAssertEqual(groups[3].entries.map { $0.row.id }, ["agent-idle-exited", "agent-not-started"])
+        }
+
+        /// Stopped agents are deliberately absent from the Agents tab: it surfaces agents with a state
+        /// worth acting on, and stopped agents stay reachable from their workspace on the Spaces tab.
+        func testNotRunningAgentsAreNeverListed() {
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-idle-exited", runState: .exited, activityState: .idle),
+                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
+                makeAgentRow(id: "agent-exited", runState: .running, activityState: .exited),
+            ])
+
+            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview), [])
         }
 
         /// A finished agent has a result the user has not read yet, so it bands ahead of the agents still
@@ -72,11 +83,11 @@
         }
 
         func testOmitsEmptyGroups() {
-            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle)])
+            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning)])
 
             let groups = SpacesMobileAgentGrouping.groups(in: overview)
 
-            XCTAssertEqual(groups.map(\.kind), [.notRunning])
+            XCTAssertEqual(groups.map(\.kind), [.working])
         }
 
         func testSkipsHiddenWorkspaces() {
