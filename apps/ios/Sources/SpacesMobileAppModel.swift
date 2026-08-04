@@ -1070,7 +1070,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
             if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
-            guard identity == overviewIdentity else { return }
+            // Re-checked after the await above, not just at fetch return: a mutation applying while the
+            // route update was suspended makes this poll's payload pre-mutation state.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             publishOverview(acceptedOverview)
             connectionNotice = nil
             errorMessage = nil
@@ -1089,9 +1091,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
             await refreshCompatibility(identity: identity)
-            // The user may have switched or removed the active device while the fallback handshake was
-            // in flight; a stale verdict must not clear the new connection's state.
-            guard identity == overviewIdentity else { return }
+            // The user may have switched or removed the active device — or a mutation may have published
+            // fresher state — while the fallback handshake was in flight; a stale verdict must not
+            // overwrite either.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             if isActiveDeviceBlocked {
                 overview = nil
                 connectionNotice = nil
