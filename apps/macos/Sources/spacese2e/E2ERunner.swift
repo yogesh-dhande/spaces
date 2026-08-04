@@ -190,6 +190,7 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(name: "ownership-guard", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "workspace-delete-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "workspace-hide-scroll", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-delete-tab-lists", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "session-end-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ios-input-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(name: "ios-scrollback-latency", kind: .mobileLatency),

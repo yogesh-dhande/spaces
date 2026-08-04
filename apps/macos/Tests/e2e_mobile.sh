@@ -38,7 +38,7 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll session-end-scroll)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll workspace-delete-tab-lists session-end-scroll)
 REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
@@ -116,6 +116,7 @@ Scenarios:
   ownership-guard
   workspace-delete-scroll
   workspace-hide-scroll
+  workspace-delete-tab-lists
   session-end-scroll
 EOF
 }
@@ -1531,7 +1532,7 @@ elif scenario == "session-end-scroll":
         "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-failure.png"),
         "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-after-scroll.png"),
     })
-elif scenario in ("workspace-delete-scroll", "workspace-hide-scroll"):
+elif scenario in ("workspace-delete-scroll", "workspace-hide-scroll", "workspace-delete-tab-lists"):
     payload.update({
         "targetWorkspaceID": os.environ.get("SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID", ""),
         "removalScrollSeconds": 12.0,
@@ -4095,6 +4096,195 @@ PY
   printf 'Mobile scenario passed: %s\n' "$scenario"
 }
 
+# Prints the worktree directory of the workspace whose id is `$1`.
+demo_workspace_dir_for_id() {
+  python3 - "$DB_PATH" "$1" <<'PY'
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute("SELECT dir FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+if row is None or not row[0]:
+    raise SystemExit(f"No directory registered for workspace {workspace_id}.")
+print(row[0])
+PY
+}
+
+# Creates a workspace-owned Spaces terminal session without opening a Mac window and prints its id.
+# Unlike `new_terminal_session` this deliberately leaves the session unowned: the lanes that use it want
+# a row in the workspace, not a takeover target.
+demo_workspace_terminal_session() {
+  local workspace_dir="$1"
+  local title="$2"
+  local command_text="$3"
+  local create_log="$SCENARIO_DIR/workspace-terminal-$title.json"
+  demo_env "$SPACES_E2E_BIN" start-workspace-terminal-session --workspace-dir "$workspace_dir" --title "$title" --command "$command_text" \
+    >"$create_log" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$create_log" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+session_id = payload.get("id") or payload.get("sessionID")
+if not session_id:
+    raise SystemExit(f"Terminal create response did not include a session id: {payload!r}")
+print(session_id)
+PY
+}
+
+# Runs one configured coding agent in `$1` through the Device API — the same daemon path the app and the
+# mobile clients use — and waits until the workspace's overview reports the agent row running and the
+# named terminal row exited. Both are what put the workspace on the Agents and Alerts tabs.
+demo_seed_tab_list_rows() {
+  local workspace_id="$1"
+  local agent_name="$2"
+  python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$workspace_id" "$agent_name" <<'PY'
+import json
+import subprocess
+import sys
+import time
+import uuid
+
+pairing_path, device_key, spacese2e, host, port, workspace_id, agent_name = sys.argv[1:8]
+pairing = json.loads(open(pairing_path, encoding="utf-8").read())[device_key]
+client_app = {
+    "installationID": pairing.get("installationID") or str(uuid.uuid4()).upper(),
+    "bundleID": "dev.usespaces.spacesmobile",
+    "platform": "ios",
+    "deviceName": "Mobile E2E tab lists",
+    "appVersion": "1.0",
+}
+
+
+def send(command, payload):
+    request = {"authToken": pairing["authToken"], "clientApp": client_app, "command": {command: payload}}
+    completed = subprocess.run(
+        [
+            spacese2e, "mobile-request", "--host", host, "--port", port,
+            f"--certificate-fingerprint={pairing['certificateFingerprint']}",
+            "--request-json", json.dumps(request, separators=(",", ":")),
+        ],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    response = json.loads(completed.stdout)
+    if response.get("ok") is not True:
+        raise SystemExit(f"{command} failed: {json.dumps(response, indent=2, sort_keys=True)}")
+    return response.get("result") or {}
+
+
+def workspace_snapshot():
+    overview = send("overview", {}).get("overview") or {}
+    for workspace in overview.get("workspaces") or []:
+        if workspace.get("id") == workspace_id:
+            return workspace
+    return None
+
+
+send("runCodingAgent", {"workspaceID": workspace_id, "agentName": agent_name, "agentLauncherID": None})
+
+deadline = time.time() + 60
+observed = None
+while time.time() < deadline:
+    workspace = workspace_snapshot()
+    if workspace is not None:
+        agents = [row for row in workspace.get("codingAgentRows") or [] if row.get("name") == agent_name]
+        exited_terminals = [row for row in workspace.get("terminalRows") or [] if row.get("runState") == "exited"]
+        observed = {
+            "codingAgentRows": [{"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("codingAgentRows") or []],
+            "terminalRows": [{"title": row.get("title"), "runState": row.get("runState")} for row in workspace.get("terminalRows") or []],
+        }
+        if agents and agents[0].get("runState") == "running" and exited_terminals:
+            print(json.dumps(observed, sort_keys=True))
+            raise SystemExit(0)
+    time.sleep(0.5)
+raise SystemExit(f"Timed out waiting for the Agents/Alerts seed rows on {workspace_id}: {json.dumps(observed, sort_keys=True)}")
+PY
+}
+
+# Regression lane for deleting a workspace that owns rows only a running session puts there, with all
+# three banded tabs in play. `workspace-delete-scroll` deletes a workspace whose rows are all configured,
+# so its section's item count never moves; here the workspace gets a coding agent started from its
+# launcher and a workspace terminal whose command has exited, so tearing it down takes several rows out
+# of a section that is still listed. Those two rows are also what put the workspace on the Agents and
+# Alerts tabs, which the UI test visits before the delete so their lists mount — a TabView keeps a
+# visited tab's collection view alive, so one delete then diffs rows out of all three lists at once.
+run_workspace_delete_tab_lists_scenario() {
+  begin_scenario "workspace-delete-tab-lists"
+
+  local agent_name="tab-lists-agent"
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  printf 'Tab-lists project: %s (%s)\n' "$project_id" "$PROJECT_DIR" >>"$SCENARIO_LOG"
+
+  # Filler workspaces so the Spaces list is long enough to scroll, shared with the removal-scroll lanes.
+  local filler_prefix="e2e-removal-scroll-"
+  local existing_count stamp index
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$filler_prefix" | wc -l | tr -d ' ')"
+  stamp="$(date +%s)"
+  index=0
+  while (( existing_count + index < 3 )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${filler_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to create tab-lists filler workspace ${filler_prefix}${stamp}-${index}."
+  done
+
+  # A dedicated target: this lane deletes it, and it carries settings the filler workspaces must not.
+  local target_branch="e2e-tab-lists-${stamp}"
+  demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "$target_branch" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to create the tab-lists target workspace $target_branch."
+  local target_workspace_id target_workspace_dir
+  target_workspace_id="$(demo_workspaces_with_branch_prefix "$project_id" "$target_branch" | head -1 | cut -f1)"
+  [[ -n "$target_workspace_id" ]] || fail "The tab-lists target workspace $target_branch was not registered."
+  target_workspace_dir="$(demo_workspace_dir_for_id "$target_workspace_id")" || fail "Unable to resolve the directory of $target_workspace_id."
+  printf 'Tab-lists target workspace: %s (%s)\n' "$target_workspace_id" "$target_workspace_dir" >>"$SCENARIO_LOG"
+
+  demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to start the tab-lists target workspace $target_workspace_id."
+
+  # The Agents tab lists coding-agent rows that are doing something, so the launcher has to stay alive
+  # for the whole scenario rather than run and exit.
+  demo_env "$SPACES_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$target_workspace_dir" --name "$agent_name" \
+    --command "python3 -c \"import time; print('tab-lists-agent-ready', flush=True); time.sleep(900)\"" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to configure the tab-lists coding agent on $target_workspace_id."
+
+  # An exited workspace terminal is the Alerts-tab event: the tab bands attention events by workspace, so
+  # this workspace gets a band of its own there. The command runs to completion rather than being
+  # terminated from outside — terminating a session drops its row instead of leaving it exited, and only
+  # an exited row raises an attention event.
+  local alert_session_id
+  alert_session_id="$(demo_workspace_terminal_session "$target_workspace_dir" "e2e-tab-lists-alert" "printf 'tab-lists-alert-done\\n'")" \
+    || fail "Failed to create the tab-lists alert terminal session."
+  track_current_scenario_session "$alert_session_id"
+
+  demo_seed_tab_list_rows "$target_workspace_id" "$agent_name" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "The tab-lists workspace never produced both an Agents-tab row and an Alerts-tab event. See $SCENARIO_LOG"
+
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "workspace-delete-tab-lists" "$alert_session_id"
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteAfterVisitingBandedTabs"
+  MOBILE_APP_LAUNCH_MODE="default"
+
+  local connection_error_alerts
+  connection_error_alerts="$(grep -o "spaces-mobile-e2e workspace-delete-tab-lists connection_error_alerts=[0-9]*" "$UI_TEST_LOG" | tail -1 | sed 's/.*=//')"
+  printf 'Connection-error alerts during the tab-lists delete: %s\n' "${connection_error_alerts:-unreported}" | tee -a "$SCENARIO_LOG"
+
+  local post_listing="$SCENARIO_DIR/workspace-list-after-delete.txt"
+  demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$post_listing" 2>>"$SCENARIO_LOG" \
+    || fail "Unable to list workspaces after the tab-lists delete."
+  python3 - "$post_listing" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id still exists after the tab-lists delete."
+import sys
+
+workspace_id = sys.argv[2]
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if line.split("\t")[0] == workspace_id:
+        raise SystemExit(f"Workspace {workspace_id} still exists after the delete.")
+PY
+  printf 'Mobile scenario passed: workspace-delete-tab-lists\n'
+}
+
 # Prints the workspace id whose directory is `$1`.
 demo_workspace_id_for_dir() {
   python3 - "$DB_PATH" "$1" <<'PY'
@@ -4204,6 +4394,9 @@ run_selected_scenarios() {
         ;;
       workspace-delete-scroll|workspace-hide-scroll)
         run_workspace_removal_scroll_scenario "$scenario"
+        ;;
+      workspace-delete-tab-lists)
+        run_workspace_delete_tab_lists_scenario
         ;;
       session-end-scroll)
         run_session_end_scroll_scenario

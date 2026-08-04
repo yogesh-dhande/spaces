@@ -27,18 +27,19 @@ struct AlertsTabView: View {
             }
         } else {
             List {
-                ForEach(model.attentionGroups) { group in alertGroupSection(group) }
                 swipeHint
+                ForEach(model.attentionGroups) { group in alertGroupSection(group) }
             }.listStyle(.plain).scrollContentBackground(.hidden)
         }
     }
 
     /// Swiping is the only way to dismiss a single alert, and nothing on the row advertises it, so the
-    /// list closes with a one-line caption. It rides along with the alerts, so it disappears with them.
+    /// list opens with a one-line caption styled as a subheading under the navigation title. It rides
+    /// along with the alerts, so it disappears with them.
     private var swipeHint: some View {
-        Text("Swipe an alert to dismiss it.").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).frame(
-            maxWidth: .infinity, alignment: .center
-        ).padding(.top, 16).padding(.bottom, 8).padding(.horizontal, 20).bandListRow().accessibilityIdentifier("alerts.swipeHint")
+        Text("Swipe an alert to dismiss it.").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).frame(
+            maxWidth: .infinity, alignment: .leading
+        ).padding(.top, 2).padding(.bottom, 6).padding(.horizontal, 20).bandListRow().accessibilityIdentifier("alerts.swipeHint")
     }
 
     @ViewBuilder private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {

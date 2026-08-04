@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -106,7 +107,10 @@ struct SpacesTabView: View {
             } else {
                 List {
                     #if DEBUG
-                        let _ = SpacesListIdentityDump.record(listIdentityRows)
+                        let _ = SpacesListIdentityDump.record(
+                            listIdentitySections,
+                            state: "pendingDelete=\(pendingDeleteWorkspace?.id ?? "none") pendingHide=\(pendingHideWorkspace?.id ?? "none") "
+                                + "mutating=\(model.isMutating) marked=\(model.overview?.workspaces.filter { model.isWorkspacePendingDeletion($0.id) }.map(\.id).joined(separator: "+") ?? "")")
                     #endif
                     Section {
                         homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
@@ -138,41 +142,47 @@ struct SpacesTabView: View {
     }
 
     #if DEBUG
-        /// The identity of every row `homeView`'s list is about to render, in the same order and under the
-        /// same conditions, for `SpacesListIdentityDump`. Built from the same `SpacesListRowID` values the
-        /// rows themselves carry, so the dump reports what the list actually identifies rows by rather than
-        /// a second description of it that could drift.
-        private var listIdentityRows: [String] {
-            var rows = ["controls@\(SpacesListRowID.controls)"]
+        /// Every row `homeView`'s list is about to render, grouped into the sections it renders them in, in
+        /// the same order and under the same conditions, for `SpacesListIdentityDump`. Built from the same
+        /// `SpacesListRowID` values and the same `Section` boundaries the body uses, so the dump reports
+        /// what the list actually holds rather than a second description of it that could drift.
+        ///
+        /// Sectioned rather than flat because the collection view's inconsistency is a *per-section* count:
+        /// the dump is only comparable with UIKit's own `numberOfItems(inSection:)` if it is partitioned
+        /// the same way.
+        private var listIdentitySections: [[String]] {
+            var sections: [[String]] = [["controls@\(SpacesListRowID.controls)"]]
             if model.isActiveDeviceBlocked {
                 // No rows: the compatibility banner in homeControls is the whole surface.
             } else if model.isLoading && model.overview == nil {
-                rows.append("loading@\(SpacesListRowID.loading)")
+                sections.append(["loading@\(SpacesListRowID.loading)"])
             } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
-                rows.append("empty@\(SpacesListRowID.empty)")
+                sections.append(["empty@\(SpacesListRowID.empty)"])
             } else {
                 for projectGroup in projectGroups {
-                    rows.append("projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))")
+                    sections.append(["projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))"])
                     for group in projectGroup.workspaceGroups {
-                        rows.append("band@\(SpacesListRowID.workspaceBand(group.id))")
-                        guard !model.collapsedWorkspaceIDs.contains(group.id) else { continue }
-                        rows.append("controlBar@\(SpacesListRowID.workspaceControlBar(group.id))")
-                        if group.rows.isEmpty { rows.append("noRows@\(SpacesListRowID.workspaceEmptyRows(group.id))") }
-                        rows.append(contentsOf: group.rows.map { "runtimeRow@\(SpacesListRowID.runtimeRow($0.id))" })
+                        var workspaceSection = ["band@\(SpacesListRowID.workspaceBand(group.id))"]
+                        if !model.collapsedWorkspaceIDs.contains(group.id) {
+                            workspaceSection.append("controlBar@\(SpacesListRowID.workspaceControlBar(group.id))")
+                            if group.rows.isEmpty { workspaceSection.append("noRows@\(SpacesListRowID.workspaceEmptyRows(group.id))") }
+                            workspaceSection.append(contentsOf: group.rows.map { "runtimeRow@\(SpacesListRowID.runtimeRow($0.id))" })
+                        }
+                        sections.append(workspaceSection)
                     }
                 }
                 for group in model.terminalGroups {
-                    rows.append("looseBand@\(SpacesListRowID.looseBand(group.workspaceID))")
-                    rows.append(contentsOf: group.sessions.map { "looseSession@\(SpacesListRowID.looseSession($0.id))" })
+                    sections.append(["looseBand@\(SpacesListRowID.looseBand(group.workspaceID))"])
+                    sections.append(contentsOf: group.sessions.map { ["looseSession@\(SpacesListRowID.looseSession($0.id))"] })
                 }
             }
             if !model.isActiveDeviceBlocked, isHiddenSectionVisible {
-                rows.append("hiddenHeader@\(SpacesListRowID.hiddenHeader)")
+                sections.append(["hiddenHeader@\(SpacesListRowID.hiddenHeader)"])
                 if model.isHiddenSectionExpanded {
-                    rows.append(contentsOf: model.hiddenWorkspaces.map { "hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))" })
+                    sections.append(contentsOf: model.hiddenWorkspaces.map { ["hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))"] })
                 }
             }
-            return rows
+            return sections
         }
     #endif
 
@@ -647,14 +657,16 @@ private struct WorkspaceBandActions: ViewModifier {
         } else {
             content.contextMenu {
                 hideButton
-                if canDelete { deleteButton }
+                if canDelete { menuDeleteButton }
             }.swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if canDelete { deleteButton }
+                if canDelete { swipeDeleteButton }
                 hideButton.tint(Theme.muted)
             }
         }
     }
 
+    /// Hide carries no role for the same reason `swipeDeleteButton` does not: it opens a confirmation and
+    /// the band stays listed until a refreshed overview reports the workspace hidden.
     private var hideButton: some View {
         Button {
             onHide()
@@ -663,13 +675,40 @@ private struct WorkspaceBandActions: ViewModifier {
         }.disabled(model.isMutating).accessibilityIdentifier("workspace.hide.\(workspace.id)")
     }
 
-    private var deleteButton: some View {
+    /// Delete in the long-press menu, where `.destructive` is only what colours it red.
+    private var menuDeleteButton: some View {
         Button(role: .destructive) {
             onDelete()
         } label: {
-            Label("Delete", systemImage: "trash")
+            deleteLabel
         }.disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
+
+    /// Delete in the swipe tray — deliberately roleless, tinted red by hand instead of carrying
+    /// `.destructive`.
+    ///
+    /// A destructive swipe action tells the collection view its row is going away, and it drops that item
+    /// from its own bookkeeping the moment the button is tapped. This one removes nothing: it opens a
+    /// confirmation sheet, and the row stays listed through the confirmation, through the pending-deletion
+    /// mark, and until a refreshed overview stops carrying the workspace. From that tap onward the
+    /// collection view holds one item fewer than the list does for that section, and the update that
+    /// finally removes the workspace walks off the end — `attempt to delete item 8 from section 6 which
+    /// only contains 8 items before the update`, raised long after the tap that caused it, with the list's
+    /// own rows provably unchanged, uniquely identified, and identically ordered across the culprit update.
+    /// The same Delete taken from the long-press menu never desyncs, because a menu makes no such promise.
+    ///
+    /// The rule: `.destructive` in `swipeActions` is only correct when the action removes the row from the
+    /// data synchronously with the tap (the Alerts tab's dismiss does, and keeps its role). Any swipe
+    /// action that leaves its row in place must not carry it. `.tint(Theme.red)` keeps the tray identical.
+    private var swipeDeleteButton: some View {
+        Button {
+            onDelete()
+        } label: {
+            deleteLabel
+        }.tint(Theme.red).disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+    }
+
+    private var deleteLabel: some View { Label("Delete", systemImage: "trash") }
 }
 
 private struct ProjectGroup: Identifiable {
@@ -748,33 +787,83 @@ struct WorkspaceCreateSheet: View {
     /// about to render, in render order, once per content evaluation.
     ///
     /// It exists because `UICollectionView`'s inconsistent-update exception reports only counts ("after the
-    /// update (42) must be (41)"), which cannot say *which* row the list lost or gained. Dumping the
-    /// flattened identity list on every evaluation makes the two publishes either side of a crash directly
-    /// diffable, and makes a duplicate identity — two rows the list counts as one — visible at a glance.
+    /// update (42) must be (41)"), which cannot say *which* row the list lost or gained, and is raised on a
+    /// later update than the one that did the damage. Two lines are emitted per evaluation and compared:
+    ///
+    /// - `LISTDUMP` — what the list is about to hold, partitioned into the sections it renders, plus the
+    ///   presentation state driving that evaluation. A duplicate identity, two rows the list counts as one,
+    ///   is called out here.
+    /// - `UIKITCOUNTS` — what each `UICollectionView` in the key window believes it holds, read a main-queue
+    ///   hop later so this evaluation's update has been applied. These are the cached counts the exception
+    ///   is raised against, not a fresh data-source query.
+    ///
+    /// The first evaluation whose per-section counts disagree is the update that lost the row, which is the
+    /// one worth investigating; every later one merely inherits the drift. Note the collection views are
+    /// reported in hierarchy order, so a tab switch renumbers them — match a view to this list by its
+    /// section count, never by position.
     ///
     /// Each row is logged as `label@identity`: `label` is where the row sits in the builder, `identity` is
     /// the value SwiftUI identifies it by (`-` for rows carrying structural identity only, which have no id
-    /// of their own). Duplicates are therefore judged on the `identity` half, across the whole flattened
-    /// list rather than per `ForEach`.
+    /// of their own). Duplicates are judged on the `identity` half, across the whole list rather than per
+    /// `ForEach`.
     ///
-    /// Lives beside `SpacesTabView.listIdentityRows`, the mirror of the list body it dumps, so the two are
-    /// edited together. Off unless `SPACES_MOBILE_LIST_IDENTITY_DUMP=1` is set in the app's environment,
+    /// Lives beside `SpacesTabView.listIdentitySections`, the mirror of the list body it dumps, so the two
+    /// are edited together. Off unless `SPACES_MOBILE_LIST_IDENTITY_DUMP=1` is set in the app's environment,
     /// and compiled out of release builds entirely.
     @MainActor enum SpacesListIdentityDump {
         static let isEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_LIST_IDENTITY_DUMP"] == "1"
 
         private static var sequence = 0
 
-        /// `rows` is an autoclosure so a disabled dump costs nothing but the flag read — the list body is
-        /// re-evaluated constantly while scrolling, and this runs inside that evaluation.
-        static func record(_ rows: @autoclosure () -> [String]) {
+        /// `sections` is an autoclosure so a disabled dump costs nothing but the flag read — the list body
+        /// is re-evaluated constantly while scrolling, and this runs inside that evaluation.
+        ///
+        /// Two lines are emitted per evaluation. `LISTDUMP` is what the list is about to hold, recorded
+        /// inside the body evaluation. `UIKITCOUNTS` is what the collection views backing the app's lists
+        /// believe they hold, read one main-queue hop later so the update this evaluation produced has been
+        /// applied. Comparing the two per section is the point: an inconsistent batch update is UIKit's
+        /// count drifting from the list's, and the first evaluation where they disagree is the update that
+        /// lost a row — not the later one that trips the exception.
+        static func record(_ sections: @autoclosure () -> [[String]], state: @autoclosure () -> String) {
             guard isEnabled else { return }
             sequence += 1
-            let identities = rows()
+            let seq = sequence
+            let sections = sections()
+            let identities = sections.flatMap { $0 }
             let duplicates = duplicateIdentities(in: identities)
+            let counts = sections.map { String($0.count) }.joined(separator: ",")
             let line =
-                "LISTDUMP seq=\(sequence) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) count=\(identities.count) "
+                "LISTDUMP seq=\(seq) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) count=\(identities.count) "
+                + "sections=\(sections.count) counts=\(counts) \(state()) "
                 + "duplicates=\(duplicates.isEmpty ? "none" : duplicates.joined(separator: ",")) rows=\(identities.joined(separator: " "))\n"
+            FileHandle.standardError.write(Data(line.utf8))
+            DispatchQueue.main.async { emitCollectionViewCounts(seq: seq) }
+        }
+
+        /// Every `UICollectionView` currently in the app's key window, with the section and per-section item
+        /// counts it believes it has. `numberOfSections` and `numberOfItems(inSection:)` report the cached
+        /// counts from the last applied update rather than re-asking the data source, which is exactly the
+        /// bookkeeping the inconsistency exception is raised against.
+        ///
+        /// Every list in the app is reported, not just the Spaces tab's: a `TabView` keeps a visited tab's
+        /// collection view alive and updating, so which one drifts is itself a finding.
+        private static func emitCollectionViewCounts(seq: Int) {
+            let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            guard let window = windows.first(where: \.isKeyWindow) ?? windows.first else { return }
+            var collectionViews: [UICollectionView] = []
+            func walk(_ view: UIView) {
+                if let collectionView = view as? UICollectionView { collectionViews.append(collectionView) }
+                for subview in view.subviews { walk(subview) }
+            }
+            walk(window)
+            let described = collectionViews.enumerated().map { index, collectionView -> String in
+                let sectionCount = collectionView.numberOfSections
+                let items = (0..<sectionCount).map { String(collectionView.numberOfItems(inSection: $0)) }.joined(separator: ",")
+                return "cv\(index)[sections=\(sectionCount) counts=\(items)]"
+            }
+            let line =
+                "UIKITCOUNTS seq=\(seq) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) "
+                + "views=\(collectionViews.count) \(described.joined(separator: " "))\n"
             FileHandle.standardError.write(Data(line.utf8))
         }
 
