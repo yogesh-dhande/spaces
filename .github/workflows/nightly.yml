@@ -16,6 +16,9 @@
 # The actual build (signing, packaging, notarization, GitHub Release, Sparkle appcast, website
 # deploy) lives in release-build.yml, the same reusable workflow release.yml calls for the stable
 # channel, so nightly and stable run byte-for-byte the same body apart from channel: nightly.
+#
+# The nightly also cuts a TestFlight iOS build by calling ios-release.yml with the latest stable
+# marketing version and the timestamp build number; see the `ios` job below for why.
 
 name: Nightly
 
@@ -35,6 +38,7 @@ jobs:
       version: ${{ steps.decide.outputs.version }}
       build: ${{ steps.decide.outputs.build }}
       release-tag: ${{ steps.decide.outputs.release-tag }}
+      stable-version: ${{ steps.decide.outputs.stable-version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -89,6 +93,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "release-tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "stable-version=$latest_stable_version" >> "$GITHUB_OUTPUT"
 
   nightly:
     needs: plan
@@ -100,6 +105,20 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
       build: ${{ needs.plan.outputs.build }}
       release-tag: ${{ needs.plan.outputs.release-tag }}
+
+  # TestFlight build of the same commit, in parallel with the macOS build — independent so a
+  # failure on one side still ships the other. App Store Connect caps CFBundleShortVersionString
+  # at three numeric components, so the iOS nightly cannot carry the 4-component nightly version;
+  # it uploads as the latest stable marketing version with the nightly timestamp as its build
+  # number, which keeps every upload unique and ordered inside that version's TestFlight group.
+  ios:
+    needs: plan
+    if: ${{ needs.plan.outputs.build-needed == 'true' }}
+    uses: ./.github/workflows/ios-release.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.plan.outputs.stable-version }}
+      build: ${{ needs.plan.outputs.build }}
 
   # Nightly prereleases accumulate one per day forever without this: keep only the newest 7 so the
   # releases page and Firebase/GitHub storage don't grow unbounded.
