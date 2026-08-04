@@ -141,14 +141,14 @@ import workspacecore
         var fetchCount = 0
         var appliedOverviews: [SpacesDeviceOverviewPayload] = []
 
-        let stillPresent = await reconciler.reconcile(
+        let outcome = await reconciler.reconcile(
             workspaceID: "ws-deleting",
             fetchOverview: {
                 fetchCount += 1
                 return SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
             }, applyOverview: { appliedOverviews.append($0) })
 
-        #expect(!stillPresent)
+        #expect(outcome == .gone)
         #expect(fetchCount == 1)
         #expect(appliedOverviews.count == 1)
     }
@@ -161,14 +161,14 @@ import workspacecore
         reconciler.interval = .zero
         var fetchCount = 0
 
-        let stillPresent = await reconciler.reconcile(
+        let outcome = await reconciler.reconcile(
             workspaceID: "ws-deleting",
             fetchOverview: {
                 fetchCount += 1
                 return SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
             }, applyOverview: { _ in })
 
-        #expect(stillPresent)
+        #expect(outcome == .present)
         #expect(fetchCount == WorkspaceDeletionReconciler.attempts)
     }
 
@@ -180,15 +180,68 @@ import workspacecore
         reconciler.interval = .zero
         var fetchCount = 0
 
-        let stillPresent = await reconciler.reconcile(
+        let outcome = await reconciler.reconcile(
             workspaceID: "ws-deleting",
             fetchOverview: {
                 fetchCount += 1
                 return fetchCount < WorkspaceDeletionReconciler.attempts ? nil : SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
             }, applyOverview: { _ in })
 
-        #expect(!stillPresent)
+        #expect(outcome == .gone)
         #expect(fetchCount == WorkspaceDeletionReconciler.attempts)
+    }
+
+    /// The defect this whole three-valued `Outcome` exists to fix: every single reconciliation attempt
+    /// failing outright (the device stayed unreachable for the whole budget, e.g. the Mac was asleep or
+    /// the network dropped right as the delete was in flight) must NOT be reported as `.present` —
+    /// nothing ever proved the workspace was still there. `AppKitController.deleteWorkspace` reads
+    /// `.unknown` as "keep waiting," not "restore the row and show an error."
+    @Test func everyFetchFailingIsUnknownNotPresent() async {
+        let reconciler = WorkspaceDeletionReconciler()
+        reconciler.interval = .zero
+        var fetchCount = 0
+
+        let outcome = await reconciler.reconcile(
+            workspaceID: "ws-deleting",
+            fetchOverview: {
+                fetchCount += 1
+                return nil
+            }, applyOverview: { _ in })
+
+        #expect(outcome == .unknown)
+        #expect(fetchCount == WorkspaceDeletionReconciler.attempts)
+    }
+
+    /// The pure decision `resolveAwaitingWorkspaceDeletions` makes once a real overview lands for a
+    /// workspace deferred to `.unknown`. No overview yet (the owning device hasn't installed one since
+    /// the deferral — offline, not yet loaded, or the empty wire-incompatible placeholder) proves
+    /// nothing, so the entry keeps waiting rather than resolving on absence-of-evidence.
+    @Test func noOverviewYetLeavesTheEntryAwaiting() {
+        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(overview: nil, workspaceID: "ws-deleting", branchDeletionRequested: false)
+        #expect(verdict == .stillAwaiting)
+    }
+
+    /// An installed overview that still lists the workspace resolves the entry to `.present`: the held-
+    /// back error was real all along.
+    @Test func anOverviewThatStillListsTheWorkspaceResolvesToPresent() {
+        let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+        let verdict = AppKitController.resolveAwaitingWorkspaceDeletion(
+            overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: false)
+        #expect(verdict == .present)
+    }
+
+    /// An installed overview that no longer lists the workspace resolves to `.gone` — silently unless
+    /// branch deletion was requested, in which case the caller still owes the unknown-branch-outcome
+    /// notice (reconciliation/deferred resolution can prove the workspace is gone, not what happened to
+    /// a branch the user explicitly asked to delete).
+    @Test func anOverviewWithoutTheWorkspaceResolvesToGoneAndCarriesTheBranchNoticeFlag() {
+        let overview = SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: false)
+                == .gone(showsBranchOutcomeNotice: false))
+        #expect(
+            AppKitController.resolveAwaitingWorkspaceDeletion(overview: overview, workspaceID: "ws-deleting", branchDeletionRequested: true)
+                == .gone(showsBranchOutcomeNotice: true))
     }
 
     private func workspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {

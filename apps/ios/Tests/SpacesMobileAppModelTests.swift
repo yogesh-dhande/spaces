@@ -346,7 +346,8 @@
         func testDeleteWorkspaceSurfacesFailure() async {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+                // The daemon codes every failure it reports; a refusal is what this models.
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
 
@@ -389,7 +390,8 @@
         func testFailedDeleteClearsThePendingDeletionMark() async {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.")
+                // The daemon codes every failure it reports; a refusal is what this models.
+                SpacesDeviceAPIResponse(ok: false, message: "Default workspace cannot be deleted.", errorCode: .invalidArgument)
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = makeOverview()
@@ -654,6 +656,103 @@
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "overview"])
+        }
+
+        /// The archive's response was lost AND every reconciliation refetch failed too — the device went
+        /// unreachable exactly while the delete was in flight. Nothing has been observed, so reporting the
+        /// delete as failed would be a verdict the client never reached. The marking stays and the error
+        /// is held back until an overview can answer.
+        func testDeleteWorkspaceWithNoReachableOverviewKeepsTheMarkAndHoldsTheError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "an unconfirmed delete keeps its row inert")
+            XCTAssertNil(model.errorMessage, "no verdict was reached, so nothing is reported yet")
+            XCTAssertFalse(model.isMutating, "only the row is inert — the model is not stuck mid-mutation")
+        }
+
+        /// The deferred delete is settled by the next overview that publishes: the workspace is gone, so it
+        /// landed. The marking clears silently, and because branch deletion had been requested the user is
+        /// told the branch outcome is unknown.
+        func testDeferredDeleteResolvesSilentlyWhenALaterOverviewNoLongerListsTheWorkspace() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: overview.projects, workspaces: overview.workspaces.filter { $0.id != "workspace-feature" }, sessions: overview.sessions,
+                daemonStatus: overview.daemonStatus)
+            let counter = SpacesMobilePollCounter()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                // Every request during the delete fails; the poll that follows it succeeds.
+                guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: true, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"), "the overview settled it: the delete landed")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.deletedWorkspaceNotice, SpacesMobileAppModel.unknownBranchOutcomeNotice)
+        }
+
+        /// The other side: the next overview still lists the workspace, so the delete really did fail and
+        /// the error the client held back is surfaced then, against a row the user can act on again.
+        func testDeferredDeleteSurfacesTheHeldErrorWhenALaterOverviewStillListsTheWorkspace() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let counter = SpacesMobilePollCounter()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                guard await counter.increment() > SpacesMobileAppModel.workspaceDeletionReconciliationAttempts + 1 else {
+                    throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNotNil(model.errorMessage, "the workspace is still there, so the delete failed after all")
+        }
+
+        /// An unconfirmed delete belongs to the connection it was issued against: another device's overview
+        /// cannot answer it. Switching devices drops the marking and the held error without reporting a
+        /// verdict nobody can reach.
+        func testDeviceSwitchDuringADeferredDeleteClearsItWithoutSurfacingAnError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                throw SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled.")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, workspaceDeletionReconciliationInterval: .zero)
+            model.overview = overview
+
+            await model.deleteWorkspace(overview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+
+            // A real connection change: `applyConnectionSettings` is one of the chokepoints — with
+            // `selectDevice`, `removeDevice`, and the Demo Mode toggles — that reload per-connection state.
+            model.applyConnectionSettings(SpacesMobileConnectionSettings())
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertNil(model.errorMessage)
         }
 
         /// The other half of the same rule: a codeless failure whose workspace is still listed once the

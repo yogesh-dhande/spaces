@@ -502,6 +502,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// `isWorkspacePendingDeletion`). In-memory and per-run, like `collapsedWorkspaceIDs`: the device is
     /// authoritative about whether a delete landed, and a relaunch reads it fresh.
     private var workspaceIDsPendingDeletion: Set<String> = []
+    /// Deletes whose outcome no overview has been able to confirm yet: the archive's response was lost and
+    /// every reconciliation refetch failed too, so nothing has proved whether the workspace is gone. The
+    /// row stays marked and the error stays unsurfaced until an overview does get published, which is the
+    /// first thing that can answer. In-memory and per-run like `workspaceIDsPendingDeletion`: a relaunch
+    /// refetches reality rather than restoring a verdict that was never reached.
+    private var workspaceDeletionsAwaitingOverview: [String: DeferredWorkspaceDeletion] = [:]
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -832,6 +838,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// leftover from the connection this model just switched away from.
     private func loadDismissedAlertIDsForActiveDevice() {
         dismissedAlertIDs = activeDeviceID.map { SpacesMobileDismissedAlertsStore.load(deviceID: $0) } ?? []
+        // Unconfirmed deletes belong to the connection they were issued against: another device's overview
+        // cannot answer whether this one's workspace was deleted, and leaving an entry behind would let the
+        // next published overview resolve it against the wrong device. Dropped with the marking, silently —
+        // the delete may well have landed, and there is no longer anyone to report a verdict to.
+        workspaceDeletionsAwaitingOverview.removeAll()
+        workspaceIDsPendingDeletion.removeAll()
     }
 
     /// Persists `dismissedAlertIDs` into the active device's bucket. A `nil` `activeDeviceID` (no device
@@ -1073,10 +1085,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // Re-checked after the await above, not just at fetch return: a mutation applying while the
             // route update was suspended makes this poll's payload pre-mutation state.
             guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
-            publishOverview(acceptedOverview)
+            // Cleared before publishing, not after: the device answered, so any stale connection error is
+            // over — but publishing is also what settles a deferred delete, and that may raise an error of
+            // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
             connectionNotice = nil
             errorMessage = nil
             refreshFailureStreak = nil
+            publishOverview(acceptedOverview)
             // Rebuilds the live client only after the overview above is already published, deliberately:
             // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
             // in this method could drop the very overview the user is waiting for. Publishing first means
@@ -1682,7 +1697,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// refetching the overview a few times gives a delete that is still finishing a chance to resolve to
     /// success instead of a spurious error. Five attempts at `workspaceDeletionReconciliationInterval`
     /// give the daemon a settle window on the order of the poll cadence rather than an instant verdict.
-    private static let workspaceDeletionReconciliationAttempts = 5
+    static let workspaceDeletionReconciliationAttempts = 5
 
     /// Deletes the workspace, optionally deleting the branch it was created on locally and/or on the
     /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
@@ -1742,18 +1757,32 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // a workspace that is already doomed. Reconcile against fresh overviews instead: if the
             // workspace stops appearing, treat the delete as successful and surface no error; only report
             // the failure once the reconciliation budget is spent and the workspace is still listed.
-            let workspaceStillPresent = await reconcileWorkspaceDeletionOutcome(
-                workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
-            workspaceIDsPendingDeletion.remove(workspace.id)
-            guard identity == overviewIdentity else { return }
-            if workspaceStillPresent {
+            let outcome = await reconcileWorkspaceDeletionOutcome(workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
+            guard identity == overviewIdentity else {
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                return
+            }
+            let requestedBranchDeletion = deleteLocalBranch || deleteRemoteBranch
+            switch outcome {
+            case .present:
+                workspaceIDsPendingDeletion.remove(workspace.id)
                 handleBridgeError(error)
-            } else if deleteLocalBranch || deleteRemoteBranch {
+            case .gone:
+                workspaceIDsPendingDeletion.remove(workspace.id)
                 // The delete landed, but the branch-deletion report existed only in the response that was
                 // lost — reconciliation can prove the workspace is gone, not what happened to branches the
                 // user explicitly asked to delete. Say so rather than silently succeeding.
-                deletedWorkspaceNotice =
-                    "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+                if requestedBranchDeletion { deletedWorkspaceNotice = Self.unknownBranchOutcomeNotice }
+            case .unknown:
+                // Nothing was ever observed: the response was lost and every refetch failed too, so the
+                // device has said nothing about this workspace at all. Clearing the marking and reporting
+                // failure here would be a verdict the client never reached — the row would go back to
+                // looking ordinary and offering Delete again, for a workspace the daemon may have deleted.
+                // The marking stays and the error is held until an overview can answer (see
+                // `resolveDeferredWorkspaceDeletions`). `isMutating` still clears on return, so only this
+                // row stays inert, not the whole UI.
+                workspaceDeletionsAwaitingOverview[workspace.id] = DeferredWorkspaceDeletion(
+                    error: error, requestedBranchDeletion: requestedBranchDeletion)
             }
         }
     }
@@ -1779,34 +1808,66 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return !code.isRequestVerdict
     }
 
+    /// What reconciliation was able to establish about a delete whose response was lost.
+    ///
+    /// `unknown` is not a synonym for `present`: it means no overview ever resolved, so nothing has been
+    /// observed either way. Reporting it as `present` would be a fabricated verdict — the client would put
+    /// the cached pre-delete row back and call the delete failed while the daemon may well have completed
+    /// it — so it defers instead, to the first overview that can actually answer.
+    private enum WorkspaceDeletionReconciliation {
+        case gone
+        case present
+        case unknown
+    }
+
+    /// A delete parked in `workspaceDeletionsAwaitingOverview`, holding what the client owes the user once
+    /// an overview finally settles the question.
+    private struct DeferredWorkspaceDeletion {
+        /// Surfaced only if the workspace turns out to still be there.
+        let error: any Error
+        /// Whether the user asked for branches to be deleted, which decides if the unknown-branch-outcome
+        /// notice is owed when the workspace turns out to be gone.
+        let requestedBranchDeletion: Bool
+    }
+
+    /// Shown when a delete is confirmed complete but its response — the only thing that carried the
+    /// branch-deletion report — never arrived.
+    static let unknownBranchOutcomeNotice =
+        "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+
     /// Refetches the overview a bounded number of times after an indeterminate delete, looking for
     /// the workspace to stop being listed. Returns whether the workspace is still present once the
     /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
     /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
-    private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async -> Bool {
+    private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
+        -> WorkspaceDeletionReconciliation
+    {
         // These fetches are issued after the delete was sent, so each one is newer than any poll already in
         // flight; publishing one retires those polls the same way applying a mutation's own overview does.
         mutationGeneration &+= 1
+        var resolvedAtLeastOnce = false
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
-            guard identity == overviewIdentity else { return false }
+            guard identity == overviewIdentity else { return .unknown }
             guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
                 if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
                 continue
             }
-            guard identity == overviewIdentity else { return false }
+            guard identity == overviewIdentity else { return .unknown }
             await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
-            guard identity == overviewIdentity else { return false }
+            guard identity == overviewIdentity else { return .unknown }
             publishOverview(refreshedOverview)
             guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
                 errorMessage = nil
                 connectionNotice = nil
                 refreshFailureStreak = nil
-                return false
+                return .gone
             }
+            // An overview resolved and still lists it, so the answer is known even if the budget runs out.
+            resolvedAtLeastOnce = true
             if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
         }
-        return true
+        return resolvedAtLeastOnce ? .present : .unknown
     }
 
     func dismissDeletedWorkspaceNotice() { deletedWorkspaceNotice = nil }
@@ -2074,9 +2135,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard let overview = response.overview else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
-        publishOverview(overview)
+        // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil
+        publishOverview(overview)
         // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
         // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
         // mutation keeps its original start time, and the next isolated failure alerts on the strength
@@ -2088,9 +2150,35 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// publishes a fetched overview goes through here, so the persisted dismissal set is pruned exactly
     /// once per refresh. Clearing the overview (a device switch, a block) deliberately does not prune:
     /// there is nothing to prune against, and pruning against nothing would discard every dismissal.
+    /// Settles deletes whose outcome nothing could confirm when they finished (see the `.unknown` case in
+    /// `deleteWorkspace`). Every published overview is a chance to answer, whichever path produced it —
+    /// the ordinary poll, a later mutation, or a reconciliation — so the resolution lives here, at the one
+    /// place an overview becomes the app's state.
+    ///
+    /// Absent means the delete landed: the marking is dropped silently, and the unknown-branch-outcome
+    /// notice is owed if the user had asked for branches to go too. Present means it did not: the marking
+    /// is dropped and the error the client held back is surfaced now, against a row the user can act on
+    /// again. Either way the entry is consumed, so an overview only ever answers once.
+    private func resolveDeferredWorkspaceDeletions(against payload: SpacesDeviceOverviewPayload) {
+        guard !workspaceDeletionsAwaitingOverview.isEmpty else { return }
+        let listedWorkspaceIDs = Set(payload.workspaces.map(\.id))
+        for (workspaceID, deferred) in workspaceDeletionsAwaitingOverview {
+            workspaceDeletionsAwaitingOverview.removeValue(forKey: workspaceID)
+            workspaceIDsPendingDeletion.remove(workspaceID)
+            if listedWorkspaceIDs.contains(workspaceID) {
+                handleBridgeError(deferred.error)
+            } else if deferred.requestedBranchDeletion {
+                deletedWorkspaceNotice = Self.unknownBranchOutcomeNotice
+            }
+        }
+    }
+
     private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
         overview = payload
-        if let payload { pruneDismissedAlertIDs(against: payload) }
+        if let payload {
+            pruneDismissedAlertIDs(against: payload)
+            resolveDeferredWorkspaceDeletions(against: payload)
+        }
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -2119,10 +2207,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard identity == overviewIdentity else { return nil }
             await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
             guard identity == overviewIdentity else { return nil }
-            publishOverview(refreshedOverview)
             errorMessage = nil
             connectionNotice = nil
             refreshFailureStreak = nil
+            publishOverview(refreshedOverview)
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

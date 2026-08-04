@@ -17,6 +17,21 @@ import spacesdevicecore
 /// reconciliation decision (how many attempts, when to stop early, what counts as resolved) is
 /// testable without a real device connection.
 @MainActor final class WorkspaceDeletionReconciler {
+    /// The reconciliation verdict once the attempt budget is spent (or an overview resolves early).
+    /// Three-valued rather than a "still present" `Bool` because a failed transport for every single
+    /// attempt proves nothing — `gone`/`present` both require at least one overview to have actually
+    /// resolved, so a caller can tell "the daemon proved the delete landed/didn't" apart from "nothing
+    /// ever answered" and avoid fabricating either verdict from silence.
+    enum Outcome: Equatable {
+        /// An overview resolved and did not list the workspace: the delete is confirmed complete.
+        case gone
+        /// An overview resolved and still listed the workspace once the budget was spent.
+        case present
+        /// Every fetch failed — the transport never answered, so neither verdict is provable. The
+        /// caller must not un-mark the row on this; it has to keep waiting for real evidence.
+        case unknown
+    }
+
     /// Reconciliation attempts after an indeterminate delete failure. Five attempts at `interval` give
     /// the daemon a settle window on the order of the sidebar's own poll cadence rather than an
     /// instant verdict — matching the constant iOS uses for the same wait.
@@ -31,21 +46,22 @@ import spacesdevicecore
     /// refetch itself failed (the transport is still down); that is inconclusive rather than evidence
     /// either way, so the loop just tries again on its next attempt. Every overview that does resolve
     /// is handed to `applyOverview` so the caller can publish it through its normal refresh path,
-    /// exactly like an ordinary overview refresh — this type never applies state itself. Returns
-    /// whether `workspaceID` is still present once the budget is spent (or every fetch failed) —
-    /// `false` means the delete is confirmed complete.
+    /// exactly like an ordinary overview refresh — this type never applies state itself. See `Outcome`
+    /// for what the return value means.
     func reconcile(workspaceID: String, fetchOverview: () async -> SpacesDeviceOverviewPayload?, applyOverview: (SpacesDeviceOverviewPayload) -> Void)
-        async -> Bool
+        async -> Outcome
     {
+        var anyOverviewResolved = false
         for attempt in 0..<Self.attempts {
             guard let overview = await fetchOverview() else {
                 if attempt + 1 < Self.attempts { try? await Task.sleep(for: interval) }
                 continue
             }
+            anyOverviewResolved = true
             applyOverview(overview)
-            guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return false }
+            guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return .gone }
             if attempt + 1 < Self.attempts { try? await Task.sleep(for: interval) }
         }
-        return true
+        return anyOverviewResolved ? .present : .unknown
     }
 }
