@@ -557,6 +557,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// Bumped every time a mutation's result is applied. A poll's overview is a snapshot of the moment its
+    /// fetch was issued, so one that started before a mutation and lands after it carries pre-mutation
+    /// state: publishing it would put a deleted workspace, or a stopped process, back on screen as an
+    /// ordinary actionable row until the next poll two seconds later. A refresh captures this value when
+    /// its fetch begins and discards its result if it moved — the same discard-don't-publish rule
+    /// `overviewIdentity` applies to connection changes, for staleness in time rather than in connection.
+    @ObservationIgnored private var mutationGeneration = 0
     /// When the current run of failed overview fetches began, gating the connection-error alert (see
     /// `refreshFailureAlertDelay`). Tagged with the connection identity it was gathered against, so any
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
@@ -1040,6 +1047,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // uninterrupted stretch of watching the connection.
         let attemptStartedAt = now()
         let monitoringGeneration = connectionMonitoringGeneration
+        // Captured before the fetch is issued: this overview describes the daemon as of now, so a mutation
+        // applied while it is in flight makes it stale and it must be dropped rather than published.
+        let mutationGenerationAtFetch = mutationGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -1049,7 +1059,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             applyCompatibility(overview.daemonStatus)
             // The daemon reports the addresses it is currently reachable at on every connection. This is
             // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
@@ -1072,7 +1082,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // above already confirmed no device switch happened in between.
             if hostsChanged { rebuildLiveClientAfterHostsBackfill() }
         } catch is CancellationError { return } catch {
-            guard identity == overviewIdentity else { return }
+            // A mutation that landed while this poll was failing has already published the device's real
+            // state and cleared any error; a stale failure must not overwrite that with an outage report.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
@@ -1764,6 +1776,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
     /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
     private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async -> Bool {
+        // These fetches are issued after the delete was sent, so each one is newer than any poll already in
+        // flight; publishing one retires those polls the same way applying a mutation's own overview does.
+        mutationGeneration &+= 1
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
             guard identity == overviewIdentity else { return false }
             guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
@@ -2040,6 +2055,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
     /// must not overwrite the new connection's state with the previous backend's overview.
     private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
+        // Bumped for every applied mutation, including one that carried no overview: the daemon's state
+        // changed either way, so any poll already in flight is describing the world before it.
+        mutationGeneration &+= 1
         guard let overview = response.overview, identity == overviewIdentity else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
@@ -2080,6 +2098,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
+            // Fetched after the mutation was sent, so it supersedes any poll already in flight.
+            mutationGeneration &+= 1
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.

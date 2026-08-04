@@ -122,6 +122,39 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspaceSetupState(workspaceID: created.id)?.status, .succeeded)
     }
 
+    /// A non-git project owns exactly one workspace, so creating one again returns the record that already
+    /// exists. That repeat create must stay a no-op: the workspace was provisioned when it was created, and
+    /// running the project's setup script again would re-execute an arbitrary user-authored command every
+    /// time a client retried the create.
+    func testRepeatCreateOnANonGitProjectRunsTheSetupScriptOnlyOnce() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("plain-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        // Each setup run appends a line, so the file's line count is the number of runs.
+        let runLog = root.appendingPathComponent("setup-runs.log")
+        let project = try orchestrator.addProject(dir: projectDir.path) { $0.setupScript = "echo ran >> '\(runLog.path)'" }
+
+        // The single workspace already exists — `addProject` seeded it — so neither create provisions
+        // anything and neither may run the script.
+        let first = try orchestrator.createWorkspace(projectID: project.id)
+        let second = try orchestrator.createWorkspace(projectID: project.id)
+
+        XCTAssertEqual(first.id, second.id, "a non-git project keeps its single workspace")
+        XCTAssertEqual(setupRunCount(loggedAt: runLog), 0, "a create that returned the existing workspace must not run the setup script")
+
+        // The counterpart: a create that genuinely makes a workspace runs the script exactly once.
+        let gitRepo = try makeTempGitRepo(name: "setup-run-once-git")
+        let gitRunLog = root.appendingPathComponent("git-setup-runs.log")
+        let gitProject = try orchestrator.addProject(dir: gitRepo.path) { $0.setupScript = "echo ran >> '\(gitRunLog.path)'" }
+        _ = try orchestrator.createWorkspace(projectID: gitProject.id, branch: "feature-provisioned")
+        XCTAssertEqual(setupRunCount(loggedAt: gitRunLog), 1)
+    }
+
+    private func setupRunCount(loggedAt url: URL) -> Int { ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: "\n").count }
+
     private func waitForFile(at url: URL, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

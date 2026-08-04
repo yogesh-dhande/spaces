@@ -456,6 +456,69 @@
             XCTAssertTrue(model.deletedWorkspaceNotice?.contains("branch") == true)
         }
 
+        /// An overview poll is a snapshot of the moment its fetch was issued. One that started before a
+        /// mutation and lands after it still carries the pre-mutation world, so publishing it would put the
+        /// deleted workspace back on screen as an ordinary actionable row until the next poll. It is
+        /// discarded instead — the same rule `overviewIdentity` applies to a connection change.
+        func testOverviewPollBegunBeforeAMutationIsDiscardedWhenItLandsAfterIt() async {
+            let pollGate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleOverview = makeOverview()
+            let postDeleteOverview = SpacesDeviceOverviewPayload(
+                projects: staleOverview.projects, workspaces: staleOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: staleOverview.sessions, daemonStatus: staleOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "overview" {
+                    // The poll's fetch is parked until the delete below has been applied.
+                    await pollGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
+                }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: postDeleteOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = staleOverview
+
+            let poll = Task { await model.refresh() }
+            while !model.isLoading { await Task.yield() }
+
+            await model.deleteWorkspace(staleOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertEqual(model.overview, postDeleteOverview, "the delete publishes the post-delete overview")
+
+            await pollGate.open()
+            await poll.value
+
+            XCTAssertEqual(model.overview, postDeleteOverview, "the stale poll must not republish the deleted workspace")
+            XCTAssertFalse(model.workspaceGroups.contains { $0.workspace.id == "workspace-feature" })
+        }
+
+        /// The other half of the rule: a poll whose fetch begins after the mutation carries current state
+        /// and publishes normally.
+        func testOverviewPollBegunAfterAMutationPublishesNormally() async {
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let postDeleteOverview = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            let laterOverview = SpacesDeviceOverviewPayload(
+                projects: postDeleteOverview.projects, workspaces: postDeleteOverview.workspaces, sessions: [],
+                daemonStatus: postDeleteOverview.daemonStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "overview" { return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(laterOverview)) }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: postDeleteOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+
+            await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false)
+            await model.refresh()
+
+            XCTAssertEqual(model.overview, laterOverview, "a poll issued after the mutation is current and publishes")
+        }
+
         /// The point of reconciling rather than reporting failure: the row stays marked for deletion for
         /// the whole reconciliation, so a workspace the daemon is still tearing down never goes back to
         /// looking normal — and offering Delete again — while it is doomed.

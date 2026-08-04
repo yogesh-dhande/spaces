@@ -1,4 +1,8 @@
+import Foundation
 import Testing
+import spacesclientcore
+import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 @testable import spacesui
@@ -96,5 +100,88 @@ import workspacecore
         WorkspaceRuntimeStatus(
             workspaceID: workspaceID, lifecycleState: .running, runtimeHealth: .healthy, hasTrackedRuntimeIndicators: false, runningProcessCount: 1,
             exitedProcessCount: 0, waitingAgentWindowCount: 0, missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
+    }
+}
+
+/// The daemon runs a delete's teardown on its own queue, well past what `deleteWorkspace`'s own
+/// request timeout allows, so a failed delete is only a definitive rejection when the daemon actually
+/// answered it — everything else has to be reconciled against fresh overviews instead of reported
+/// outright (see `AppKitController.isIndeterminateDeleteOutcome` and `WorkspaceDeletionReconciler`).
+/// `AppKitController` itself needs a live AppKit window to construct, so these cover the two testable
+/// seams `deleteWorkspace` is built from directly: the classification and the reconciliation loop.
+@Suite @MainActor struct WorkspaceDeletionReconciliationTests {
+    /// A daemon-coded rejection is the one shape that proves the daemon answered — every other error
+    /// this request can throw carries no code, coded or not, and must reconcile instead.
+    @Test func onlyADaemonCodedRejectionIsDefinitive() {
+        #expect(!AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.requestRejected(message: "nope", code: .notFound)))
+        #expect(AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.unavailable("request timed out")))
+        #expect(AppKitController.isIndeterminateDeleteOutcome(SpacesDeviceClientError.missingOverview))
+        #expect(AppKitController.isIndeterminateDeleteOutcome(NSError(domain: "test", code: 1)))
+    }
+
+    /// Reconciliation stops the moment a refetched overview no longer lists the workspace, instead of
+    /// spending the rest of its budget: the delete is confirmed complete and the caller is not made to
+    /// wait out attempts that can no longer change the answer. Every overview that did resolve — just
+    /// the one here — is still handed to `applyOverview`, exactly as an ordinary refresh would apply it.
+    @Test func reconciliationStopsAsSoonAsTheWorkspaceIsConfirmedGone() async {
+        let reconciler = WorkspaceDeletionReconciler()
+        reconciler.interval = .zero
+        var fetchCount = 0
+        var appliedOverviews: [SpacesDeviceOverviewPayload] = []
+
+        let stillPresent = await reconciler.reconcile(
+            workspaceID: "ws-deleting",
+            fetchOverview: {
+                fetchCount += 1
+                return SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-keep")], sessions: [])
+            }, applyOverview: { appliedOverviews.append($0) })
+
+        #expect(!stillPresent)
+        #expect(fetchCount == 1)
+        #expect(appliedOverviews.count == 1)
+    }
+
+    /// A workspace that is still listed on every refetch exhausts the whole attempt budget rather than
+    /// resolving early, and is reported present so the caller restores the row and surfaces the
+    /// original error.
+    @Test func reconciliationExhaustsItsBudgetWhenTheWorkspaceOutlivesIt() async {
+        let reconciler = WorkspaceDeletionReconciler()
+        reconciler.interval = .zero
+        var fetchCount = 0
+
+        let stillPresent = await reconciler.reconcile(
+            workspaceID: "ws-deleting",
+            fetchOverview: {
+                fetchCount += 1
+                return SpacesDeviceOverviewPayload(workspaces: [workspaceSummary(id: "ws-deleting")], sessions: [])
+            }, applyOverview: { _ in })
+
+        #expect(stillPresent)
+        #expect(fetchCount == WorkspaceDeletionReconciler.attempts)
+    }
+
+    /// A refetch that fails outright (the transport is still down) is inconclusive rather than
+    /// evidence either way — the loop keeps its budget and tries again on the next attempt instead of
+    /// treating the failure as proof the workspace is gone or giving up early.
+    @Test func aFailedRefetchIsRetriedRatherThanTreatedAsResolved() async {
+        let reconciler = WorkspaceDeletionReconciler()
+        reconciler.interval = .zero
+        var fetchCount = 0
+
+        let stillPresent = await reconciler.reconcile(
+            workspaceID: "ws-deleting",
+            fetchOverview: {
+                fetchCount += 1
+                return fetchCount < WorkspaceDeletionReconciler.attempts ? nil : SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+            }, applyOverview: { _ in })
+
+        #expect(!stillPresent)
+        #expect(fetchCount == WorkspaceDeletionReconciler.attempts)
+    }
+
+    private func workspaceSummary(id: String) -> SpacesDeviceWorkspaceSummary {
+        SpacesDeviceWorkspaceSummary(
+            id: id, projectID: "proj", projectName: "Project", branch: "doomed", baseBranch: "main", dir: "/project-\(id)", isRunning: false,
+            isHidden: false, isDefault: false, sessionCount: 0)
     }
 }

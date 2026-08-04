@@ -537,7 +537,7 @@ public final class WorkspaceOrchestrator {
         // create cannot land in a project being deleted: `removeProject` holds the same key while it drops
         // the project's records and worktrees, and a workspace created inside that window would outlive the
         // project as an orphan.
-        let workspace = try withProjectLifecycleLock(projectID: projectID) {
+        let created = try withProjectLifecycleLock(projectID: projectID) {
             try createWorkspaceUnlocked(
                 projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse,
@@ -550,15 +550,25 @@ public final class WorkspaceOrchestrator {
         // created with setup deferred (`.pending`) and the script is run after the key is released, which
         // is the shape the Device API's create path already had. A setup failure still throws out of
         // `createWorkspace` with the record left in place and its `.failed` state recorded, exactly as when
-        // setup ran inline.
-        if runSetupScript { try runWorkspaceSetup(workspaceID: workspace.id) }
-        return workspace
+        // setup ran inline. Setup runs only for a workspace this call actually created: a repeat create
+        // against a non-git project returns the existing record, and rerunning the project's setup script
+        // over an already-provisioned workspace would make a retried create re-execute an arbitrary script.
+        if runSetupScript, created.didCreate { try runWorkspaceSetup(workspaceID: created.workspace.id) }
+        return created.workspace
+    }
+
+    /// A `createWorkspace` outcome paired with whether this call created the record. A non-git project owns
+    /// exactly one workspace, so a repeat create returns the existing one — which the caller must be able
+    /// to tell apart from a fresh create before it runs any provisioning.
+    private struct CreatedWorkspace {
+        let workspace: WorkspaceRecord
+        let didCreate: Bool
     }
 
     private func createWorkspaceUnlocked(
         projectID: String, branch: String?, baseBranch: String?, directoryName: String?, allowRemoteBranchLookup: Bool,
         allowExistingBranchReuse: Bool, replaceExistingManagedDirectory: Bool
-    ) throws -> WorkspaceRecord {
+    ) throws -> CreatedWorkspace {
         guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
         let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let replacesExplicitManagedDirectory = replaceExistingManagedDirectory && trimmedDirectoryName?.isEmpty == false
@@ -597,8 +607,10 @@ public final class WorkspaceOrchestrator {
         }
         if !project.isGitRepo, let existing = try store.workspace(dir: project.dir) {
             // A non-git project owns exactly one workspace (the project directory), so an existing record for
-            // that directory is returned rather than duplicated into a second, indistinguishable one.
-            return existing
+            // that directory is returned rather than duplicated into a second, indistinguishable one. It is
+            // reported as not created so the caller does not rerun the project's setup script over a
+            // workspace that was already set up — a repeat create is a no-op, not a re-provision.
+            return CreatedWorkspace(workspace: existing, didCreate: false)
         }
         let workspaceDir: String
         let workspaceDirname: String?
@@ -640,7 +652,7 @@ public final class WorkspaceOrchestrator {
         // Setup is always deferred here: `createWorkspace` runs it after releasing the project key.
         try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: false)
 
-        return workspace
+        return CreatedWorkspace(workspace: workspace, didCreate: true)
     }
 
     public func createWorkspaceOnDevice(

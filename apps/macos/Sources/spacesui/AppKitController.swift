@@ -2844,6 +2844,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
     }
 
+    /// Whether a failed `deviceMutation` leaves its outcome unknown, so `deleteWorkspace` has to
+    /// reconcile against fresh overviews (`WorkspaceDeletionReconciler`) instead of reporting the
+    /// failure outright.
+    ///
+    /// Only a verdict from the daemon is definitive, and the one thing that proves the daemon produced
+    /// a verdict is a Device API error code: `SpacesDeviceClientError` attaches one exactly where it
+    /// turns an `ok: false` response into `.requestRejected`, and the daemon fills one in for every
+    /// failure it reports (`SpacesDeviceAPIServer.errorCode(for:)`). Every other failure this request
+    /// can throw carries no code — a client-side timeout (`archiveWorkspace` allows 60s, well short of
+    /// what the daemon's own teardown queue can take once it is stopping the workspace, removing its
+    /// worktree, and dropping its record), an unreachable host, a certificate pin mismatch — and none
+    /// of them says anything about whether the daemon accepted the delete. Mirrors
+    /// `SpacesMobileAppModel.isIndeterminateDeleteOutcome` on iOS.
+    nonisolated static func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
+        (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode == nil
+    }
+
+    /// Refetches `device`'s overview for `WorkspaceDeletionReconciler`, discarding the specific
+    /// failure: a reconciliation refetch that fails is inconclusive rather than proof of anything, so
+    /// the reconciler just tries again on its next attempt.
+    nonisolated private static func deviceOverviewFetch(device: SpacesPairedDeviceRecord) async -> SpacesDeviceOverviewPayload? {
+        await Task.detached(priority: .userInitiated) {
+            (try? SpacesDeviceClient.overview(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))?.overview
+        }.value
+    }
+
     nonisolated private static func deviceWorkspaceCreateOptions(projectID: String, device: SpacesPairedDeviceRecord) async -> Result<
         SpacesDeviceWorkspaceCreateOptions, Error
     > {
@@ -3098,8 +3124,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
-                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                    isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
+                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
+                    isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -4313,9 +4339,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func sidebarCardBackgroundColor() -> NSColor { sidebar.sidebarCardBackgroundColor() }
     func sidebarSelectedCardBackgroundColor() -> NSColor { sidebar.sidebarSelectedCardBackgroundColor() }
     func sidebarCardBorderColor(isSelected: Bool) -> NSColor { sidebar.sidebarCardBorderColor(isSelected: isSelected) }
-    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor {
-        sidebar.sidebarPrimaryTextColor(isSelected: isSelected)
-    }
+    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarPrimaryTextColor(isSelected: isSelected) }
     func sidebarMetadataTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarMetadataTextColor(isSelected: isSelected) }
     func sidebarRunningIndicatorColor() -> NSColor { sidebar.sidebarRunningIndicatorColor() }
     func sidebarFailedIndicatorColor() -> NSColor { sidebar.sidebarFailedIndicatorColor() }
@@ -8123,8 +8147,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func presentProjectImportWorkspaceSyncPrompt() -> ProjectImportWorkspaceSyncDecision {
         let alert = NSAlert()
         alert.messageText = "Update workspaces?"
-        alert.informativeText =
-            "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project?"
+        alert.informativeText = "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project?"
         alert.addButton(withTitle: "Update All Workspaces")
         alert.addButton(withTitle: "Project Only")
         alert.addButton(withTitle: "Cancel")
@@ -8797,16 +8820,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
                     // remote that refused), so its report is shown; a delete with no branch boxes ticked
                     // carries no notice and stays silent.
-                    if let notice = response.mutationNotice, !notice.isEmpty {
-                        self.showInfoMessage(title: "Deleted workspace", message: notice)
-                    }
+                    if let notice = response.mutationNotice, !notice.isEmpty { self.showInfoMessage(title: "Deleted workspace", message: notice) }
                 case .failure(let error):
-                    // The delete did not land, so the row goes back to normal — its expansion state
-                    // included — and the reload re-syncs whatever the daemon did get through.
+                    guard Self.isIndeterminateDeleteOutcome(error) else {
+                        // The daemon answered and refused: the workspace was never touched, so the row
+                        // goes back to normal — its expansion state included — and the reload re-syncs
+                        // whatever the daemon did get through.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        requestSidebarReload()
+                        button?.isEnabled = true
+                        showError(error)
+                        return
+                    }
+                    // The delete's fate is unknown — the daemon may still be tearing the workspace down
+                    // (see `isIndeterminateDeleteOutcome`). Un-marking and reporting failure here would
+                    // let the user retry-delete a workspace that is already doomed. Reconcile against
+                    // fresh overviews instead: every overview that resolves is applied through the same
+                    // path a mutation response takes, so the row already reflects reality by the time the
+                    // marking clears. If the workspace stops appearing, treat the delete as successful and
+                    // surface no error; only report the failure once the reconciliation budget is spent
+                    // and the workspace is still listed.
+                    let reconciler = WorkspaceDeletionReconciler()
+                    let workspaceStillPresent = await reconciler.reconcile(
+                        workspaceID: id, fetchOverview: { await Self.deviceOverviewFetch(device: device) },
+                        applyOverview: { [weak self] overview in
+                            self?.applyDeviceOverview(overview, deviceID: device.id, selectedProjectID: project.id)
+                        })
                     self.endPendingWorkspaceDeletion(workspaceID: id)
-                    requestSidebarReload()
                     button?.isEnabled = true
-                    showError(error)
+                    if workspaceStillPresent {
+                        // Every reconciliation refetch may have failed outright (transport still down),
+                        // in which case no overview ever reached the row — resync explicitly so it does
+                        // not sit stale beside the error.
+                        requestSidebarReload()
+                        showError(error)
+                    } else if deleteLocalBranch || deleteRemoteBranch {
+                        // The delete landed, but the branch-deletion report existed only in the response
+                        // that was lost — reconciliation can prove the workspace is gone, not what
+                        // happened to branches the user explicitly asked to delete. Say so rather than
+                        // silently succeeding.
+                        self.showInfoMessage(
+                            title: "Deleted workspace",
+                            message:
+                                "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+                        )
+                    }
                 }
             } else {
                 self.endPendingWorkspaceDeletion(workspaceID: id)
