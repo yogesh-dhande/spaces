@@ -516,34 +516,64 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains("survives SSH setup disconnect"))
     }
 
-    /// The demo pairs with the remote account's INSTALLED daemon — pairing goes through
-    /// `open-remote-device-pairing-window`, which drives the installed profile's CLI — so the artifact is
-    /// installed with no profile selector and, crucially, with no environment prefix at all: the installed
-    /// profile resolves its database, runtime root, and canonical Device API port from where the binary
-    /// lives. Pinning the whole install command is what keeps a stray environment assignment from creeping
-    /// back and silently redirecting the daemon the demo then pairs with.
-    func testMobileDemoPreparesRepoLocalLinuxArtifactBeforeRemotePairing() throws {
+    /// The demo's remote daemon is a development profile of its own, never the remote account's installed
+    /// profile: a source build carries no release version, and the installed lane is the one real paired
+    /// clients talk to. So the artifact is installed with that profile's name and, crucially, with no
+    /// environment prefix at all — a profile-rooted binary resolves its database, runtime root, and Device
+    /// API port from where it lives. Pinning the whole install command, the port lookup, and the CLI the
+    /// pairing window is opened through is what keeps a stray environment assignment, or a slip back to the
+    /// installed lane, from silently redirecting the daemon the demo then pairs with.
+    func testMobileDemoInstallsRemoteDevelopmentProfileBeforePairing() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
             "run_mobile_terminal_demo.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
         let prepareRange = try XCTUnwrap(script.range(of: "  prepare_remote_demo_daemon"))
-        let pairRange = try XCTUnwrap(script.range(of: #""$spacese2e" "${args[@]}" >"$remote_pairing_json""#))
+        let pairRange = try XCTUnwrap(script.range(of: #""$spaces_cli" device pair --link "$remote_pairing_link""#))
         XCTAssertLessThan(prepareRange.lowerBound, pairRange.lowerBound)
-        XCTAssertTrue(script.contains("deploy_linux_spacesd_e2e.sh"))
+        XCTAssertTrue(script.contains(#"remote_demo_profile_name="remote-mobile-demo""#))
+        XCTAssertTrue(script.contains(#"deploy_linux_spacesd_e2e.sh" --profile "$remote_demo_profile_name""#))
 
         let installLine = try XCTUnwrap(
             script.split(separator: "\n").first { $0.contains("$quoted_install/install.sh") }, "The demo must install the deployed artifact.")
         XCTAssertEqual(
             installLine.trimmingCharacters(in: .whitespaces),
-            #"remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh" >/dev/null"#
+            #"remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null"#
         )
-        // The demo waits on the canonical port because that is the port the installed profile binds; there is
-        // no configurable remote daemon port left for it to read.
-        XCTAssertTrue(script.contains("remote_demo_daemon_port=47847"))
+        // The port is the one the daemon assigned itself for this profile and persisted, read back from that
+        // profile's own Device API settings. Nothing in the lane chooses a port.
+        XCTAssertTrue(script.contains(#"$remote_demo_profile_root/runtime/terminal/device-api.json"#))
+        XCTAssertFalse(script.contains("remote_demo_daemon_port=47847"))
         XCTAssertFalse(script.contains("SPACES_E2E_REMOTE_DAEMON_PORT"))
         XCTAssertTrue(script.contains("remote demo daemon port {port} did not open"))
-        XCTAssertFalse(script.contains("~/.spaces/bin/spaces mobile status"))
+        // Pairing windows are opened through the deployed profile's own CLI, so the installed profile's
+        // binaries are never reached.
+        XCTAssertTrue(script.contains(#"remote_demo_cli="$remote_demo_profile_root/daemon/current/bin/spaces""#))
+        XCTAssertFalse(script.contains("~/.spaces/bin/spaces"))
+    }
+
+    /// Every lane that redeems a pairing link redeems the daemon's own, with nothing but its endpoint moved
+    /// to an address the running machine can reach.
+    ///
+    /// A harness that reassembled the link would pin a copy of a format it does not own — the link version,
+    /// the daemon's wire-protocol version, and its app version are the daemon's to state — and pairing would
+    /// fail outright the next time that format moves, which is exactly how a hand-built link went stale
+    /// before. The substitution rewrites only the endpoint parameters and passes every other one through as
+    /// written, so the escapes the daemon chose survive to the client that reads them back.
+    func testRemoteLanesRedeemDaemonPairingLinkVerbatim() throws {
+        let testsRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for lane in ["run_mobile_terminal_demo.sh", "e2e_remote_terminal_send.sh"] {
+            let script = try String(contentsOf: testsRoot.appendingPathComponent(lane), encoding: .utf8)
+            XCTAssertTrue(script.contains("pairingLink"), lane)
+            XCTAssertTrue(script.contains("rewrite_pairing_link_endpoint"), lane)
+            XCTAssertFalse(script.contains("spaces://pair"), lane)
+        }
+
+        let helper = try String(contentsOf: testsRoot.appendingPathComponent("pairing_link_endpoint.sh"), encoding: .utf8)
+        XCTAssertTrue(helper.contains(#"substituted.append("host=" + quote(host, safe=""))"#))
+        XCTAssertTrue(helper.contains(#"substituted.append("port=" + quote(port, safe=""))"#))
+        XCTAssertTrue(helper.contains("substituted.append(parameter)"))
+        XCTAssertFalse(helper.contains("urlencode"))
     }
 
     /// The remote development daemon a repo-local build deploys is the same profile this Mac's pairing

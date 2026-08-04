@@ -17,6 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+source "$SCRIPT_DIR/pairing_link_endpoint.sh"
 spaces_e2e_require_remote_host_env "$ROOT_DIR"
 
 SPACES_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
@@ -103,8 +104,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Opens a fresh one-time pairing window on the remote E2E daemon and prints its code, nonce, and the
-# daemon's certificate fingerprint (stable across windows — it is the daemon's TLS identity).
+# Opens a fresh one-time pairing window on the remote E2E daemon and prints its link, code, nonce, and
+# the daemon's certificate fingerprint (stable across windows — it is the daemon's TLS identity). The
+# code and nonce are redeemed directly through the Device API below; the link is what the CLI redeems.
 open_remote_pairing_window() {
   local pair_json parsed
   pair_json="$(remote_ssh "$REMOTE_CLI device pair --json")"
@@ -114,21 +116,21 @@ import json
 import os
 import shlex
 payload = json.loads(os.environ["SPACES_E2E_PAIR_JSON"])
-for key in ("pairingCode", "pairingNonce", "certificateFingerprint"):
+for key in ("pairingLink", "pairingCode", "pairingNonce", "certificateFingerprint"):
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"remote pairing JSON missing {key}")
 if not isinstance(payload.get("protocolVersion"), int):
     raise SystemExit("remote pairing JSON missing protocolVersion")
+print(f"PAIRING_LINK={shlex.quote(payload['pairingLink'])}")
 print(f"PAIRING_CODE={shlex.quote(payload['pairingCode'])}")
 print(f"PAIRING_NONCE={shlex.quote(payload['pairingNonce'])}")
 print(f"CERTIFICATE_FINGERPRINT={shlex.quote(payload['certificateFingerprint'])}")
 print(f"PAIRING_PROTOCOL_VERSION={payload['protocolVersion']}")
-print(f"PAIRING_APP_VERSION={shlex.quote(str(payload.get('appVersion') or '1.0'))}")
-print(f"PAIRING_NAME={shlex.quote(str(payload.get('name') or 'remote-e2e'))}")
 PY
   )"
   eval "$parsed"
+  [[ -n "$PAIRING_LINK" ]] || fail "remote pairing JSON missing pairingLink"
   [[ -n "$PAIRING_CODE" ]] || fail "remote pairing JSON missing pairingCode"
   [[ -n "$PAIRING_NONCE" ]] || fail "remote pairing JSON missing pairingNonce"
   [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
@@ -245,21 +247,11 @@ echo "remote workspace: $REMOTE_WORKSPACE_ID"
 
 echo "== pairing this client's CLI with the remote E2E daemon (link redemption) =="
 open_remote_pairing_window
-PAIR_LINK="$(
-  python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$PAIRING_NONCE" "$PAIRING_CODE" "$CERTIFICATE_FINGERPRINT" "$PAIRING_NAME" "$PAIRING_PROTOCOL_VERSION" "$PAIRING_APP_VERSION" <<'PY'
-import sys
-import urllib.parse
-host, port, nonce, code, fingerprint, name, pv, av = sys.argv[1:9]
-# The daemon advertises its own interface address, which may not be reachable from this machine;
-# rebuild the v3 link against the configured daemon host/port from .env, carrying the daemon
-# wire-protocol (pv) and app version (av) so the pairing-time compatibility gate passes.
-query = urllib.parse.urlencode({
-    "v": "3", "host": host, "port": port, "nonce": nonce, "code": code,
-    "fp": fingerprint, "name": name, "pv": pv, "av": av,
-})
-print(f"spaces://pair?{query}")
-PY
-)"
+# The daemon writes its link with the interface address it sees itself on, which may not be reachable
+# from this machine, so only that endpoint is moved to the configured daemon host/port from .env. The
+# link is otherwise the daemon's own, carrying its wire-protocol and app version for the pairing-time
+# compatibility gate.
+PAIR_LINK="$(rewrite_pairing_link_endpoint "$PAIRING_LINK" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT")"
 PAIR_OUTPUT="$("$SPACES_BIN" device pair --link "$PAIR_LINK")"
 echo "$PAIR_OUTPUT"
 DEVICE_ID="$(printf '%s' "$PAIR_OUTPUT" | tr '\t' '\n' | sed -n 's/^id=//p' | head -n 1)"

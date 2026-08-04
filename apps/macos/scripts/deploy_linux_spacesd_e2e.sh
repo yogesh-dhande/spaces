@@ -37,6 +37,14 @@ if ! LC_ALL=C bash -c 'case "$1" in . | .. | *[!A-Za-z0-9._-]*) exit 1 ;; esac' 
   echo "deploy_linux_spacesd_e2e.sh --profile '$profile_name' is not a valid profile name: letters, digits, '.', '_', and '-' only, and not '.' or '..'." >&2
   exit 1
 fi
+# `installed` names the device's installed profile -- the lane real paired clients talk to -- and it
+# carries release builds only. This script deploys a source build, which reports no release version,
+# so installing one there hands those clients a daemon that goes wire-stale at the next protocol
+# bump with nothing to identify what it is. Every source deploy belongs in a development profile.
+if [[ "$profile_name" == "installed" ]]; then
+  echo "deploy_linux_spacesd_e2e.sh refuses --profile installed: the installed profile is the lane paired clients talk to and carries release builds only. Deploy this source build into a development profile instead." >&2
+  exit 1
+fi
 
 git_common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
 linux_cache_root="$app_root/.build/linux-e2e-cache"
