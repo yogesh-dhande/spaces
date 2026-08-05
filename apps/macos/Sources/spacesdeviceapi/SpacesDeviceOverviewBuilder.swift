@@ -346,11 +346,15 @@ struct SpacesDeviceOverviewBuilder {
                     command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
         }
 
+        // A row with no configured launcher behind it is named by its session: the user's rename when one
+        // is stored, else the label the agent reports for itself. A configured row above keeps taking its
+        // name from the launcher entry, which is what a rename edits there.
         for agent in descriptor.agentWindows where !usedAgentIDs.contains(agent.id) {
             if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
                 codingAgentRow(
-                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
+                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id,
+                    name: agent.userLabel ?? agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
                     isConfigured: false, sessionsByID: sessionsByID))
         }

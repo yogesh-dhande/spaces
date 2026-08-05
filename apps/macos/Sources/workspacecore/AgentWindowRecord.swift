@@ -5,6 +5,11 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let workspaceID: String
     public let provider: AgentProvider
     public let label: String?
+    /// The name the user typed for this agent's row, or nil when it was never renamed. Kept apart from
+    /// `label`, which the hook and foreground-detection writers rewrite from what the agent reports, so a
+    /// rename survives every later signal. Only the rename path writes it (see
+    /// `SQLiteStore.setAgentSessionUserLabel`); it is read-only on every other path.
+    public let userLabel: String?
     public let runtimeTargetID: String?
     public let terminalTarget: TerminalTargetRecord?
     public let sessionKey: String?
@@ -25,7 +30,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let updatedAt: String
 
     public init(
-        id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil,
+        id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
         terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
         status: AgentWindowStatus, note: String? = nil, detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
     ) {
@@ -33,6 +38,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.workspaceID = workspaceID
         self.provider = provider
         self.label = label
+        self.userLabel = userLabel
         self.runtimeTargetID = runtimeTargetID
         self.terminalTarget = terminalTarget
         self.sessionKey = sessionKey

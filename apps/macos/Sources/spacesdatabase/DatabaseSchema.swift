@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 11
+    public static let currentVersion = 12
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -310,6 +310,43 @@ public enum DatabaseSchema {
                       WHERE length(branch) > 0;
                     """)
         },
+        // Holds the name a user typed for a coding-agent row. It is its own column, separate from `label`,
+        // for the same reason `terminal_sessions.user_title` is separate from a terminal's live title: the
+        // hook and foreground-detection writers rewrite `label` from what the agent reports, so a rename
+        // stored there would be overwritten by the next signal. Existing rows carry NULL — nothing was
+        // renamed before this version — and read their name from `label` as they always have.
+        //
+        // The frozen pre-step shape is created first, exactly like the v9→v10 step and for the same
+        // load-bearing reason: no migration step before v10 ever created `agent_sessions`, so a chain can
+        // reach this ALTER with no table to alter (the v10→v11 step tolerates the absence rather than
+        // filling it). The shape frozen here is the v11 one (the v10 CREATE plus `detected_agent_kind`),
+        // so both arrival routes land the same v12 schema; on a database that already carries the table
+        // the CREATE is a no-op and every row is preserved.
+        DatabaseMigrationStep(fromVersion: 11, toVersion: 12, description: "Add agent_sessions.user_label", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      claimed_launcher_id TEXT,
+                      claimed_launcher_name TEXT,
+                      note TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      detected_agent_kind TEXT,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    ALTER TABLE agent_sessions ADD COLUMN user_label TEXT;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -605,6 +642,7 @@ public enum DatabaseSchema {
               workspace_id TEXT NOT NULL,
               provider TEXT NOT NULL,
               label TEXT,
+              user_label TEXT,
               status TEXT NOT NULL DEFAULT 'idle',
               runtime_target_id TEXT,
               terminal_session_id TEXT,

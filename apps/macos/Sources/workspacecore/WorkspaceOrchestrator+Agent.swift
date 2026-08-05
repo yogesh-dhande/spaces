@@ -1198,6 +1198,23 @@ extension WorkspaceOrchestrator {
         return updated
     }
 
+    /// Sets (or clears, with an empty title) the name a user gave a coding-agent row, addressed by the
+    /// agent session id the overview row carries. The name is stored on the session rather than in the
+    /// workspace config because most live agents have no config entry to rename: they are registered by an
+    /// agent's own hooks, detected in a terminal's foreground, or spawned through `spaces agent spawn`. A
+    /// launcher-backed row keeps renaming its launcher entry, so this never competes with that name.
+    ///
+    /// An empty (or whitespace-only) title clears the rename instead of being rejected, putting back the
+    /// runtime label underneath it — the only way back from a rename, matching `renameTerminalSession`.
+    /// An id that names no agent session in the workspace is a loud error, not a silent no-op.
+    public func renameAgentSession(workspaceID: String, agentID: String, title: String) throws {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
+            throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+        }
+        try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title)
+    }
+
     /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
     /// are removed so an annotation can never inject terminal control sequences or break the one-line
     /// injection format, then the result is trimmed and capped.

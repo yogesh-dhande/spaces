@@ -1257,6 +1257,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload, context: context)
+        case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
@@ -2449,6 +2450,23 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(
             context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
+    }
+
+    /// Renames a coding-agent row whose name is stored on its session (one with no configured launcher
+    /// behind it). An empty title clears the rename, restoring the name the agent reports for itself (see
+    /// `SpacesDeviceAgentSessionRenameRequest.title`); an id that names no agent session in the workspace
+    /// throws from the orchestrator and is reported as a failure.
+    private func handleRenameAgentSessionRequest(_ request: SpacesDeviceAgentSessionRenameRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        guard let agentID = normalizedString(request.agentID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
+        }
+        let title = normalizedString(request.title)
+        try context.orchestrator().renameAgentSession(workspaceID: workspaceID, agentID: agentID, title: title ?? "")
+        return try refreshedMutationResponse(
+            context: context, message: title == nil ? "Cleared coding agent name." : "Renamed coding agent.", workspaceID: workspaceID)
     }
 
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the

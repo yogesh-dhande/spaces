@@ -216,17 +216,19 @@ extension AppKitController {
         }
     }
 
-    /// Renames a sidebar runtime target. Ad hoc terminal sessions rename through the
-    /// dedicated Device API command; configured processes, agent launchers, and browser
-    /// sessions rename their workspace-config entry (so a running process picks the new
-    /// name up on restart, matching how config edits behave elsewhere).
+    /// Renames a sidebar runtime target. Rows whose name lives on a session — an ad hoc terminal, and a
+    /// coding agent with no configured launcher behind it — rename through their dedicated Device API
+    /// command; configured processes, agent launchers, and browser sessions rename their workspace-config
+    /// entry (so a running process picks the new name up on restart, matching how config edits behave
+    /// elsewhere).
     ///
-    /// Submitting an empty name clears an ad hoc terminal's rename, handing the row back to its live
-    /// title. Every other kind renames a config entry, which must keep a name, so an empty submission
-    /// there is discarded.
+    /// Submitting an empty name clears a session-stored rename, handing the row back to the name
+    /// underneath it (an ad hoc terminal's launch title, an agent's reported label). A config entry must
+    /// keep a name, so an empty submission on those kinds is discarded.
     func commitSidebarRuntimeTargetRename(workspaceID: String, item: SidebarRuntimeTargetItem, newTitle: String) {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard title != item.title, !title.isEmpty || item.kind == .window else { return }
+        let clearsSessionRename = item.kind == .window || (item.kind == .agent && item.launcherID == nil)
+        guard title != item.title, !title.isEmpty || clearsSessionRename else { return }
         switch item.kind {
         case .window:
             guard let sessionID = item.sessionID else { return }
@@ -246,18 +248,21 @@ extension AppKitController {
                     settings.processes[index].name = title
                 }
             } catch { showError(error) }
-        case .agent, .agentLauncher:
-            do {
-                try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
-                    guard
-                        let index = settings.agentLaunchers.firstIndex(where: {
-                            if let launcherID = item.launcherID { return $0.id == launcherID }
-                            return Self.normalizedRunRowName($0.name) == Self.normalizedRunRowName(item.launcherName ?? "")
-                        })
-                    else { return }
-                    settings.agentLaunchers[index].name = title
-                }
-            } catch { showError(error) }
+        case .agentLauncher: renameConfiguredAgentLauncher(workspaceID: workspaceID, item: item, title: title)
+        case .agent:
+            // A launcher-backed agent is named by its config entry, so its rename edits that entry. Most
+            // live agents have no launcher behind them — registered by an agent's own hooks, detected in a
+            // terminal's foreground, or spawned through `spaces agent spawn` — and nothing in the config
+            // names them, so their rename is stored on the agent session instead.
+            guard item.launcherID == nil else {
+                renameConfiguredAgentLauncher(workspaceID: workspaceID, item: item, title: title)
+                return
+            }
+            guard let agentID = item.agentID else { return }
+            runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
+                try SpacesDeviceClient.renameAgentSession(
+                    workspaceID: workspaceID, agentID: agentID, title: title, device: device, clientApp: clientApp)
+            }
         case .browser:
             do {
                 try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
@@ -266,6 +271,22 @@ extension AppKitController {
                 }
             } catch { showError(error) }
         }
+    }
+
+    /// Renames the workspace-config launcher entry a row is named by, matched by id and falling back to
+    /// the row's name for a not-started launcher row, whose id is itself resolved from that name.
+    private func renameConfiguredAgentLauncher(workspaceID: String, item: SidebarRuntimeTargetItem, title: String) {
+        do {
+            try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
+                guard
+                    let index = settings.agentLaunchers.firstIndex(where: {
+                        if let launcherID = item.launcherID { return $0.id == launcherID }
+                        return Self.normalizedRunRowName($0.name) == Self.normalizedRunRowName(item.launcherName ?? "")
+                    })
+                else { return }
+                settings.agentLaunchers[index].name = title
+            }
+        } catch { showError(error) }
     }
 
     /// The configured browser session a sidebar row targets. The row's `browserTargetURL` is the

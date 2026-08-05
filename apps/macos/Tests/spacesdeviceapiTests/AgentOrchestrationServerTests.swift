@@ -8,8 +8,9 @@
     @testable import spacesterminalcore
 
     /// Device API server coverage for the remote orchestration surface (`spawnAgentSession`,
-    /// `listAgentSessions`, `annotateAgentSession`, `killAgentSession`): the remote spawn gate, the row
-    /// shape carried over the wire, note sanitization, and the injected-killer routing for remote kill.
+    /// `listAgentSessions`, `annotateAgentSession`, `renameAgentSession`, `killAgentSession`): the remote
+    /// spawn gate, the row shape carried over the wire, note sanitization, how a renamed row is named
+    /// across overview builds, and the injected-killer routing for remote kill.
     final class AgentOrchestrationServerTests: XCTestCase {
         func testSpawnAgentSessionRejectsUnsupportedCommandWithoutTouchingWorkspace() throws {
             try withTemporaryProfile { _ in
@@ -189,7 +190,121 @@
             }
         }
 
+        /// Renaming a coding agent that no configured launcher backs — the common case, since an agent
+        /// registered by its own hooks, detected in a terminal's foreground, or spawned through `agent
+        /// spawn` claims no launcher — names its row, and the name survives a fresh overview build because
+        /// it is stored on the agent session rather than echoed back in the mutation's overview.
+        func testRenamingAnUnconfiguredAgentNamesItsRowAndPersists() throws {
+            try withTemporaryProfile { _ in
+                let agent = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .renameAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, title: "  Reviewer  ")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertEqual(codingAgentRowNames(response), ["Reviewer"])
+                XCTAssertEqual(
+                    codingAgentRowNames(try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))),
+                    ["Reviewer"])
+            }
+        }
+
+        /// The agent keeps signaling after the user renames its row, and every signal rewrites the label
+        /// the row used to be named from. The rename lives in its own column, so the row keeps the name
+        /// the user gave it while the runtime label underneath it moves on.
+        func testAgentSignalWithANewLabelLeavesTheUserRenameStanding() throws {
+            try withTemporaryProfile { _ in
+                let agent = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                let renamed = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .renameAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, title: "Reviewer")), authToken: token,
+                        clientApp: clientApp))
+                XCTAssertTrue(renamed.ok, renamed.message)
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                try WorkspaceOrchestrator(store: store).updateAgentWindowStatus(
+                    workspaceID: "workspace-1", provider: .spaces, terminalTrackingID: "agent-session", label: "Codex CLI", status: .spinning)
+
+                // The signal really did move the runtime label, so the unchanged row name below is the
+                // separation holding rather than a write that quietly did nothing.
+                XCTAssertEqual(try store.agentWindow(id: agent.id)?.label, "Codex CLI")
+                XCTAssertEqual(
+                    codingAgentRowNames(try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))),
+                    ["Reviewer"])
+            }
+        }
+
+        /// Clearing the rename is the only way back from one, so an empty title clears it instead of being
+        /// rejected, handing the row back to the label the agent reports for itself.
+        func testEmptyTitleClearsAnAgentRenameBackToItsReportedLabel() throws {
+            try withTemporaryProfile { _ in
+                let agent = try seedAgentSession(
+                    terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+                _ = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .renameAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, title: "Reviewer")), authToken: token,
+                        clientApp: clientApp))
+
+                let cleared = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .renameAgentSession(.init(workspaceID: "workspace-1", agentID: agent.id, title: "   ")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(cleared.ok, cleared.message)
+                XCTAssertEqual(codingAgentRowNames(cleared), ["Claude Code CLI"])
+            }
+        }
+
+        /// An id that names no agent session in the workspace is a loud error: a silent success would let a
+        /// client believe a rename it can never see took effect.
+        func testRenamingAnUnknownAgentFailsLoudly() throws {
+            try withTemporaryProfile { _ in
+                _ = try seedAgentSession(terminalSessionID: "agent-session", label: "Claude Code CLI", status: .idle, note: nil, signalAt: nil)
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .renameAgentSession(.init(workspaceID: "workspace-1", agentID: "ghost-agent", title: "Reviewer")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertEqual(
+                    codingAgentRowNames(try client.send(SpacesDeviceAPIRequest(command: .overview, authToken: token, clientApp: clientApp))),
+                    ["Claude Code CLI"])
+            }
+        }
+
         // MARK: - Fixtures
+
+        /// The names the seeded workspace's coding-agent rows carry in a response's overview — what every
+        /// client renders for those rows.
+        private func codingAgentRowNames(_ response: SpacesDeviceAPIResponse) -> [String] {
+            response.overview?.workspaces.first(where: { $0.id == "workspace-1" })?.codingAgentRows.map(\.name) ?? []
+        }
 
         @discardableResult private func seedAgentSession(
             terminalSessionID: String, label: String, status: AgentWindowStatus, note: String?, signalAt: String?
