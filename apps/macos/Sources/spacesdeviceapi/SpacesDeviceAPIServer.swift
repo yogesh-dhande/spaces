@@ -1986,7 +1986,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
             return "agent-id:\(claimedLauncherID)"
         }
-        let slotName = record.claimedLauncherName ?? record.label ?? record.id
+        // The slot name has to be the name the row displays: a rename frees the raw label for a new agent
+        // to register under, and keying on it would collapse two live agents into one slot.
+        let slotName = record.claimedLauncherName ?? record.effectiveLabel ?? record.id
         return "agent:\(normalizedSlotName(slotName))"
     }
 

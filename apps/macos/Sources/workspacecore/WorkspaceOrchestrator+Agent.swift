@@ -1228,31 +1228,38 @@ extension WorkspaceOrchestrator {
     /// instead recovers a free name (see `clearedAgentSessionUserLabel`).
     public func renameAgentSession(workspaceID: String, agentID: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
-            throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
-        }
-        let agents = try store.agentWindows(workspaceID: workspaceID)
-        let claims = AgentLauncherClaim.resolve(agents: agents, launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
-        guard !claims.claimedAgentIDs.contains(existing.id) else {
-            throw WorkspaceError.invalidArgument(
-                message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
-        }
-        let userLabel: String?
-        if title.isEmpty {
-            userLabel = try clearedAgentSessionUserLabel(existing)
-        } else {
-            // Validated as the workspace would look with the rename applied: the candidate replaces this
-            // row's own name, so it is checked against the processes, browser sessions, launchers, and
-            // other agents, and never against the name it is replacing.
-            try validateWorkspaceFocusNames(
-                workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
-            userLabel = title
-        }
-        // The update names the row by id, so a stop or exit that deleted it between the lookup above and
-        // this write matches nothing. That is the same "no such agent" the lookup reports, and reporting it
-        // rather than success is what stops a client from believing a name it will never see took hold.
-        guard try store.setAgentSessionUserLabel(id: existing.id, userLabel: userLabel) else {
-            throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+        // Read, decide, and write as one transaction. Uniqueness is decided against what the rest of the
+        // workspace is named, so two renames settling on the same title could each validate against a state
+        // the other was about to leave and both commit it. `BEGIN IMMEDIATE` takes the write lock up front,
+        // so the second one waits here and then reads the first one's committed name. The nested
+        // transaction inside `setAgentSessionUserLabel` becomes a savepoint of this one.
+        try store.withTransaction {
+            guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
+                throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+            }
+            let agents = try store.agentWindows(workspaceID: workspaceID)
+            let claims = AgentLauncherClaim.resolve(agents: agents, launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
+            guard !claims.claimedAgentIDs.contains(existing.id) else {
+                throw WorkspaceError.invalidArgument(
+                    message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
+            }
+            let userLabel: String?
+            if title.isEmpty {
+                userLabel = try clearedAgentSessionUserLabel(existing)
+            } else {
+                // Validated as the workspace would look with the rename applied: the candidate replaces
+                // this row's own name, so it is checked against the processes, browser sessions, launchers,
+                // and other agents, and never against the name it is replacing.
+                try validateWorkspaceFocusNames(
+                    workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
+                userLabel = title
+            }
+            // The update names the row by id, so a stop or exit that deleted it before this transaction took
+            // the lock matches nothing. That is the same "no such agent" the lookup reports, and reporting it
+            // rather than success is what stops a client from believing a name it will never see took hold.
+            guard try store.setAgentSessionUserLabel(id: existing.id, userLabel: userLabel) else {
+                throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+            }
         }
     }
 
