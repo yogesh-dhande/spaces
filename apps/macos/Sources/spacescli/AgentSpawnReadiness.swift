@@ -6,7 +6,7 @@ import spacesterminalcore
 /// Device API overview (remote); unit tests drive them deterministically.
 ///
 /// Rationale (validated on the real system): the daemon's foreground process classifier identifies a
-/// spawned coding agent within ~1s, uniformly across claude/codex/opencode, and hook-free. That makes
+/// spawned coding agent within ~1s, uniformly across every supported coding agent (see `CodingAgent`), and hook-free. That makes
 /// detection — not a hook signal — the reliable "the agent is up" marker: a promptless Codex never emits
 /// `SessionStart`, so first-signal readiness would time out. Spawn returns at detection and delivers no
 /// prompt itself; the orchestrator sends the prompt with `terminal send` and confirms work with

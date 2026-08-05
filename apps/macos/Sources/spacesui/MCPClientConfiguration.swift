@@ -64,32 +64,33 @@ enum MCPClientConfiguration {
     }
 }
 
-/// MCP clients shown as tabs in Settings → MCP, each with its own snippet format.
-enum MCPClient: CaseIterable, Equatable {
-    case claudeCode
-    case codexCLI
-    case opencode
-
-    var title: String {
+/// MCP-client presentation for the tabs shown in Settings → MCP. Each `CodingAgent` this app
+/// integrates with is also an MCP client that can be configured to launch `spaces mcp`, so the
+/// picker is driven by the shared `CodingAgent` registry rather than a second enum.
+extension CodingAgent {
+    /// Tab title in the MCP client picker. Deliberately distinct from `displayName` for `.codex`
+    /// ("Codex CLI" vs "Codex") because this picker is specifically about configuring the Codex
+    /// CLI's MCP server list, not the agent generally.
+    var mcpClientTitle: String {
         switch self {
         case .claudeCode: "Claude Code"
-        case .codexCLI: "Codex CLI"
+        case .codex: "Codex CLI"
         case .opencode: "opencode"
         }
     }
 
-    var configHint: String {
+    var mcpConfigHint: String {
         switch self {
         case .claudeCode: "Run once in your terminal."
-        case .codexCLI: "Add to the mcp_servers table in ~/.codex/config.toml."
+        case .codex: "Add to the mcp_servers table in ~/.codex/config.toml."
         case .opencode: "Add to the mcp block in ~/.config/opencode/opencode.json."
         }
     }
 
-    func configSnippet(cliPath: String) -> String {
+    func mcpConfigSnippet(cliPath: String) -> String {
         switch self {
         case .claudeCode: MCPClientConfiguration.claudeCodeAddCommand(cliPath: cliPath)
-        case .codexCLI: MCPClientConfiguration.codexConfigTOML(cliPath: cliPath)
+        case .codex: MCPClientConfiguration.codexConfigTOML(cliPath: cliPath)
         case .opencode: MCPClientConfiguration.opencodeConfigJSON(cliPath: cliPath)
         }
     }

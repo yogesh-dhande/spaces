@@ -489,9 +489,10 @@ enum SpacesDaemonProfileCommandRouting {
             TerminalEngineActor.runSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
         }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
-        // (codex/opencode, SIGKILL'd claude) and notify subscribers through this submitter. They run on
-        // detached tasks/queues, never main, so `submitAgentNotificationLine` takes its off-main direct
-        // send path here (it only defers onto the delivery queue when invoked on the main actor).
+        // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
+        // through this submitter. They run on detached tasks/queues, never main, so
+        // `submitAgentNotificationLine` takes its off-main direct send path here (it only defers onto the
+        // delivery queue when invoked on the main actor).
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { [weak self] sessionID, line in
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
             try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
@@ -585,9 +586,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// act on, and both add a failure path to the update mechanism to serve a race that needs a signal
     /// inside the quiesce window AND a successful exec, and that a second signal resolves immediately.
     private func awaitHandoffCompletion() async {
-        while handoffInProgress {
-            await withCheckedContinuation { continuation in handoffCompletionWaiters.append(continuation) }
-        }
+        while handoffInProgress { await withCheckedContinuation { continuation in handoffCompletionWaiters.append(continuation) } }
     }
 
     /// Called from `performExecHandoff`'s `defer` — see `awaitHandoffCompletion()`.
@@ -1708,8 +1707,8 @@ enum SpacesDaemonProfileCommandRouting {
     private nonisolated func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
-            isDefault: value.isDefault, isHidden: value.isHidden, isRunning: value.isRunning,
-            lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
+            isDefault: value.isDefault, isHidden: value.isHidden, isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes
+        )
     }
 
     private nonisolated func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -1856,7 +1855,7 @@ enum SpacesDaemonProfileCommandRouting {
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             },
-            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) the row
+            // The `(<kind>)` parenthetical is the detected agent kind (see `CodingAgent`) the row
             // carries — the same identity an orchestration row's `agent:` field reports, kept off the
             // launch title so the label is not duplicated (`smoke-hello (smoke-hello)`). Resolved through
             // the orchestrator so this path and the reconcilers' own engine name a kind identically,
@@ -1937,7 +1936,7 @@ enum SpacesDaemonProfileCommandRouting {
     }
 
     /// Spawns a coding-agent terminal session after gating the command against the supported-agent set:
-    /// the command must launch a supported coding agent (claude, codex, or opencode) so spawn readiness
+    /// the command must launch a supported coding agent (see `CodingAgent`) so spawn readiness
     /// knows which foreground kind to await. Hooks are not a prerequisite — readiness is
     /// foreground-detection-based, polled CLI-side against the session's terminal id.
     private nonisolated func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws

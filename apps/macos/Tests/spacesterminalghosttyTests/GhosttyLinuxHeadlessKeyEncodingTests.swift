@@ -64,8 +64,7 @@
                 try? await Task.sleep(for: .milliseconds(30))
             }
             await GhosttyLinuxHeadlessHangDiagnostics.report(
-                wait: String(describing: comment), elapsed: Date().timeIntervalSince(started), timeout: timeout,
-                transcriptPath: transcriptPath)
+                wait: String(describing: comment), elapsed: Date().timeIntervalSince(started), timeout: timeout, transcriptPath: transcriptPath)
             #expect(condition(), comment)
         }
 

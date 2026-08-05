@@ -304,7 +304,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let rowAfterTimeoutWindow = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         XCTAssertNotEqual(
             rowAfterTimeoutWindow?.updatedAt, stateBeforeHandoff.updatedAt,
-            "row: state=\(String(describing: rowAfterTimeoutWindow?.state)) bellAt=\(String(describing: rowAfterTimeoutWindow?.bellAt)) updatedAt=\(String(describing: rowAfterTimeoutWindow?.updatedAt))")
+            "row: state=\(String(describing: rowAfterTimeoutWindow?.state)) bellAt=\(String(describing: rowAfterTimeoutWindow?.bellAt)) updatedAt=\(String(describing: rowAfterTimeoutWindow?.updatedAt))"
+        )
         XCTAssertEqual(rowAfterTimeoutWindow?.bellAt, bellAt)
     }
 

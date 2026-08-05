@@ -20,9 +20,7 @@ import Testing
         #expect(decoded("file://build-host/home/dev/project", host: "build-host") == "/home/dev/project")
     }
 
-    @Test func percentUnescapesFileURIPaths() {
-        #expect(decoded("file://localhost/home/dev/my%20project/caf%C3%A9") == "/home/dev/my project/café")
-    }
+    @Test func percentUnescapesFileURIPaths() { #expect(decoded("file://localhost/home/dev/my%20project/caf%C3%A9") == "/home/dev/my project/café") }
 
     @Test func keepsKittyShellCwdPathsUnescaped() {
         // kitty-shell-cwd carries an already-unencoded path, so a literal percent stays literal.

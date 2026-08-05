@@ -167,16 +167,16 @@ import Testing
     /// approved command that exits non-zero, which is the outcome a gated command most often has.
     /// Codex has no failure variant, so its single `PostToolUse` carries both outcomes.
     @Test func everyAgentReportsWorkingOnceAnAnsweredPermissionPromptLetsTheToolRun() {
-        for agent in [SupportedCodingAgentHook.claudeCode, .codex] {
+        for agent in [CodingAgent.claudeCode, .codex] {
             let bindings = agent.jsonEventBindings
             #expect(bindings.contains { $0.eventName == "PermissionRequest" && $0.event == .blocked })
             #expect(bindings.contains { $0.eventName == "PreToolUse" && $0.event == .working })
             #expect(bindings.contains { $0.eventName == "PostToolUse" && $0.event == .working })
         }
-        #expect(SupportedCodingAgentHook.claudeCode.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" && $0.event == .working })
+        #expect(CodingAgent.claudeCode.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" && $0.event == .working })
         // Codex's hook registry has no `PostToolUseFailure`; binding it would write an entry codex
         // never fires.
-        #expect(!SupportedCodingAgentHook.codex.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" })
+        #expect(!CodingAgent.codex.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" })
 
         // opencode is the one agent that reports the answer itself, so it need not wait for the tool to
         // finish: `permission.replied` fires the moment the human allows or rejects.
@@ -214,13 +214,13 @@ import Testing
         let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
         try AgentHookJSONWriter.install(
-            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: SupportedCodingAgentHook.codex.jsonEventBindings,
+            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: CodingAgent.codex.jsonEventBindings,
             spacesExecutablePath: "/usr/local/bin/spaces")
 
         let disabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: false)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
 
         let enabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: true)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
     }
 }

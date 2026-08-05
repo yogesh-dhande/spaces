@@ -33,7 +33,6 @@ final class SpacesDeviceTests: XCTestCase {
         XCTAssertThrowsError(try store.upsert(workspace: second))
     }
 
-
     func testPlannerBuildsRuntimeManifest() throws {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(

@@ -1330,8 +1330,8 @@ public final class WorkspaceOrchestrator {
             let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
             let defaultTitle =
-                SupportedCodingAgentHook.matching(command: command)?.displayName
-                ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+                CodingAgent.matching(command: command)?.displayName
+                ?? (CodingAgent.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
                 defaultTitle: defaultTitle)

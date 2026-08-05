@@ -10,9 +10,7 @@ import Testing
 /// ending in `.xctest` marks it. Either signal disappearing drops profile resolution's refusal for that
 /// whole lane. An XCTest case cannot cover this — it satisfies the other checks anyway.
 @Suite struct SpacesTestHostDetectionTests {
-    @Test func testHostIsRecognisedInThisLane() {
-        #expect(SpacesTestHost.isRunningUnderXCTest())
-    }
+    @Test func testHostIsRecognisedInThisLane() { #expect(SpacesTestHost.isRunningUnderXCTest()) }
 
     /// The Linux signal, spelled exactly as measured in the container: SwiftPM execs the test binary
     /// directly and passes the testing library after it.
@@ -33,7 +31,5 @@ import Testing
     }
 
     /// A process with no arguments answers `false` rather than trapping.
-    @Test func emptyArgumentsAreNotATestBundle() {
-        #expect(!SpacesTestHost.executableIsTestBundle(arguments: []))
-    }
+    @Test func emptyArgumentsAreNotATestBundle() { #expect(!SpacesTestHost.executableIsTestBundle(arguments: [])) }
 }

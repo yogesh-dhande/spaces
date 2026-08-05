@@ -846,17 +846,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
 
         // A failed (and swallowed) baseline load leaves seed-only state; surface the exact store
         // error here rather than letting the state assertions below report a bare set mismatch.
-        XCTAssertEqual(
-            errorLog.lines(containing: "op=load_baselines"), [],
-            "startup baseline load failed instead of merging (#238)")
+        XCTAssertEqual(errorLog.lines(containing: "op=load_baselines"), [], "startup baseline load failed instead of merging (#238)")
         // The load merges the persisted {child-1} into the seed's {child-2}.
         XCTAssertEqual(
             service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) }, ["child-1", "child-2"],
             "startup load never merged the persisted baseline with the seed")
         // The merged union must reach the durable mirror, not just memory.
         func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
-        XCTAssertEqual(
-            mirroredChildren(), ["child-1", "child-2"], "durable mirror never converged to the seed-merged union {child-1, child-2}")
+        XCTAssertEqual(mirroredChildren(), ["child-1", "child-2"], "durable mirror never converged to the seed-merged union {child-1, child-2}")
         // And it must stay there — not regress once a later, stale-generation write on the chain runs.
         // `Task.sleep` (not `RunLoop.main.run`, which is unavailable from an async context) still yields
         // the main actor between checks so any such queued write gets its turn to run.

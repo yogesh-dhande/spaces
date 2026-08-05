@@ -621,14 +621,14 @@ final class AgentNotificationEngineTests: XCTestCase {
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .waiting)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-sub", agentSessionID: child.id, createdAt: "t")
         // An unrelated remote watch the same dead subscriber holds, untouched by the local transition below.
-        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
         try engine.childDidTransition(agent: child, transition: .blocked)
 
         XCTAssertTrue(recorder.delivered.isEmpty)
         XCTAssertTrue(
-            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty,
-            "A dead subscriber's own local watch edge is torn down.")
+            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "A dead subscriber's own local watch edge is torn down.")
         XCTAssertTrue(
             try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty,
             "A dead subscriber's unrelated remote watch edge is torn down too — the whole subscriber is gone, not just the failing edge.")
@@ -655,8 +655,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         XCTAssertTrue(recorder.delivered.isEmpty)
         XCTAssertTrue(
-            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-orch").isEmpty,
-            "The failing cross-device watch edge is torn down.")
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-orch").isEmpty, "The failing cross-device watch edge is torn down.")
         XCTAssertTrue(
             try store.agentSubscriptions(subscriberTerminalSessionID: "dead-orch").isEmpty,
             "The same dead subscriber's unrelated local watch edge is torn down too.")
@@ -681,8 +680,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try engine.childDidTransition(agent: child, transition: .blocked)
 
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["alive-sub"], "The live subscriber still receives its line.")
-        XCTAssertTrue(
-            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The dead subscriber's own edge is torn down.")
+        XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The dead subscriber's own edge is torn down.")
         XCTAssertFalse(
             try store.agentSubscriptions(subscriberTerminalSessionID: "alive-sub").isEmpty,
             "The live subscriber's edge to the same child must survive.")
@@ -706,7 +704,8 @@ final class AgentNotificationEngineTests: XCTestCase {
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-sub", agentSessionID: child.id, createdAt: "t")
-        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
         // Two rows land on the busy subscriber's queue: one local-origin, one cross-device-origin.
         try engine.childDidTransition(agent: child, transition: .blocked)
@@ -721,8 +720,7 @@ final class AgentNotificationEngineTests: XCTestCase {
             try store.pendingAgentNotifications(subscriberTerminalSessionID: "dead-sub").isEmpty,
             "Every remaining pending row, including the cross-device-origin one, is purged by the teardown.")
         XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The local watch edge is torn down.")
-        XCTAssertTrue(
-            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The remote watch edge is torn down.")
+        XCTAssertTrue(try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The remote watch edge is torn down.")
     }
 
     func testSelfSubscriptionIsRejected() throws {
@@ -766,7 +764,8 @@ final class AgentNotificationEngineTests: XCTestCase {
                 updatedAt: "now"))
 
         // Never-signaled detection row: subscribing is rejected and points the caller at retrying post-signal.
-        XCTAssertThrowsError(try orchestrator.validateAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: detectionID)) { error in
+        XCTAssertThrowsError(try orchestrator.validateAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: detectionID)) {
+            error in
             XCTAssertTrue(
                 error.localizedDescription.contains("has not emitted its first hook signal"),
                 "The error must tell the caller to retry after the agent signals, got: \(error.localizedDescription)")

@@ -91,8 +91,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces on this or a paired device.",
                 properties: [
-                    "project": stringSchema("Project ID filter."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                    "project": stringSchema("Project ID filter."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: []
             ) { server, arguments in
                 if let device = try server.resolvedDevice(arguments) {
@@ -101,8 +100,7 @@ final class SpacesMCPStdioServer {
                     return .profile(
                         TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord)))
                 }
-                return .profile(
-                    try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: server.optionalString(arguments["project"])))))
+                return .profile(try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: server.optionalString(arguments["project"])))))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_create",
@@ -296,9 +294,9 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_spawn",
                 description:
-                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. The result carries a structured agentSpawn object: terminalSessionID, workspaceID, detectedAgent, deviceID, subscribed, and open (a spaces://terminal deep link, device-qualified when deviceID is set). Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on agentSpawn.terminalSessionID, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. agentSpawn.subscribed reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
+                    "Start a coding agent (\(CodingAgent.commandListText)) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. The result carries a structured agentSpawn object: terminalSessionID, workspaceID, detectedAgent, deviceID, subscribed, and open (a spaces://terminal deep link, device-qualified when deviceID is set). Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on agentSpawn.terminalSessionID, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. agentSpawn.subscribed reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
                 properties: [
-                    "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
+                    "command": stringSchema("Command that launches a supported coding agent (\(CodingAgent.commandListText))."),
                     "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory. Required with device."),
                     "title": stringSchema("Window or session title. Defaults to the coding agent's name."),
                     "timeout": intSchema("Seconds to wait for detection. Defaults to 90."),
@@ -539,8 +537,7 @@ final class SpacesMCPStdioServer {
     private static func profileWorkspaceRecord(_ summary: SpacesDeviceWorkspaceSummary) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: summary.id, projectID: summary.projectID, dir: summary.dir, dirname: nil, branch: summary.branch, baseBranch: summary.baseBranch,
-            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning,
-            lastLaunchedAt: nil, notes: summary.notes)
+            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning, lastLaunchedAt: nil, notes: summary.notes)
     }
 
     /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current

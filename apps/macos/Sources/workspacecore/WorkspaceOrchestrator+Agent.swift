@@ -1124,11 +1124,11 @@ extension WorkspaceOrchestrator {
         return value
     }
 
-    /// The coding agent kind (claude/codex/opencode) a terminal session's LIVE foreground state reports,
-    /// never the `.agent` launch title — keeping it off the launch title is what prevents a "Reviewer
-    /// (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings. This is the
-    /// detection source the kind is persisted from; it goes nil the moment the agent process ends, so no
-    /// consumer reads it alone (see `resolvedAgentKind`).
+    /// The coding agent kind (a `TerminalDetectedAgentKind` raw value) a terminal session's LIVE
+    /// foreground state reports, never the `.agent` launch title — keeping it off the launch title is what
+    /// prevents a "Reviewer (Reviewer)" duplication and preserves the detected-kind identity in listings.
+    /// This is the detection source the kind is persisted from; it goes nil the moment the agent process
+    /// ends, so no consumer reads it alone (see `resolvedAgentKind`).
     func liveDetectedAgentKind(terminalSessionID: String?) -> String? {
         guard let terminalSessionID, !terminalSessionID.isEmpty, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -1162,7 +1162,7 @@ extension WorkspaceOrchestrator {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
                     if let sessionID, terminalSessionID != sessionID { continue }
-                    // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
+                    // `agent:` carries the detected kind (`TerminalDetectedAgentKind` raw value), never the launch title;
                     // `label:` carries the row's stored label — the workspace-unique visible name, which
                     // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
                     // report the same label. Collapsing kind and label made remote rendering emit

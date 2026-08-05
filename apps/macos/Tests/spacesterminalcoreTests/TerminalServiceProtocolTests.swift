@@ -63,8 +63,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: "/srv/work", dirname: "feature", branch: "feature", baseBranch: "main",
-                    isDefault: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
-                terminalOutput: "recent output"),
+                    isDefault: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 

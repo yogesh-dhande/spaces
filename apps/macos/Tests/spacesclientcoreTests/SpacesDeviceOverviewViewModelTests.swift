@@ -72,8 +72,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-visible", projectID: "project-1", projectName: "Project", branch: "feature/visible", baseBranch: "main",
-                    dir: "/device/project-visible", isRunning: true, isHidden: false, isDefault: false, notes: "Visible notes",
-                    sessionCount: 2,
+                    dir: "/device/project-visible", isRunning: true, isHidden: false, isDefault: false, notes: "Visible notes", sessionCount: 2,
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-visible", name: "web", command: "npm run dev", processID: "running-web",

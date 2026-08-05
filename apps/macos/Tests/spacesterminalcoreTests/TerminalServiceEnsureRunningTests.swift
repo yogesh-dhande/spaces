@@ -84,7 +84,10 @@ import XCTest
 
         /// The JSON shape `TerminalServiceInstanceLock.acquire` writes (its `LockRecord` is private, so
         /// this test writes the same wire shape directly rather than reaching into that type).
-        private struct FakeInstanceLockRecord: Codable { let pid: Int32; let token: String }
+        private struct FakeInstanceLockRecord: Codable {
+            let pid: Int32
+            let token: String
+        }
 
         private func writeFakeInstanceLock(pid: Int32, path: String) throws {
             try JSONEncoder().encode(FakeInstanceLockRecord(pid: pid, token: UUID().uuidString)).write(to: URL(fileURLWithPath: path))
@@ -100,8 +103,7 @@ import XCTest
 
             let start = Date()
             TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
-            XCTAssertLessThan(
-                Date().timeIntervalSince(start), 1, "an absent lock file names no owner, so there is nothing to wait for")
+            XCTAssertLessThan(Date().timeIntervalSince(start), 1, "an absent lock file names no owner, so there is nothing to wait for")
         }
 
         /// Reproduces the half of the gate that must NOT wait: a lock file naming a pid that has already
@@ -125,8 +127,7 @@ import XCTest
 
             let start = Date()
             TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
-            XCTAssertLessThan(
-                Date().timeIntervalSince(start), 1, "a dead owner pid must not incur the full shutdownExitTimeout wait")
+            XCTAssertLessThan(Date().timeIntervalSince(start), 1, "a dead owner pid must not incur the full shutdownExitTimeout wait")
         }
 
         /// Reproduces the bug this gate exists to fix (P1 follow-up to #325/#334): a live instance-lock
@@ -169,8 +170,7 @@ import XCTest
             liveProcess.waitUntilExit()
 
             wait(for: [expectation], timeout: 5)
-            XCTAssertLessThan(
-                elapsed, 3, "must return once the owner actually exits, not wait out the full shutdownExitTimeout")
+            XCTAssertLessThan(elapsed, 3, "must return once the owner actually exits, not wait out the full shutdownExitTimeout")
         }
 
         /// Reproduces the exec-in-place handoff case (P2 follow-up to #325/#334/#341): the successor keeps
@@ -201,9 +201,7 @@ import XCTest
             TerminalService.waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: lockPath)
             let elapsed = Date().timeIntervalSince(start)
 
-            XCTAssertLessThan(
-                elapsed, 3,
-                "a live ok pong must end the gate immediately even though the owner pid (this test process) never dies")
+            XCTAssertLessThan(elapsed, 3, "a live ok pong must end the gate immediately even though the owner pid (this test process) never dies")
         }
     }
 #endif

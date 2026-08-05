@@ -378,8 +378,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.attachmentState, title: "taken-over"),
             ownerClientID: "another-mac")
         fixture.recorder.setPayloads([
-            takeover,
-            clipboardPayload(sessionID: "remote-clipboard-demoted", targetClientID: fixture.clientID, text: "not ours any more"),
+            takeover, clipboardPayload(sessionID: "remote-clipboard-demoted", targetClientID: fixture.clientID, text: "not ours any more"),
             remoteStatePayloadWithTitle(sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
         ])
         waitForCondition("the takeover is applied") {
@@ -437,9 +436,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let owner = TerminalClient(
             id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: ownerClientID), connectedAt: "2026-07-28T00:00:00Z")
         return GhosttyRemoteSessionStatePayload(
-            sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt,
-            sessionStateRevision: payload.sessionStateRevision, sessionStateFlags: payload.sessionStateFlags,
-            screenStateRevision: payload.screenStateRevision, runtimeState: payload.runtimeState,
+            sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt, sessionStateRevision: payload.sessionStateRevision,
+            sessionStateFlags: payload.sessionStateFlags, screenStateRevision: payload.screenStateRevision, runtimeState: payload.runtimeState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(
                 clients: [owner],
                 attachments: [

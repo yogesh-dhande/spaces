@@ -5,7 +5,6 @@ import spacesdevicecore
 import workspacecore
 
 @testable import spacesdeviceapi
-
 @testable import spacesterminalcore
 @testable import spacesui
 
@@ -306,8 +305,8 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil,
-                    sessionCount: 3, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 3,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
@@ -347,9 +346,8 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil,
-                    sessionCount: 2, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
-                    config: SpacesDeviceWorkspaceConfig(),
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
                             id: "terminal-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
@@ -414,8 +412,8 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil,
-                    sessionCount: 1, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -513,8 +511,7 @@ import workspacecore
             workspacesByProject: [
                 projectID: [
                     WorkspaceSummary(
-                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isDefault: false,
-                        deviceID: deviceID)
+                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isDefault: false, deviceID: deviceID)
                 ]
             ],
             workspaceRuntimeStatusByID: [
@@ -932,16 +929,15 @@ import workspacecore
     @Test func coldResolveOpensAnEndedSessionHeldOnlyByItsTerminalWindowRow() async throws {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-ended", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-ended", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let endedWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended", role: "terminal",
             orderIndex: 0, lastSeenAt: "now")
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace, windows: [endedWindow])
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-ended", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Shell",
-            workingDirectory: "/repo/feature", shell: "/bin/zsh", command: "seq 1 300", createdAt: "2026-07-29T12:00:00Z",
-            workspaceID: workspace.id, kind: .shell)
+            sessionID: "session-ended", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Shell", workingDirectory: "/repo/feature",
+            shell: "/bin/zsh", command: "seq 1 300", createdAt: "2026-07-29T12:00:00Z", workspaceID: workspace.id, kind: .shell)
         let endedEntry = TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration,
             runtimeState: TerminalSessionRuntimeState(

@@ -134,11 +134,7 @@
 
         @Test func everySpawnedChildReachesItsShellUnderRuntimeChurn() async throws {
             let churnStop = ChurnStop()
-            let churnThreads = (0..<3).map { seed in
-                Thread {
-                    Self.runChurn(until: churnStop, seed: seed)
-                }
-            }
+            let churnThreads = (0..<3).map { seed in Thread { Self.runChurn(until: churnStop, seed: seed) } }
             for thread in churnThreads { thread.start() }
             defer { churnStop.stop() }
 
@@ -153,9 +149,8 @@
                     let core = GhosttyEmbeddedSessionCore(
                         launchConfiguration: TerminalSessionLaunchConfiguration(
                             sessionID: "spawn-stress-\(spawn)-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
-                            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
-                            command: "printf \(Self.marker)", createdAt: "2026-07-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
-                        paths: paths)
+                            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "printf \(Self.marker)",
+                            createdAt: "2026-07-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
                     try core.startIfNeeded()
                     return Box(core)
                 }

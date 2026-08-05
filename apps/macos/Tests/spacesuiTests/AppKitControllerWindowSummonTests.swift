@@ -117,7 +117,8 @@ extension ProcessProfileEnvironmentSuites {
             #expect(!AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: nil))
             #expect(AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: 123))
             #expect(
-                !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: "session-1", returnApplicationProcessID: 123))
+                !AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
+                    returnTerminalSessionID: "session-1", returnApplicationProcessID: 123))
             #expect(!AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(returnTerminalSessionID: nil, returnApplicationProcessID: nil))
         }
 
@@ -131,7 +132,8 @@ extension ProcessProfileEnvironmentSuites {
             let cases: [(Bool, Bool, Bool)] = [(true, true, false), (true, false, false), (false, true, true), (false, false, false)]
             for (appIsHidden, mainWindowIsFocused, expectedHide) in cases {
                 #expect(
-                    AppKitController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide)
+                    AppKitController.shouldHideMainWindowForToggle(appIsHidden: appIsHidden, mainWindowIsFocused: mainWindowIsFocused) == expectedHide
+                )
             }
         }
 
@@ -197,10 +199,14 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {
             #expect(
-                !AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: true, commandPaletteMainWindowVisibility: false))
-            #expect(AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: true))
-            #expect(AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: true, commandPaletteMainWindowVisibility: nil))
-            #expect(!AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: nil))
+                !AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: true, commandPaletteMainWindowVisibility: false)
+            )
+            #expect(
+                AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: true))
+            #expect(
+                AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: true, commandPaletteMainWindowVisibility: nil))
+            #expect(
+                !AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: nil))
         }
 
         // Ad hoc terminate-on-pane-close is a pure decision over device-owned liveness:

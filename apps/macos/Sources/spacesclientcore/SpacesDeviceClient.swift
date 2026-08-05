@@ -272,8 +272,7 @@ public enum SpacesDeviceClient {
     /// be installed — an install lands partially, so a non-empty `failures` does not mean nothing
     /// happened. Throws only when the request itself fails.
     @discardableResult public static func installAgentHooks(
-        _ kinds: [SupportedCodingAgentHook], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
+        _ kinds: [CodingAgent], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> AgentHookInstallOutcome {
         let response = try request(.init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
         guard let payload = response.agentHooksInstall else {
@@ -347,7 +346,8 @@ public enum SpacesDeviceClient {
             throw error
         }
         do {
-            let resolution = try resolutionFromInlineStatus(device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+            let resolution = try resolutionFromInlineStatus(
+                device: refreshed, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
             logLocalEndpointRecoveryMetric(device: device, refreshedPort: refreshed.port, startedAt: startedAt, success: true, stage: "overview")
             return resolution
         } catch {
