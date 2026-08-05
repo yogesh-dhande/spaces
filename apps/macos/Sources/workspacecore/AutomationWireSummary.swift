@@ -23,14 +23,11 @@ extension TerminalServiceAutomationRunSummary {
     /// `automationName` is denormalized in by the caller (from the run's automation lookup, when it still
     /// exists); `attributedAgents` is the run's coding-agent breakdown, which the caller builds once for the
     /// whole listing (see `AutomationAttributedAgents`).
-    public init(
-        _ run: AutomationRun, automationName: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []
-    ) {
+    public init(_ run: AutomationRun, automationName: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []) {
         self.init(
             id: run.id, automationID: run.automationID, automationName: automationName, kind: run.kind.rawValue, status: run.status.rawValue,
             trigger: run.trigger.rawValue, skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
-            startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
-            endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
+            startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)), endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
             createdAt: TerminalSessionTimestamp.string(from: run.createdAt), attributedAgents: attributedAgents)
     }
 }
@@ -78,7 +75,7 @@ public enum AutomationAttributedAgents {
                     // Reported as the row-less `idle` value with live == true rather than a separate status.
                     agents.append(
                         TerminalServiceAutomationAgentSummary(
-                            terminalSessionID: sessionID, status: AgentWindowStatus.idle.rawValue, live: true, title: entry.effectiveTitle,
+                            terminalSessionID: sessionID, status: AgentWindowStatus.idle.rawValue, live: true, title: entry.name,
                             workspaceID: entry.workspaceID))
                 }
             }

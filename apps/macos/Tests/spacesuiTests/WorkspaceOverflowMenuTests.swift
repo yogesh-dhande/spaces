@@ -60,16 +60,16 @@ import Testing
         let titles = menu.items.map { $0.title }
         #expect(titles.contains("Copy path"))
         #expect(titles.contains("Reveal in Finder"))
-        #expect(titles.contains("Archive…"))
+        #expect(titles.contains("Delete…"))
         #expect(menu.items.first { $0.title == "Copy path" }?.isEnabled == true)
         #expect(menu.items.first { $0.title == "Reveal in Finder" }?.isEnabled == true)
-        #expect(menu.items.first { $0.title == "Archive…" }?.isEnabled == false)
+        #expect(menu.items.first { $0.title == "Delete…" }?.isEnabled == false)
     }
 
     @Test func reachableDeviceEnablesTheDaemonBackedItem() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(
             workspaceID: "ws-1", path: "/tmp/ws-1", target: nil, isLocalDevice: true, daemonActionsEnabled: true)
-        #expect(menu.items.first { $0.title == "Archive…" }?.isEnabled == true)
+        #expect(menu.items.first { $0.title == "Delete…" }?.isEnabled == true)
     }
 
     @Test func menuItemsHaveSymbolImages() {

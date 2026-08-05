@@ -31,22 +31,32 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     /// tolerate nil rather than assume every session belongs to a workspace.
     public var workspaceID: String? { launchConfiguration.workspaceID }
     public var kind: TerminalSessionKind { launchConfiguration.kind }
-    /// A manual rename (userTitle) wins over the runtime title, which Ghostty set_title events
-    /// keep rewriting; the launch-time title is the fallback before either exists.
-    public var effectiveTitle: String { launchConfiguration.userTitle ?? runtimeState.title ?? launchConfiguration.title }
+    /// The session's stable name: the user's rename when set, else the launch-generated name. What the
+    /// program inside prints never replaces it; that travels beside it as `liveTitle`.
+    public var name: String { TerminalSessionTitle.name(userTitle: launchConfiguration.userTitle, launchTitle: launchConfiguration.title) }
+    /// What the program running in this session last reported as its title, nil when it reported none.
+    public var liveTitle: String? { TerminalSessionTitle.liveTitle(runtimeState.title) }
     public var effectiveWorkingDirectory: String { runtimeState.workingDirectory ?? launchConfiguration.workingDirectory }
 }
 
 public enum TerminalSessionCatalog {
+    /// The sessions that currently have a live interactive service, in stored session order.
+    ///
+    /// Liveness is decided first, from one batched read of every session row and its runtime state,
+    /// and only the sessions that survive it are expanded into entries. Ordering the work the other
+    /// way round — expanding a session to learn whether it is live — made this cost grow with every
+    /// session the device had ever created, and the device-API overview rebuilds it several times a
+    /// second. Which sessions are reported is unaffected: the batched read answers the runtime-state
+    /// lookup for exactly the rows a per-session read would have answered it for, and every returned
+    /// row is still put through `isInteractiveServiceAlive` in full.
     public static func listLiveSessions(fileManager: FileManager = .default) throws -> [TerminalSessionCatalogEntry] {
-        try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager).compactMap { launchConfiguration in
-            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
-            guard isInteractiveServiceAlive(for: runtimeState) else { return nil }
+        try TerminalSessionPersistence.listInteractiveSessionRuntimeStates().filter { isInteractiveServiceAlive(for: $0.runtimeState) }.map {
+            session in
+            let paths = try TerminalSessionPaths.forStoredSession(id: session.sessionID, rootDirectory: session.rootDirectory)
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? .init()
             return TerminalSessionCatalogEntry(
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot, paths: paths,
-                isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
+                launchConfiguration: session.launchConfiguration, runtimeState: session.runtimeState, attachmentSnapshot: attachmentSnapshot,
+                paths: paths, isControlAvailable: fileManager.fileExists(atPath: paths.controlSocketPath),
                 isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
         }
     }

@@ -4,31 +4,6 @@ import Foundation
     import Darwin
 #endif
 
-public enum TerminalDetectedAgentKind: String, Codable, Sendable, Equatable {
-    case codex
-    case claude
-    case claudeCode = "claude-code"
-    case opencode
-
-    public var displayLabel: String {
-        switch self {
-        case .codex: "codex"
-        case .claude: "claude"
-        case .claudeCode: "claude-code"
-        case .opencode: "opencode"
-        }
-    }
-
-    var commandName: String {
-        switch self {
-        case .codex: "codex"
-        case .claude: "claude"
-        case .claudeCode: "claude-code"
-        case .opencode: "opencode"
-        }
-    }
-}
-
 public struct TerminalForegroundProcessSnapshot: Codable, Sendable, Equatable {
     public let pid: Int32
     public let executablePath: String?
@@ -45,9 +20,7 @@ public struct TerminalForegroundProcessSnapshot: Codable, Sendable, Equatable {
     }
 
     private static func basename(_ value: String) -> String? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return URL(fileURLWithPath: trimmed).lastPathComponent.nilIfEmpty
+        TerminalForegroundProcessInspector.lastPathComponent(of: value.trimmingCharacters(in: .whitespacesAndNewlines)).nilIfEmpty
     }
 }
 
@@ -68,16 +41,6 @@ public struct TerminalForegroundAgentSnapshot: Codable, Sendable, Equatable {
 }
 
 public enum TerminalForegroundProcessInspector {
-    private struct AgentDefinition {
-        let kind: TerminalDetectedAgentKind
-        let executableNames: Set<String>
-        let nodeScriptNames: Set<String>
-        let nodePathFragments: [String]
-
-        var commandName: String { kind.commandName }
-        var displayLabel: String { kind.displayLabel }
-    }
-
     private struct CommandNameCandidate {
         let name: String
         let matchedArgumentIndex: Int?
@@ -86,32 +49,25 @@ public enum TerminalForegroundProcessInspector {
     private static let maxArgumentCount = 16
     private static let maxArgumentLength = 160
     private static let nodeExecutableNames: Set<String> = ["node", "nodejs"]
-    private static let definitions: [AgentDefinition] = [
-        AgentDefinition(
-            kind: .codex, executableNames: ["codex"], nodeScriptNames: ["codex", "codex.js"],
-            nodePathFragments: ["/@openai/codex/", "/codex/bin/codex.js", "/codex/bin/codex"]),
-        AgentDefinition(
-            kind: .claudeCode, executableNames: ["claude-code"], nodeScriptNames: ["claude-code", "claude-code.js"], nodePathFragments: []),
-        AgentDefinition(kind: .claude, executableNames: ["claude"], nodeScriptNames: ["claude", "claude.js"], nodePathFragments: []),
-        // The `opencode-ai` npm package installs the selected Darwin binary at
-        // `bin/opencode.exe`; npm exposes it to users as `opencode`.
-        AgentDefinition(
-            kind: .opencode, executableNames: ["opencode", "opencode.exe"], nodeScriptNames: ["opencode", "opencode.js"],
-            nodePathFragments: ["/opencode-ai/", "/opencode/bin/opencode"]),
-    ]
+    // Derived from the coding-agent registry (`CodingAgent`) rather than hard-coded here, so a new
+    // registry entry's detection variants are picked up automatically. Order matters only in that
+    // the more specific `claude-code` variant is listed before the broader `claude` variant within
+    // `.claudeCode` — see `CodingAgent.detectionVariants`; matching itself is disjoint-set membership,
+    // so ordering across agents does not matter.
+    private static let definitions: [CodingAgentDetectionVariant] = CodingAgent.allCases.flatMap(\.detectionVariants)
 
     public static func inspect(pid: Int32) -> TerminalForegroundProcessSnapshot? {
         guard pid > 0 else { return nil }
         #if os(macOS)
             let executablePath = processExecutablePath(pid: pid)
             let argv = processArguments(pid: pid)
-            let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
+            let executableName = executablePath.flatMap { Self.lastPathComponent(of: $0).nilIfEmpty }
             guard executableName != nil || !argv.isEmpty else { return nil }
             return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
         #elseif os(Linux)
             let executablePath = processExecutablePath(pid: pid)
             let argv = processArguments(pid: pid)
-            let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
+            let executableName = executablePath.flatMap { Self.lastPathComponent(of: $0).nilIfEmpty }
             guard executableName != nil || !argv.isEmpty else { return nil }
             return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
         #else
@@ -215,7 +171,7 @@ public enum TerminalForegroundProcessInspector {
         return candidates
     }
 
-    private static func snapshot(for process: TerminalForegroundProcessSnapshot, definition: AgentDefinition, matchedArgumentIndex: Int?)
+    private static func snapshot(for process: TerminalForegroundProcessSnapshot, definition: CodingAgentDetectionVariant, matchedArgumentIndex: Int?)
         -> TerminalForegroundAgentSnapshot
     {
         TerminalForegroundAgentSnapshot(
@@ -223,7 +179,7 @@ public enum TerminalForegroundProcessInspector {
             displayCommand: displayCommand(for: process.argv, definition: definition, matchedArgumentIndex: matchedArgumentIndex))
     }
 
-    private static func displayCommand(for argv: [String], definition: AgentDefinition, matchedArgumentIndex: Int?) -> String {
+    private static func displayCommand(for argv: [String], definition: CodingAgentDetectionVariant, matchedArgumentIndex: Int?) -> String {
         let bounded = boundedArguments(argv)
         let trailingArguments: ArraySlice<String>
         if let matchedArgumentIndex, matchedArgumentIndex < bounded.count {
@@ -279,7 +235,7 @@ public enum TerminalForegroundProcessInspector {
         return nil
     }
 
-    private static func matchesNodeScript(_ argument: String, definition: AgentDefinition) -> Bool {
+    private static func matchesNodeScript(_ argument: String, definition: CodingAgentDetectionVariant) -> Bool {
         let basename = normalizedBasename(argument)
         if definition.nodeScriptNames.contains(basename) || definition.executableNames.contains(basename) { return true }
         let normalizedPath = argument.replacingOccurrences(of: "\\", with: "/").lowercased()
@@ -287,9 +243,26 @@ public enum TerminalForegroundProcessInspector {
     }
 
     private static func normalizedBasename(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+        lastPathComponent(of: value.trimmingCharacters(in: .whitespacesAndNewlines)).lowercased()
+    }
+
+    /// The trailing name in a path, computed as string arithmetic.
+    ///
+    /// This runs for the executable path and for every argv element of every foreground process the
+    /// daemon inspects, once a second per live session. `URL(fileURLWithPath:)` was doing it, and each
+    /// construction cost a `stat` to decide whether the path is a directory plus a `getcwd` to resolve a
+    /// relative one — file-system work to answer a question about a string.
+    ///
+    /// The semantics are the ones this job needs rather than `URL`'s incidental ones: trailing slashes
+    /// are ignored, so `/usr/bin/` names `bin`; a value that is empty or only slashes names nothing; and
+    /// `.` and `..` are returned unchanged instead of being resolved against the daemon's own working
+    /// directory, which named a directory that has nothing to do with the inspected process.
+    static func lastPathComponent(of value: String) -> String {
+        var name = Substring(value)
+        while name.hasSuffix("/") { name = name.dropLast() }
+        guard !name.isEmpty else { return "" }
+        if let separator = name.lastIndex(of: "/") { name = name[name.index(after: separator)...] }
+        return String(name)
     }
 
     private static func appendProcArgument(_ bytes: Data.SubSequence, to arguments: inout [String]) {

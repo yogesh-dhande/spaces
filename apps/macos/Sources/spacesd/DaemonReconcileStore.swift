@@ -33,8 +33,9 @@ import workspacecore
 /// daemon re-execs itself across updates, and a connection re-opened after the owning service
 /// stopped would still be holding the database when the replacement daemon starts. `close()`
 /// therefore latches, and a pass that lands afterwards does nothing at all rather than opening a
-/// connection nobody will ever close. That keeps the guarantee a property of this type instead of a
-/// property of each caller's shutdown ordering.
+/// connection nobody will ever close. `close()` is also async and does not return until the release has
+/// actually happened, so a caller can establish the guarantee rather than inherit it from the accident of
+/// its own shutdown ordering.
 ///
 /// `@unchecked Sendable` is sound because the only mutable state is `store` and `isClosed`, both
 /// confined to `queue`; everything else is immutable.
@@ -77,14 +78,30 @@ final class DaemonReconcileStore: @unchecked Sendable {
         }
     }
 
-    /// Permanently releases the connection so its final WAL checkpoint happens when the owning
-    /// service stops rather than only at process exit. Enqueued on the owning queue, so it cannot
-    /// race a pass, and idempotent: a second call finds the connection already released, so the
-    /// checkpoint happens exactly once.
-    func close() {
-        queue.async {
-            self.isClosed = true
-            self.store = nil
+    /// Permanently releases the connection so its final WAL checkpoint happens when the owning service
+    /// stops rather than only at process exit, and does not return until that has happened. The release
+    /// runs on the owning queue, so it cannot race a pass, and it is idempotent: a second call finds the
+    /// connection already released, so the checkpoint happens exactly once.
+    ///
+    /// Waiting for it is the point. The daemon hands the database to a replacement across a re-exec, so
+    /// "the connection is released" has to be a fact a caller can establish, not merely the likely outcome
+    /// of a queue draining faster than the rest of shutdown. `close()` returning is that fact.
+    ///
+    /// The wait is a SUSPENSION, never a blocked thread, and that is what makes it safe. Both owners stop
+    /// on the main actor, and a reconcile pass ahead of this close reaches `WorkspaceOrchestrator`'s
+    /// process-wide built-in-terminal terminator, which synchronously enters the terminal engine actor —
+    /// which may in turn legally hop synchronously back to the main queue (the one-way rule documented on
+    /// `TerminalEngineActor`). Blocking the main thread here, with `queue.sync`, would close that ring:
+    /// main waits on this queue, the pass on it waits on the engine, and the engine waits on main.
+    /// Awaiting a continuation leaves the main actor free instead, so the engine's hop to main runs, the
+    /// pass ahead finishes, the release happens, and this call resumes.
+    func close() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async {
+                self.isClosed = true
+                self.store = nil
+                continuation.resume()
+            }
         }
     }
 

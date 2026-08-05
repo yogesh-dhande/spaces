@@ -20,9 +20,7 @@ import ghosttyvtshim
 
     private func write(_ session: OpaquePointer, _ text: String) {
         let data = Data(text.utf8)
-        let ok = data.withUnsafeBytes {
-            spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
-        }
+        let ok = data.withUnsafeBytes { spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
         #expect(ok)
     }
 
@@ -33,17 +31,17 @@ import ghosttyvtshim
         #expect(spaces_ghostty_vt_session_state_preamble(session, &pointer, &length))
         let pointer2 = try #require(pointer)
         defer { spaces_ghostty_vt_free_buffer(pointer2) }
-        return pointer2.withMemoryRebound(to: UInt8.self, capacity: length) {
-            Data(bytes: $0, count: length)
-        }
+        return pointer2.withMemoryRebound(to: UInt8.self, capacity: length) { Data(bytes: $0, count: length) }
+    }
+
+    private func write(_ session: OpaquePointer, _ data: Data) {
+        let ok = data.withUnsafeBytes { spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        #expect(ok)
     }
 
     private func replay(_ data: Data, columns: UInt16 = 80, rows: UInt16 = 24, scrollback: Int = 0) throws -> OpaquePointer {
         let session = try makeSession(columns: columns, rows: rows, scrollback: scrollback)
-        let ok = data.withUnsafeBytes {
-            spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
-        }
-        #expect(ok)
+        write(session, data)
         return session
     }
 
@@ -97,6 +95,88 @@ import ghosttyvtshim
 
     private func marker(_ index: Int) -> String { "RMK\(String(format: "%03d", index))X" }
 
+    // MARK: - Paint-neutral margins across a resize
+
+    /// A preamble is replayed at whatever size the terminal has then, which is not necessarily the size
+    /// it was captured at: a handoff or a tail after the terminal was resized past the last trim replays
+    /// it wider or narrower. Its paint-neutral margins therefore have to mean "this terminal's full
+    /// extent", which is what the sequences' default extent parameters give — an explicit column count
+    /// would pin the captured width, and since the region restore emits no DECSLRM at all when the
+    /// captured margins were already full, nothing after it would widen the margin back out.
+    ///
+    /// The source enables DECLRMM because left/right margins are only installed while it is set; that is
+    /// the state in which a pinned width is not silently ignored. The assertion is on output written
+    /// AFTER the preamble, since a stale right margin shows up as that output wrapping early.
+    @Test func paintNeutralMarginsFollowTheReplayWidthRatherThanTheCapturedOne() throws {
+        let source = try makeSession(columns: 60, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B}[?69h")  // DECLRMM: left/right margins can be installed at all.
+        write(source, "\u{1B}[3;1H\(marker(1))")
+        write(source, "\u{1B}[1;1H")
+
+        let bytes = try preamble(source)
+        let replayed = try replay(bytes, columns: 100, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        let run = String(repeating: "X", count: 90)
+        write(replayed, run)
+
+        let rows = visibleRows(replayed)
+        #expect(rows.first?.hasPrefix(run) == true, "output after the preamble must reach the replay terminal's right edge: \(rows.first ?? "")")
+        #expect(rows.count > 2 && rows[2].hasPrefix(marker(1)), "the repaint must still land where it did: \(rows)")
+    }
+
+    // MARK: - Charset restoration
+
+    /// A preamble is not only replayed into a blank terminal: a from-zero replay of a trimmed transcript
+    /// reaches the head preamble with whatever state the file's earlier bytes established, and a program
+    /// drawing box characters leaves GL invoking the DEC line-drawing set for as long as it draws. The
+    /// repaint's own bytes would then be mapped through that set — the library translates ASCII through
+    /// the table and renders anything above U+00FF as a space — so the preamble normalizes the invocation
+    /// before painting and restores the captured designations after.
+    @Test func repaintSurvivesReplayIntoATerminalWithACharsetInvoked() throws {
+        let source = try makeSession(columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B})0\u{000E}")  // G1 = DEC special graphics, invoked on GL and left invoked.
+        write(source, "\u{1B}[1;1Hqqqqqqqq")  // Renders as a run of U+2500.
+        write(source, "\u{1B}[3;1H\u{000F}plain row\u{000E}")
+
+        let bytes = try preamble(source)
+        let replayed = try makeSession(columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        write(replayed, "\u{1B})0\u{000E}")
+        write(replayed, bytes)
+
+        #expect(visibleRows(replayed) == visibleRows(source), "the repaint must not be charset-mapped by the terminal it replays into")
+    }
+
+    // MARK: - Cursor restoration under origin mode
+
+    /// The preamble restores the scrolling region before the cursor, because DECSTBM homes the cursor and
+    /// would otherwise discard it. That ordering makes the cursor step subtle: with origin mode (DECOM)
+    /// set, CUP is interpreted against the region's top-left corner while the library's cursor getters
+    /// report absolute coordinates, so an absolute CUP lands a region's-worth of rows too low or clamps.
+    /// Positioning with origin mode temporarily off is not available either — re-enabling it homes the
+    /// cursor again — so the emitted coordinates have to be region-relative.
+    ///
+    /// Writing the same text into the source and into the replay is what makes this cell-level: the two
+    /// grids can only match if the restored cursor sat on the same cell.
+    @Test func cursorUnderOriginModeAndAScrollingRegionSurvivesPreamble() throws {
+        let source = try makeSession(columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B}[?6h")  // DECOM: CUP becomes region-relative.
+        write(source, "\u{1B}[5;20r")  // Region rows 5...20; homes the cursor to its top-left.
+        write(source, "\u{1B}[3;1H")  // Region-relative row 3, i.e. absolute row 7.
+
+        let bytes = try preamble(source)
+        let replayed = try replay(bytes, columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+
+        write(source, marker(1))
+        write(replayed, marker(1))
+
+        #expect(visibleRows(replayed) == visibleRows(source), "the preamble's cursor must land on the same cell under origin mode")
+    }
+
     // MARK: - FIX A: dimension tolerance (top-down flow instead of absolute CUP)
 
     /// A preamble that painted a 24-row static grid, replayed into a SMALLER 60x20 terminal, must keep
@@ -119,9 +199,7 @@ import ghosttyvtshim
         let joined = rows.joined(separator: "\n")
 
         // The newest 20 marker rows (indices 4...23) must each survive in the visible grid.
-        for index in 4..<24 {
-            #expect(joined.contains(marker(index)), "marker \(marker(index)) must survive replay at a smaller size")
-        }
+        for index in 4..<24 { #expect(joined.contains(marker(index)), "marker \(marker(index)) must survive replay at a smaller size") }
 
         // No visible row may hold two markers: that would prove one row was overwritten by another.
         for line in rows {
@@ -235,34 +313,27 @@ import ghosttyvtshim
         // Each cell is preceded by a full reset so its pen is isolated; the reset-first emitter then
         // reproduces each pen deterministically from the cell alone.
         write(source, "\u{1B}[1;1H")
-        write(source, "\u{1B}[0m\u{1B}[4:3m\u{1B}[58:5:196mC")     // curly underline + palette-196 underline color
-        write(source, "\u{1B}[0m\u{1B}[4:2mD")                     // double underline
-        write(source, "\u{1B}[0m\u{1B}[5mB")                       // blink
-        write(source, "\u{1B}[0m\u{1B}[53mO")                      // overline
-        write(source, "\u{1B}[0m\u{1B}[4m\u{1B}[58:2::10:20:30mR") // single underline + RGB underline color
+        write(source, "\u{1B}[0m\u{1B}[4:3m\u{1B}[58:5:196mC")  // curly underline + palette-196 underline color
+        write(source, "\u{1B}[0m\u{1B}[4:2mD")  // double underline
+        write(source, "\u{1B}[0m\u{1B}[5mB")  // blink
+        write(source, "\u{1B}[0m\u{1B}[53mO")  // overline
+        write(source, "\u{1B}[0m\u{1B}[4m\u{1B}[58:2::10:20:30mR")  // single underline + RGB underline color
 
         // Distinctive, pen-boundary-anchored fragments (avoid substring collisions such as ";5" inside
         // ";53" or "58:5"). The blink-only and overline-only cells assert the whole reset-first pen.
         let fragments: [(String, Data)] = [
-            ("curly underline variant", Data("4:3".utf8)),
-            ("palette underline color", Data("58:5:196".utf8)),
-            ("double underline variant", Data("4:2".utf8)),
-            ("blink pen", Data("[0;5m".utf8)),
-            ("overline pen", Data("[0;53m".utf8)),
+            ("curly underline variant", Data("4:3".utf8)), ("palette underline color", Data("58:5:196".utf8)),
+            ("double underline variant", Data("4:2".utf8)), ("blink pen", Data("[0;5m".utf8)), ("overline pen", Data("[0;53m".utf8)),
             ("rgb underline color", Data("58:2::10:20:30".utf8)),
         ]
 
         let sourceBytes = try preamble(source)
-        for (label, fragment) in fragments {
-            #expect(sourceBytes.range(of: fragment) != nil, "source preamble must carry \(label)")
-        }
+        for (label, fragment) in fragments { #expect(sourceBytes.range(of: fragment) != nil, "source preamble must carry \(label)") }
 
         let replayed = try replay(sourceBytes, columns: 80, rows: 24)
         defer { spaces_ghostty_vt_session_free(replayed) }
         let replayedBytes = try preamble(replayed)
-        for (label, fragment) in fragments {
-            #expect(replayedBytes.range(of: fragment) != nil, "replayed preamble must carry \(label) (round-trip)")
-        }
+        for (label, fragment) in fragments { #expect(replayedBytes.range(of: fragment) != nil, "replayed preamble must carry \(label) (round-trip)") }
     }
 
     // MARK: - Enabling change: in-place resize with reflow

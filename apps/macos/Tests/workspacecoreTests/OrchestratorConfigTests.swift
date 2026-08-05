@@ -93,7 +93,10 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.kind, .shell)
         XCTAssertEqual(runtimeState.sessionID, reservation.sessionID)
         XCTAssertEqual(runtimeState.state, .starting)
-        XCTAssertEqual(runtimeState.title, reservation.title)
+        // A reserved session has run nothing, so it has reported no title. Its name lives in the launch
+        // configuration; a title stamped here would read back as a live title the shell never set.
+        XCTAssertNil(runtimeState.title)
+        XCTAssertEqual(launchConfiguration.title, reservation.title)
         XCTAssertGreaterThan(runtimeState.servicePID, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.outputPath)).count, 0)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
@@ -239,6 +242,9 @@ extension OrchestratorTests {
         XCTAssertEqual(launchConfiguration.kind, .shell)
         XCTAssertEqual(launchConfiguration.title, "shell-1")
         XCTAssertTrue(launchConfiguration.command?.contains("echo hello") == true)
+        // An ad-hoc command runs under an interactive login shell, the same form a spawned coding agent
+        // gets, so both resolve the tools a user's own terminal resolves.
+        XCTAssertTrue(launchConfiguration.command?.contains(" -l -i -c ") == true)
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
         XCTAssertEqual(terminalWindow.name, "shell-1")
@@ -259,7 +265,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let launchCapture = TerminalLaunchConfigurationCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalSessionLauncher: { configuration in
                 launchCapture.append(configuration)
@@ -272,8 +278,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        _ = try orchestrator.createWorkspaceAgentSession(
-            workspaceID: workspace.id, command: "codex", title: "Nightly", automationRunID: "run-99")
+        _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: "Nightly", automationRunID: "run-99")
 
         let launchConfiguration = try XCTUnwrap(launchCapture.snapshot().first)
         XCTAssertEqual(launchConfiguration.kind, .agent)
@@ -282,6 +287,34 @@ extension OrchestratorTests {
         _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: "Interactive")
         let interactiveConfiguration = try XCTUnwrap(launchCapture.snapshot().last)
         XCTAssertNil(interactiveConfiguration.automationRunID)
+    }
+
+    /// With no command the session IS the user's shell — a bare interactive login shell on the PTY — so
+    /// it is launched directly instead of being wrapped in another `-i -c` shell.
+    func testCreateWorkspaceTerminalSessionWithoutCommandLaunchesABareLoginShell() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        _ = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil)
+
+        let command = try XCTUnwrap(launchCapture.snapshot().first?.command)
+        XCTAssertTrue(command.hasSuffix(" -l"), "a bare terminal session launches its login shell directly: \(command)")
+        XCTAssertFalse(command.contains(" -l -i -c "))
     }
 
     func testStopWorkspaceTerminatesLaunchOwnedAdHocTerminalSessionWithoutWindowRow() throws {
@@ -607,50 +640,39 @@ extension OrchestratorTests {
 
     // Tests refresh workspace windows prunes legacy process-backed terminal rows without built-in terminal identity.
 
-    // Tests refresh all workspace windows skips archived workspaces by arranging representative inputs and asserting the expected result.
-    func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
-        let repo = try makeTempGitRepo(name: "refresh-skip-archived")
+    /// Bulk refresh reconciles the workspaces a project still has. A workspace archived out of the project
+    /// takes its window rows with it, so it can neither be refreshed nor leave rows behind.
+    func testRefreshAllWorkspaceWindowsCoversRemainingWorkspacesAfterArchive() throws {
+        let repo = try makeTempGitRepo(name: "refresh-after-archive")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
         let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
+
+        for (workspaceID, title) in [
+            (defaultWorkspace.id, "default-stale"), (activeWorkspace.id, "active-stale"), (archivedWorkspace.id, "archived-stale"),
+        ] {
+            try store.upsert(
+                window: WindowRecord(
+                    id: UUID().uuidString, workspaceID: workspaceID, app: "Spaces", title: title, role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+        }
         _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
+        XCTAssertNil(try store.workspace(id: archivedWorkspace.id))
+        XCTAssertTrue(try store.windows(workspaceID: archivedWorkspace.id).isEmpty)
 
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
+        let refreshResult = try XCTUnwrap(try orchestrator.refreshAllWorkspaceWindows())
 
-        // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
-        // Remaining risk: archived rows are intentionally left untouched until explicit archive/cleanup paths run.
-        var result: WorkspaceOrchestrator.RefreshResult?
-        result = try orchestrator.refreshAllWorkspaceWindows()
-
-        let refreshResult = try XCTUnwrap(result)
         XCTAssertTrue(refreshResult.didMutateDB)
-        // Archived workspace is excluded from refresh, so its ID should not appear in tracked counts.
         XCTAssertNil(refreshResult.trackedWindowCounts[archivedWorkspace.id])
-        // Active workspaces had their stale windows pruned, leaving zero tracked windows each.
         XCTAssertEqual(refreshResult.trackedWindowCounts[defaultWorkspace.id], 0)
         XCTAssertEqual(refreshResult.trackedWindowCounts[activeWorkspace.id], 0)
-
         XCTAssertTrue(try store.windows(workspaceID: defaultWorkspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: activeWorkspace.id).isEmpty)
-        XCTAssertEqual(try store.windows(workspaceID: archivedWorkspace.id).count, 1)
     }
 
     // Tests update workspace settings leaves stopped workspaces stopped when only stale runtime leftovers exist.
@@ -727,8 +749,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo stop"
@@ -750,8 +771,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo project-stop"
@@ -978,9 +998,6 @@ extension OrchestratorTests {
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
                     state: .running, updatedAt: "now", title: "vim main.swift", workingDirectory: workspace.dir), paths: paths)
 
-            XCTAssertThrowsError(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  ")) {
-                error in XCTAssertTrue(error.localizedDescription.contains("title"))
-            }
             XCTAssertFalse(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: otherWorkspace.id, sessionID: sessionID, title: "x"))
             XCTAssertTrue(
                 try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  build watcher  "))
@@ -997,7 +1014,47 @@ extension OrchestratorTests {
                     state: .running, updatedAt: "later", title: "nvim other.swift", workingDirectory: workspace.dir), paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
-            XCTAssertEqual(entry.effectiveTitle, "build watcher")
+            XCTAssertEqual(entry.name, "build watcher")
+        }
+    }
+
+    /// Clearing the name restores the generated one the session was launched under, on the session and
+    /// on the window record — which names the row only once the session is gone.
+    func testClearingAnAdHocBuiltInTerminalSessionRenameRestoresItsGeneratedName() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-clear-rename-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell-1", workingDirectory: workspace.dir,
+                    shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "now", title: "vim main.swift", workingDirectory: workspace.dir), paths: paths)
+
+            XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "build watcher"))
+            XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "   "))
+
+            XCTAssertNil(try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).userTitle)
+            let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
+            XCTAssertEqual(entry.name, "shell-1")
+            XCTAssertEqual(entry.liveTitle, "vim main.swift", "the program's title keeps describing the session; it never names it")
+            let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == "terminal-window" })
+            XCTAssertEqual(window.name, "shell-1")
         }
     }
 
@@ -1176,31 +1233,6 @@ extension OrchestratorTests {
 
     // Tests openWorkspaceTerminal uses the window ID from a running Spaces process when the focused window is not Spaces by arranging representative inputs and asserting the expected result.
 
-    // Tests ensureDefaultWorkspace revives an archived default workspace via updateProjectConfig by arranging representative inputs and asserting the expected result.
-    func testEnsureDefaultWorkspaceRevivesArchivedDefaultViaUpdateProjectConfig() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-
-        // Find the default workspace and archive it via store directly.
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-        let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
-        let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
-            isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
-        try store.upsert(workspace: archived)
-        XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
-
-        // updateProjectConfig calls ensureDefaultWorkspace, which should revive the archived default workspace.
-        try orchestrator.updateProjectConfig(projectID: project.id) { _ in }
-
-        let revived = try XCTUnwrap(store.workspace(id: defaultWS.id))
-        XCTAssertFalse(revived.isArchived)
-    }
-
     // Tests updateProjectConfig leaves missing default workspace settings missing.
     func testUpdateProjectConfigDoesNotReseedMissingDefaultWorkspaceSettings() throws {
         let store = try makeTemporaryStore()
@@ -1216,8 +1248,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
@@ -1227,21 +1259,21 @@ extension OrchestratorTests {
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
     }
 
-    // Tests openWorkspaceTerminal throws invalidArgument when the workspace is archived.
-    func testOpenWorkspaceTerminalThrowsForArchivedWorkspace() throws {
+    /// Archiving removes the record, so a terminal can no longer be opened for it.
+    func testOpenWorkspaceTerminalThrowsAfterArchive() throws {
+        let repo = try makeTempGitRepo(name: "open-terminal-after-archive")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
 
-        // Archive the workspace directly via the store.
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
+        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
+        XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertThrowsError(try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("archived"))
+            XCTAssertTrue(error.localizedDescription.contains("Workspace not found"))
         }
     }
 
@@ -1284,7 +1316,7 @@ extension OrchestratorTests {
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
             id: "workspace-a", projectID: project.id, dir: "/projects/app", dirname: nil, branch: "main", baseBranch: "main", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])

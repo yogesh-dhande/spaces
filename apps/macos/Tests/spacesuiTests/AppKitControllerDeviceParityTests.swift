@@ -1,10 +1,10 @@
 import Foundation
 import Testing
 import spacesclientcore
-import spacesdeviceapi
 import spacesdevicecore
 import workspacecore
 
+@testable import spacesdeviceapi
 @testable import spacesterminalcore
 @testable import spacesui
 
@@ -254,7 +254,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false,
                     notes: "Remote and local use this same payload.", sessionCount: 1,
                     assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
                     setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
@@ -305,8 +305,8 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: nil,
-                    sessionCount: 3, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 3,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
@@ -336,6 +336,32 @@ import workspacecore
         #expect(items.contains { $0.kind == .process && $0.label == "web" && $0.detail == "npm run dev" })
         #expect(items.contains { $0.kind == .agent && $0.label == "Codex" })
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
+    }
+
+    /// Palette rows for ad hoc shells read the way the sidebar rows do: the terminal's name, described
+    /// by the title its program reported. A shell that has reported none is named and nothing more.
+    @Test func commandPaletteTerminalRowsShowTheNameDescribedByTheLiveTitle() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-quiet", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
+                            sessionID: "session-quiet", runState: .running, canOpenTerminal: true, canStop: true),
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-busy", workspaceID: "workspace-1", title: "shell-2", workingDirectory: "/device/project-feature",
+                            sessionID: "session-busy", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
+                    ])
+            ], sessions: [])
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        #expect(try #require(items.first { $0.label == "shell-1" }).detail == nil)
+        #expect(try #require(items.first { $0.label == "shell-2" }).detail == "vim main.swift")
     }
 
     @Test func deviceTerminalRowsRenderThroughWorkspaceRuntimeRows() {
@@ -386,8 +412,8 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: nil,
-                    sessionCount: 1, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -414,7 +440,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -485,8 +511,7 @@ import workspacecore
             workspacesByProject: [
                 projectID: [
                     WorkspaceSummary(
-                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isArchived: false, isDefault: false,
-                        deviceID: deviceID)
+                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isDefault: false, deviceID: deviceID)
                 ]
             ],
             workspaceRuntimeStatusByID: [
@@ -521,7 +546,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     config: SpacesDeviceWorkspaceConfig(agentLaunchers: [
                         SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
                     ]),
@@ -704,7 +729,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
                             id: "terminal-shell", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
@@ -730,7 +755,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     config: SpacesDeviceWorkspaceConfig(processes: [
                         SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
                     ]),
@@ -760,7 +785,7 @@ import workspacecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
@@ -792,6 +817,26 @@ import workspacecore
         #expect(request.rows == 40)
         #expect(request.ownerEpoch == 7)
         #expect(request.resizeSerial == 3)
+    }
+
+    @Test func deviceTerminalControlRequestCarriesMouseButtonAndPointerToTheDaemon() throws {
+        // The daemon rejects a mouseButton control with no button or pointer, so every field of the
+        // click must survive the device-API conversion for a mirror click to reach the application.
+        let control = TerminalControlRequest(
+            command: .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: "mac-client", ownerEpoch: 7, button: 1, pressed: true, pointerX: 0.25, pointerY: 0.75, pointerMods: 4)))
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .mouseButton)
+        #expect(request.clientID == "mac-client")
+        #expect(request.ownerEpoch == 7)
+        #expect(request.mouseButton == 1)
+        #expect(request.mousePressed == true)
+        #expect(request.mousePointerX == 0.25)
+        #expect(request.mousePointerY == 0.75)
+        #expect(request.mousePointerMods == 4)
     }
 
     @Test func deviceTerminalControlRequestPreservesPasteIntent() throws {
@@ -987,6 +1032,62 @@ import workspacecore
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
     }
 
+    /// Opening an ended terminal's pane for the first time — the session is in no loaded overview, so the
+    /// pane is resolved cold against the device. The session exited and its terminal window record is all
+    /// that holds it, which is the state a local daemon restart leaves behind, and the resolve has to come
+    /// back with a request that can actually describe the pane: its workspace and its shell. The overview
+    /// here is built by the daemon's own row derivation rather than hand-assembled, since whether the
+    /// session is published at all is that derivation's decision.
+    @Test func coldResolveOpensAnEndedSessionHeldOnlyByItsTerminalWindowRow() async throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-ended", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
+        let endedWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended", role: "terminal",
+            orderIndex: 0, lastSeenAt: "now")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace, windows: [endedWindow])
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-ended", backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Shell", workingDirectory: "/repo/feature",
+            shell: "/bin/zsh", command: "seq 1 300", createdAt: "2026-07-29T12:00:00Z", workspaceID: workspace.id, kind: .shell)
+        let endedEntry = TerminalSessionCatalogEntry(
+            launchConfiguration: launchConfiguration,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "session-ended", backend: .ghosttyEmbedded, servicePID: 321, childPID: 654, state: .exited,
+                updatedAt: "2026-07-29T12:00:05Z", title: nil, workingDirectory: "/repo/feature"),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), paths: TerminalSessionPaths(rootDirectory: "/tmp/session-ended"),
+            isControlAvailable: false, isSubscriptionAvailable: false)
+        let rows = SpacesDeviceAPIServer.workspaceTerminalRows(
+            workspaces: [descriptor], sessions: [], sessionIDsWithFinalRender: ["session-ended"],
+            catalogEntry: { $0 == "session-ended" ? endedEntry : nil }, endedWindowSessions: ["session-ended": endedEntry])
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [descriptor], workspaceRows: rows, liveSessions: [],
+            daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))
+        let device = SpacesPairedDeviceRecord(
+            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
+        let clientApp = SpacesDeviceClientApp(
+            installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
+
+        let match = await AppKitController.resolveSessionSummaryMatchOffMain(
+            sessionID: "session-ended", device: device, clientApp: clientApp,
+            resolveOverview: { device, _ in
+                SpacesDeviceOverviewResolution(
+                    overview: SpacesDeviceOverview(device: device, overview: overview), daemonStatus: nil, compatibility: nil)
+            })
+
+        let resolved = try #require(match)
+        let request = AppKitController.terminalSessionPaneOpenRequest(from: resolved)
+        #expect(request.sessionID == "session-ended")
+        #expect(request.workspaceID == "workspace-ended")
+        #expect(request.shell == "/bin/zsh")
+        #expect(request.command == "seq 1 300")
+        #expect(request.workingDirectory == "/repo/feature")
+        #expect(request.kind == .shell)
+        #expect(request.initialState == .exited)
+        #expect(request.deviceID == "local")
+    }
+
     @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
         let recorder = ThreadRecorder()
         let device = SpacesPairedDeviceRecord(
@@ -1014,9 +1115,9 @@ import workspacecore
     }
 
     @Test func attachControlRefreshesSessionStateWhenResponseOmitsIt() throws {
-        // The Device API does not echo session state for attach/detach controls, so the
-        // control helper must fetch the post-control state and apply the new ownership
-        // immediately instead of waiting for the live subscription to redeliver it.
+        // A daemon that could not load the post-attach state answers without it, so the control
+        // helper falls back to fetching that state and applying the new ownership immediately
+        // instead of waiting for the live subscription to redeliver it.
         let refreshedSnapshot = attachmentSnapshot(ownerID: "mac-window")
         let refreshedState = sessionStatePayload(attachmentSnapshot: refreshedSnapshot)
         let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
@@ -1033,6 +1134,28 @@ import workspacecore
         #expect(response.ok)
         #expect(recorder.issuedStateFetch)
         #expect(applied.payload?.attachmentSnapshot == refreshedSnapshot)
+    }
+
+    @Test func attachControlAppliesCarriedStateWithoutASecondRoundTrip() throws {
+        // Attach responses carry the session state the attach produced, so the helper applies it
+        // directly. Fetching it again would spend a second round trip — and a second full-frame
+        // export — on every attach, including the one behind each terminal pane open.
+        let carriedSnapshot = attachmentSnapshot(ownerID: "mac-window")
+        let carriedState = sessionStatePayload(attachmentSnapshot: carriedSnapshot)
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: nil, controlResponseSnapshot: carriedState)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1",
+            request: TerminalControlRequest(
+                command: "attach",
+                client: TerminalClient(
+                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(!recorder.issuedStateFetch)
+        #expect(applied.payload?.attachmentSnapshot == carriedSnapshot)
     }
 
     @Test func sendControlDoesNotFetchStateWhenRefreshNotRequested() throws {
@@ -1085,16 +1208,21 @@ import workspacecore
 
     private final class ControlRequestRecorder: @unchecked Sendable {
         private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
+        /// The state the control response itself carries, as an attach/detach/takeover response does.
+        private let controlResponseSnapshot: GhosttyRemoteSessionStatePayload?
         private(set) var issuedStateFetch = false
 
-        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?) { self.stateResponseSnapshot = stateResponseSnapshot }
+        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?, controlResponseSnapshot: GhosttyRemoteSessionStatePayload? = nil) {
+            self.stateResponseSnapshot = stateResponseSnapshot
+            self.controlResponseSnapshot = controlResponseSnapshot
+        }
 
         var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
             { [self] request in
                 switch request.command {
                 case .control:
                     return TerminalServiceResponse(
-                        ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+                        ok: true, message: "", sessionState: controlResponseSnapshot, controlResponse: TerminalControlResponse(ok: true, message: ""))
                 case .state:
                     issuedStateFetch = true
                     return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)

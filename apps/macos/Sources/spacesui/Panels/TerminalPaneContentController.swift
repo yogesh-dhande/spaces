@@ -8,6 +8,10 @@ import spacesterminalui
     func applyAppearance(_ appearance: ThemeAppearance)
     func setAccessibilityRuntimeTargetName(_ name: String)
     func requestOwnershipIfNeeded()
+    /// Whether this content already holds the session's owner attachment on a live surface (see
+    /// `TerminalSessionPaneViewController.holdsOwnerAttachedSurface`). Lets a re-show of the pane the user
+    /// is already in skip the open path's state fetch, attach, and ownership reclaim.
+    var holdsOwnerAttachedSurface: Bool { get }
     func closeForSessionTermination()
     var canPerformFindActions: Bool { get }
     func find(_ sender: Any?)
@@ -72,6 +76,8 @@ import spacesterminalui
     /// The `openTerminalSessionWindow` (owner) IPC calls this after opening the pane;
     /// without it an owner-mode `terminal show` would only attach as a viewer.
     func requestOwnershipIfNeeded() { pane.requestOwnershipIfNeeded() }
+
+    var holdsOwnerAttachedSurface: Bool { pane.holdsOwnerAttachedSurface }
 
     func deactivate() { pane.hideEmbedded() }
 

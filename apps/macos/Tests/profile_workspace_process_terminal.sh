@@ -30,6 +30,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -136,7 +137,7 @@ wait_for_process_session_id() {
   start="$(date +%s)"
   while true; do
     write_workspace_dump "$workspace_dir" "$dump_path"
-    if [[ -n "$(process_field "$dump_path" "$process_name" terminalNativeID)" ]]; then
+    if [[ -n "$(process_field "$dump_path" "$process_name" terminalTrackingID)" ]]; then
       return 0
     fi
     if (( "$(date +%s)" - start >= timeout )); then
@@ -188,6 +189,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI
   --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' > /dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" lookup-workspace --project-dir "$PROJECT_DIR" >"$WORKSPACE_INFO_JSON"
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
+WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
@@ -199,11 +201,11 @@ import time
 print(time.time())
 PY
 )"
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" start "$WORKSPACE_DIR" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" workspace start --workspace "$WORKSPACE_ID" >/dev/null
 wait_for_process_session_id "$WORKSPACE_DIR" backend "$WORK_ROOT/after-start.json" 30
 START_MS="$(ms_since "$start_started_at")"
 
-BACKEND_SESSION_ID="$(process_field "$WORK_ROOT/after-start.json" backend terminalNativeID)"
+BACKEND_SESSION_ID="$(process_field "$WORK_ROOT/after-start.json" backend terminalTrackingID)"
 
 close_started_at="$(python3 - <<'PY'
 import time
@@ -218,13 +220,17 @@ import time
 print(time.time())
 PY
 )"
-summon_pattern="spaces: perf metric=terminal_window_summon target=session=${BACKEND_SESSION_ID} success=1 .*mode=owner"
-summon_baseline="$(log_pattern_count "$summon_pattern")"
+# The window-focus IPC this scenario drives resolves through `openOrFocusTerminalTarget`, which reports
+# `terminal_pane_focus` for the session and never `terminal_window_summon` — that metric belongs to the
+# owner-mode open IPC (`spaces terminal show`), which nothing here posts. Waiting on the summon could
+# therefore never be satisfied, so the focus wall time is bounded by this pane-focus report instead.
+focus_pattern="spaces: perf metric=terminal_pane_focus target=session=${BACKEND_SESSION_ID} success=1"
+focus_baseline="$(log_pattern_count "$focus_pattern")"
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name backend >/dev/null 2>"$FOCUS_LOG"
-wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30
+wait_for_log_pattern_count_greater_than "$focus_pattern" "$focus_baseline" 30
 write_workspace_dump "$WORKSPACE_DIR" "$WORK_ROOT/after-focus.json"
 FOCUS_MS="$(ms_since "$focus_started_at")"
-REOPENED_SESSION_ID="$(process_field "$WORK_ROOT/after-focus.json" backend terminalNativeID)"
+REOPENED_SESSION_ID="$(process_field "$WORK_ROOT/after-focus.json" backend terminalTrackingID)"
 
 python3 - "$APP_LOG" "$FOCUS_LOG" "$START_MS" "$CLOSE_MS" "$FOCUS_MS" "$BACKEND_SESSION_ID" "$REOPENED_SESSION_ID" "$METRICS_PATH" >"$SUMMARY_PATH" <<'PY'
 import json, re, sys

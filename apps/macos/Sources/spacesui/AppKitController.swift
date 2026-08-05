@@ -208,6 +208,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceIndex = workspacesByProject.reduce(into: [:]) { index, entry in
                 for workspace in entry.value { index[workspace.id] = (projectID: entry.key, workspace: workspace) }
             }
+            // `SidebarController.rebuildFlatSidebarData()` — the single point every overview-install
+            // path (the local snapshot, a remote pull/subscription, a mutation response) funnels
+            // through — assigns this property on every call, so it is the nearest reachable proxy for
+            // that funnel from this type. See `resolveAwaitingWorkspaceDeletions`.
+            resolveAwaitingWorkspaceDeletions()
         }
     }
     private(set) var workspaceIndex: [String: (projectID: String, workspace: WorkspaceSummary)] = [:]
@@ -319,7 +324,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }()
     /// Distributed IPC notifications observed while the app is running, paired with their `@objc` handlers.
     /// `self` is the observer for every one, so registration and teardown are uniform loops.
-    private static let distributedIPCObservers: [(name: Notification.Name, selector: Selector)] = [
+    static let distributedIPCObservers: [(name: Notification.Name, selector: Selector)] = [
         (IPCNotification.agentEventFired, #selector(handleAgentEventIPC(_:))),
         (IPCNotification.showMainWindow, #selector(handleShowMainWindowIPC(_:))),
         (IPCNotification.hideMainWindow, #selector(handleHideMainWindowIPC(_:))),
@@ -340,6 +345,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
         (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
+        (TerminalOverviewSignal.name, #selector(handleTerminalOverviewSignalIPC(_:))),
         (IPCNotification.deliverUserNotification, #selector(handleDeliverUserNotificationIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
@@ -381,6 +387,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
     private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
+    /// Workspaces whose delete mutation is in flight. Deleting a workspace takes seconds on the owning
+    /// daemon — it stops the workspace, then removes the git worktree — and every overview that lands in
+    /// that window still lists the workspace, so removing the row up front would let the next background
+    /// refresh put it back for a beat before it finally disappears. The row stays and renders marked as
+    /// deleting instead (see `sidebarWorkspaceRowState`), whatever rebuilds happen meanwhile.
+    /// In-memory and per-run, like `pendingNewTerminalSessionWorkspaceIDs`: a relaunch reloads from the
+    /// daemons, which are authoritative about whether the delete landed.
+    ///
+    /// Deletes issued from this app only. What the row renders is `isWorkspaceMarkedDeleting`, which
+    /// unions this with the teardowns the owning daemon reports; this set stays exactly the deletes this
+    /// app has to see through, since it is what the reconciliation paths key their outcome on.
+    private(set) var workspaceIDsPendingDeletion: Set<String> = []
+
+    /// What `deleteWorkspace` held back when `WorkspaceDeletionReconciler` returned `.unknown` — every
+    /// reconciliation refetch failed, so no overview ever proved the delete's fate either way. The
+    /// workspace stays in `workspaceIDsPendingDeletion` (its row stays inert) and this is what
+    /// `resolveAwaitingWorkspaceDeletions` needs once a real overview for `deviceID` finally arrives:
+    /// which device to check, the error to surface if the workspace is still there, whether to show the
+    /// branch-outcome notice if it is gone, and the browser windows/panes a confirmed-gone resolution
+    /// still has to close (the same cleanup an immediate `.gone` verdict performs).
+    private struct AwaitingWorkspaceDeletionResolution {
+        let deviceID: String
+        let error: Error
+        let branchDeletionRequested: Bool
+        let browserSessionTargetURLs: [String]
+        /// `deviceID`'s `DeviceSection.overviewInstallGeneration` at the moment reconciliation gave up.
+        /// Resolution waits for a fresh install for this exact device — one whose generation exceeds
+        /// this snapshot — rather than settling on any `workspacesByProject` rebuild, which fires for
+        /// every device's refresh and would otherwise reread this device's own untouched cached overview
+        /// as if it were new evidence.
+        let overviewInstallGenerationAtDefer: Int
+    }
+
+    /// Workspaces whose delete reconciliation exhausted its attempt budget without a single overview
+    /// resolving (`WorkspaceDeletionReconciler.Outcome.unknown`). In-memory and per-run, like
+    /// `workspaceIDsPendingDeletion`: a relaunch always refetches reality from the daemon instead of
+    /// trusting anything held here.
+    private var workspaceIDsAwaitingDeletionResolution: [String: AwaitingWorkspaceDeletionResolution] = [:]
 
     @discardableResult func beginNewTerminalSessionCreation(workspaceID: String) -> Bool {
         pendingNewTerminalSessionWorkspaceIDs.insert(workspaceID).inserted
@@ -458,11 +502,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
         case workspaceAgentLauncher(workspaceID: String, name: String)
         case agentWindow(AgentWindowRecord)
+        case terminalSession(workspaceID: String, sessionID: String)
 
         var workspaceID: String {
             switch self {
             case .workspaceBrowserSession(let workspaceID, _), .workspaceWindow(let workspaceID, _), .workspaceProcess(let workspaceID, _),
-                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _):
+                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _),
+                .terminalSession(let workspaceID, _):
                 return workspaceID
             case .agentWindow(let record): return record.workspaceID
             }
@@ -557,7 +603,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
                 self.enterSetupFlow()
-                self.ensureMainWindowVisibleOnLaunch()
+                self.ensureMainWindowVisible()
             }
         }
         prewarmTerminalServiceAfterStartup()
@@ -572,6 +618,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let reason = persistentTerminationPolicyReason()
         processInfo.disableAutomaticTermination(reason)
         processInfo.disableSuddenTermination()
+    }
+
+    /// Clicking the Dock icon (or otherwise reopening the app) restores the main window whenever it is
+    /// not visible, even if another Spaces window (a panel window) is visible: `hasVisibleWindows` counts
+    /// every app window, so relying on it alone would leave the main window hidden behind a visible
+    /// panel. When the main window is already visible, AppKit's default reopen handling stands.
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard let window, !window.isVisible else { return true }
+        ensureMainWindowVisible()
+        return false
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -664,6 +720,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let object = notification.object as? String
         Task { @MainActor [weak self, object] in
             guard let self, self.didStartBackgroundServices, self.matchesProfileIPCObject(object) else { return }
+            self.sidebar.handleDatabaseDidChange()
+        }
+    }
+
+    /// Reloads the sidebar when a terminal session's overview-affecting state changes (a bell, an exit,
+    /// a title or runtime-state change). Terminal runtime state lives outside the database and so raises
+    /// no `databaseDidChange`; this signal is its equivalent, and it takes the same reload path so the
+    /// mid-edit deferral and reload coalescing are identical. The app and the daemon hosting the session
+    /// are separate processes, so the signal arrives here through its distributed half.
+    @objc private nonisolated func handleTerminalOverviewSignalIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self,
+                Self.shouldReloadSidebarForTerminalOverviewSignal(
+                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object, profileObject: self.ipcNotificationObject
+                )
+            else { return }
             self.sidebar.handleDatabaseDidChange()
         }
     }
@@ -1346,6 +1419,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.displayName)")
             // Drop a full-pane alerts view so the selection below resolves to the workspace instead of
             // `refreshSelection` bouncing back to alerts; a shown workspace/compatibility pane is untouched.
+            // Left as a background presentation: this only clears the way, and the selection it makes
+            // room for is what carries the navigation — `selectWorkspace` lands on the outline row whose
+            // selection change presents the workspace pane as `.userNavigation`.
             if case .alerts = self.detailPane { self.presentDetailPane(.none) }
             self.showingSettings = false
             self.selectWorkspace(workspace)
@@ -1709,7 +1785,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         TerminalSessionRuntimeState(
             sessionID: sessionID, backend: summary.backend, servicePID: summary.servicePID, childPID: summary.childPID, state: summary.state,
-            updatedAt: summary.updatedAt, title: summary.title, workingDirectory: summary.workingDirectory)
+            updatedAt: summary.updatedAt, title: summary.title, workingDirectory: summary.workingDirectory, bellAt: summary.bellAt)
     }
 
     /// Reads a session's real launch configuration straight from its owning device when the
@@ -1875,6 +1951,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
+        // Re-showing the pane the user is already focused in and owns is a foreground-and-focus, so it also
+        // skips resolving the request: resolution only exists to install or re-target a pane.
+        if reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+                detail: "mode=\(mode.rawValue) reused=1 route=pane refocus=1\(requestDetail)")
+            return true
+        }
         let resolved: DeviceTerminalOpenRequest?
         if let resolvedRequest { resolved = resolvedRequest } else { resolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) }
         guard let request = resolved else {
@@ -2019,8 +2103,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let clientID = remoteClientStore.current() else {
                     return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
                 }
-                let ownerEpoch = stateModel.latestRemoteStatePayload?.renderOwnerEpoch ?? 0
-                return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
+                // Send whatever owner epoch the cached payload carries, absent included: a payload with no
+                // render owner epoch (an owner change, or an input-reason payload) means this paste is not
+                // epoch-gated, exactly like every other input path this pane sends.
+                return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: stateModel.latestRemoteStatePayload?.renderOwnerEpoch)
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                 let response = try Self.sendDeviceTerminalControl(
@@ -2052,7 +2138,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-                detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                detachClientAction: detachClientAction,
                 onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
@@ -2169,8 +2255,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
             scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
-            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
-            appearance: request.appearance)
+            scrollPointerMods: request.scrollPointerMods, mouseButton: request.mouseButton, mousePressed: request.mousePressed,
+            mousePointerX: request.mousePointerX, mousePointerY: request.mousePointerY, mousePointerMods: request.mousePointerMods,
+            appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2531,7 +2618,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localOfflineMessage: String?
     }
 
-    enum SidebarDeviceLoadState: Sendable, Equatable {
+    enum SidebarDeviceLoadState: Sendable, Hashable {
         case loading
         case offline(String)
         case loaded
@@ -2579,7 +2666,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var workspacesByProject: [String: [WorkspaceSummary]] = [:]
         var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
         var alertsGroups: [AlertsGroup] = []
-        var overview: SpacesDeviceOverviewPayload?
+        /// Bumped by `overview`'s `didSet` on every reassignment after this section already exists —
+        /// once per overview-install event for this device, from whichever path installs it (a local
+        /// snapshot refresh, a remote pull/subscription in `SidebarController`, or a mutation response
+        /// in this file). A struct's own memberwise init never routes through property observers, so a
+        /// section's initial construction leaves this at its default rather than counting as an install.
+        ///
+        /// `resolveAwaitingWorkspaceDeletions` uses this to tell "fresh evidence for the owning device
+        /// arrived" apart from "some other device's refresh re-ran the `workspacesByProject` didSet,
+        /// which reread this device's untouched, possibly stale, cached overview" — the bug this guards
+        /// against: an offline owning device keeps its last-known overview, and a rebuild triggered by
+        /// any other device would otherwise draw a delete verdict from evidence that predates the
+        /// delete.
+        ///
+        /// The local device's section is not mutated in place on an ordinary refresh — it is rebuilt and
+        /// assigned whole (`SidebarController.rebuildFlatSidebarData()`), which bypasses `didSet` — so that
+        /// path carries the counter forward explicitly via `adoptingOverviewInstallGeneration(from:)`.
+        /// Without that, the local counter would reset to zero on every refresh and a deferred delete for a
+        /// local workspace would never see fresh evidence at all.
+        private(set) var overviewInstallGeneration = 0
+        var overview: SpacesDeviceOverviewPayload? { didSet { overviewInstallGeneration += 1 } }
+
+        /// Carries `previous`'s install generation into this freshly built section, counting one new install
+        /// when `carriesFreshInstall` says this rebuild is carrying an overview the daemon actually just
+        /// returned.
+        ///
+        /// The caller states that fact rather than letting this infer it from payload equality. A fresh
+        /// fetch that happens to be byte-identical to the cached one is real evidence — it is exactly what
+        /// a delete that never reached the daemon looks like — and treating it as "nothing happened" would
+        /// leave that deferred delete unresolvable for the rest of the run. Conversely an outage rebuild
+        /// re-renders the retained overview without asking the daemon anything, and must not count.
+        func adoptingOverviewInstallGeneration(from previous: DeviceSection?, carriesFreshInstall: Bool) -> DeviceSection {
+            var section = self
+            section.overviewInstallGeneration = (previous?.overviewInstallGeneration ?? 0) + (carriesFreshInstall ? 1 : 0)
+            return section
+        }
         /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
         /// the first successful handshake; drives the per-device compatibility banner and gating.
         var daemonStatus: TerminalServiceDaemonStatus?
@@ -2596,9 +2717,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// this merged data (which device owns a workspace, which overview a row belongs to) keep resolving
     /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
     /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
+    ///
+    /// A workspace whose delete is in flight stays in this data: it keeps its sidebar row, which renders
+    /// marked as deleting (see `sidebarWorkspaceRowState`) until the mutation resolves, rather than
+    /// disappearing and — because the owning daemon still reports it — coming back on the next refresh.
     nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
-        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]],
-        workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus], alertsGroups: [AlertsGroup]
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus],
+        alertsGroups: [AlertsGroup]
     ) {
         var mergedProjects: [ProjectSummary] = []
         var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
@@ -2613,6 +2738,65 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return (mergedProjects, mergedWorkspaces, mergedRuntime, mergedAlerts)
     }
 
+    /// How a sidebar workspace row renders and responds while its delete mutation runs. A delete takes
+    /// seconds on the owning daemon (it stops the workspace, then removes the git worktree), so the row
+    /// stays listed and is marked for that whole window instead of vanishing and reappearing on the next
+    /// overview refresh: dimmed, carrying a progress indicator, its runtime-target children hidden, and
+    /// inert — no selection, no context menu, no expansion. It leaves the sidebar exactly once, when the
+    /// post-delete overview stops carrying it.
+    struct SidebarWorkspaceRowState: Equatable, Sendable {
+        /// Row opacity. Assigned independently of the owning device's dimming, which uses the same value,
+        /// so a marked row under an unreachable device is dimmed once rather than twice.
+        let alpha: CGFloat
+        let showsDeletingProgress: Bool
+        /// Whether the row's runtime targets are listed as children at all. False while deleting, so the
+        /// children are hidden whatever the user's expansion state — there is nothing to do under a row
+        /// that is going away — and the expansion state itself is left untouched, so a failed delete
+        /// restores exactly what the user had open.
+        let listsRuntimeTargetChildren: Bool
+        /// Whether the row accepts selection, its context menu, and expansion.
+        let isInteractive: Bool
+    }
+
+    /// Whether a workspace's row is marked as deleting: the union of the deletes this app issued
+    /// (`workspaceIDsPendingDeletion`) and the teardowns the owning daemon reports running
+    /// (`deviceOverview.workspaceIDsWithTeardownInFlight`). A delete started on the iPhone — or a project
+    /// delete taking its workspaces with it — has to mark the row here too, rather than leaving it looking
+    /// ordinary and actionable while its worktree is being removed. `deviceOverview` is whatever
+    /// `deviceSections` has installed for the workspace's owning device, `nil` when that device has none
+    /// (offline, not yet loaded, or a wire-incompatible placeholder), which reports only the local set.
+    /// Pure so the union is directly testable without a live `AppKitController`.
+    nonisolated static func isWorkspaceMarkedDeleting(
+        workspaceID: String, pendingDeletionWorkspaceIDs: Set<String>, deviceOverview: SpacesDeviceOverviewPayload?
+    ) -> Bool { pendingDeletionWorkspaceIDs.contains(workspaceID) || deviceOverview?.workspaceIDsWithTeardownInFlight.contains(workspaceID) == true }
+
+    /// `isWorkspaceMarkedDeleting` against this controller's live state: the local pending set and the
+    /// overview installed for the workspace's owning device.
+    func isWorkspaceMarkedDeleting(_ workspaceID: String) -> Bool {
+        let deviceOverview = deviceID(forWorkspaceID: workspaceID).flatMap { deviceSection(id: $0)?.overview }
+        return Self.isWorkspaceMarkedDeleting(
+            workspaceID: workspaceID, pendingDeletionWorkspaceIDs: workspaceIDsPendingDeletion, deviceOverview: deviceOverview)
+    }
+
+    /// The row treatment for a workspace, keyed on whether its delete is in flight. Pure so the
+    /// marked-row contract is directly testable.
+    nonisolated static func sidebarWorkspaceRowState(isPendingDeletion: Bool) -> SidebarWorkspaceRowState {
+        guard isPendingDeletion else {
+            return SidebarWorkspaceRowState(alpha: 1, showsDeletingProgress: false, listsRuntimeTargetChildren: true, isInteractive: true)
+        }
+        return SidebarWorkspaceRowState(
+            alpha: unreachableDeviceAlpha, showsDeletingProgress: true, listsRuntimeTargetChildren: false, isInteractive: false)
+    }
+
+    /// The row treatment for a project row, keyed on the workspace its row stands in for. A non-git
+    /// project owns exactly one workspace and has no `.workspace` row of its own — the project row is that
+    /// workspace's row — so it renders and responds to the workspace's marked state. A git project row
+    /// stands in for no workspace (`nil`) and is never marked: its own workspaces carry their marks.
+    /// Pure so the stand-in contract is directly testable.
+    nonisolated static func sidebarProjectRowState(standInWorkspaceIsPendingDeletion: Bool?) -> SidebarWorkspaceRowState {
+        sidebarWorkspaceRowState(isPendingDeletion: standInWorkspaceIsPendingDeletion == true)
+    }
+
     /// The opacity a row inherits from its owning device's load state. A device that is not loaded —
     /// unreachable, or reconnecting after an outage — keeps its rows listed but dimmed, so the subtree
     /// reads as browsable-but-not-actionable. This is the same treatment the add-project device picker
@@ -2620,7 +2804,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// extra per-row icon. Pure so the rule is directly testable.
     nonisolated static func sidebarRowAlpha(loadState: SidebarDeviceLoadState) -> CGFloat { loadState == .loaded ? 1 : unreachableDeviceAlpha }
 
-    /// The dimming an unreachable device's rows and its add-project picker row share.
+    /// The dimming every listed-but-not-actionable row shares: an unreachable device's rows, its
+    /// add-project picker row, and a workspace row marked as deleting.
     nonisolated static let unreachableDeviceAlpha: CGFloat = 0.55
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -2817,6 +3002,88 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
     }
 
+    /// Whether a failed `deviceMutation` leaves its outcome unknown, so `deleteWorkspace` has to
+    /// reconcile against fresh overviews (`WorkspaceDeletionReconciler`) instead of reporting the
+    /// failure outright.
+    ///
+    /// Only a refusal from the daemon is definitive, and it takes two things to prove one. First a Device
+    /// API error code, which `SpacesDeviceClientError` attaches exactly where it turns an `ok: false`
+    /// response into `.requestRejected`: every other failure this request can throw carries none — a
+    /// client-side timeout (`archiveWorkspace` allows 60s, well short of what the daemon's own teardown
+    /// queue can take once it is stopping the workspace, removing its worktree, and dropping its record),
+    /// an unreachable host, a certificate pin mismatch — and none of those says anything about whether
+    /// the daemon accepted the delete.
+    ///
+    /// Second, the code has to be a verdict on the request (`SpacesDeviceErrorCode.isRequestVerdict`)
+    /// rather than a report of something going wrong. A delete that succeeded and then failed while
+    /// building its refreshed overview answers with a coded `internalError`, and reading that as a refusal
+    /// would restore a row for a workspace that is already gone.
+    ///
+    /// Mirrors `SpacesMobileAppModel.isIndeterminateDeleteOutcome` on iOS; both share the verdict list.
+    nonisolated static func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
+        guard let code = (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode else { return true }
+        return !code.isRequestVerdict
+    }
+
+    /// What a workspace awaiting deferred delete resolution (see `AwaitingWorkspaceDeletionResolution`)
+    /// should do once `resolveAwaitingWorkspaceDeletions` finds a candidate overview for its device.
+    enum AwaitingWorkspaceDeletionResolutionVerdict: Equatable {
+        /// No overview for the owning device is installed yet (it is nil — offline, not yet loaded, or a
+        /// wire-incompatible placeholder). Nothing was proved either way, so the entry keeps waiting.
+        case stillAwaiting
+        /// An overview resolved and did not list the workspace: the delete landed. Clear the marking
+        /// silently; `showsBranchOutcomeNotice` says whether the caller also has to surface the notice
+        /// that branch deletion's own result was lost.
+        case gone(showsBranchOutcomeNotice: Bool)
+        /// An overview resolved and still lists the workspace: the held-back error is real and has to be
+        /// surfaced now.
+        case present
+    }
+
+    /// The pure decision `resolveAwaitingWorkspaceDeletions` makes per entry, factored out so it is
+    /// testable without a live `AppKitController` — mirroring `WorkspaceDeletionReconciler`, an I/O-free
+    /// type driven by an injected overview rather than a live device connection. `overview` is whatever
+    /// `deviceSections` currently has installed for the workspace's owning device — `nil` until that
+    /// device's next overview install actually lands.
+    ///
+    /// `overviewInstallGeneration` and `overviewInstallGenerationAtDefer` gate the verdict on *fresh*
+    /// evidence for the owning device: `resolveAwaitingWorkspaceDeletions` is hooked off a
+    /// `workspacesByProject` rebuild that fires for every device's refresh, not just the owning device's,
+    /// and an offline owning device keeps its last-known (pre-delete) overview rather than clearing it.
+    /// Without this check, some other device's refresh would trigger a rebuild that rereads the owning
+    /// device's untouched cached overview, sees the workspace still listed, and wrongly concludes
+    /// `.present` — a verdict drawn from evidence that predates the delete. Requiring the generation to
+    /// have advanced past its captured-at-defer snapshot means the verdict is only drawn once this
+    /// specific device's overview has actually been reinstalled since the defer.
+    nonisolated static func resolveAwaitingWorkspaceDeletion(
+        overview: SpacesDeviceOverviewPayload?, overviewInstallGeneration: Int, overviewInstallGenerationAtDefer: Int, workspaceID: String,
+        branchDeletionRequested: Bool
+    ) -> AwaitingWorkspaceDeletionResolutionVerdict {
+        guard let overview, overviewInstallGeneration > overviewInstallGenerationAtDefer else { return .stillAwaiting }
+        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return .gone(showsBranchOutcomeNotice: branchDeletionRequested) }
+        // Listed, but the daemon reports it is still tearing this workspace down: that is not the delete
+        // having failed, it is the delete still running. Keep waiting rather than telling the user a
+        // workspace survived that the daemon is about to remove.
+        return overview.workspaceIDsWithTeardownInFlight.contains(workspaceID) ? .stillAwaiting : .present
+    }
+
+    /// The delete landed, but the branch-deletion report existed only in the response that was lost —
+    /// reconciliation (or, once deferred, the next installed overview) can prove the workspace is gone,
+    /// not what happened to branches the user explicitly asked to delete. Shared verbatim between the
+    /// immediate `.gone` verdict in `deleteWorkspace` and `resolveAwaitingWorkspaceDeletions`, so both
+    /// paths report the exact same thing rather than two copies of the same sentence drifting apart.
+    private static let workspaceDeletionBranchOutcomeUnknownMessage =
+        "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+
+    /// Refetches `device`'s overview for `WorkspaceDeletionReconciler`, discarding the specific
+    /// failure: a reconciliation refetch that fails is inconclusive rather than proof of anything, so
+    /// the reconciler just tries again on its next attempt.
+    nonisolated private static func deviceOverviewFetch(device: SpacesPairedDeviceRecord) async -> SpacesDeviceOverviewPayload? {
+        await Task.detached(priority: .userInitiated) {
+            (try? SpacesDeviceClient.overview(device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))?.overview
+        }.value
+    }
+
     nonisolated private static func deviceWorkspaceCreateOptions(projectID: String, device: SpacesPairedDeviceRecord) async -> Result<
         SpacesDeviceWorkspaceCreateOptions, Error
     > {
@@ -2892,7 +3159,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         let iso8601Formatter = staticISO8601Formatter
         var groups: [AlertsGroup] = []
-        for workspace in overview.workspaces where !workspace.isArchived {
+        for workspace in overview.workspaces {
             var items: [AlertsAttentionEntry] = []
             if workspace.isRunning {
                 for process in workspace.processRows where process.runState == .exited {
@@ -2926,6 +3193,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                                 terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
                                 claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
                                 updatedAt: agent.updatedAt ?? ""))))
+            }
+            // Every session with a bell gets an entry, including one the user is looking at right now:
+            // suppressing the focused session's bell is a consumption, not a filter (see
+            // `AlertsController.consumeFocusedSessionBellAlerts`), and consumption needs the entry to
+            // exist so its identity can be recorded and kept alive by the dismissal pruning rule.
+            for session in overview.sessions where session.workspaceID == workspace.id {
+                guard let bellAt = session.bellAt else { continue }
+                // Not `iso8601Formatter`: a Linux daemon stamps runtime state with fractional seconds,
+                // which the framework's default format rejects, and the age is the only recency this row
+                // carries.
+                let eventDate = GhosttyRemoteSessionStateTimestamp.date(from: bellAt)
+                items.append(
+                    AlertsAttentionEntry(
+                        attentionID: "alert:\(deviceID):session:\(session.id):bell:\(bellAt)", icon: "terminal", iconTint: .terminal,
+                        // The row reads exactly as the session's sidebar row does — name, then what the
+                        // program is doing — because its presence under Alerts is what says the bell rang.
+                        label: session.title, detail: session.liveTitle, shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true,
+                        eventDate: eventDate, focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
             }
             guard !items.isEmpty else { continue }
             items.sort {
@@ -3071,8 +3356,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
-                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived,
-                    isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
+                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isHidden: $0.isHidden,
+                    isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -3246,8 +3531,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = staticISO8601Formatter.string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
-                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,
-                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.liveTitle, terminalTrackingID: row.sessionID,
+                role: "terminal", orderIndex: index, lastSeenAt: now)
         }
     }
 
@@ -4075,6 +4360,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func buildShellWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        // AppKit releases a titled, closable window on close by default, which would deallocate the
+        // window this controller still strongly references. Close is intercepted below as hide (see
+        // windowShouldClose), but a programmatic close() must also never deallocate it.
+        window.isReleasedWhenClosed = false
         window.title = "Spaces"
         // No window title or titlebar chrome: the titlebar strip keeps its native
         // behavior (traffic lights, dragging, double-click zoom) and the panel tab
@@ -4097,7 +4386,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     static func configureWorkspacePanelTabStripAccessory(_ accessory: NSTitlebarAccessoryViewController) { accessory.layoutAttribute = .left }
 
-    private func ensureMainWindowVisibleOnLaunch() {
+    private func ensureMainWindowVisible() {
         guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         prepareWindowForActiveSpaceSummon(window)
@@ -4238,7 +4527,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    @objc func alertsRowClicked() { alerts.showAlertsDetail() }
+    @objc func alertsRowClicked() { alerts.showAlertsDetail(presentation: .userNavigation) }
 
     // MARK: - Alerts forwarders
     // Thin pass-throughs that keep widely-used alerts entry points callable from
@@ -4246,7 +4535,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func alertsAttentionCount() -> Int { alerts.alertsAttentionCount() }
     func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
-    func showAlertsDetail() { alerts.showAlertsDetail() }
+    func consumeFocusedSessionBellAlerts() { alerts.consumeFocusedSessionBellAlerts() }
+    func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) { alerts.showAlertsDetail(presentation: presentation) }
 
     // MARK: - Automations
 
@@ -4458,7 +4748,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func toggleProjectExpanded(projectID: String) { sidebar.toggleProjectExpanded(projectID: projectID) }
     func canPreserveDetailPaneAfterSidebarReload() -> Bool { sidebar.canPreserveDetailPaneAfterSidebarReload() }
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
-    func applySidebarProjectExpansionState() { sidebar.applySidebarProjectExpansionState() }
+    /// Rebuilds the whole outline for a change the row diff does not model; see the sidebar's own method.
+    func fullReloadSidebarOutline() { sidebar.fullReloadSidebarOutline() }
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
     func updateAlertsRowAppearance() {
         sidebar.updateAlertsRowAppearance()
@@ -4473,12 +4764,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             currentWorkspaceID: currentWorkspaceID)
     }
     func sidebarPanelBackgroundColor() -> NSColor { sidebar.sidebarPanelBackgroundColor() }
-    func sidebarCardBackgroundColor(isArchived: Bool) -> NSColor { sidebar.sidebarCardBackgroundColor(isArchived: isArchived) }
+    func sidebarCardBackgroundColor() -> NSColor { sidebar.sidebarCardBackgroundColor() }
     func sidebarSelectedCardBackgroundColor() -> NSColor { sidebar.sidebarSelectedCardBackgroundColor() }
     func sidebarCardBorderColor(isSelected: Bool) -> NSColor { sidebar.sidebarCardBorderColor(isSelected: isSelected) }
-    func sidebarPrimaryTextColor(isSelected: Bool, isArchived: Bool) -> NSColor {
-        sidebar.sidebarPrimaryTextColor(isSelected: isSelected, isArchived: isArchived)
-    }
+    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarPrimaryTextColor(isSelected: isSelected) }
     func sidebarMetadataTextColor(isSelected: Bool) -> NSColor { sidebar.sidebarMetadataTextColor(isSelected: isSelected) }
     func sidebarRunningIndicatorColor() -> NSColor { sidebar.sidebarRunningIndicatorColor() }
     func sidebarFailedIndicatorColor() -> NSColor { sidebar.sidebarFailedIndicatorColor() }
@@ -4739,6 +5028,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         hasExistingPane || deviceAcceptsDaemonActions
     }
 
+    /// Whether re-showing a session can stop at foregrounding its panel and restoring the caret, instead of
+    /// running the open path's state fetch, attach, and ownership reclaim. All three conditions are load
+    /// bearing: the pane must be the focused one in the panel's selected tab (anything else has to move
+    /// focus, which re-activates the content), and it must already hold the owner attachment on a live
+    /// surface — when another client owns the session, reclaiming ownership is the whole request. Pure so
+    /// the line between "already here" and "go get it" is directly testable.
+    nonisolated static func canRefocusTerminalPaneWithoutReattaching(
+        paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
+    ) -> Bool { paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface }
+
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
     /// detail is being built, so a retained pane keeps whatever it was built with: a device that goes
@@ -4796,8 +5095,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             domain: "Spaces", code: 1003,
             userInfo: [
                 NSLocalizedDescriptionKey: "\(deviceName) is offline.",
-                NSLocalizedRecoverySuggestionErrorKey: isLocal
-                    ? "Restart the local daemon and try again." : "Reconnect it and try again.",
+                NSLocalizedRecoverySuggestionErrorKey: isLocal ? "Restart the local daemon and try again." : "Reconnect it and try again.",
             ])
     }
 
@@ -4891,8 +5189,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             selectedProjectID = preferredProjectID
             selectedWorkspaceID = nil
         }
-        outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        fullReloadSidebarOutline()
         if !shouldPreserveDetailPane { refreshSelection() }
         updateAlertsSidebarBadge()
         if showingAlerts { showAlertsDetail() }
@@ -5006,16 +5303,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // failure backoff — it repeats every 0.75s for the whole duration of the setup,
         // and clearing backoff on every tick would redial every unrelated offline
         // device that fast, defeating the backoff entirely (see `startRemoteOverviewPull`).
-        requestSidebarReload(
-            forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
+        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
-    /// switching away from a workspace also clears the workspace-only titlebar tab strip.
-    func presentDetailPane(_ pane: DetailPane) {
+    /// switching away from a workspace also clears the workspace-only titlebar tab strip, and the user
+    /// navigating to different content dismisses the free-standing add/settings form windows.
+    func presentDetailPane(_ pane: DetailPane, presentation: DetailPanePresentation = .backgroundRefresh) {
+        if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
+            clearActiveAddFormStateAndCloseWindows()
+        }
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
+    }
+
+    /// Whether this presentation dismisses the open New Project / New Workspace / project settings
+    /// windows. Both conditions are required: the user has to be the one asking for a different pane
+    /// (`DetailPanePresentation`), and the pane has to actually move out from under the form.
+    ///
+    /// A background refresh never dismisses, however much it changes — inferring intent from the
+    /// content alone would close a form on a device turning wire-incompatible, on its recovery, on a
+    /// failed reload's error placeholder, and on the selected workspace being deleted elsewhere. Nor
+    /// does re-presenting the same content on a user action: clicking the Alerts row while Alerts is
+    /// already showing moves nothing.
+    nonisolated static func detailPanePresentationDismissesFormWindows(
+        current: DetailPane, presented: DetailPane, presentation: DetailPanePresentation
+    ) -> Bool {
+        guard presentation == .userNavigation else { return false }
+        return presented != current
     }
 
     private func hideWorkspacePanelTabStrip() {
@@ -5057,10 +5373,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
     }
 
-    func showPlaceholder(message: String = "Select a project or workspace.") {
-        clearActiveAddFormStateAndCloseWindows()
+    func showPlaceholder(message: String = "Select a project or workspace.", presentation: DetailPanePresentation = .backgroundRefresh) {
         stopWorkspaceSetupDetailRefreshTimer()
-        presentDetailPane(.none)
+        presentDetailPane(.none, presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -5138,7 +5453,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
     /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
-    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility, presentation: DetailPanePresentation = .backgroundRefresh) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else {
             // A device with no remedy needs no block — leave the detail pane exactly as it is rather
@@ -5147,9 +5462,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         visibleCompatibilityBlockRemedy = remedy
 
-        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        presentDetailPane(.compatibilityBlock(deviceID: deviceID))
+        presentDetailPane(.compatibilityBlock(deviceID: deviceID), presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -5257,7 +5571,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
-        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         // A visible compatibility block survives the loading placeholder: the reload behind this loading
         // state re-resolves back to the block. Only a workspace or alerts pane is cleared.
@@ -5354,6 +5667,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func closeSettingsWindow() { settings.closeSettingsWindow() }
+
+    /// Closing the main window (the red traffic-light button, or a programmatic `performClose`) hides it
+    /// instead of tearing it down: Spaces keeps running with its hotkeys, panel windows, and background
+    /// services, and `applicationShouldHandleReopen` brings the same window back. Every other window this
+    /// controller is delegate for (add-project/add-workspace/project-settings/workspace-settings/settings)
+    /// keeps AppKit's normal close behavior; their cleanup lives in `windowWillClose` above.
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        window.orderOut(nil)
+        return false
+    }
 
     public func windowWillClose(_ notification: Notification) {
         let closingWindow = notification.object as? NSWindow
@@ -5572,10 +5896,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // --- Fields ---
         let setupScriptSection = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
-            value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
+            value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created.")
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
-            value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
+            value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and delete.")
         let portsSection = PortsSection(
             ports: projectSettings.ports, subtitle: "Per-workspace services, routed through Caddy.", showsEnvironmentVariableHints: true)
         let processesSection = ProcessesSection(
@@ -5994,10 +6318,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) {
         let setupScriptSection = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "",
-            subtitle: "Runs when each new workspace is created or revived from archive.")
+            subtitle: "Runs when each new workspace is created.")
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: "",
-            subtitle: "Runs after processes stop — on stop, restart, and archive.")
+            subtitle: "Runs after processes stop — on stop, restart, and delete.")
         let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.", showsEnvironmentVariableHints: true)
         let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
@@ -6282,6 +6606,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 10
+        contentStack.detachesHiddenViews = true
 
         let modeSegmented = NSSegmentedControl(
             labels: ["Create branch", "Use existing"], trackingMode: .selectOne, target: self, action: #selector(addWorkspaceBranchModeChanged(_:)))
@@ -6337,8 +6662,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
-            createButton: createButton)
+            newBranchField: newBranchField, baseBranchField: baseBranchField, baseBranchRow: baseRow, notesField: notesField,
+            autoNameState: autoNameState, createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = addWorkspaceFieldRefs {
             updateAddWorkspaceBranchInputUI(refs: refs)
@@ -6381,9 +6706,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func prepareWorkspaceDetailContainer(workspaceID: String) {
-        clearActiveAddFormStateAndCloseWindows()
-        presentDetailPane(.workspace(id: workspaceID))
+    private func prepareWorkspaceDetailContainer(workspaceID: String, presentation: DetailPanePresentation) {
+        presentDetailPane(.workspace(id: workspaceID), presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -6403,20 +6727,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+    func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary, presentation: DetailPanePresentation = .backgroundRefresh) {
         // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
         // detail surface is the compatibility banner. Other devices' workspaces stay usable.
         // The owning device comes from the row's own project (callers always pass the pair the
         // sidebar resolved together), so the panel scope below can never key off a stale id.
         let workspaceDeviceID = project.deviceID
         if let verdict = deviceCompatibility(forDeviceID: workspaceDeviceID), !verdict.isCompatible {
-            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
+            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict, presentation: presentation)
             return
         }
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
             requestSidebarReload()
             return
@@ -6424,7 +6748,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deviceWorkspace = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspaceSummary)
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
             showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
@@ -6447,10 +6771,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             panelCoordinator.refreshTabTitles(scope: scope)
             return
         }
-        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
         showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
+        // Sized before it joins the window: a terminal pane inside rebuilds its evicted mirror surface
+        // during `addSubview` and forces a layout pass from there, which is ahead of the edge
+        // constraints below. Without a plausible frame that pass solves the panel to its fitting size
+        // and the pane measures a grid a fraction of the real one.
+        panelView.frame = detailContainer.bounds
         detailContainer.addSubview(panelView)
         NSLayoutConstraint.activate([
             panelView.topAnchor.constraint(equalTo: detailContainer.topAnchor),
@@ -6488,7 +6817,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
         titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
         footer.addArrangedSubview(titleLabel)
@@ -6766,7 +7095,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
         titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
 
@@ -7176,6 +7505,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         objc_setAssociatedObject(view, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    /// Row text for a terminal row: its stable name, described by the live title its program reported
+    /// (nothing when it reported none). Both arrive stripped of the `*`/`-` prefixes tracked window
+    /// names historically carried.
     nonisolated static func terminalFallbackRowText(name: String?, detail: String?, app _: String) -> (label: String, detail: String?) {
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
             of: #"^[*-]\s*"#, with: "", options: .regularExpression)
@@ -7872,13 +8204,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, branchModeSegmented: NSSegmentedControl?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
-        baseBranchField: NSComboBox?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, createButton: NSButton
+        baseBranchField: NSComboBox?, baseBranchRow: NSView?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?,
+        createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         addWorkspaceFieldRefs = AddWorkspaceFieldRefs(
             formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented,
-            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField,
-            autoNameState: autoNameState, createButton: createButton)
+            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, baseBranchRow: baseBranchRow,
+            notesField: notesField, autoNameState: autoNameState, createButton: createButton)
         branchModeSegmented?.tag = id
         return id
     }
@@ -8242,8 +8575,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func presentProjectImportWorkspaceSyncPrompt() -> ProjectImportWorkspaceSyncDecision {
         let alert = NSAlert()
         alert.messageText = "Update workspaces?"
-        alert.informativeText =
-            "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project, including archived workspaces?"
+        alert.informativeText = "Save the imported spaces.yaml settings to this project. Apply the same settings to every workspace in this project?"
         alert.addButton(withTitle: "Update All Workspaces")
         alert.addButton(withTitle: "Project Only")
         alert.addButton(withTitle: "Cancel")
@@ -8549,6 +8881,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let isCreatingBranch = addWorkspaceBranchMode(refs: refs) == .create
         refs.existingBranchField?.isHidden = isCreatingBranch
         refs.newBranchField?.isHidden = !isCreatingBranch
+        // Base branch is the start point for a branch Spaces creates. Attaching to an existing
+        // branch has no start point, so the whole row leaves the form in that mode.
+        refs.baseBranchRow?.isHidden = !isCreatingBranch
     }
 
     private func updateAddWorkspaceProgressiveDisclosure(refs: AddWorkspaceFieldRefs, branchValue: String) {
@@ -8575,16 +8910,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func createWorkspace(_ sender: NSButton) {
         guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         do {
-            let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mode = addWorkspaceBranchMode(refs: refs)
+            // Base branch only names the start point for a branch Spaces creates; attaching to an
+            // existing branch checks that branch out directly and sends no base branch.
+            let baseBranch = mode == .create ? refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
             let notes = refs.notesField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedNotes: String?
             if let notes, notes.isEmpty { resolvedNotes = nil } else { resolvedNotes = notes }
             if refs.isGitRepo, branch.isEmpty { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
-            if refs.isGitRepo, baseBranch == nil || baseBranch?.isEmpty == true {
+            if refs.isGitRepo, mode == .create, baseBranch == nil || baseBranch?.isEmpty == true {
                 throw WorkspaceError.invalidArgument(message: "Base branch is required for git projects.")
             }
-            if refs.isGitRepo, addWorkspaceBranchMode(refs: refs) == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
+            if refs.isGitRepo, mode == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
@@ -8592,7 +8930,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             {
                 let input = WorkspaceCreateInput(
                     projectID: refs.projectID, branch: branch, baseBranch: baseBranch, notes: resolvedNotes, allowRemoteBranchLookup: true,
-                    allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing, replaceExistingManagedDirectory: false)
+                    allowExistingBranchReuse: mode == .existing, replaceExistingManagedDirectory: false)
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
@@ -8813,9 +9151,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
     /// the workspace has no tracked browser-session tabs.
     ///
-    /// Called from two disjoint triggers: the GUI's own stop/restart/archive handlers (eager, and
+    /// Called from two disjoint triggers: the GUI's own stop/restart/delete handlers (eager, and
     /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
-    /// transition diff (the net for stop/archive initiated outside this GUI — CLI, MCP, the Device
+    /// transition diff (the net for stop/delete initiated outside this GUI — CLI, MCP, the Device
     /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
     /// re-observes the same stopped workspace finds nothing to close.
     func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
@@ -8826,7 +9164,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Closes the workspace's open terminal panes after the owning daemon confirms a workspace
-    /// stop/restart/archive. The terminal sessions are already being stopped by that mutation, so
+    /// stop/restart/delete. The terminal sessions are already being stopped by that mutation, so
     /// pane teardown skips the client-detach cleanup path.
     private func closeWorkspaceTerminalPanes(workspaceID: String) {
         panelCoordinator.closeTerminalPanes(workspaceID: workspaceID, sessionIsTerminating: true)
@@ -8836,27 +9174,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Self.browserSessionTargetURLs(workspaceID: workspaceID, overview: overview(forWorkspaceID: workspaceID))
     }
 
-    @objc private func archiveWorkspace(_ sender: Any) {
+    @objc private func deleteWorkspace(_ sender: Any) {
         guard let id = Self.senderIdentifier(sender) else { return }
-        archiveWorkspace(id: id, sender: sender)
+        deleteWorkspace(id: id, sender: sender)
     }
 
-    /// Archives a workspace by id, so the detail ⋯ overflow menu and the sidebar row's right-click menu
+    /// Deletes a workspace by id, so the detail ⋯ overflow menu and the sidebar row's right-click menu
     /// share one confirmation and teardown path. `sender` is only used to disable the originating button
     /// while the mutation is in flight; a menu item passes none.
-    func archiveWorkspace(id: String, sender: Any? = nil) {
+    func deleteWorkspace(id: String, sender: Any? = nil) {
         guard let (project, workspace) = findWorkspace(id: id) else { return }
         if workspace.isDefault {
             showInfoMessage(
                 title: "Default Workspace",
-                message: "Default workspaces cannot be archived. Delete the project instead to remove all of its workspaces.")
+                message: "Default workspaces cannot be deleted. Delete the project instead to remove all of its workspaces.")
             return
         }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Archive workspace?"
+        alert.messageText = "Delete workspace?"
         alert.informativeText =
-            "Are you sure you want to archive \"\(workspace.displayName)\"? This will remove its git worktree and stop all running processes."
+            "Are you sure you want to delete \"\(workspace.displayName)\"? This stops all running processes, removes its git worktree, and removes the workspace and its settings from Spaces."
         let deleteLocalBranchCheckbox = NSButton(checkboxWithTitle: "Delete local branch", target: nil, action: nil)
         let deleteRemoteBranchCheckbox = NSButton(checkboxWithTitle: "Delete remote branch", target: nil, action: nil)
         if project.isGitRepo, let branch = workspace.branch, !branch.isEmpty {
@@ -8874,7 +9212,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             accessoryView.addSubview(checkboxStack)
             alert.accessoryView = accessoryView
         }
-        alert.addButton(withTitle: "Archive")
+        alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
@@ -8882,14 +9220,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
-        // Resolve the owning device before the optimistic removal below; once the row
-        // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
-        // find it and would fall back to the local device, misrouting remote archives.
+        // Route the delete to the daemon that owns the workspace's project rather than the local
+        // device, so a remote workspace is deleted where it actually lives.
         let device = deviceForMutation(deviceID: project.deviceID)
-        let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
-        if !didOptimisticallyArchive { button?.isEnabled = false }
+        beginPendingWorkspaceDeletion(workspaceID: id, projectID: project.id)
+        button?.isEnabled = false
         showOperationProgressOverlay(
-            message: "Archiving workspace...", detail: "Stopping runtime state and cleaning up workspace files.", context: .workspace(id))
+            message: "Deleting workspace...", detail: "Stopping runtime state and cleaning up workspace files.", context: .workspace(id))
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
@@ -8904,14 +9241,85 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
+                    // Install the post-delete overview first, then clear the marking: the workspace is
+                    // already absent from that overview, so its row leaves the sidebar exactly once.
+                    //
+                    // Accepted risk: a remote overview pull that began before this response can land after
+                    // the marking clears and re-add the row for one refresh cycle. That needs a pull in
+                    // flight inside the seconds-wide delete window, shows a ghost row the next pull
+                    // removes, and the fix — a mutation-generation fence across every overview install
+                    // path like the iOS model's — is disproportionate to a self-healing flicker.
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
+                    self.endPendingWorkspaceDeletion(workspaceID: id)
+                    // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
+                    // remote that refused), so its report is shown; a delete with no branch boxes ticked
+                    // carries no notice and stays silent.
+                    if let notice = response.mutationNotice, !notice.isEmpty { self.showInfoMessage(title: "Deleted workspace", message: notice) }
                 case .failure(let error):
-                    requestSidebarReload()
+                    guard Self.isIndeterminateDeleteOutcome(error) else {
+                        // The daemon answered and refused: the workspace was never touched, so the row
+                        // goes back to normal — its expansion state included — and the reload re-syncs
+                        // whatever the daemon did get through.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        requestSidebarReload()
+                        button?.isEnabled = true
+                        showError(error)
+                        return
+                    }
+                    // The delete's fate is unknown — the daemon may still be tearing the workspace down
+                    // (see `isIndeterminateDeleteOutcome`). Un-marking and reporting failure here would
+                    // let the user retry-delete a workspace that is already doomed. Reconcile against
+                    // fresh overviews instead: every overview that resolves is applied through the same
+                    // path a mutation response takes, so the row already reflects reality by the time the
+                    // marking clears. If the workspace stops appearing, treat the delete as successful and
+                    // surface no error; only report the failure once the reconciliation budget is spent
+                    // and the workspace is still listed.
+                    let reconciler = WorkspaceDeletionReconciler()
+                    let outcome = await reconciler.reconcile(
+                        workspaceID: id, fetchOverview: { await Self.deviceOverviewFetch(device: device) },
+                        applyOverview: { [weak self] overview in
+                            self?.applyDeviceOverview(overview, deviceID: device.id, selectedProjectID: project.id)
+                        })
+                    // The mutation call itself is done either way, so its button re-enables now — the row
+                    // stays inert through the pending-deletion marking, not a stuck in-flight button.
                     button?.isEnabled = true
-                    showError(error)
+                    switch outcome {
+                    case .unknown:
+                        // Every reconciliation refetch failed outright — the transport never answered, so
+                        // neither `.present` nor `.gone` is provable and un-marking the row here would be a
+                        // guess dressed up as a verdict. Keep the pending-deletion marking (the row stays
+                        // inert) and hold the error and this delete's context until a real overview for
+                        // this device installs through any path — a background poll, a later reload, or
+                        // any other mutation's response — and resolves it (`resolveAwaitingWorkspaceDeletions`).
+                        self.workspaceIDsAwaitingDeletionResolution[id] = AwaitingWorkspaceDeletionResolution(
+                            deviceID: device.id, error: error, branchDeletionRequested: deleteLocalBranch || deleteRemoteBranch,
+                            browserSessionTargetURLs: browserSessionTargetURLs,
+                            overviewInstallGenerationAtDefer: self.deviceSections.first(where: { $0.deviceID == device.id })?
+                                .overviewInstallGeneration ?? 0)
+                    case .present:
+                        // An overview resolved and still lists the workspace: the row goes back to normal
+                        // and the held error is real.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        requestSidebarReload()
+                        showError(error)
+                    case .gone:
+                        // Reconciliation confirmed the delete landed, so the workspace gets the same client
+                        // cleanup a direct success performs — otherwise its browser windows would outlive it
+                        // indefinitely.
+                        self.endPendingWorkspaceDeletion(workspaceID: id)
+                        self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                        self.closeWorkspaceTerminalPanes(workspaceID: id)
+                        if deleteLocalBranch || deleteRemoteBranch {
+                            // The delete landed, but the branch-deletion report existed only in the response
+                            // that was lost — reconciliation can prove the workspace is gone, not what
+                            // happened to branches the user explicitly asked to delete. Say so rather than
+                            // silently succeeding.
+                            self.showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
+                        }
+                    }
                 }
             } else {
-                if didOptimisticallyArchive { requestSidebarReload() }
+                self.endPendingWorkspaceDeletion(workspaceID: id)
                 button?.isEnabled = true
                 showDeviceNotLoadedError()
             }
@@ -8991,7 +9399,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         menu.addItem(.separator())
         addItem(
-            title: "Archive…", symbol: "archivebox", action: #selector(AppKitController.archiveWorkspace(_:)), keyEquivalent: "", modifiers: [],
+            title: "Delete…", symbol: "trash", action: #selector(AppKitController.deleteWorkspace(_:)), keyEquivalent: "", modifiers: [],
             identifier: workspaceID, isEnabled: daemonActionsEnabled)
         return menu
     }
@@ -9068,7 +9476,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
         }
         rebuildFlatSidebarData()
-        outlineView.reloadData()
+        fullReloadSidebarOutline()
         showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
         if let window { revealTargetedHotkeyWindow(window) }
     }
@@ -9124,7 +9532,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let (project, workspace) = findWorkspace(id: workspaceID) else {
                 throw WorkspaceError.invalidArgument(message: "Workspace not found.")
             }
-            guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
             let target = try resolveEditorLaunch(try clientAppConfig().editor)
             // The owning device comes from the row the workspace was found in, so the
             // remote/local branch below can never run the local path for a remote workspace.
@@ -9363,22 +9770,85 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
 
-    private func optimisticallyArchiveWorkspaceInSidebar(workspaceID: String) -> Bool {
-        guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
-        guard var workspaces = workspacesByProject[project.id] else { return false }
-        let originalCount = workspaces.count
-        workspaces.removeAll(where: { $0.id == workspaceID })
-        guard workspaces.count != originalCount else { return false }
-
-        workspacesByProject[project.id] = workspaces
+    /// Marks a workspace whose delete the user just confirmed, and moves the selection off it: a marked
+    /// row is inert, so it must not stay selected with its detail pane open. The marking is read on every
+    /// row build, so overview refreshes that land while the daemon works through the delete keep showing
+    /// the row as deleting instead of restoring it to normal.
+    private func beginPendingWorkspaceDeletion(workspaceID: String, projectID: String) {
+        workspaceIDsPendingDeletion.insert(workspaceID)
         if selectedWorkspaceID == workspaceID {
             selectedWorkspaceID = nil
-            selectedProjectID = project.id
+            selectedProjectID = projectID
         }
-        outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Clears the marking once the delete resolves. After a successful delete the workspace is already
+    /// gone from the refreshed overview, so the row leaves once; after a failed one the row returns to
+    /// normal, with the user's expansion state intact because marking never touched it.
+    private func endPendingWorkspaceDeletion(workspaceID: String) {
+        guard workspaceIDsPendingDeletion.remove(workspaceID) != nil else { return }
+        applyPendingWorkspaceDeletionMarking()
+    }
+
+    /// Rebuilds the rows against the current marking. The sidebar data itself is unchanged — a workspace
+    /// being deleted keeps its row — so only the row views and the expansion state (a marked row hides
+    /// its runtime targets) have to be reapplied.
+    private func applyPendingWorkspaceDeletionMarking() {
+        fullReloadSidebarOutline()
         refreshSelection()
-        return true
+    }
+
+    /// Resolves every entry in `workspaceIDsAwaitingDeletionResolution` whose owning device now has an
+    /// overview installed. Hooked off the `workspacesByProject` `didSet` (see its comment) because that
+    /// is the nearest point in this file every overview-install path — the local snapshot, a remote
+    /// pull/subscription, and a mutation response, including `deleteWorkspace`'s own reconciliation
+    /// refetches — is guaranteed to reach, without requiring `SidebarController` to know this feature
+    /// exists.
+    ///
+    /// Each entry is independent: an overview that resolves one device's workspace says nothing about
+    /// another device's, and a device whose current overview is `nil` — offline, not yet loaded, or the
+    /// empty placeholder a wire-incompatible daemon answers with — has proved nothing either way, so
+    /// that entry is left waiting for a later install with real data.
+    ///
+    /// This `didSet` fires for a rebuild triggered by *any* device's refresh, not just the owning
+    /// device's, so an overview alone is not enough evidence: an offline owning device keeps its
+    /// last-known (pre-delete) overview rather than clearing it, and reading that stale snapshot on a
+    /// rebuild some other device caused would draw a verdict that predates the delete. Each entry also
+    /// captures the owning device's `overviewInstallGeneration` at defer time and only resolves once
+    /// that device's own generation has advanced past it — i.e. once this specific device has actually
+    /// reinstalled an overview since the defer, not merely been read again.
+    private func resolveAwaitingWorkspaceDeletions() {
+        guard !workspaceIDsAwaitingDeletionResolution.isEmpty else { return }
+        for (workspaceID, pending) in workspaceIDsAwaitingDeletionResolution {
+            // A missing section (device unpaired mid-defer) falls back to comparing the captured
+            // generation against itself, i.e. `.stillAwaiting` — there is no fresher evidence to read.
+            let section = deviceSections.first(where: { $0.deviceID == pending.deviceID })
+            switch Self.resolveAwaitingWorkspaceDeletion(
+                overview: section?.overview,
+                overviewInstallGeneration: section?.overviewInstallGeneration ?? pending.overviewInstallGenerationAtDefer,
+                overviewInstallGenerationAtDefer: pending.overviewInstallGenerationAtDefer, workspaceID: workspaceID,
+                branchDeletionRequested: pending.branchDeletionRequested)
+            {
+            case .stillAwaiting: continue
+            case .present:
+                workspaceIDsAwaitingDeletionResolution.removeValue(forKey: workspaceID)
+                endPendingWorkspaceDeletion(workspaceID: workspaceID)
+                requestSidebarReload()
+                showError(pending.error)
+            case .gone(let showsBranchOutcomeNotice):
+                workspaceIDsAwaitingDeletionResolution.removeValue(forKey: workspaceID)
+                endPendingWorkspaceDeletion(workspaceID: workspaceID)
+                // Same client cleanup an immediate `.gone` verdict performs in `deleteWorkspace` —
+                // otherwise a deferred-but-confirmed delete would leave this workspace's browser windows
+                // and terminal panes open indefinitely.
+                closeLocalBrowserSessionWindows(workspaceID: workspaceID, configuredBrowserSessionTargetURLs: pending.browserSessionTargetURLs)
+                closeWorkspaceTerminalPanes(workspaceID: workspaceID)
+                if showsBranchOutcomeNotice {
+                    showInfoMessage(title: "Deleted workspace", message: Self.workspaceDeletionBranchOutcomeUnknownMessage)
+                }
+            }
+        }
     }
 
     private func normalizePath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
@@ -9849,9 +10319,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
         // Top-level row order is Alerts ↔ Automations ↔ first workspace; the Automations row is always present.
-        if showingAlerts {
-            return direction > 0 ? .automations : nil
-        }
+        if showingAlerts { return direction > 0 ? .automations : nil }
         if showingAutomations {
             guard direction > 0 else { return .alerts }
             guard let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
@@ -10201,6 +10669,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return openTerminalResolution(
                 workspaceID: record.workspaceID, sessionID: sessionID, fallbackTitle: row.name, fallbackDir: detail.dir, fallbackKind: .agent,
                 overview: overview)
+        case .terminalSession(let workspaceID, let sessionID):
+            guard let session = overview.sessions.first(where: { $0.id == sessionID }) else { return .noMatch }
+            return openTerminalResolution(
+                workspaceID: workspaceID, sessionID: sessionID, fallbackTitle: session.title, fallbackDir: session.workingDirectory,
+                fallbackKind: terminalSessionKind(rowKind: session.rowKind), overview: overview)
         }
     }
 
@@ -10221,6 +10694,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .workspaceAgentLauncher(_, let name):
             target = targets.first { $0.kind == .agentLauncher && normalizedRunRowName($0.launcherName ?? "") == normalizedRunRowName(name) }
         case .agentWindow(let record): target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
+        // A bell alert's session isn't one of the workspace's numbered run-shortcut targets, so it
+        // has no run-shortcut target to resolve.
+        case .terminalSession: target = nil
         }
         guard let target else { return nil }
         return (target, detail)
@@ -11202,6 +11678,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.id)"
+        case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
 
@@ -11244,6 +11721,7 @@ struct CommandPaletteItem: Sendable {
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
+        case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
     }
 }
@@ -11563,6 +12041,7 @@ extension AppKitController {
         case .workspaceMissingConfiguredProcess: return .missingConfiguredProcess
         case .workspaceAgentLauncher: return .agentLauncher
         case .agentWindow: return .agent
+        case .terminalSession: return .window
         case nil:
             if agentStatus != nil { return .agent }
             if processStatus != nil {
@@ -11659,25 +12138,18 @@ extension AppKitController {
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                        let window = windows[windowListIndex]
-                        let label: String
-                        let detail: String?
-                        if window.roleValue == .terminal {
-                            let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-                            label = fallback.label
-                            detail = fallback.detail
-                        } else {
-                            label = window.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Window"
-                            detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                        }
+                        let rowText = terminalFallbackRowText(
+                            name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: label, detail: detail, status: .none,
+                                kind: target.kind, label: rowText.label, detail: rowText.detail, status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
+                                // Recency is keyed off the row's name: which row was last focused must not
+                                // turn on what its program happens to be printing.
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
-                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
+                                    for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: rowText.label)))
                     case .missingConfiguredProcess:
                         guard let processKey = target.processKey else { continue }
                         items.append(

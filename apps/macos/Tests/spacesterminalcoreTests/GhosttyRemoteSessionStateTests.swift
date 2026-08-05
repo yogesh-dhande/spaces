@@ -197,8 +197,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let snapshot = snapshot(text: "frame")
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 34, snapshot: snapshot)
         let attributes = GhosttyRenderFrameMetrics.attributes(
-            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5,
-            outputByteCount: 6, screenStateRevision: 7, dropped: false, renderMode: "ghostty-mirror")
+            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5, outputByteCount: 6, screenStateRevision: 7,
+            dropped: false, renderMode: "ghostty-mirror")
 
         XCTAssertEqual(attributes["reason"], "output")
         XCTAssertEqual(attributes["render_frame"], "1")
@@ -228,6 +228,62 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(attributes["frame_kind"], "none")
         XCTAssertEqual(attributes["frame_bytes"], "0")
         XCTAssertEqual(attributes["screen_revision"], "7")
+    }
+
+    // MARK: - Clipboard writes are one-shots
+
+    /// The clipboard write must not be carried onto the payload the merge produces. Both directions
+    /// matter: a stored clipboard write leaking forward would re-paste on every later output turn, and
+    /// nothing in the state stream ever re-announces a write, so the field only ever means "this
+    /// payload announced a copy".
+    func testMergedPayloadDropsTheClipboardWrite() {
+        let clipboardPayload = payload(
+            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+        let laterOutput = payload(reason: TerminalRemoteSessionStateReason.output)
+
+        XCTAssertNil(clipboardPayload.merged(with: laterOutput).clipboardWrite)
+        XCTAssertNil(laterOutput.merged(with: clipboardPayload).clipboardWrite)
+    }
+
+    /// `replacingRenderUpdate` rebuilds a payload around re-exported screen state, which a clipboard
+    /// write is not part of.
+    func testReplacingRenderUpdateDropsTheClipboardWrite() {
+        let clipboardPayload = payload(
+            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+        XCTAssertNil(clipboardPayload.replacingRenderUpdate(nil).clipboardWrite)
+    }
+
+    /// The reducer hands the incoming payload's clipboard write to the client (so it can be applied
+    /// once) while the payload it stores as the session's state carries none.
+    func testReducerAppliesTheClipboardWriteOnceAndStoresNone() {
+        var reducer = TerminalRemoteStateReducer()
+        let clipboardPayload = payload(
+            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+
+        let reduction = reducer.reduce(incomingPayload: clipboardPayload, previousPayload: payload(reason: "initial"))
+
+        XCTAssertEqual(reduction.payload.clipboardWrite?.text, "copied")
+        XCTAssertNil(reduction.storedPayload.clipboardWrite)
+    }
+
+    /// Clipboard bytes are a live one-shot for the attached owner and must never reach disk: the
+    /// terminated payload the daemon persists at session exit is rebuilt without one, and a subscriber
+    /// that reconnects afterwards would otherwise be handed a stale copy to paste.
+    func testClipboardWriteSurvivesTheWireButNotAMerge() throws {
+        let clipboardPayload = payload(
+            reason: TerminalRemoteSessionStateReason.clipboardWrite, clipboardWrite: .init(targetClientID: "mac-window", text: "copied"))
+        let decoded = try GhosttyRemoteSessionStateCodec.decodeLine(try GhosttyRemoteSessionStateCodec.encodeLine(clipboardPayload))
+        XCTAssertEqual(decoded.clipboardWrite, TerminalClipboardWritePayload(targetClientID: "mac-window", text: "copied"))
+
+        let terminated = payload(reason: TerminalRemoteSessionStateReason.terminated)
+        XCTAssertNil(decoded.merged(with: terminated).clipboardWrite)
+    }
+
+    private func payload(reason: String, clipboardWrite: TerminalClipboardWritePayload? = nil) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: reason, emittedAt: "2026-07-28T00:00:00Z", sessionStateRevision: nil, sessionStateFlags: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"), title: "alpha",
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, clipboardWrite: clipboardWrite)
     }
 
     private func renderUpdateData(text: String, sessionRevision: UInt64, ownerEpoch: UInt64) throws -> Data {

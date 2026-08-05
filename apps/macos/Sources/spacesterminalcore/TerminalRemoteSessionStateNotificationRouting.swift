@@ -29,6 +29,13 @@ public enum TerminalRemoteSessionStateNotificationRouting {
             TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
             TerminalRemoteSessionStateReason.resize:
             return [.spacesTerminalOutputDidChange]
+        case TerminalRemoteSessionStateReason.clipboardWrite:
+            // Deliberately no notification. A clipboard write changes nothing a pane presents — the
+            // receiving client acts on it where it applies the payload, by writing its own
+            // pasteboard — so neither refresh family has anything to do. The row exists because the
+            // `default:` below silently drops unknown reasons, which would make a later reader
+            // think this reason was simply forgotten.
+            return []
         default:
             // A reason this build does not know. The payload has already been applied to the
             // mirror and to the client's cached session state, so posting nothing keeps an

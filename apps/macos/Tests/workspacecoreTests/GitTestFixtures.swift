@@ -149,6 +149,5 @@ func makeTestOrchestrator(
         git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
         builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress,
-        currentDate: currentDate)
+        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress, currentDate: currentDate)
 }

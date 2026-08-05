@@ -112,7 +112,7 @@ import workspacecore
     private func makeHeaderRow(inputs: [AutomationDeviceInput]) -> NSView {
         let title = NSTextField(labelWithString: "Automations")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
-        title.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        title.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         title.setContentHuggingPriority(.required, for: .horizontal)
 
         let devicePopUp = NSPopUpButton()
@@ -140,7 +140,8 @@ import workspacecore
     }
 
     private func makeTabControl() -> NSView {
-        let segmented = NSSegmentedControl(labels: ["Automations", "Runs"], trackingMode: .selectOne, target: self, action: #selector(tabChanged(_:)))
+        let segmented = NSSegmentedControl(
+            labels: ["Automations", "Runs"], trackingMode: .selectOne, target: self, action: #selector(tabChanged(_:)))
         segmented.selectedSegment = selectedTab.rawValue
         segmented.translatesAutoresizingMaskIntoConstraints = false
         return segmented
@@ -162,7 +163,7 @@ import workspacecore
         row.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         row.wantsLayer = true
         row.layer?.cornerRadius = 8
-        bindAppearanceReactiveLayer(row) { [unowned host] view in view.layer?.backgroundColor = host.sidebarCardBackgroundColor(isArchived: false).cgColor }
+        bindAppearanceReactiveLayer(row) { [unowned host] view in view.layer?.backgroundColor = host.sidebarCardBackgroundColor().cgColor }
         return row
     }
 
@@ -187,11 +188,12 @@ import workspacecore
 
         let name = NSTextField(labelWithString: automation.name)
         name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        name.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         name.lineBreakMode = .byTruncatingTail
 
-        let metaText = [row.deviceName, triggerDescription(automation), nextFireDescription(automation), policiesDescription(automation)]
-            .filter { !$0.isEmpty }.joined(separator: "  •  ")
+        let metaText = [row.deviceName, triggerDescription(automation), nextFireDescription(automation), policiesDescription(automation)].filter {
+            !$0.isEmpty
+        }.joined(separator: "  •  ")
         let meta = NSTextField(labelWithString: metaText)
         meta.font = .systemFont(ofSize: 11)
         meta.textColor = .secondaryLabelColor
@@ -262,7 +264,7 @@ import workspacecore
 
         let name = NSTextField(labelWithString: run.automationName ?? "Automation")
         name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        name.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         name.lineBreakMode = .byTruncatingTail
 
         var metaParts = [row.deviceName, runTriggerDescription(run), startedDescription(run), durationDescription(run)]
@@ -271,9 +273,7 @@ import workspacecore
         // Count only live coding agents (attributedAgents already excludes a script run's own workspace-less
         // wrapper session), so a running script automation with no agent shows no "live agent" meta.
         let liveAgentCount = run.attributedAgents.filter(\.live).count
-        if liveAgentCount > 0 {
-            metaParts.append("\(liveAgentCount) live agent\(liveAgentCount == 1 ? "" : "s")")
-        }
+        if liveAgentCount > 0 { metaParts.append("\(liveAgentCount) live agent\(liveAgentCount == 1 ? "" : "s")") }
         let meta = NSTextField(labelWithString: metaParts.filter { !$0.isEmpty }.joined(separator: "  •  "))
         meta.font = .systemFont(ofSize: 11)
         meta.textColor = .secondaryLabelColor
@@ -297,9 +297,7 @@ import workspacecore
         // A running run's live terminal, or an ended run's read-only transcript replay, opens on click; a
         // skipped/queued run that never had a session is inert.
         if run.terminalSessionID != nil, status != .skipped, status != .queued {
-            attachRowClickAction(to: contentArea) { [weak self] in
-                self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: run)
-            }
+            attachRowClickAction(to: contentArea) { [weak self] in self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: run) }
         }
 
         var trailing: [NSView] = []
@@ -364,7 +362,7 @@ import workspacecore
         let title = agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent"
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11)
-        label.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        label.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         label.lineBreakMode = .byTruncatingTail
 
         let row = NSStackView(views: [dot, label])
@@ -384,9 +382,7 @@ import workspacecore
             row.leadingAnchor.constraint(equalTo: chip.leadingAnchor), row.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
             row.topAnchor.constraint(equalTo: chip.topAnchor), row.bottomAnchor.constraint(equalTo: chip.bottomAnchor),
         ])
-        attachRowClickAction(to: chip) { [weak self] in
-            self?.host.openAutomationAgentSession(deviceID: deviceID, agent: agent)
-        }
+        attachRowClickAction(to: chip) { [weak self] in self?.host.openAutomationAgentSession(deviceID: deviceID, agent: agent) }
         return chip
     }
 
@@ -394,7 +390,7 @@ import workspacecore
         content.translatesAutoresizingMaskIntoConstraints = false
         let card = ColoredBackgroundView()
         card.cornerRadius = 10
-        card.fillColor = host.sidebarCardBackgroundColor(isArchived: false)
+        card.fillColor = host.sidebarCardBackgroundColor()
         card.translatesAutoresizingMaskIntoConstraints = false
         // ColoredBackgroundView tracks appearance for its fill; the border color still needs a per-appearance
         // cgColor snapshot, so bind it reactively.
@@ -574,7 +570,8 @@ import workspacecore
     /// the daemon confirms, so on rejection or an offline remote we must re-render from the daemon's truth
     /// to clear the stale flip rather than leave the UI asserting a change that never landed. For an
     /// offline remote this renders whatever cached overview exists, which is acceptable.
-    private func performMutation(deviceID: String, _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void) {
+    private func performMutation(deviceID: String, _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void)
+    {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()
             return
@@ -588,9 +585,7 @@ import workspacecore
                 } catch { return error }
             }.value
             guard let self else { return }
-            if let error {
-                host.showError(error)
-            }
+            if let error { host.showError(error) }
             host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
         }
     }

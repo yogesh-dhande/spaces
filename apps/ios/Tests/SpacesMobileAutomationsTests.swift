@@ -200,9 +200,11 @@
             let liveAgent = makeAgentSummary(terminalSessionID: "agent-1", live: true)
             let settledAgent = makeAgentSummary(terminalSessionID: "agent-2", live: false)
 
-            XCTAssertTrue(SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [liveAgent])))
+            XCTAssertTrue(
+                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [liveAgent])))
             XCTAssertFalse(
-                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [settledAgent])))
+                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [settledAgent]))
+            )
             XCTAssertFalse(
                 SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "running", attributedAgents: [liveAgent])))
             XCTAssertFalse(
@@ -227,7 +229,8 @@
         // MARK: - Attributed agents decode
 
         func testRunSummaryCarriesAttributedAgents() {
-            let agent = makeAgentSummary(terminalSessionID: "agent-1", status: "spinning", live: true, title: "Fix flaky test", workspaceID: "workspace-1")
+            let agent = makeAgentSummary(
+                terminalSessionID: "agent-1", status: "spinning", live: true, title: "Fix flaky test", workspaceID: "workspace-1")
             let run = makeRun(id: "r", automationID: "a", status: "running", attributedAgents: [agent])
 
             XCTAssertEqual(run.attributedAgents.count, 1)
@@ -414,13 +417,14 @@
         private func makeWorkspace(id: String, branch: String?) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: nil, dir: "/tmp/\(id)", isRunning: false,
-                isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
+                isHidden: false, isDefault: false, sessionCount: 0)
         }
 
         private func makeAgentSummary(
             terminalSessionID: String, status: String = "idle", live: Bool = true, title: String? = "Agent", workspaceID: String? = "workspace-1"
         ) -> TerminalServiceAutomationAgentSummary {
-            TerminalServiceAutomationAgentSummary(terminalSessionID: terminalSessionID, status: status, live: live, title: title, workspaceID: workspaceID)
+            TerminalServiceAutomationAgentSummary(
+                terminalSessionID: terminalSessionID, status: status, live: live, title: title, workspaceID: workspaceID)
         }
 
         private func makeAutomation(
@@ -430,9 +434,8 @@
         ) -> TerminalServiceAutomationSummary {
             TerminalServiceAutomationSummary(
                 id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
-                agentPrompt: agentPrompt, workspaceID: workspaceID,
-                workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "skip", missedRunPolicy: "skip", nextFireTime: nextFireTime,
-                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+                agentPrompt: agentPrompt, workspaceID: workspaceID, workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "skip",
+                missedRunPolicy: "skip", nextFireTime: nextFireTime, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
         }
 
         private func makeRun(

@@ -236,8 +236,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
                 sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
                 workspaceID: "workspace", kind: .shell),
             clientApp: SpacesDeviceClientApp(
-                installationID: "INSTALLATION-RACE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
-                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+                installationID: "INSTALLATION-RACE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0"),
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
         model.reconnectBackoff.retryDelay = .milliseconds(5)
         model.reconnectBackoff.maxRetryDelay = .milliseconds(5)
@@ -326,8 +326,8 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
                 sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
                 workspaceID: "workspace", kind: .shell),
             clientApp: SpacesDeviceClientApp(
-                installationID: "INSTALLATION-STACK-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
-                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+                installationID: "INSTALLATION-STACK-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0"),
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
         model.reconnectBackoff.retryDelay = .milliseconds(10)
         model.reconnectBackoff.maxRetryDelay = .seconds(10)
@@ -417,6 +417,87 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
     /// through `stateStreamConnectOverrideForTesting`. A real connect's failure timing is not something
     /// to depend on here — a refused port is not guaranteed to fail before the pinned-TLS connector's own
     /// connect timeout.
+    // MARK: - One-shot clipboard writes
+
+    /// A clipboard write is an event, not state, and losing one loses the user's copy with nothing to
+    /// redeliver it. The catch-up `.state` request runs on its own connection alongside the live
+    /// subscription, so a response served AFTER the event was emitted can be installed before the event
+    /// arrives — and the emission-time guard that (correctly) keeps that catch-up from regressing
+    /// render/runtime/ownership must not swallow the copy riding the older event.
+    @MainActor func testClipboardWriteFromAnOlderEventStillReachesListeners() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        var received: [GhosttyRemoteSessionStatePayload] = []
+        model.startStateStream(onUpdate: { received.append($0) }, onDisconnect: { _ in })
+
+        // The catch-up response lands first and installs the newer emission time.
+        model.applyControlResponseState(statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:09Z"))
+        // The stream event carrying the copy was emitted earlier and arrives after it.
+        model.applyStreamEvent(
+            clipboardPayload(sessionID: sessionID, emittedAt: "2026-07-28T00:00:01Z", targetClientID: "owner", text: "copied text"),
+            generation: generation)
+
+        let clipboardWrites = received.compactMap(\.clipboardWrite)
+        XCTAssertEqual(clipboardWrites.map(\.text), ["copied text"])
+        XCTAssertEqual(clipboardWrites.map(\.targetClientID), ["owner"])
+    }
+
+    /// The one-shot skips the staleness guard, not the generation guard: an event from a stream client
+    /// that has already been replaced says nothing about the session this model is now serving, so its
+    /// copy must not be pushed onto the user's clipboard.
+    @MainActor func testClipboardWriteFromASupersededStreamIsIgnored() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let staleGeneration = model.installStreamClientForTesting(FakeStreamClient())
+        _ = model.installStreamClientForTesting(FakeStreamClient())
+        var received: [GhosttyRemoteSessionStatePayload] = []
+        model.startStateStream(onUpdate: { received.append($0) }, onDisconnect: { _ in })
+
+        model.applyStreamEvent(
+            clipboardPayload(sessionID: sessionID, emittedAt: "2026-07-28T00:00:01Z", targetClientID: "owner", text: "from a dead stream"),
+            generation: staleGeneration)
+
+        XCTAssertEqual(received.compactMap(\.clipboardWrite), [])
+    }
+
+    /// A clipboard write carries no state worth caching — its reason exports no screen state and repeats
+    /// the snapshot the output turn before it already delivered — so it neither advances the emission
+    /// watermark nor becomes the model's cached payload. Were it to advance the watermark, an event that
+    /// legitimately arrived out of order would start discarding the real state payloads behind it.
+    @MainActor func testClipboardWriteDoesNotBecomeCachedState() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        let generation = model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        model.applyControlResponseState(
+            statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:01Z", title: "before"))
+        model.applyStreamEvent(
+            clipboardPayload(sessionID: sessionID, emittedAt: "2026-07-28T00:00:09Z", targetClientID: "owner", text: "copied", title: "clipboard"),
+            generation: generation)
+        model.applyControlResponseState(
+            statePayload(sessionID: sessionID, reason: "runtime_state", emittedAt: "2026-07-28T00:00:05Z", title: "after"))
+
+        XCTAssertEqual(model.latestRemoteStatePayload?.title, "after")
+        XCTAssertNil(model.latestRemoteStatePayload?.clipboardWrite)
+    }
+
+    private func statePayload(sessionID: String, reason: String, emittedAt: String, title: String = "t") -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+            runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp", outputByteCount: nil)
+    }
+
+    private func clipboardPayload(sessionID: String, emittedAt: String, targetClientID: String, text: String, title: String = "t")
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp",
+            outputByteCount: nil, clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
+    }
+
     @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
             id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: 1,

@@ -6,16 +6,27 @@
     /// A mirror surface costs tens of megabytes — its IOSurface buffers are sized from the pane's
     /// pixel dimensions and it holds several of them — and a pane keeps its surface for as long as
     /// the pane exists. Without a cap the app's memory grows with every tab that has ever been
-    /// displayed. This registry orders panes by when they were last displayed, keeps the most recent
-    /// ones warm so switching back to a recent tab stays instant, and frees the rest.
+    /// displayed. This registry orders panes by when they were last displayed and frees the
+    /// surfaces of hidden panes beyond the cap; a freed pane repaints from its retained frame the
+    /// next time it is shown.
     ///
     /// The cap is process-wide rather than per window or per panel because the memory it bounds is
     /// process-wide: several windows each keeping their own quota of warm surfaces would defeat it.
     @MainActor final class GhosttyMirrorSurfaceMRU {
         static let shared = GhosttyMirrorSurfaceMRU()
 
-        /// How many mirror surfaces stay live at once, beyond the panes currently on screen.
-        static let warmSurfaceLimit = 3
+        /// The live-surface total the sweep aims for. Displayed panes always stay live even beyond
+        /// it, so the effective total is `max(warmSurfaceLimit, displayed panes)` and a hidden pane
+        /// keeps its surface only while fewer panes than this are on screen.
+        ///
+        /// Each warm surface holds roughly 98 MB of IOSurface buffers, while a cold revisit rebuilds
+        /// in 5–8 ms with zero blank frames and no network round trip, so switching tabs deliberately
+        /// evicts the pane that just left the screen instead of keeping it warm. The slot earns its
+        /// keep when no pane is displayed at all: hiding the window leaves the most recent pane's
+        /// surface alive, so summoning the window back skips even the rebuild. Eviction resets
+        /// mirror-local state — an open find overlay and any selection — which is accepted; scroll
+        /// position and content are host-authoritative and survive.
+        static let warmSurfaceLimit = 1
 
         private struct Entry { weak var view: GhosttyMirrorTerminalView? }
 

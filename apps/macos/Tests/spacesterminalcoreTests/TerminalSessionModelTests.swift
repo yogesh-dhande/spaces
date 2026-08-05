@@ -58,7 +58,34 @@ final class TerminalSessionModelTests: XCTestCase {
 
         let sessions = try TerminalSessionPersistence.listKnownSessions()
 
-        XCTAssertEqual(sessions, [metadata])
+        XCTAssertEqual(sessions.map(\.launchConfiguration), [metadata])
+        XCTAssertEqual(sessions.map(\.paths.rootDirectory), [sessionPaths.rootDirectory])
+    }
+
+    /// Sessions are listed with the root their own row stores, not one re-derived from the current
+    /// profile, so a session whose root the profile does not derive stays readable through the listing.
+    func testListKnownSessionsCarriesTheStoredRootDirectory() throws {
+        let foreignRoot = try XCTUnwrap(databaseRoot).appendingPathComponent("elsewhere", isDirectory: true)
+        let paths = TerminalSessionPaths(rootDirectory: foreignRoot.path)
+        try writeLaunchConfiguration(sessionID: "session-elsewhere", paths: paths)
+
+        let listed = try XCTUnwrap(try TerminalSessionPersistence.listKnownSessions().first)
+
+        XCTAssertEqual(listed.paths.rootDirectory, foreignRoot.path)
+        XCTAssertNoThrow(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: listed.paths),
+            "A listed session must be readable through the paths it was listed with.")
+    }
+
+    /// A runtime row must never outlive — or precede — its `terminal_sessions` row: a runtime row with no
+    /// session row is invisible to every session-driven sweep, so nothing can repair or reclaim it.
+    func testRuntimeStateWriteRequiresTheSessionRow() throws {
+        let paths = try TerminalSessionPaths.forSession(id: "session-orphan-runtime")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "session-orphan-runtime", servicePID: 123, childPID: nil, state: .running, updatedAt: "2026-05-08T00:00:00Z")
+
+        XCTAssertThrowsError(try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths))
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths))
     }
 
     func testLaunchConfigurationEncodesWorkspaceIDAndKind() throws {
@@ -140,7 +167,7 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(read.kind, .automation)
         XCTAssertEqual(read.automationRunID, "run-42")
         // The same values survive the profile-wide listing query.
-        XCTAssertEqual(try TerminalSessionPersistence.listKnownSessions(), [configuration])
+        XCTAssertEqual(try TerminalSessionPersistence.listKnownSessions().map(\.launchConfiguration), [configuration])
     }
 
     func testLaunchConfigurationPersistenceRoundTripsWorkspaceIDAndKind() throws {
@@ -401,6 +428,39 @@ final class TerminalSessionModelTests: XCTestCase {
         try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
 
         XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), payload)
+    }
+
+    /// Whether an ended pane can replay its final frame is answered from the stored flag, so a reader does
+    /// not decode the whole payload to test one field. A payload carrying a full frame reports available;
+    /// one without a replayable frame reports unavailable.
+    func testFinalRenderAvailabilityIsReadableWithoutDecodingThePayload() throws {
+        let withFrame = "session-with-frame"
+        let withoutFrame = "session-without-frame"
+        let framePaths = try TerminalSessionPaths.forSession(id: withFrame)
+        let framelessPaths = try TerminalSessionPaths.forSession(id: withoutFrame)
+        try writeLaunchConfiguration(sessionID: withFrame, paths: framePaths)
+        try writeLaunchConfiguration(sessionID: withoutFrame, paths: framelessPaths)
+        let snapshot = GhosttyTerminalSnapshot(
+            columns: 2, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xEEEEEE, defaultBackgroundRGB: 0x101010,
+            cells: [
+                GhosttyTerminalSnapshot.Cell(codepoint: 0x68, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0),
+                GhosttyTerminalSnapshot.Cell(codepoint: 0x69, foregroundRGB: 0xEEEEEE, backgroundRGB: 0x101010, flags: 0),
+            ])
+        let renderUpdate = try GhosttyRenderUpdateBinaryCodec.encode(.full(GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 1, snapshot: snapshot)))
+
+        try TerminalSessionPersistence.writeRemoteSessionState(payload(sessionID: withFrame, renderUpdate: renderUpdate), paths: framePaths)
+        try TerminalSessionPersistence.writeRemoteSessionState(payload(sessionID: withoutFrame, renderUpdate: nil), paths: framelessPaths)
+
+        XCTAssertTrue(try TerminalSessionPersistence.hasFinalRender(paths: framePaths))
+        XCTAssertFalse(try TerminalSessionPersistence.hasFinalRender(paths: framelessPaths))
+        XCTAssertEqual(try TerminalSessionPersistence.sessionIDsWithFinalRender(), [withFrame])
+    }
+
+    private func payload(sessionID: String, renderUpdate: Data?) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-05-08T00:00:05Z", sessionStateRevision: 1,
+            sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: sessionID,
+            workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: renderUpdate)
     }
 
     func testPendingAgentSignalsCanBeAcknowledged() throws {

@@ -26,52 +26,65 @@ struct AlertsTabView: View {
                 Text("Agents waiting for input and exited runs show up here.")
             }
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.attentionGroups) { group in alertGroupSection(group).padding(.bottom, 14) }
-                    if !model.automationAlerts.isEmpty { automationAlertsSection(model.automationAlerts).padding(.bottom, 14) }
-                }.padding(.vertical, 12)
-            }.scrollContentBackground(.hidden)
+            List {
+                swipeHint
+                ForEach(model.attentionGroups) { group in alertGroupSection(group) }
+                if !model.automationAlerts.isEmpty { automationAlertsSection(model.automationAlerts) }
+            }.listStyle(.plain).scrollContentBackground(.hidden)
         }
     }
 
     /// Failed/timed-out automation runs are workspace-less, so they get their own band rather than
     /// joining a per-workspace section — mirrors the Mac's synthetic "Automations" alerts group.
-    private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
-        VStack(spacing: 0) {
-            HeaderBand {
-                Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                Spacer(minLength: 0)
-                Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
-            }.accessibilityIdentifier("alerts.band.automations")
-            VStack(spacing: 0) { ForEach(entries) { entry in automationAlertRow(entry) } }.padding(.top, 4)
-        }
+    @ViewBuilder private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
+        HeaderBand {
+            Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+            Spacer(minLength: 0)
+            Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+        }.accessibilityIdentifier("alerts.band.automations").bandListHeaderRow()
+        ForEach(entries) { entry in automationAlertRow(entry).bandListRow() }
     }
 
     /// Status-level only: there is no terminal/replay to open for an automation run in this feature, so
     /// unlike `eventRow` this row is never a button.
     private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
         BandRow(
-            dotKind: .exited, tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
+            dotKind: .exited,
+            tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
             title: entry.automationName, detail: entry.outcome, detailIsMonospaced: false
         ) { EmptyView() }.accessibilityIdentifier("alert.automation.\(entry.id)")
     }
 
-    private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
-        VStack(spacing: 0) {
-            HeaderBand {
-                WorkspaceBandLabel(isGitWorkspace: group.isGitWorkspace, displayName: group.workspaceDisplayName)
-                Spacer(minLength: 0)
-                Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                    .lineLimit(1)
-            }.accessibilityIdentifier("alerts.band.\(group.workspaceID)")
-            VStack(spacing: 0) { ForEach(group.events) { event in eventRow(event) } }.padding(.top, 4)
+    /// Swiping is the only way to dismiss a single alert, and nothing on the row advertises it, so the
+    /// list opens with a one-line caption styled as a subheading under the navigation title. It rides
+    /// along with the alerts, so it disappears with them.
+    private var swipeHint: some View {
+        Text("Swipe an alert to dismiss it.").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).frame(
+            maxWidth: .infinity, alignment: .leading
+        ).padding(.top, 2).padding(.bottom, 6).padding(.horizontal, 20).bandListRow().accessibilityIdentifier("alerts.swipeHint")
+    }
+
+    @ViewBuilder private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {
+        HeaderBand {
+            WorkspaceBandLabel(isGitWorkspace: group.isGitWorkspace, displayName: group.workspaceDisplayName)
+            Spacer(minLength: 0)
+            Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
+                .lineLimit(1)
+        }.accessibilityIdentifier("alerts.band.\(group.workspaceID)").bandListHeaderRow()
+        ForEach(group.events) { event in
+            eventRow(event).bandListRow().swipeActions(edge: .trailing) {
+                Button(role: .destructive) {
+                    model.dismissAlert(event)
+                } label: {
+                    Label("Dismiss", systemImage: "bell.slash")
+                }.accessibilityIdentifier("alert.dismiss.\(event.id)")
+            }
         }
     }
 
     @ViewBuilder private func eventRow(_ event: SpacesMobileAttentionEvent) -> some View {
         let row = BandRow(
-            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.kind.label,
+            dotKind: StatusDot.Kind(attentionKind: event.kind), tile: .tile(for: event.rowType), title: event.title, detail: event.detail,
             detailIsMonospaced: false
         ) {
             Text(SpacesMobileAttention.abbreviatedAge(of: event.date)).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()

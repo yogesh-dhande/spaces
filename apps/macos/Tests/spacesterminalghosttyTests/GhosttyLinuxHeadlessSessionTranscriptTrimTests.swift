@@ -6,21 +6,21 @@
 
     @testable import spacesterminalghostty
 
-    /// Guards the split error domains of the Linux headless core's `appendTranscript`: a durable write
-    /// that succeeds must report success even when the follow-on head-truncation (`TerminalTranscriptTrim`)
-    /// throws. The trim is failure-safe with no post-commit failure path — on any throw the just-appended
-    /// bytes are already durable in `output.log` and the append handle is untouched — so a trim failure
-    /// must not be surfaced as an append failure. `clearScreen` keys the live-renderer application (and its
-    /// ok/failure response) off the append's return value, so a conflated failure would durably persist the
+    /// Guards the split error domains of the Linux headless core's `appendTranscript`: a durable write that
+    /// succeeds must report success no matter what happens to the follow-on head-truncation. The trim runs
+    /// off the engine actor and never touches `output.log` until its atomic swap
+    /// (`TerminalTranscriptTrimCoordinator`), so a trim that cannot run leaves the just-appended bytes
+    /// durable and the append handle valid. `clearScreen` keys the live-renderer application (and its
+    /// ok/failure response) off the append's return value, so conflating the two would durably persist the
     /// clear bytes while skipping the live clear, diverging live state from a future replay.
     ///
     /// The trim only fires once the transcript exceeds `liveTranscriptTrimTriggerBytes`, so these tests
     /// pre-fill `output.log` past that trigger and resume the core through the real handoff path (which
     /// preserves the existing bytes and seeds the byte count from the file size). The trim is then made to
     /// fail without disturbing the append by pre-creating a DIRECTORY at the sibling `output.log.trim` temp
-    /// path: `TerminalTranscriptTrim` opens that path for writing to stage preamble+tail, which fails with
-    /// `EISDIR` (a directory can never be opened for writing, even by root — so this is robust in the
-    /// root-owned Linux CI container, unlike a permission-bit block that `DAC_OVERRIDE` bypasses), while the
+    /// path: the staging stage opens that path for writing to hold preamble+tail, which fails with `EISDIR`
+    /// (a directory can never be opened for writing, even by root — so this is robust in the root-owned
+    /// Linux CI container, unlike a permission-bit block that `DAC_OVERRIDE` bypasses), while the
     /// already-open `output.log` append fd is untouched.
     ///
     /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops onto
@@ -97,12 +97,23 @@
             #expect(master >= 0)
             #expect(slave >= 0)
 
+            // Spawn `/bin/sleep` itself rather than `sh -c "sleep 120"`: `tearDown` kills exactly the pid
+            // reported here, and a shell layer would fork the real `sleep` (dash does not exec it), leaving
+            // that grandchild running after the shell is killed. Redirect the child's stdio to /dev/null so
+            // it never inherits the test runner's stdout/stderr: a surviving child holding SwiftPM's output
+            // pipe blocks `swift test` on pipe EOF long after the test binary itself has exited.
             var childPID: pid_t = 0
-            let path = "/bin/sh"
-            let arguments = [path, "-c", "sleep 120"]
+            let path = "/bin/sleep"
+            let arguments = ["sleep", "120"]
             var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
             defer { for argument in argv where argument != nil { free(argument) } }
-            #expect(posix_spawn(&childPID, path, nil, nil, &argv, environ) == 0, "posix_spawn of the liveness child failed")
+            var fileActions = posix_spawn_file_actions_t()
+            #expect(posix_spawn_file_actions_init(&fileActions) == 0, "posix_spawn_file_actions_init failed")
+            defer { posix_spawn_file_actions_destroy(&fileActions) }
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0) == 0, "redirecting child stdin failed")
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0) == 0, "redirecting child stdout failed")
+            #expect(posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0) == 0, "redirecting child stderr failed")
+            #expect(posix_spawn(&childPID, path, &fileActions, nil, &argv, environ) == 0, "posix_spawn of the liveness child failed")
 
             return AdoptablePTY(master: master, slave: slave, childPID: childPID)
         }
@@ -121,13 +132,17 @@
         /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
         /// synchronous, so unlike the macOS harness no renderer tick is needed here.
         private func waitAsync(
-            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+            timeout: TimeInterval = 30, transcriptPath: String? = nil, sourceLocation: SourceLocation = #_sourceLocation,
+            _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
+            let started = Date()
+            let deadline = started.addingTimeInterval(timeout)
             while Date() < deadline {
                 if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            await GhosttyLinuxHeadlessHangDiagnostics.report(
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout, transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
@@ -172,11 +187,11 @@
 
         // MARK: - Tests
 
-        /// A trim failure AFTER a successful clear-mutation write must not fail the append: `clearScreen`
+        /// A trim that cannot run must not fail the clear-mutation append that triggered it: `clearScreen`
         /// must still report success, apply the clear to the live renderer, and leave the durable mutation
-        /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch) the trim throw returned false,
-        /// so `clearScreen` returned ok:false and never touched the live renderer even though the clear bytes
-        /// were already durable — diverging live state from a future replay.
+        /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch around the inline trim) the
+        /// trim throw returned false, so `clearScreen` returned ok:false and never touched the live renderer
+        /// even though the clear bytes were already durable — diverging live state from a future replay.
         @Test func clearScreenSucceedsWhenTrimFailsAfterDurableWrite() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
@@ -202,12 +217,12 @@
             }
             let record = DaemonHandoffSessionRecord(
                 sessionID: configuration.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: 80, rows: 24, ownerEpoch: 0,
-                screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue)
+                screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue, transcriptOffsetAtQuiesce: nil)
             try await core.resumeFromHandoff(record)
             try await TerminalEngineActor.run { Self.attachRemoteOwner(to: core, id: "remote-owner") }
 
             // The replayed transcript renders the marker onto the live screen before the clear.
-            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
+            try await waitAsync(transcriptPath: paths.outputPath) { Self.renderedScreenText(of: core)?.contains(marker) == true }
 
             // Make the trim fail without disturbing the append: pre-create a directory at the sibling
             // output.log.trim temp path so the trim's open-for-writing throws EISDIR (unblockable even by
@@ -216,12 +231,10 @@
             try FileManager.default.createDirectory(atPath: trimBlockerPath, withIntermediateDirectories: false)
             defer { try? FileManager.default.removeItem(atPath: trimBlockerPath) }
 
-            let response = TerminalEngineActor.runSynchronously {
-                core.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
-            }
+            let response = TerminalEngineActor.runSynchronously { core.handleControlRequest(TerminalControlRequest(command: "clearScreen")) }
 
-            // The append succeeded (bytes durable) even though the trim threw, so clearScreen reports success
-            // and applied the clear to the live renderer.
+            // The append succeeded (bytes durable) even though the trim could not stage, so clearScreen
+            // reports success and applied the clear to the live renderer.
             #expect(response.ok, "clearScreen must report success when only the post-write trim failed: \(response.message)")
             let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) })
             #expect(!screen.contains(marker), "the live renderer must apply the clear, dropping the marker from the visible screen")

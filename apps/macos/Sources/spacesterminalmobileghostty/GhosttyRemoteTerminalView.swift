@@ -92,8 +92,10 @@ import Foundation
         public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void
+        public let onSendMouseButton: @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
+        public let onPasteClipboardImage: (@MainActor () -> Bool)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -102,7 +104,9 @@ import Foundation
             onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
             onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
-            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
+            onSendMouseButton: @escaping @MainActor (UInt8, Bool, TerminalScrollPointerPosition?) -> Void = { _, _, _ in },
+            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil,
+            onPasteClipboardImage: (@MainActor () -> Bool)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -118,8 +122,10 @@ import Foundation
             self.onSendText = onSendText
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
+            self.onSendMouseButton = onSendMouseButton
             self.onOpenLink = onOpenLink
             self.onOpenComposer = onOpenComposer
+            self.onPasteClipboardImage = onPasteClipboardImage
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -133,8 +139,19 @@ import Foundation
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
             }
+            // Synchronous on purpose, unlike the Task-hopping callbacks around it: a tap sends a
+            // press immediately followed by a release, and two independent unstructured Tasks have
+            // no ordering guarantee — a reordered pair would deliver a release-before-press to the
+            // application. UIKit fires the gesture on the main thread, so assuming isolation holds.
+            hostView.onSendMouseButton = { button, pressed, pointerPosition in
+                MainActor.assumeIsolated { onSendMouseButton(button, pressed, pointerPosition) }
+            }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
+            // Synchronous, unlike the Task-hopping callbacks around it: the paste routes need the
+            // handler's answer (did the clipboard image claim this paste?) before deciding whether to
+            // fall through to the text paste. UIKit delivers the paste on the main thread.
+            hostView.onPasteClipboardImage = onPasteClipboardImage.map { callback in { MainActor.assumeIsolated { callback() } } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -177,6 +194,7 @@ import Foundation
             case ignored
             case openedLink
             case focused
+            case sentClick
         }
 
         struct AccessoryToolbarButtonLabels: Equatable {
@@ -228,6 +246,11 @@ import Foundation
         private var lastMomentumTimestamp: CFTimeInterval = 0
         private var lastScrollPointerPosition: TerminalScrollPointerPosition?
         private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
+        /// Clipboard read seams: production reads the system pasteboard, tests substitute the contents so
+        /// the paste paths can be exercised without mutating the device pasteboard. The image probe reads
+        /// declared pasteboard types only, so it costs no paste prompt on the common text-only path.
+        private var clipboardTextReader: () -> String? = { UIPasteboard.general.string }
+        private var clipboardHasImageReader: () -> Bool = { UIPasteboard.general.hasImages }
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
         private var openedLinkDuringTapProbe = false
@@ -238,11 +261,14 @@ import Foundation
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
-            onComposer: { [weak self] in self?.onOpenComposer?() }, onText: { [weak self] text in self?.sendAccessoryText(text) },
-            onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onComposer: { [weak self] in self?.onOpenComposer?() }, onPaste: { [weak self] in self?.pasteFromClipboard() },
+            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?
+        /// Stands in for the live mirror surface's mouse-capture state, which only exists once a real
+        /// surface has applied a frame.
+        var debugMouseCapturedForTesting: Bool?
 
         public private(set) var acceptsTerminalInput = false
         public var onInputReadinessChanged: ((Bool) -> Void)?
@@ -251,8 +277,13 @@ import Foundation
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
+        public var onSendMouseButton: ((UInt8, Bool, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
+        /// Handles a paste whose clipboard declares an image. The app layer reads and validates the image
+        /// (types this layer cannot see) and returns whether it claimed the paste; `false` means the
+        /// declared image carried nothing readable, so the text paste runs instead.
+        public var onPasteClipboardImage: (() -> Bool)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -378,26 +409,45 @@ import Foundation
         }
 
         /// Called when another terminal view takes the shared mirror over. This view drops back to
-        /// its own black background and stops asking for the mirror until it re-enters a window,
-        /// so an outgoing view still in the hierarchy during a navigation transition cannot trade
-        /// the mirror back and forth with the incoming one.
+        /// its own black background and stops asking for the mirror while the newcomer holds it, so
+        /// an outgoing view still in the hierarchy during a navigation transition cannot trade the
+        /// mirror back and forth with the incoming one.
         ///
-        /// Re-entering a window is the *only* thing that lifts this latch, which is safe because a
-        /// view can only surrender while some other view is in the window, and every way to present
-        /// a terminal takes the previous one out of the window in the same update: the terminal is a
-        /// single `navigationDestination(item:)` per stack, so one can never be pushed over another,
-        /// and a switch between sessions replaces that destination outright. A presentation that
-        /// instead left the surrendering view parented — a terminal in a sheet or a non-fullscreen
-        /// cover over another terminal, or two terminals side by side in a split layout — would
-        /// leave this view latched and permanently black once the newcomer went away, since nothing
-        /// re-offers a parked mirror to the view that gave it up. Adding one means giving the latch
-        /// a second release edge here, not just adding the new screen.
+        /// The latch lifts on exactly two edges, and both mean "this view is entitled to the mirror
+        /// again": re-entering a window, which is what makes this the terminal on screen after a
+        /// route change; and being offered the mirror back once it is parked with no holder at all,
+        /// which is what happens when the view that took it over goes away while this one stayed
+        /// parented — a terminal in a sheet or a non-fullscreen cover over another terminal, or two
+        /// terminals side by side in a split layout. Neither edge can fire while another view holds
+        /// the mirror, which is what keeps the latch doing its job.
         func surrenderSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
             didSurrenderSharedMirror = true
             setNeedsDisplay()
             reportInputReadinessIfNeeded()
+        }
+
+        /// Takes the shared mirror back after the view that took it over gave it up, reporting
+        /// whether this view actually took it. Being in a window with something to render is the
+        /// same entitlement every other acquisition goes through, so a view with nothing on screen
+        /// declines and the offer moves on to the view beneath it.
+        ///
+        /// The hand-back completes here, synchronously, rather than lifting the latch and letting
+        /// the render path schedule an acquisition: an entitlement checked when the offer is made
+        /// but acted on a turn later is no entitlement at all. A terminal that mounted in the same
+        /// update has its own acquisition already queued, and once that lands it is the terminal the
+        /// user is looking at — a deferred hand-back would take the mirror straight off it. Because
+        /// nothing suspends between the mirror parking and this call returning, an acquisition can
+        /// only run before the offer (and then there is a holder, so no offer is made) or after it
+        /// (and then it is an ordinary takeover by the newer view).
+        func reclaimSurrenderedSharedMirror() -> Bool {
+            guard didSurrenderSharedMirror, window != nil else { return false }
+            didSurrenderSharedMirror = false
+            acquireMirrorIfNeeded()
+            renderLatestSnapshot()
+            reportViewportSizeIfNeeded()
+            return mirror != nil
         }
 
         public func setTerminalVisible(_ visible: Bool) {
@@ -421,6 +471,9 @@ import Foundation
                 clearAccessoryModifiers()
                 resignFirstResponder()
             }
+            // The capture flags applied to the mirror are gated on this property, so a pane whose
+            // latest frame carries them must re-apply when it flips (e.g. the session just ended).
+            if latestRenderFrame?.snapshot.mouseReportingActive == true { applyLatestRenderFrameIfPossible() }
             reloadInputViews()
             reportInputReadinessIfNeeded(force: true)
         }
@@ -490,8 +543,17 @@ import Foundation
             onSendText?(text, false)
         }
 
-        public override func paste(_ sender: Any?) {
-            guard acceptsTerminalInput, let text = UIPasteboard.general.string else { return }
+        public override func paste(_ sender: Any?) { pasteFromClipboard() }
+
+        /// Pastes the clipboard, image first: an image belongs in the composer as an attachment the user
+        /// then sends deliberately, never in the terminal as bytes, so `onPasteClipboardImage` takes the
+        /// paste when the clipboard holds one. Text is sent as a bracketed paste. Shared by the system
+        /// Paste command, the accessory Paste button, and the accessory cmd+v chord so all three behave
+        /// identically.
+        private func pasteFromClipboard() {
+            guard acceptsTerminalInput else { return }
+            if clipboardHasImageReader(), onPasteClipboardImage?() == true { return }
+            guard let text = clipboardTextReader() else { return }
             pasteText(text)
         }
 
@@ -499,6 +561,10 @@ import Foundation
             guard acceptsTerminalInput else { return }
             pasteText(text)
         }
+
+        func setClipboardTextForTesting(_ text: String?) { clipboardTextReader = { text } }
+
+        func setClipboardHasImageForTesting(_ hasImage: Bool) { clipboardHasImageReader = { hasImage } }
 
         private func pasteText(_ text: String) {
             guard !text.isEmpty else { return }
@@ -563,6 +629,12 @@ import Foundation
         }
 
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
+            if sendMouseButtonClickIfCaptured(at: location) {
+                // A tap that drives the application still needs the keyboard: without this, tapping
+                // vim's mouse=a on a phone would move the cursor while leaving nothing to type with.
+                if acceptsTerminalInput, !isFirstResponder { becomeFirstResponder() }
+                return .sentClick
+            }
             if openTerminalLink(at: location) { return .openedLink }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
@@ -750,11 +822,20 @@ import Foundation
             emitHostRenderEvent("host_view_render_end", dedupeKey: lastRenderKey)
         }
 
-        private func scheduleMirrorAcquisitionIfNeeded() {
-            guard mirror == nil, mirrorAcquisitionTask == nil, window != nil, !didSurrenderSharedMirror else { return }
+        /// Whether this view may take the shared mirror right now: it is the terminal on screen, it
+        /// is not latched out by a newer holder, and it has somewhere to render. The render area has
+        /// to be non-empty because Ghostty sizes its render target from the host layer's bounds and a
+        /// layer bound at zero size never grows back. Checked again at acquisition rather than only
+        /// when one is scheduled, since a view can lose any of this in between.
+        private var isEntitledToSharedMirror: Bool {
+            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return false }
+            guard Self.nativeMirrorEnabledForTesting else { return false }
             let renderBounds = visibleRenderBounds()
-            guard renderBounds.width > 0, renderBounds.height > 0 else { return }
-            guard Self.nativeMirrorEnabledForTesting else { return }
+            return renderBounds.width > 0 && renderBounds.height > 0
+        }
+
+        private func scheduleMirrorAcquisitionIfNeeded() {
+            guard mirrorAcquisitionTask == nil, isEntitledToSharedMirror else { return }
             emitHostRenderEvent("host_view_mirror_acquire_scheduled", dedupeKey: lastRenderKey)
             mirrorAcquisitionTask = Task { @MainActor [weak self] in
                 await Task.yield()
@@ -772,8 +853,7 @@ import Foundation
         }
 
         private func acquireMirrorIfNeeded() {
-            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return }
-            guard Self.nativeMirrorEnabledForTesting else { return }
+            guard isEntitledToSharedMirror else { return }
             do {
                 emitHostRenderEvent("host_view_mirror_acquire_begin", dedupeKey: lastRenderKey)
                 let acquired = try GhosttySharedTerminalMirror.shared.acquire(
@@ -800,6 +880,12 @@ import Foundation
             return ghostty_mirror_surface(mirror)
         }
 
+        private var mirrorCapturesMouse: Bool {
+            if let debugMouseCapturedForTesting { return debugMouseCapturedForTesting }
+            guard let surface = mirrorSurface() else { return false }
+            return ghostty_surface_mouse_captured(surface)
+        }
+
         private func handleActionEvent(_ event: GhosttyMobileActionEvent) {
             switch event {
             case .openURL(_, let value):
@@ -812,7 +898,6 @@ import Foundation
         private func openTerminalLink(at location: CGPoint) -> Bool {
             if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
             guard let surface = mirrorSurface() else { return false }
-            guard !ghostty_surface_mouse_captured(surface) else { return false }
             let position = Self.ghosttyMousePosition(for: location)
             let mods = Self.linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
@@ -830,6 +915,20 @@ import Foundation
 
         private static func ghosttyMousePosition(for location: CGPoint) -> (x: Double, y: Double) {
             (Double(max(location.x, 0)), Double(max(location.y, 0)))
+        }
+
+        /// Forwards a tap as a left-button press followed by a release when the session's own terminal
+        /// is tracking the mouse (`ghostty_surface_mouse_captured`), so a mouse-aware application there
+        /// receives the tap as a click instead of Spaces treating it as a link probe or a focus request.
+        private func sendMouseButtonClickIfCaptured(at location: CGPoint) -> Bool {
+            // Only an owner of a live session can deliver a click; an ended or read-only session's
+            // final frame can still carry tracking flags (a crash never disables them), and
+            // intercepting those taps would swallow them with no application left to click.
+            guard acceptsTerminalInput, mirrorCapturesMouse else { return false }
+            let pointerPosition = scrollPointerPosition(for: location)
+            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), true, pointerPosition)
+            onSendMouseButton?(UInt8(GHOSTTY_MOUSE_LEFT.rawValue), false, pointerPosition)
+            return true
         }
 
         private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
@@ -912,30 +1011,52 @@ import Foundation
             guard frame.version == GhosttyRenderFrame.currentVersion else { return false }
             let snapshot = frame.snapshot
             guard snapshot.columns > 0, snapshot.rows > 0, snapshot.columns <= Int(UInt16.max), snapshot.rows <= Int(UInt16.max) else { return false }
+            // The C cell's link fields are export-only — applying a snapshot ignores them — so they
+            // stay zeroed here and a cell's OSC 8 target travels no further than the Swift snapshot.
+            // Nothing consumes those targets for interaction yet: a mirrored link whose label is not
+            // itself a URL renders as plain text (#373 tracks hit-testing or surface apply).
             var cells = snapshot.cells.map { cell in
                 ghostty_terminal_snapshot_cell_s(
-                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags)
+                    codepoint: cell.codepoint, foreground_rgb: cell.foregroundRGB, background_rgb: cell.backgroundRGB, flags: cell.flags,
+                    grapheme_extra_len: 0, grapheme_extras: nil, link_index: 0)
             }
-            return cells.withUnsafeMutableBufferPointer { buffer in
-                var cSnapshot = ghostty_terminal_snapshot_s()
-                cSnapshot.columns = UInt16(snapshot.columns)
-                cSnapshot.rows = UInt16(snapshot.rows)
-                cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
-                cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
-                cSnapshot.cursor_visible = snapshot.cursorVisible
-                cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
-                cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
-                cSnapshot.cell_count = buffer.count
-                cSnapshot.cells = buffer.baseAddress
+            // The frame's clusters live in one buffer the cells point into, so they stay alive for
+            // exactly the span of the C call and no cell owns memory Ghostty would have to free.
+            var clusterExtras = GhosttyTerminalSnapshotClusterExtras.flatten(snapshot)
+            return clusterExtras.codepoints.withUnsafeMutableBufferPointer { extras in
+                if let base = extras.baseAddress {
+                    for placement in clusterExtras.placements {
+                        cells[placement.cellIndex].grapheme_extra_len = UInt16(placement.count)
+                        cells[placement.cellIndex].grapheme_extras = base + placement.offset
+                    }
+                }
+                return cells.withUnsafeMutableBufferPointer { buffer in
+                    var cSnapshot = ghostty_terminal_snapshot_s()
+                    cSnapshot.columns = UInt16(snapshot.columns)
+                    cSnapshot.rows = UInt16(snapshot.rows)
+                    cSnapshot.cursor_column = UInt16(clamping: snapshot.cursorColumn)
+                    cSnapshot.cursor_row = UInt16(clamping: snapshot.cursorRow)
+                    cSnapshot.cursor_visible = snapshot.cursorVisible
+                    cSnapshot.default_foreground_rgb = snapshot.defaultForegroundRGB
+                    cSnapshot.default_background_rgb = snapshot.defaultBackgroundRGB
+                    // Only an interactive owner's mirror keeps the session's capture flags. An ended or
+                    // read-only pane's frame can still carry them (a crash never disables tracking), and
+                    // a captured mirror consumes the synthetic click a link tap probes with — links in
+                    // that pane would silently stop opening.
+                    cSnapshot.mouse_reporting_active = acceptsTerminalInput && snapshot.mouseReportingActive
+                    cSnapshot.mouse_shift_capture = acceptsTerminalInput ? snapshot.mouseShiftCapture : 0
+                    cSnapshot.cell_count = buffer.count
+                    cSnapshot.cells = buffer.baseAddress
 
-                var cFrame = ghostty_render_frame_s()
-                cFrame.version = UInt32(frame.version)
-                cFrame.session_revision = frame.sessionRevision ?? 0
-                cFrame.owner_epoch = frame.ownerEpoch
-                cFrame.columns = UInt16(snapshot.columns)
-                cFrame.rows = UInt16(snapshot.rows)
-                cFrame.snapshot = cSnapshot
-                return withUnsafePointer(to: &cFrame, body)
+                    var cFrame = ghostty_render_frame_s()
+                    cFrame.version = UInt32(frame.version)
+                    cFrame.session_revision = frame.sessionRevision ?? 0
+                    cFrame.owner_epoch = frame.ownerEpoch
+                    cFrame.columns = UInt16(snapshot.columns)
+                    cFrame.rows = UInt16(snapshot.rows)
+                    cFrame.snapshot = cSnapshot
+                    return withUnsafePointer(to: &cFrame, body)
+                }
             }
         }
 
@@ -1010,7 +1131,15 @@ import Foundation
             guard !pendingAccessoryModifiers.isEmpty else { return false }
             defer { clearAccessoryModifiers() }
             guard text.count == 1, let scalar = text.unicodeScalars.first, scalar.properties.isAlphabetic else { return false }
-            guard let keySpec = modifiedKeySpec(for: String(scalar).lowercased()) else { return false }
+            let key = String(scalar).lowercased()
+            // cmd+v is a client-side clipboard action, not a chord the terminal resolves: the key resolver
+            // drops non-line-editing command chords, so without this the keystroke would fall through and
+            // type a literal "v". The keystroke is consumed either way, including on an empty clipboard.
+            if pendingAccessoryModifiers == [.command], key == "v" {
+                pasteFromClipboard()
+                return true
+            }
+            guard let keySpec = modifiedKeySpec(for: key) else { return false }
             onSendKey?(keySpec)
             return true
         }
@@ -1181,6 +1310,7 @@ import Foundation
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
 
             private let onComposer: () -> Void
+            private let onPaste: () -> Void
             private let onText: (String) -> Void
             private let onKey: (String) -> Void
             private let onModifier: (AccessoryModifier) -> Void
@@ -1208,10 +1338,11 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onComposer: @escaping () -> Void, onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void,
-                onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
+                onComposer: @escaping () -> Void, onPaste: @escaping () -> Void, onText: @escaping (String) -> Void,
+                onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
             ) {
                 self.onComposer = onComposer
+                self.onPaste = onPaste
                 self.onText = onText
                 self.onKey = onKey
                 self.onModifier = onModifier
@@ -1276,6 +1407,9 @@ import Foundation
                     contentStackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
                 ])
 
+                addIconButton(imageName: "doc.on.clipboard", accessibilityLabel: "Paste", accessibilityIdentifier: "terminal.accessory.paste") {
+                    [weak self] in self?.onPaste()
+                }
                 addTextButton("tab") { [weak self] in self?.onKey("tab") }
                 addTextButton("/") { [weak self] in self?.onText("/") }
                 addTextButton("~") { [weak self] in self?.onText("~") }
@@ -1324,6 +1458,15 @@ import Foundation
                 keyboardButton.accessibilityLabel = "Hide keyboard"
                 keyboardButton.addAction(UIAction { [weak self] _ in self?.onKeyboardToggle() }, for: .touchUpInside)
                 pinnedStackView.addArrangedSubview(keyboardButton)
+            }
+
+            private func addIconButton(imageName: String, accessibilityLabel: String, accessibilityIdentifier: String, action: @escaping () -> Void) {
+                let button = UIButton(type: .system)
+                configureButton(button, imageName: imageName)
+                button.accessibilityLabel = accessibilityLabel
+                button.accessibilityIdentifier = accessibilityIdentifier
+                button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+                contentStackView.addArrangedSubview(button)
             }
 
             private func addTextButton(_ title: String, action: @escaping () -> Void) {

@@ -121,7 +121,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
-    let detachClientSynchronouslyOnClose: Bool
+    /// Serializes this pane's attach and detach control sends. Both are blocking device round-trips
+    /// that must stay off the main actor, and the daemon has to see them in the order the pane issued
+    /// them: a close's detach overtaken by the attach it followed would leave the daemon holding an
+    /// attachment for a pane that is gone. One queue per pane, so no pane waits on another's link.
+    /// Internal (not `private`) so the debug extension can expose its drain to tests.
+    let clientControlQueue = TerminalInputSerialQueue()
     /// When true, presenting the pane does not eagerly attach the live Ghostty
     /// client; the deferred-presentation path attaches it once the owner surface is
     /// ready. The app passes false so an injected attach happens immediately;
@@ -147,12 +152,31 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private var isResolvingGhosttySessionHost = false
     private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
-    var takeoverTask: Task<Void, Never>?
-    var takeoverTaskStartedAt: Date?
+    var takeoverAttemptStartedAt: Date?
     private var takeoverAttemptID: UUID?
+    /// Whether a takeover control this pane issued is still queued or in flight. Every completion path
+    /// is keyed by `takeoverAttemptID`, so the id is also what says an attempt is outstanding.
+    var isTakeoverAttemptPending: Bool { takeoverAttemptID != nil }
     var lastRenderedOutput = ""
     var isClientAttached = false
     var lastRequestedAttachmentMode: TerminalAttachmentMode?
+    /// The attach send that is queued or in flight, if any. A refresh running before that send lands
+    /// still reads a snapshot without this client's attachment and clears the optimistic flags above,
+    /// so this — not those flags — is what keeps such a refresh from queueing a second attach for the
+    /// same mode behind the first. The id distinguishes a superseded attach's late completion from
+    /// the current one's.
+    private var pendingAttach: (id: UUID, mode: TerminalAttachmentMode)?
+    /// The message a failed attach put in the input status, so a later successful attach can retire it
+    /// (see `clearAttachErrorStatusIfShowing`). Nil whenever no attach failure is on display.
+    private var attachErrorStatusMessage: String?
+    /// The attachment mode the pane hands its session host. Owner interactivity — the host accepting
+    /// keystrokes, and the owner-attach viewport it sends — follows the attachment the daemon has
+    /// CONFIRMED, not the optimistic intent above: until the queued attach lands this client is not the
+    /// owner, so keystrokes and a viewport resize riding the host's own queues would reach the daemon
+    /// ahead of it and be rejected. The host is still attached, as a viewer, so the pane keeps
+    /// presenting the session's last known frame throughout; `finishAttach` re-runs the host attach
+    /// when the daemon answers, which is where the host flips to owner and the viewport goes out.
+    private var confirmedHostAttachmentMode: TerminalAttachmentMode { pendingAttach == nil ? preferredAttachmentMode : .viewer }
     /// Set by the host when the pane's hosting window (or container) closes, and
     /// cleared when it is presented again; refresh loops stop while it is true.
     var didCloseWindow = false
@@ -206,10 +230,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil, onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
+        defersInitialOwnerClientAttach: Bool = false, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -256,7 +280,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
         self.attachClientAction = attachClientAction
         self.detachClientAction = detachClientAction
-        self.detachClientSynchronouslyOnClose = detachClientSynchronouslyOnClose
         self.defersInitialOwnerClientAttach = defersInitialOwnerClientAttach
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
@@ -275,9 +298,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         mainThreadReleaseBag = [view]
     }
 
-    deinit {
-        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
-    }
+    deinit { MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 }) }
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }
@@ -319,25 +340,38 @@ private final class NotificationObserverBag: @unchecked Sendable {
             updateInputStatus(message: "Terminal is still preparing.", isError: false)
             return
         }
-        if let takeoverTask {
-            guard let takeoverTaskStartedAt, now.timeIntervalSince(takeoverTaskStartedAt) >= Self.takeoverAttemptTimeout else { return }
-            takeoverTask.cancel()
-            self.takeoverTask = nil
-            self.takeoverTaskStartedAt = nil
-            takeoverAttemptID = nil
+        // A retry supersedes an outstanding attempt only once that attempt has been *sending* for longer
+        // than the timeout. An attempt still queued behind other controls has stamped no start and is
+        // not stale however long it has waited: treating the wait as the attempt would duplicate the
+        // takeover on the wire the moment a busy queue outlasted the budget. Superseding is the new
+        // attempt id assigned below; every completion path is keyed by it, so whatever the stale attempt
+        // eventually answers is inert.
+        if isTakeoverAttemptPending {
+            guard let takeoverAttemptStartedAt, now.timeIntervalSince(takeoverAttemptStartedAt) >= Self.takeoverAttemptTimeout else { return }
         }
         let startedAt = now
         let attemptID = UUID()
         let clientID = client.id
         takeoverButton.isEnabled = false
-        takeoverTaskStartedAt = startedAt
+        takeoverAttemptStartedAt = nil
         takeoverAttemptID = attemptID
-        takeoverTask = Task.detached(priority: .userInitiated) { [takeoverAction] in
+        // The takeover rides the pane's client-control queue for the same reason attach and detach do:
+        // the daemon has to see it behind the attach this pane already issued. Sent on its own it could
+        // overtake that attach, and the daemon would either refuse a takeover naming a client it has not
+        // seen attach, or grant it and then have the late attach demote this client straight back to
+        // viewer — leaving the session with no owner.
+        //
+        // Unlike the attach, the send needs no current-intent check of its own: an attempt can only be
+        // superseded after it has stamped a start, which happens here immediately before the send, so a
+        // superseded takeover is always one already on the wire. A retry then names the same client the
+        // stale attempt did, which is why the daemon seeing both is harmless.
+        clientControlQueue.enqueue(priority: .userInitiated) { [weak self, takeoverAction] in
+            await self?.beginTakeoverAttempt(id: attemptID)
             let controlStartedAt = Date()
             do {
                 let response = try takeoverAction(clientID)
                 await MainActor.run {
-                    guard self.takeoverAttemptID == attemptID else { return }
+                    guard let self, self.takeoverAttemptID == attemptID else { return }
                     defer { self.clearTakeoverAttempt(id: attemptID) }
                     guard response.ok else {
                         TerminalPerformance.logMetric(
@@ -363,7 +397,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 }
             } catch {
                 await MainActor.run {
-                    guard self.takeoverAttemptID == attemptID else { return }
+                    guard let self, self.takeoverAttemptID == attemptID else { return }
                     TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
@@ -372,6 +406,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
         }
         refreshNow(allowGhosttyOwnerAttach: false)
+    }
+
+    /// Stamps the moment a queued takeover starts sending, which is what the retry timeout measures.
+    /// Skipped for an attempt that is no longer current, so a stale attempt cannot restamp the one that
+    /// replaced it.
+    private func beginTakeoverAttempt(id: UUID) {
+        guard takeoverAttemptID == id else { return }
+        takeoverAttemptStartedAt = Date()
     }
 
     private func finishFailedTakeoverAttempt(id: UUID, message: String) {
@@ -388,8 +430,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     private func clearTakeoverAttempt(id: UUID) {
         guard takeoverAttemptID == id else { return }
-        takeoverTask = nil
-        takeoverTaskStartedAt = nil
+        takeoverAttemptStartedAt = nil
         takeoverAttemptID = nil
         let isCurrentOwner = lastObservedOwnerClientID == client.id
         takeoverButton.isEnabled = !isCurrentOwner && isInteractiveRuntimeState(lastObservedRuntimeState)
@@ -407,16 +448,20 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 return
             }
             switchGhosttySessionHostIfNeeded(host)
-            try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
+            let attachmentMode = confirmedHostAttachmentMode
+            try host.attach(client: client, mode: attachmentMode, into: terminalContainer)
             if defersInitialOwnerClientAttach { isClientAttached = true }
+            // The pane's own record of its attachment stays the requested mode even while the host is
+            // held at viewer: it is what the attachment-transition rules in `refreshNow` compare a
+            // snapshot against, and recording a momentary viewer here would hide a real demotion.
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
-            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: requestWindowFocus && preferredAttachmentMode == .owner)
+            syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: requestWindowFocus && attachmentMode == .owner)
             completeOwnershipTransitionIfNeeded(target: .owner, renderer: "ghostty_owner")
             updateRendererVisibility()
             logFocusMetric(
                 "terminal_window_attach_owner_surface", startedAt: startedAt, requestID: requestID,
-                detail: "reason=\(reason) mode=\(preferredAttachmentMode.rawValue)")
+                detail: "reason=\(reason) mode=\(attachmentMode.rawValue)")
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
@@ -446,12 +491,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
     }
 
-    func hasAttachedGhosttyOwnerSurface() -> Bool {
+    /// Whether this pane holds the session's owner attachment on a live surface right now: it asked for
+    /// owner mode, it is showing the owner renderer, that surface has content, and the session's active
+    /// owner is this pane's client. False whenever the owner is another client (or is not yet known), which
+    /// is what keeps a re-show of the pane from skipping the ownership reclaim that is the point of the
+    /// request.
+    public var holdsOwnerAttachedSurface: Bool {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner, visibleRenderer == .ghosttyOwner, let host = ghosttyRendererHost,
             host.hasRenderableSurface()
         else { return false }
-        if let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID { return ownerClientID == client.id }
-        return true
+        guard let ownerClientID = ghosttySessionInfoProvider?.activeOwnerClientID() ?? lastObservedOwnerClientID else { return false }
+        return ownerClientID == client.id
     }
 
     func logFocusMetric(_ metric: String, startedAt: Date, requestID: String?, detail: String) {
@@ -497,7 +547,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             let runtimeState = stateProvider.currentRuntimeState
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            var attachmentSnapshot = stateProvider.currentAttachmentSnapshot
+            let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
             var currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
             let isInteractive = isInteractiveRuntimeState(runtimeState)
             let canAttachToRuntime = canAttachToGhosttyRuntime(runtimeState)
@@ -511,11 +561,24 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 } else {
                     let wasObservedAsAttachedOwner =
                         isClientAttached || lastObservedAttachmentMode == .owner || lastObservedOwnerClientID == client.id
-                    isClientAttached = false
-                    lastRequestedAttachmentMode = nil
+                    // An attach the daemon has not answered yet cannot show up in this snapshot, so its
+                    // absence says nothing about a pending one. Keeping the intent is what makes a close
+                    // during the attach still send the detach (ordered behind it) rather than leave the
+                    // daemon holding an attachment for a pane that is gone.
+                    if pendingAttach == nil {
+                        isClientAttached = false
+                        lastRequestedAttachmentMode = nil
+                    }
                     lastObservedAttachmentMode = nil
                     if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
-                        ownerAttachmentRequested = false
+                        // The pane presents as a viewer behind whoever the snapshot says owns the session,
+                        // but it gives up SEEKING ownership only on evidence that it lost an attachment it
+                        // held. With an attach still outstanding this snapshot carries no such evidence —
+                        // it cannot describe this client's attachment at all — and giving up on it would
+                        // park an owner-seeking pane as a viewer for good, since nothing short of a user
+                        // request asks again. That mirrors `shouldPreserveOwnerRequest` below, which keeps
+                        // the request across an observed viewer attachment for the same reason.
+                        if pendingAttach == nil { ownerAttachmentRequested = false }
                         preferredAttachmentMode = .viewer
                     }
                 }
@@ -533,11 +596,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 } else {
                     attachmentModeToRequest = activeAttachment == nil ? preferredAttachmentMode : nil
                 }
-                if let attachmentModeToRequest {
-                    attachLocalClientIfNeeded(mode: attachmentModeToRequest)
-                    attachmentSnapshot = stateProvider.currentAttachmentSnapshot
-                    currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
-                }
+                // The attach is sent off the main actor, so the rest of this refresh deliberately
+                // resolves against the snapshot as it stands: the request cannot be reflected in it
+                // yet. The daemon broadcasts the attachment change once the send lands, which brings
+                // the pane back through here with an authoritative snapshot.
+                if let attachmentModeToRequest { attachLocalClientIfNeeded(mode: attachmentModeToRequest) }
             }
             let isOwner =
                 canAttachToRuntime
@@ -564,7 +627,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     if !shouldPreserveOwnerRequest {
                         if currentOwnerClient != nil, currentOwnerClient?.id != client.id { ownerAttachmentRequested = false }
                         preferredAttachmentMode = activeAttachment.mode
-                    } else if !canKeepOwnerRequest && takeoverTask == nil {
+                    } else if !canKeepOwnerRequest && !isTakeoverAttemptPending {
                         preferredAttachmentMode = activeAttachment.mode
                     }
                     if lastObservedAttachmentMode != activeAttachment.mode {
@@ -644,6 +707,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     @objc func takeoverOwnershipAction() { takeOverOwnership() }
 
+    /// Records the attachment intent and sends the attach off the main actor, so presenting a pane
+    /// never waits on a device round-trip. The pane keeps presenting its last known state meanwhile;
+    /// the landed attach reaches it as an attachment-state broadcast, the same way any other client's
+    /// attachment change does.
     func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil, force: Bool = false) {
         guard backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) else { return }
         var attachmentMode = mode ?? (ownerAttachmentRequested ? .owner : preferredAttachmentMode)
@@ -656,38 +723,104 @@ private final class NotificationObserverBag: @unchecked Sendable {
             }
         }
         guard force || !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
-        do {
-            try attachClientAction(client, attachmentMode)
-            isClientAttached = true
-            lastRequestedAttachmentMode = attachmentMode
-        } catch { updateInputStatus(message: String(describing: error), isError: true) }
+        // An attach already queued for this mode covers the request; only an explicit reclaim
+        // (`force`) re-sends behind it.
+        guard force || pendingAttach?.mode != attachmentMode else { return }
+        let requestedMode = attachmentMode
+        // Optimistic: the intent is recorded before the send so the pane presents as attached right
+        // away and no later refresh re-issues the same attach. `finishAttach` rolls it back when the
+        // send fails, so the next show retries.
+        isClientAttached = true
+        lastRequestedAttachmentMode = requestedMode
+        let attachID = UUID()
+        pendingAttach = (id: attachID, mode: requestedMode)
+        let attachingClient = client
+        clientControlQueue.enqueue(priority: .userInitiated) { [weak self, attachClientAction] in
+            // Ordering the sends is not enough on its own: a queued attach the pane has already replaced
+            // asks the daemon for a mode that is wrong by definition. An owner attach superseded by the
+            // viewer attach a lost-ownership refresh issued would, if it still went out, displace the
+            // session's new owner — and the viewer attach behind it then demotes this client, leaving
+            // the session with nobody owning it. So only the newest intent gets to send.
+            // Accepted residual: the check runs at send time, so an owner attach superseded while
+            // ALREADY IN FLIGHT can still land, and the same ownerless corner exists inside that one
+            // network round trip. Both clients then read the true state off the attachment broadcast
+            // and either's takeover prompt restores it in one action; closing the window needs the
+            // attach request to carry an ownership precondition the daemon checks — a wire change a
+            // two-client race inside one RTT does not justify.
+            let isCurrentIntent = await self?.isCurrentPendingAttach(id: attachID) ?? false
+            guard isCurrentIntent else { return }
+            do {
+                try attachClientAction(attachingClient, requestedMode)
+                await self?.finishAttach(id: attachID, mode: requestedMode, error: nil)
+            } catch { await self?.finishAttach(id: attachID, mode: requestedMode, error: error) }
+        }
     }
 
-    /// `onDetached`, when provided, runs once the detach has landed — after the daemon has
-    /// processed it in the async case — so a caller that then reads the authoritative attachment
-    /// snapshot sees this client already gone. It also runs when there is nothing to detach, so a
-    /// close always gets its post-detach hook.
-    func detachLocalClientIfNeeded(synchronously: Bool = true, onDetached: (@MainActor @Sendable () -> Void)? = nil) {
+    /// Whether `id` is still the attach the pane wants sent. Its queued send checks this immediately
+    /// before going out, so a superseded attach is dropped rather than delivered; `pendingAttach` is
+    /// left alone either way, since by then it belongs to the intent that replaced this one.
+    private func isCurrentPendingAttach(id: UUID) -> Bool { pendingAttach?.id == id }
+
+    /// Completion for an attach send that has landed. An attach superseded while it was in flight — the
+    /// window the pre-send check in `attachLocalClientIfNeeded` cannot cover — is inert here: its
+    /// outcome describes a request the pane has already moved on from, so it neither rolls back the
+    /// current intent nor reports anything, which is what keeps a stale failure from sitting on a pane
+    /// the daemon has since answered.
+    ///
+    /// A confirmed attach is where the pane's host becomes interactive: clearing `pendingAttach` moves
+    /// `confirmedHostAttachmentMode` to the requested mode, and re-running the host attach is what
+    /// promotes the host from viewer to owner — the same funnel the daemon's attachment broadcast
+    /// drives. It claims no window focus: the show that issued this attach already made whatever claim
+    /// it intended, and the surface reclaims first responder itself once it accepts input.
+    ///
+    /// A failure clears the optimistic attachment state so a later show retries the attach.
+    private func finishAttach(id: UUID, mode: TerminalAttachmentMode, error: (any Error)?) {
+        guard pendingAttach?.id == id else { return }
+        pendingAttach = nil
+        guard let error else {
+            clearAttachErrorStatusIfShowing()
+            ensureGhosttyHostAttached(reason: "client_attach_confirmed", requestWindowFocus: false)
+            return
+        }
+        if lastRequestedAttachmentMode == mode {
+            isClientAttached = false
+            lastRequestedAttachmentMode = nil
+        }
+        let message = String(describing: error)
+        attachErrorStatusMessage = message
+        updateInputStatus(message: message, isError: true)
+    }
+
+    /// Retires the message a failed attach left in the input status once a later attach succeeds.
+    /// Mirrors `clearDisconnectedInputStatusIfResolved`: the row holds one message at a time and every
+    /// writer owns its own, so this clears only its exact text — an unrelated status the user is
+    /// looking at (a send error, an ownership refusal) had no part in the attach and must survive it.
+    private func clearAttachErrorStatusIfShowing() {
+        guard let attachErrorStatusMessage, inputStatusLabel.stringValue == attachErrorStatusMessage else { return }
+        self.attachErrorStatusMessage = nil
+        updateInputStatus(message: "", isError: false)
+    }
+
+    /// Sends the detach off the main actor, ordered behind whatever attach this pane already issued.
+    /// `onDetached`, when provided, runs once the detach has landed — after the daemon has processed
+    /// it — so a caller that then reads the authoritative attachment snapshot sees this client
+    /// already gone. It also runs when there is nothing to detach, so a close always gets its
+    /// post-detach hook.
+    func detachLocalClientIfNeeded(onDetached: (@MainActor @Sendable () -> Void)? = nil) {
         guard isClientAttached else {
             onDetached?()
             return
         }
-        guard synchronously else {
-            let clientID = client.id
-            isClientAttached = false
-            lastRequestedAttachmentMode = nil
-            Task.detached(priority: .utility) { [detachClientAction] in
-                try? detachClientAction(clientID)
-                if let onDetached { await MainActor.run { onDetached() } }
-            }
-            return
+        let clientID = client.id
+        isClientAttached = false
+        lastRequestedAttachmentMode = nil
+        // The detach supersedes any attach still in flight, so a re-show of this pane must be free to
+        // issue a fresh attach behind it rather than be deduplicated against the superseded one.
+        pendingAttach = nil
+        clientControlQueue.enqueue(priority: .utility) { [detachClientAction] in
+            try? detachClientAction(clientID)
+            if let onDetached { await MainActor.run { onDetached() } }
         }
-        do {
-            try detachClientAction(client.id)
-            isClientAttached = false
-            lastRequestedAttachmentMode = nil
-        } catch { updateInputStatus(message: String(describing: error), isError: true) }
-        onDetached?()
     }
 
     func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
@@ -931,9 +1064,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
         // so this is what puts the pane's disconnected notice up and takes it down again.
         //
         // Deliberately the banner alone, not a full `refreshNow()`: the link state is the only thing
-        // that moved (with no stream, nothing else can have), and a full refresh can issue a
-        // synchronous attach against the very device this notification says is unreachable, stalling
-        // the main actor for that request's timeout.
+        // that moved (with no stream, nothing else can have), so a full refresh would only re-derive
+        // presentation from state that has not changed and queue an attach against the very device
+        // this notification says is unreachable.
         notificationObservers.tokens.append(
             NotificationCenter.default.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, object: nil, queue: .main) {
                 [weak self] notification in

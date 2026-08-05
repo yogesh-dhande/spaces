@@ -67,21 +67,63 @@
 
         private static func makeSnapshot(from snapshot: ghostty_terminal_snapshot_s) -> GhosttyTerminalSnapshot {
             let cellCount = Int(snapshot.cell_count)
-            let cells: [GhosttyTerminalSnapshot.Cell]
+            let links = linkTable(of: snapshot)
+            var cells: [GhosttyTerminalSnapshot.Cell] = []
+            var clusters: [Int: String] = [:]
+            var linkURLs: [Int: String] = [:]
             if let rawCells = snapshot.cells, cellCount > 0 {
-                let buffer = UnsafeBufferPointer(start: rawCells, count: cellCount)
-                cells = buffer.map {
-                    GhosttyTerminalSnapshot.Cell(
-                        codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
+                cells.reserveCapacity(cellCount)
+                for (index, rawCell) in UnsafeBufferPointer(start: rawCells, count: cellCount).enumerated() {
+                    cells.append(
+                        GhosttyTerminalSnapshot.Cell(
+                            codepoint: rawCell.codepoint, foregroundRGB: rawCell.foreground_rgb, backgroundRGB: rawCell.background_rgb,
+                            flags: rawCell.flags))
+                    if let cluster = cluster(for: rawCell) { GhosttyTerminalSnapshot.setCluster(cluster, forCell: index, in: &clusters) }
+                    if let linkURL = linkURL(for: rawCell, in: links) { GhosttyTerminalSnapshot.setLinkURL(linkURL, forCell: index, in: &linkURLs) }
                 }
-            } else {
-                cells = []
             }
 
             return GhosttyTerminalSnapshot(
                 columns: Int(snapshot.columns), rows: Int(snapshot.rows), cursorColumn: Int(snapshot.cursor_column),
                 cursorRow: Int(snapshot.cursor_row), cursorVisible: snapshot.cursor_visible, defaultForegroundRGB: snapshot.default_foreground_rgb,
-                defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells)
+                defaultBackgroundRGB: snapshot.default_background_rgb, cells: cells, clusters: clusters, linkURLs: linkURLs,
+                mouseReportingActive: snapshot.mouse_reporting_active, mouseShiftCapture: snapshot.mouse_shift_capture)
+        }
+
+        /// Rebuilds a cell's grapheme cluster from the exported base codepoint plus the extra codepoints
+        /// the snapshot carries. Cells with no extras — nearly all of them — carry no cluster and render
+        /// from the base codepoint alone.
+        private static func cluster(for cell: ghostty_terminal_snapshot_cell_s) -> String? {
+            guard let extras = cell.grapheme_extras, cell.grapheme_extra_len > 0, let base = UnicodeScalar(cell.codepoint) else { return nil }
+            var scalars = String.UnicodeScalarView()
+            scalars.append(base)
+            for extra in UnsafeBufferPointer(start: extras, count: Int(cell.grapheme_extra_len)) {
+                // A surrogate or out-of-range value is not something the terminal can hold; the base
+                // codepoint alone still renders the cell.
+                guard let scalar = UnicodeScalar(extra) else { return nil }
+                scalars.append(scalar)
+            }
+            return String(scalars)
+        }
+
+        /// The snapshot's deduplicated OSC 8 targets, decoded once per snapshot. Cells index into this
+        /// table, so a link shared by a run of cells is decoded once and every cell in the run ends up
+        /// with the same string.
+        private static func linkTable(of snapshot: ghostty_terminal_snapshot_s) -> [String] {
+            let linkCount = Int(snapshot.link_count)
+            guard let rawLinks = snapshot.links, linkCount > 0 else { return [] }
+            return UnsafeBufferPointer(start: rawLinks, count: linkCount).map {
+                guard let bytes = $0.ptr, $0.len > 0 else { return "" }
+                return String(decoding: UnsafeBufferPointer(start: bytes, count: Int($0.len)), as: UTF8.self)
+            }
+        }
+
+        /// A cell's OSC 8 target. `link_index` is 1-based so that zero means "no link", which is what
+        /// almost every cell carries.
+        private static func linkURL(for cell: ghostty_terminal_snapshot_cell_s, in links: [String]) -> String? {
+            guard cell.link_index > 0, Int(cell.link_index) <= links.count else { return nil }
+            let url = links[Int(cell.link_index) - 1]
+            return url.isEmpty ? nil : url
         }
 
         private static func makeScrollRects(from snapshot: ghostty_terminal_snapshot_s) -> [GhosttyRenderScrollRectOperation] {

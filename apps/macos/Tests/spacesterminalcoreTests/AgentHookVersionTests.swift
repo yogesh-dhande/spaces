@@ -151,6 +151,41 @@ import Testing
         #expect(AgentHookJSONWriter.installState(fileURL: file, bindings: bindings) == .current)
     }
 
+    // MARK: - Ending a block
+
+    /// Every supported agent must bind an event that fires *after* a permission prompt is answered.
+    ///
+    /// The pre-tool hooks alone cannot do it: Claude Code and Codex both fire `PreToolUse` before the
+    /// permission decision, so the `blocked` a gated tool raises always lands after that tool's own
+    /// `working`. With only `PreToolUse` bound, a row stays `waiting` for the entire run of the approved
+    /// tool and — when that tool is the turn's last — right through to `Stop`, never returning to
+    /// `working` at all. `PostToolUse` is the first thing either agent emits once the human has
+    /// answered, because it proves the tool actually ran.
+    ///
+    /// Claude Code splits that evidence by outcome — `PostToolUse` on success, `PostToolUseFailure`
+    /// on failure or interrupt, never both — so binding only the success half would strand every
+    /// approved command that exits non-zero, which is the outcome a gated command most often has.
+    /// Codex has no failure variant, so its single `PostToolUse` carries both outcomes.
+    @Test func everyAgentReportsWorkingOnceAnAnsweredPermissionPromptLetsTheToolRun() {
+        for agent in [CodingAgent.claudeCode, .codex] {
+            let bindings = agent.jsonEventBindings
+            #expect(bindings.contains { $0.eventName == "PermissionRequest" && $0.event == .blocked })
+            #expect(bindings.contains { $0.eventName == "PreToolUse" && $0.event == .working })
+            #expect(bindings.contains { $0.eventName == "PostToolUse" && $0.event == .working })
+        }
+        #expect(CodingAgent.claudeCode.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" && $0.event == .working })
+        // Codex's hook registry has no `PostToolUseFailure`; binding it would write an entry codex
+        // never fires.
+        #expect(!CodingAgent.codex.jsonEventBindings.contains { $0.eventName == "PostToolUseFailure" })
+
+        // opencode is the one agent that reports the answer itself, so it need not wait for the tool to
+        // finish: `permission.replied` fires the moment the human allows or rejects.
+        let plugin = AgentHookOpencodePluginWriter.pluginContents(spacesExecutablePath: "/usr/local/bin/spaces")
+        #expect(plugin.contains("permission.asked") && plugin.contains("signal(\"blocked\")"))
+        let repliedLine = plugin.split(separator: "\n").first { $0.contains("permission.replied") }
+        #expect(repliedLine?.contains("signal(\"working\")") == true)
+    }
+
     // MARK: - opencode plugin
 
     @Test func opencodePluginStateTracksTheHeaderVersion() throws {
@@ -179,13 +214,13 @@ import Testing
         let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
         try AgentHookJSONWriter.install(
-            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: SupportedCodingAgentHook.codex.jsonEventBindings,
+            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: CodingAgent.codex.jsonEventBindings,
             spacesExecutablePath: "/usr/local/bin/spaces")
 
         let disabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: false)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
 
         let enabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: true)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
     }
 }

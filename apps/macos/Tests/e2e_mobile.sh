@@ -26,6 +26,9 @@ fi
 MOBILE_ARTIFACT_NAME="${SPACES_MOBILE_E2E_ARTIFACT_NAME:-$MOBILE_DEVICE_KEY}"
 CODEX_RESUME_THREAD_ID="${SPACES_MOBILE_CODEX_RESUME_THREAD_ID:-019e380a-9def-7852-9834-74c67b2da894}"
 USER_HOME="${HOME:?}"
+# Where the demo puts its ephemeral profile roots; mirrors run_mobile_terminal_demo.sh's own default so
+# cleanup can recognize a demo profile without the demo having reported which root it used.
+DEMO_ROOT_PARENT="${SPACES_MOBILE_DEMO_ROOT_PARENT:-$USER_HOME/.spaces-dev/mobile-demo}"
 SOURCE_CODEX_HOME="${SPACES_MOBILE_CODEX_HOME:-${CODEX_HOME:-$USER_HOME/.codex}}"
 E2E_CODEX_HOME="$SOURCE_CODEX_HOME"
 USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
@@ -35,7 +38,7 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard workspace-delete-scroll workspace-hide-scroll workspace-delete-tab-lists session-end-scroll)
 REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
@@ -111,6 +114,10 @@ Scenarios:
   ctrl-c-final-frame
   ctrl-c-final-frame-codex-survivor
   ownership-guard
+  workspace-delete-scroll
+  workspace-hide-scroll
+  workspace-delete-tab-lists
+  session-end-scroll
 EOF
 }
 
@@ -279,6 +286,50 @@ terminate_pid_if_command_matches() {
   kill -9 "$pid" >/dev/null 2>&1 || true
 }
 
+# Stops a demo SpacesApp that outlived its run while holding the desktop-global control lease.
+#
+# `DEMO_APP_PID` is parsed from the demo's metadata block, so a demo that dies before printing it — a
+# failed bring-up — leaves cleanup with no pid to reap at all. An orphaned demo app keeps desktop-global
+# control, and every later desktop-driving lane then fails out its full frontmost/window wait instead of
+# naming the lease. The lease records its own holder, so read it and stop that process when it is a
+# SpacesApp running on a demo profile root. Scoped to `DEMO_ROOT_PARENT` so a real profile's app — the
+# installed one, or another worktree's — is never touched.
+#
+# The candidate must also be orphaned (reparented to launchd), which is what tells a leak apart from a
+# live run: the demo launches SpacesApp as its own child, so an app whose demo shell is still alive
+# belongs to a mobile lane that is still using it. Another worktree's mobile lane can be mid-run while
+# this one fails waiting for the shared harness lock, and killing its app would break a passing run.
+stop_leaked_demo_desktop_control_owner() {
+  local owner_json leaked_pid parent_pid
+  owner_json="$("$SPACES_E2E_BIN" profile-desktop-control-owner --json 2>/dev/null || true)"
+  [[ -n "$owner_json" ]] || return 0
+  leaked_pid="$(
+    python3 - "$DEMO_ROOT_PARENT" "$owner_json" <<'PY' || true
+import json
+import sys
+
+root_parent = sys.argv[1].rstrip("/") + "/"
+try:
+    payload = json.loads(sys.argv[2])
+except ValueError:
+    raise SystemExit(0)
+owner = payload.get("owner") or {}
+pid = owner.get("pid")
+profile_root = owner.get("profileRoot") or ""
+if isinstance(pid, int) and pid > 0 and profile_root.startswith(root_parent):
+    print(pid)
+PY
+  )"
+  [[ -n "$leaked_pid" ]] || return 0
+  parent_pid="$(ps -o ppid= -p "$leaked_pid" 2>/dev/null | tr -d ' ')"
+  if [[ "$parent_pid" != "1" ]]; then
+    printf 'Leaving demo SpacesApp pid %s alone: its demo (ppid %s) is still running.\n' "$leaked_pid" "$parent_pid" >&2
+    return 0
+  fi
+  printf 'Stopping demo SpacesApp still holding desktop control: pid %s\n' "$leaked_pid" >&2
+  terminate_pid_if_command_matches "$leaked_pid" "leaked demo app" "SpacesApp"
+}
+
 cleanup() {
   local exit_code=$?
   if [[ -n "$DEMO_PID" ]]; then
@@ -290,6 +341,7 @@ cleanup() {
     fi
   fi
   terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
+  stop_leaked_demo_desktop_control_owner
   if [[ "$DEMO_DEVICE_API_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
     terminate_pid_if_command_matches "$DEMO_DEVICE_API_PID" "demo Device API" "spacesd"
   fi
@@ -1213,12 +1265,8 @@ PY
   SCENARIO_CREATED_SESSIONS=()
 }
 
-reset_mobile_app() {
-  local launch_env=()
-  local assignment
-  while IFS= read -r assignment; do
-    [[ -n "$assignment" ]] && launch_env+=("$assignment")
-  done < <(python3 - "$UI_TEST_CONFIG" <<'PY'
+mobile_launch_environment_assignments() {
+  python3 - "$UI_TEST_CONFIG" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1266,15 +1314,37 @@ if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
     print(f"SIMCTL_CHILD_SPACES_MOBILE_TEST_DEVICE_SEED_JSON={json.dumps(seed, separators=(',', ':'))}")
 print(f"SIMCTL_CHILD_SPACES_MOBILE_UI_TEST_CONFIG_PATH={config_path}")
 PY
-  )
+}
+
+reset_mobile_app() {
+  local launch_env=()
+  local assignment
+  while IFS= read -r assignment; do
+    [[ -n "$assignment" ]] && launch_env+=("$assignment")
+  done < <(mobile_launch_environment_assignments)
   xcrun simctl terminate "$MOBILE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
-  env \
-    "${launch_env[@]}" \
-    SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
-    SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
-    SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
-    xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
-  sleep 2
+  if [[ "${MOBILE_APP_LAUNCH_MODE:-default}" == "console-capture" ]]; then
+    # Attached to a pty so the app's stdout/stderr land in the scenario directory. An uncaught
+    # NSException prints its reason there and nowhere else — the .ips crash report carries the
+    # backtrace but not the assertion text.
+    env \
+      "${launch_env[@]}" \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
+      SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_LIST_IDENTITY_DUMP="${SPACES_MOBILE_LIST_IDENTITY_DUMP:-0}" \
+      xcrun simctl launch --console-pty "$MOBILE_UDID" "$BUNDLE_ID" \
+      >"$SCENARIO_DIR/app-stdout.log" 2>"$SCENARIO_DIR/app-stderr.log" </dev/null &
+    sleep 4
+  else
+    env \
+      "${launch_env[@]}" \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
+      SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
+      SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
+      xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
+    sleep 2
+  fi
 }
 
 write_ui_test_config() {
@@ -1283,6 +1353,7 @@ write_ui_test_config() {
   local secondary_session_id="${3:-}"
   python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1454,6 +1525,20 @@ elif scenario == "two-session":
         "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
     })
+elif scenario == "session-end-scroll":
+    payload.update({
+        "targetWorkspaceID": os.environ.get("SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID", ""),
+        "terminalRowRemovalTimeoutSeconds": 55.0,
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-failure.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-after-scroll.png"),
+    })
+elif scenario in ("workspace-delete-scroll", "workspace-hide-scroll", "workspace-delete-tab-lists"):
+    payload.update({
+        "targetWorkspaceID": os.environ.get("SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID", ""),
+        "removalScrollSeconds": 12.0,
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-failure.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-after-scroll.png"),
+    })
 elif scenario in ("ctrl-c-final-frame", "ctrl-c-final-frame-codex-survivor"):
     expected_secondary_text = "" if scenario == "ctrl-c-final-frame-codex-survivor" else "__spaces_survivor_peer_ready__"
     payload.update({
@@ -1487,6 +1572,14 @@ run_ui_test() {
       -derivedDataPath "$IOS_DERIVED_DATA" \
       -only-testing:"$test_name" \
       test-without-building >"$UI_TEST_LOG" 2>&1; then
+    tail -40 "$UI_TEST_LOG" 2>/dev/null | grep -E "error:|failed" || true
+    # An uncaught NSException's reason text appears only in the app's captured stderr — the .ips crash
+    # report carries the backtrace but not the assertion text — so print it before failing.
+    if [[ -s "$SCENARIO_DIR/app-stderr.log" ]]; then
+      printf '\n--- SpacesMobile app stderr ---\n'
+      cat "$SCENARIO_DIR/app-stderr.log"
+      printf -- '--- end SpacesMobile app stderr ---\n\n'
+    fi
     fail "UI test failed: $test_name"
   fi
 }
@@ -3442,8 +3535,11 @@ with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
         "SELECT state, service_pid, child_pid FROM terminal_runtime_states WHERE session_id = ?",
         (secondary_session_id,),
     ).fetchone()
+    # The row stores the payload plus `has_final_render`, the flag every device-overview build reads
+    # to answer "can this ended pane replay?" without decoding the payload. The emitting reason lives
+    # inside the payload itself.
     persisted_final = db.execute(
-        "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
+        "SELECT payload_json, has_final_render FROM terminal_remote_session_states WHERE session_id = ?",
         (session_id,),
     ).fetchone()
 require(process_is_alive(expected_service_pid), f"spacesd pid {expected_service_pid} exited after ctrl+c.")
@@ -3462,9 +3558,16 @@ require(
     f"Secondary child process is not alive after ctrl+c: {secondary_state!r}",
 )
 require(persisted_final is not None, "Primary session did not persist a final remote state payload.")
-require(persisted_final[0] == "terminated", f"Persisted final payload reason was not terminated: {persisted_final[0]!r}")
-persisted_final_payload = json.loads(persisted_final[1])
+persisted_final_payload = json.loads(persisted_final[0])
+require(
+    persisted_final_payload.get("reason") == "terminated",
+    f"Persisted final payload reason was not terminated: {persisted_final_payload.get('reason')!r}",
+)
 require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
+require(
+    persisted_final[1] == 1,
+    f"Persisted final payload was not flagged as carrying a replayable frame: has_final_render={persisted_final[1]!r}",
+)
 
 overview_response = send_mobile_request({"command": "overview"})
 require(overview_response.get("ok"), f"Device API overview failed after ctrl+c: {overview_response}")
@@ -3850,6 +3953,409 @@ PY
   printf 'Mobile scenario passed: ownership-guard\n'
 }
 
+demo_project_id() {
+  local project_dir="$1"
+  local listing="$SCENARIO_DIR/project-list.txt"
+  demo_env "$SPACES_CLI_BIN" project list >"$listing" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$listing" "$project_dir" <<'PY'
+import os
+import sys
+
+listing = open(sys.argv[1], encoding="utf-8").read().splitlines()
+wanted = os.path.realpath(sys.argv[2])
+for line in listing:
+    fields = line.split("\t")
+    if not fields or not fields[0]:
+        continue
+    directory = ""
+    for field in fields[1:]:
+        if field.startswith("dir="):
+            directory = field[4:]
+    if directory and os.path.realpath(directory) == wanted:
+        print(fields[0])
+        break
+else:
+    raise SystemExit(f"No Spaces project registered for {wanted}. Listing:\n" + "\n".join(listing))
+PY
+}
+
+# Prints "<id>\t<branch>" for every workspace of the project whose branch carries the given prefix.
+demo_workspaces_with_branch_prefix() {
+  local project_id="$1"
+  local prefix="$2"
+  local listing="$SCENARIO_DIR/workspace-list.txt"
+  demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$listing" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$listing" "$prefix" "$DB_PATH" <<'PY'
+import sqlite3
+import sys
+
+listing = open(sys.argv[1], encoding="utf-8").read().splitlines()
+prefix = sys.argv[2]
+# `workspace list` does not report hidden state, and a hidden workspace has no band in the Spaces
+# list, so it cannot be the target of a swipe.
+with sqlite3.connect(sys.argv[3]) as db:
+    hidden = {row[0] for row in db.execute("SELECT id FROM workspaces WHERE is_hidden = 1")}
+for line in listing:
+    fields = line.split("\t")
+    if not fields or not fields[0] or fields[0] in hidden:
+        continue
+    branch = ""
+    for field in fields[1:]:
+        if field.startswith("branch="):
+            branch = field[7:]
+    if branch.startswith(prefix):
+        print(f"{fields[0]}\t{branch}")
+PY
+}
+
+# Regression lane for removing a workspace while the Spaces list is being scrolled: its rows are diffed
+# out from under a moving collection view, which must stay a consistent batch update. Populates the
+# project with extra workspaces so the list is long enough to scroll, starts the target so the daemon's
+# stop-then-remove takes real time, then drives the swipe -> Delete/Hide -> confirm -> keep scrolling
+# flow from the simulator and verifies the workspace really was removed or hidden.
+run_workspace_removal_scroll_scenario() {
+  local scenario="$1"
+  local action="delete"
+  local ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteWhileScrollingList"
+  if [[ "$scenario" == "workspace-hide-scroll" ]]; then
+    action="hide"
+    ui_test_name="SpacesMobileUITests/SpacesMobileUITests/testWorkspaceHideWhileScrollingList"
+  fi
+  begin_scenario "$scenario"
+
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  printf 'Removal-scroll project: %s (%s)\n' "$project_id" "$PROJECT_DIR" >>"$SCENARIO_LOG"
+
+  local branch_prefix="e2e-removal-scroll-"
+  local existing_count
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | wc -l | tr -d ' ')"
+  local wanted=4
+  local stamp
+  stamp="$(date +%s)"
+  local index=0
+  while (( existing_count + index < wanted )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${branch_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to create removal-scroll workspace ${branch_prefix}${stamp}-${index}."
+  done
+
+  local target_workspace_id
+  target_workspace_id="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | head -1 | cut -f1)"
+  [[ -n "$target_workspace_id" ]] || fail "No removal-scroll workspace was available to remove."
+  printf 'Removal target workspace: %s\n' "$target_workspace_id" >>"$SCENARIO_LOG"
+
+  # A running workspace makes the daemon's stop-then-remove path take seconds, so the removal lands
+  # well inside the scroll window rather than before the list has started moving.
+  demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to start removal-scroll workspace $target_workspace_id."
+
+  local session_id
+  session_id="$(new_terminal_session "e2e-$scenario")"
+  track_current_scenario_session "$session_id"
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "$scenario" "$session_id"
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "$ui_test_name"
+  MOBILE_APP_LAUNCH_MODE="default"
+
+  # The UI test dismisses any connection-error alert so the scroll can continue and reports how many it
+  # had to. Surface the count on a pass as well: a non-zero count means overview polls went unanswered
+  # while the daemon tore the workspace down.
+  local connection_error_alerts
+  connection_error_alerts="$(grep -o "spaces-mobile-e2e workspace-${action}-scroll connection_error_alerts=[0-9]*" "$UI_TEST_LOG" \
+    | tail -1 | sed 's/.*=//')"
+  printf 'Connection-error alerts during the %s scroll: %s\n' "$action" "${connection_error_alerts:-unreported}" | tee -a "$SCENARIO_LOG"
+
+  if [[ "$action" == "delete" ]]; then
+    local post_listing="$SCENARIO_DIR/workspace-list-after-delete.txt"
+    demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$post_listing" 2>>"$SCENARIO_LOG" \
+      || fail "Unable to list workspaces after the delete."
+    python3 - "$post_listing" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id still exists after the delete."
+import sys
+
+workspace_id = sys.argv[2]
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if line.split("\t")[0] == workspace_id:
+        raise SystemExit(f"Workspace {workspace_id} still exists after the delete.")
+PY
+  else
+    python3 - "$DB_PATH" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id is not hidden after the hide."
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute("SELECT is_hidden FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+if row is None:
+    raise SystemExit(f"Workspace {workspace_id} not found after the hide.")
+if row[0] != 1:
+    raise SystemExit(f"Workspace {workspace_id} is not hidden after the hide (is_hidden={row[0]}).")
+PY
+  fi
+  printf 'Mobile scenario passed: %s\n' "$scenario"
+}
+
+# Prints the worktree directory of the workspace whose id is `$1`.
+demo_workspace_dir_for_id() {
+  python3 - "$DB_PATH" "$1" <<'PY'
+import sqlite3
+import sys
+
+db_path, workspace_id = sys.argv[1:3]
+with sqlite3.connect(db_path) as db:
+    row = db.execute("SELECT dir FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+if row is None or not row[0]:
+    raise SystemExit(f"No directory registered for workspace {workspace_id}.")
+print(row[0])
+PY
+}
+
+# Creates a workspace-owned Spaces terminal session without opening a Mac window and prints its id.
+# Unlike `new_terminal_session` this deliberately leaves the session unowned: the lanes that use it want
+# a row in the workspace, not a takeover target.
+demo_workspace_terminal_session() {
+  local workspace_dir="$1"
+  local title="$2"
+  local command_text="$3"
+  local create_log="$SCENARIO_DIR/workspace-terminal-$title.json"
+  demo_env "$SPACES_E2E_BIN" start-workspace-terminal-session --workspace-dir "$workspace_dir" --title "$title" --command "$command_text" \
+    >"$create_log" 2>>"$SCENARIO_LOG" || return 1
+  python3 - "$create_log" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+session_id = payload.get("id") or payload.get("sessionID")
+if not session_id:
+    raise SystemExit(f"Terminal create response did not include a session id: {payload!r}")
+print(session_id)
+PY
+}
+
+# Runs one configured coding agent in `$1` through the Device API — the same daemon path the app and the
+# mobile clients use — and waits until the workspace's overview reports the agent row running and the
+# named terminal row exited. Both are what put the workspace on the Agents and Alerts tabs.
+demo_seed_tab_list_rows() {
+  local workspace_id="$1"
+  local agent_name="$2"
+  python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$workspace_id" "$agent_name" <<'PY'
+import json
+import subprocess
+import sys
+import time
+import uuid
+
+pairing_path, device_key, spacese2e, host, port, workspace_id, agent_name = sys.argv[1:8]
+pairing = json.loads(open(pairing_path, encoding="utf-8").read())[device_key]
+client_app = {
+    "installationID": pairing.get("installationID") or str(uuid.uuid4()).upper(),
+    "bundleID": "dev.usespaces.spacesmobile",
+    "platform": "ios",
+    "deviceName": "Mobile E2E tab lists",
+    "appVersion": "1.0",
+}
+
+
+def send(command, payload):
+    request = {"authToken": pairing["authToken"], "clientApp": client_app, "command": {command: payload}}
+    completed = subprocess.run(
+        [
+            spacese2e, "mobile-request", "--host", host, "--port", port,
+            f"--certificate-fingerprint={pairing['certificateFingerprint']}",
+            "--request-json", json.dumps(request, separators=(",", ":")),
+        ],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    response = json.loads(completed.stdout)
+    if response.get("ok") is not True:
+        raise SystemExit(f"{command} failed: {json.dumps(response, indent=2, sort_keys=True)}")
+    return response.get("result") or {}
+
+
+def workspace_snapshot():
+    overview = send("overview", {}).get("overview") or {}
+    for workspace in overview.get("workspaces") or []:
+        if workspace.get("id") == workspace_id:
+            return workspace
+    return None
+
+
+send("runCodingAgent", {"workspaceID": workspace_id, "agentName": agent_name, "agentLauncherID": None})
+
+deadline = time.time() + 60
+observed = None
+while time.time() < deadline:
+    workspace = workspace_snapshot()
+    if workspace is not None:
+        agents = [row for row in workspace.get("codingAgentRows") or [] if row.get("name") == agent_name]
+        exited_terminals = [row for row in workspace.get("terminalRows") or [] if row.get("runState") == "exited"]
+        observed = {
+            "codingAgentRows": [{"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("codingAgentRows") or []],
+            "terminalRows": [{"title": row.get("title"), "runState": row.get("runState")} for row in workspace.get("terminalRows") or []],
+        }
+        if agents and agents[0].get("runState") == "running" and exited_terminals:
+            print(json.dumps(observed, sort_keys=True))
+            raise SystemExit(0)
+    time.sleep(0.5)
+raise SystemExit(f"Timed out waiting for the Agents/Alerts seed rows on {workspace_id}: {json.dumps(observed, sort_keys=True)}")
+PY
+}
+
+# Regression lane for deleting a workspace that owns rows only a running session puts there, with all
+# three banded tabs in play. `workspace-delete-scroll` deletes a workspace whose rows are all configured,
+# so its section's item count never moves; here the workspace gets a coding agent started from its
+# launcher and a workspace terminal whose command has exited, so tearing it down takes several rows out
+# of a section that is still listed. Those two rows are also what put the workspace on the Agents and
+# Alerts tabs, which the UI test visits before the delete so their lists mount — a TabView keeps a
+# visited tab's collection view alive, so one delete then diffs rows out of all three lists at once.
+run_workspace_delete_tab_lists_scenario() {
+  begin_scenario "workspace-delete-tab-lists"
+
+  local agent_name="tab-lists-agent"
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  printf 'Tab-lists project: %s (%s)\n' "$project_id" "$PROJECT_DIR" >>"$SCENARIO_LOG"
+
+  # Filler workspaces so the Spaces list is long enough to scroll, shared with the removal-scroll lanes.
+  local filler_prefix="e2e-removal-scroll-"
+  local existing_count stamp index
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$filler_prefix" | wc -l | tr -d ' ')"
+  stamp="$(date +%s)"
+  index=0
+  while (( existing_count + index < 3 )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${filler_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1 \
+      || fail "Failed to create tab-lists filler workspace ${filler_prefix}${stamp}-${index}."
+  done
+
+  # A dedicated target: this lane deletes it, and it carries settings the filler workspaces must not.
+  local target_branch="e2e-tab-lists-${stamp}"
+  demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "$target_branch" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to create the tab-lists target workspace $target_branch."
+  local target_workspace_id target_workspace_dir
+  target_workspace_id="$(demo_workspaces_with_branch_prefix "$project_id" "$target_branch" | head -1 | cut -f1)"
+  [[ -n "$target_workspace_id" ]] || fail "The tab-lists target workspace $target_branch was not registered."
+  target_workspace_dir="$(demo_workspace_dir_for_id "$target_workspace_id")" || fail "Unable to resolve the directory of $target_workspace_id."
+  printf 'Tab-lists target workspace: %s (%s)\n' "$target_workspace_id" "$target_workspace_dir" >>"$SCENARIO_LOG"
+
+  demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to start the tab-lists target workspace $target_workspace_id."
+
+  # The Agents tab lists coding-agent rows that are doing something, so the launcher has to stay alive
+  # for the whole scenario rather than run and exit.
+  demo_env "$SPACES_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$target_workspace_dir" --name "$agent_name" \
+    --command "python3 -c \"import time; print('tab-lists-agent-ready', flush=True); time.sleep(900)\"" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "Failed to configure the tab-lists coding agent on $target_workspace_id."
+
+  # An exited workspace terminal is the Alerts-tab event: the tab bands attention events by workspace, so
+  # this workspace gets a band of its own there. The command runs to completion rather than being
+  # terminated from outside — terminating a session drops its row instead of leaving it exited, and only
+  # an exited row raises an attention event.
+  local alert_session_id
+  alert_session_id="$(demo_workspace_terminal_session "$target_workspace_dir" "e2e-tab-lists-alert" "printf 'tab-lists-alert-done\\n'")" \
+    || fail "Failed to create the tab-lists alert terminal session."
+  track_current_scenario_session "$alert_session_id"
+
+  demo_seed_tab_list_rows "$target_workspace_id" "$agent_name" >>"$SCENARIO_LOG" 2>&1 \
+    || fail "The tab-lists workspace never produced both an Agents-tab row and an Alerts-tab event. See $SCENARIO_LOG"
+
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "workspace-delete-tab-lists" "$alert_session_id"
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testWorkspaceDeleteAfterVisitingBandedTabs"
+  MOBILE_APP_LAUNCH_MODE="default"
+
+  local connection_error_alerts
+  connection_error_alerts="$(grep -o "spaces-mobile-e2e workspace-delete-tab-lists connection_error_alerts=[0-9]*" "$UI_TEST_LOG" | tail -1 | sed 's/.*=//')"
+  printf 'Connection-error alerts during the tab-lists delete: %s\n' "${connection_error_alerts:-unreported}" | tee -a "$SCENARIO_LOG"
+
+  local post_listing="$SCENARIO_DIR/workspace-list-after-delete.txt"
+  demo_env "$SPACES_CLI_BIN" workspace list --project "$project_id" >"$post_listing" 2>>"$SCENARIO_LOG" \
+    || fail "Unable to list workspaces after the tab-lists delete."
+  python3 - "$post_listing" "$target_workspace_id" <<'PY' || fail "Workspace $target_workspace_id still exists after the tab-lists delete."
+import sys
+
+workspace_id = sys.argv[2]
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if line.split("\t")[0] == workspace_id:
+        raise SystemExit(f"Workspace {workspace_id} still exists after the delete.")
+PY
+  printf 'Mobile scenario passed: workspace-delete-tab-lists\n'
+}
+
+# Prints the workspace id whose directory is `$1`.
+demo_workspace_id_for_dir() {
+  python3 - "$DB_PATH" "$1" <<'PY'
+import os
+import sqlite3
+import sys
+
+db_path, wanted = sys.argv[1], os.path.realpath(sys.argv[2])
+with sqlite3.connect(db_path) as db:
+    for workspace_id, directory in db.execute("SELECT id, dir FROM workspaces"):
+        if directory and os.path.realpath(directory) == wanted:
+            print(workspace_id)
+            break
+    else:
+        raise SystemExit(f"No workspace registered for {wanted}.")
+PY
+}
+
+# Regression lane for the other way the Spaces list loses a row: a terminal session ends and its runtime
+# row drops out from under a workspace band that stays listed. The session is ended from the daemon side
+# on a delay so the removal lands while the simulator is mid-scroll, which is when the list's batch update
+# has to stay consistent.
+run_session_end_scroll_scenario() {
+  begin_scenario "session-end-scroll"
+
+  local project_id
+  project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
+  local branch_prefix="e2e-removal-scroll-"
+  local existing_count
+  existing_count="$(demo_workspaces_with_branch_prefix "$project_id" "$branch_prefix" | wc -l | tr -d ' ')"
+  local stamp
+  stamp="$(date +%s)"
+  local index=0
+  # The list has to be long enough that scrolling it means something.
+  while (( existing_count + index < 4 )); do
+    index=$((index + 1))
+    demo_env "$SPACES_CLI_BIN" workspace create --project "$project_id" --branch "${branch_prefix}${stamp}-${index}" >>"$SCENARIO_LOG" 2>&1       || fail "Failed to create session-end workspace ${branch_prefix}${stamp}-${index}."
+  done
+
+  local target_workspace_id
+  target_workspace_id="$(demo_workspace_id_for_dir "$PROJECT_DIR")" || fail "Unable to resolve the workspace owning $PROJECT_DIR."
+  printf 'Session-end target workspace: %s
+' "$target_workspace_id" >>"$SCENARIO_LOG"
+
+  local session_id
+  session_id="$(new_terminal_session "e2e-session-end-scroll")"
+  printf 'Session-end target session: %s
+' "$session_id" >>"$SCENARIO_LOG"
+  export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"
+  write_ui_test_config "session-end-scroll" "$session_id"
+
+  # Ends the session while the UI test is already scrolling: the app needs time to launch, pair and
+  # render the list first, and the test scrolls until the row goes or its own timeout expires.
+  (
+    sleep 30
+    demo_env "$SPACES_E2E_BIN" terminate-terminal-session "$session_id" >>"$SCENARIO_LOG" 2>&1 || true
+  ) &
+  local terminator_pid=$!
+
+  MOBILE_APP_LAUNCH_MODE="console-capture"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalRowRemovedWhileScrollingList"
+  MOBILE_APP_LAUNCH_MODE="default"
+  wait "$terminator_pid" 2>/dev/null || true
+
+  # No database assertion here: ending a session stops it but leaves its record until the daemon
+  # collects it, so the record says nothing about what the list did. What matters is what the UI test
+  # already asserted — the row left the list while its workspace band stayed, and the app survived
+  # the scroll.
+  printf 'Mobile scenario passed: session-end-scroll\n'
+}
+
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
@@ -3885,6 +4391,15 @@ run_selected_scenarios() {
         ;;
       ownership-guard)
         run_ownership_guard_scenario
+        ;;
+      workspace-delete-scroll|workspace-hide-scroll)
+        run_workspace_removal_scroll_scenario "$scenario"
+        ;;
+      workspace-delete-tab-lists)
+        run_workspace_delete_tab_lists_scenario
+        ;;
+      session-end-scroll)
+        run_session_end_scroll_scenario
         ;;
       *)
         fail "unknown scenario: $scenario"

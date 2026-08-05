@@ -60,6 +60,32 @@ extension SQLiteStore {
             ])
     }
 
+    /// Marks a process the exit reconcile judged dead as exited, but only while the row still is the one
+    /// the reconcile snapshotted — same id, still running, still bound to the same terminal session.
+    /// The reconcile runs on its own connection and takes no workspace lifecycle lock, so a stop can
+    /// delete the row and a restart can rebind it to a fresh session while the reconcile is deciding.
+    /// An unconditional upsert would re-insert the stopped process as a permanently exited row, or
+    /// strand the restarted process's live row as exited on the terminated session. Returns whether the
+    /// write applied; when it did not, the row changed under the reconcile and the next pass judges it
+    /// on its own state.
+    public func markRunningProcessExited(_ snapshot: RunningProcessRecord, pid: Int?, exitedAt: String) throws -> Bool {
+        let expectedSessionID = spacesTerminalSessionID(terminalApp: snapshot.terminalApp, terminalTrackingID: snapshot.terminalTrackingID)
+        return try withImmediateTransaction {
+            try execute(
+                sql: """
+                    UPDATE running_processes
+                    SET pid = ?, status = ?, exited_at = ?
+                    WHERE id = ? AND status = ? AND terminal_session_id IS NULLIF(?, '')
+                    """,
+                bindings: [
+                    pid.map(String.init) ?? "", RunningProcessState.exited.rawValue, exitedAt, snapshot.id, RunningProcessState.running.rawValue,
+                    expectedSessionID ?? "",
+                ])
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
+            return changed > 0
+        }
+    }
+
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] {
         let rows = try queryRows(
             sql: """

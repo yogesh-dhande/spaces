@@ -36,13 +36,23 @@ public struct SpacesDeviceTerminalPerformanceEvent: Codable, Equatable, Sendable
 public enum SpacesDeviceTerminalPerformanceLogger {
     public static let environmentKey = "SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH"
 
-    public static func isEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
-        resolvedLogPath(environment: environment) != nil
-    }
+    /// Resolved once, the first time this enum is touched, rather than per call. `ProcessInfo.processInfo
+    /// .environment` materializes the *entire* process environment dictionary on every access; reading it
+    /// as a per-call default argument here used to run on every terminal output tick and measured at
+    /// 70-80% of the serial terminal-engine queue's CPU while the logger was switched off (#332). Because
+    /// this is a `static let`, exporting the environment variable after the process has already started
+    /// has no effect on that process — the same one-time-read behavior as `ghosttyEmbeddedSessionTraceEnabled`
+    /// in GhosttyEmbeddedSessionHost.swift.
+    private static let resolvedLogPathAtLaunch: String? = resolvedLogPath(environment: ProcessInfo.processInfo.environment)
 
-    public static func emit(_ event: SpacesDeviceTerminalPerformanceEvent, environment: [String: String] = ProcessInfo.processInfo.environment) {
-        guard let logPath = resolvedLogPath(environment: environment) else { return }
-        appendJSONLine(event, to: logPath)
+    /// A disabled logger costs exactly this boolean check: no environment lookup happens per call.
+    public static func isEnabled() -> Bool { resolvedLogPathAtLaunch != nil }
+
+    /// `event` is `@autoclosure` so a disabled logger never constructs the event (or evaluates whatever
+    /// attribute dictionary a caller built inline to pass into it).
+    public static func emit(_ event: @autoclosure () -> SpacesDeviceTerminalPerformanceEvent) {
+        guard let logPath = resolvedLogPathAtLaunch else { return }
+        appendJSONLine(event(), to: logPath)
     }
 
     private static func resolvedLogPath(environment: [String: String]) -> String? {

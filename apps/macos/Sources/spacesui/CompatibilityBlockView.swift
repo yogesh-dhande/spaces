@@ -165,10 +165,12 @@ final class CompatibilityBlockView: NSView {
         }
     }
 
-    /// Builds the block's copy and button choice for `remedy`. `clientVersion` is display-only context
-    /// threaded through for the user's benefit — it plays no part in picking the title, detail, or
-    /// button below; `remedy` already encodes every decision, and a client must never re-derive one by
-    /// comparing its own build against a daemon's (unrelated release trains — see `DaemonUpdateRemedy`).
+    /// Builds the block's copy and button choice for `remedy`. `clientVersion` plays no part in picking
+    /// the title, detail, or button below; `remedy` already encodes every decision, and a client must
+    /// never re-derive one by comparing its own build against a daemon's (unrelated release trains — see
+    /// `DaemonUpdateRemedy`). It survives here for two uses that are not comparisons: naming this app's
+    /// own build alongside the daemon's in `.updateClient`, and pinning the Linux installer command to
+    /// the version this app ships with.
     nonisolated static func content(
         remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, clientVersion: String, canCheckForUpdates: Bool
     ) -> Content {
@@ -190,12 +192,17 @@ final class CompatibilityBlockView: NSView {
             return Content(title: "\(deviceName) needs a daemon update", detail: detail, installerCommand: nil, actionButtonTitle: "Update Daemon")
 
         case .installUpdateOnDevice(let daemonVersion):
+            // The reason is always the connection protocol, never a version comparison: this app and a
+            // given device's daemon are on unrelated release trains, so "older than this app" is both
+            // meaningless and — whenever the two share a marketing version, as every dev build does —
+            // visibly absurd. The daemon's version rides along as an appositive identifying which build
+            // is behind, and drops out entirely (commas included) when the status did not carry one.
+            let daemonLabel = daemonVersion.map { ", running Spaces \($0)," } ?? ""
             if isLinuxDaemon {
                 let detail =
-                    "The daemon on \(deviceName) is running Spaces \(daemonVersion ?? "an older build"), older than this app needs (Spaces "
-                    + "\(clientVersion)), and a restart won't update it — nothing newer is installed there. Run the command below on the Linux "
-                    + "device — running terminals, agents, and processes on it are preserved — then reconnect. Other paired devices remain "
-                    + "available."
+                    "The daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and a restart won't change "
+                    + "that — nothing newer is installed there. Run the command below on the Linux device — running terminals, agents, and "
+                    + "processes on it are preserved — then reconnect. Other paired devices remain available."
                 return Content(
                     title: "Update \(deviceName)'s Spaces daemon", detail: detail,
                     installerCommand: SpacesLinuxInstaller.installCommand(version: clientVersion), actionButtonTitle: nil)
@@ -205,17 +212,17 @@ final class CompatibilityBlockView: NSView {
                 // only for a wire-compatible daemon, and this one is too old for that, so once the
                 // install lands this pane re-renders as `.applyStagedUpdate` and the user applies it.
                 let detail =
-                    "This Mac's Spaces daemon is running \(daemonVersion ?? "an older build"), older than this app needs (Spaces "
-                    + "\(clientVersion)). Update Spaces on this Mac, then apply it to the daemon here — running terminals, agents, and processes "
-                    + "are preserved."
+                    "This Mac's Spaces daemon\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is installed "
+                    + "here to restart into. Update Spaces on this Mac, then apply it to the daemon here — running terminals, agents, and "
+                    + "processes are preserved."
                 return Content(
                     title: "This Mac needs a Spaces update", detail: detail, installerCommand: nil,
                     actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil)
             }
             let detail =
-                "\(deviceName) is running Spaces \(daemonVersion ?? "an older build"), older than this app needs (Spaces \(clientVersion)), and "
-                + "nothing newer is installed there. Open Spaces on \(deviceName) and install the update; this pane then offers to apply it to "
-                + "the daemon. Other paired devices remain available."
+                "The Spaces daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is "
+                + "installed there. Open Spaces on \(deviceName) and install the update; this pane then offers to apply it to the daemon. Other "
+                + "paired devices remain available."
             return Content(title: "\(deviceName) needs a Spaces update", detail: detail, installerCommand: nil, actionButtonTitle: nil)
         }
     }

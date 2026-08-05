@@ -100,9 +100,11 @@ extension WorkspaceOrchestrator {
     /// terminal-session record and updates the `name` of the session's runtime-target rows so
     /// both the workspace terminal row and the session summary reflect the rename. Returns
     /// false when no ad-hoc session in the workspace matches.
+    ///
+    /// An empty (or whitespace-only) title clears the rename instead of setting one, restoring the
+    /// generated name the session was launched under — the only way back from a rename.
     @discardableResult public func renameAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String, title: String) throws -> Bool {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { throw WorkspaceError.invalidArgument(message: "Terminal session title must not be empty.") }
         // The lifecycle lock keeps the rename from re-upserting a window row that a concurrent
         // stop just deleted.
         return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
@@ -119,14 +121,20 @@ extension WorkspaceOrchestrator {
             let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
                 $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
             }
-            for window in matchingWindows {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role, orderIndex: window.orderIndex,
-                        lastSeenAt: nowISO8601()))
+            let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+            // The window record names its row only once the session is gone, so a rename writes it to
+            // outlive the session and clearing one puts back the launch-generated name the record was
+            // created with. With no session record left there is no name to restore, so it stands.
+            if let windowName = title.isEmpty ? launchConfiguration?.title : title {
+                for window in matchingWindows {
+                    try store.upsert(
+                        window: WindowRecord(
+                            id: window.id, workspaceID: window.workspaceID, app: window.app, name: windowName, detail: window.detail,
+                            targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role,
+                            orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                }
             }
-            if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
+            if launchConfiguration != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try TerminalSessionPersistence.writeUserTitle(title, sessionID: sessionID, paths: paths)
             }
@@ -200,6 +208,42 @@ extension WorkspaceOrchestrator {
 
     func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
+    /// Runs `command` through an interactive login shell (`-l -i -c`), the single shell form every
+    /// command Spaces launches into a terminal goes through — workspace processes, ad-hoc
+    /// `terminal command` sessions, and spawned coding agents.
+    ///
+    /// `-l` alone sources only the profile files (`~/.zshenv`, `~/.zprofile`). The PATH entries and
+    /// version-manager shims that put a user's tools on PATH — `~/.local/bin`, nvm/fnm/asdf/volta —
+    /// live in `~/.zshrc`, which a shell reads only when it is interactive. Without `-i`, `claude`
+    /// (installed to `~/.local/bin`), an fnm-managed `codex`, or `nvm use 24 && npm run dev` fails
+    /// with `command not found` even though the same command works typed into a Spaces terminal —
+    /// whose shell is a bare `exec <shell> -l` on a PTY, and therefore interactive.
+    func interactiveLoginShellCommand(_ command: String, shellPath: String? = nil) -> String {
+        "exec \(shellQuoted(shellPath ?? terminalLoginShellPath())) -l -i -c \(shellQuoted(command))"
+    }
+
+    /// Builds the environment a Spaces terminal session launches with.
+    ///
+    /// `SPACES_DB_PATH` is FORWARDED from this daemon's own environment, never synthesized from the resolved
+    /// profile. Both real profiles are discoverable from a binary's own location with no environment at all —
+    /// the installed daemon under launchd falls through to `~/.spaces`, and a repo-built or deployed binary
+    /// derives its development profile from where it sits on disk — so an unbound terminal is the CORRECT
+    /// state for both: every `spaces` binary invoked inside one resolves the profile it belongs to. The only
+    /// profile that cannot be discovered that way is an ephemeral throwaway root (tests, E2E harnesses), and
+    /// that is exactly the case where the daemon itself was started with the variable and so forwards it.
+    ///
+    /// Synthesizing it instead exported a `SPACES_DB_PATH` into every workspace terminal, including the
+    /// installed daemon's own. Anything run inside — notably an agent hook, which fires on every tool call —
+    /// inherited it, and a `spaces` invocation that autostarts a daemon hands it the whole parent
+    /// environment. A daemon serving `~/.spaces` then resolved itself through the explicit-path branch,
+    /// was classified as a development profile, and assigned and persisted a development-range Device API
+    /// port, orphaning every paired client. Profile identity belongs to the binary's location, not to an
+    /// inherited binding, which is why `SPACES_DB_PATH` is refused outright inside a live profile root.
+    ///
+    /// Accepted consequence: in a development-profile terminal, a globally-configured agent hook still runs
+    /// the INSTALLED `spaces` binary, which resolves the installed profile, so its agent signal is a silent
+    /// no-op for a workspace id that profile has never heard of. Agent-lifecycle reporting from
+    /// development-profile terminals is explicitly not supported.
     func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) -> [String:
         String]
     {
@@ -273,13 +317,7 @@ extension WorkspaceOrchestrator {
         let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
         let runtimeEnv = terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
-        let resolvedShellPath = shellPath ?? terminalLoginShellPath()
-        // Run managed processes through an interactive login shell (`-l -i -c`), matching the ad-hoc
-        // terminal experience. `-l` alone sources only the profile files; the version-manager shims
-        // developers rely on (nvm, asdf, volta) live in `~/.bashrc`/`~/.zshrc`, which is guarded to
-        // interactive shells. Without `-i`, a command like `nvm use 24 && npm run dev` fails with
-        // `nvm: command not found` even though the same command works when typed into a terminal.
-        return commandPrefixedWithShellEnvironment("exec \(shellQuoted(resolvedShellPath)) -l -i -c \(shellQuoted(command))", env: runtimeEnv)
+        return commandPrefixedWithShellEnvironment(interactiveLoginShellCommand(command, shellPath: shellPath), env: runtimeEnv)
     }
 
     func logTerminalPerfMetric(_ metric: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
@@ -485,7 +523,7 @@ extension WorkspaceOrchestrator {
     }
 
     func builtInTerminalSessionOwnership(sessionID: String) throws -> BuiltInTerminalSessionOwnership {
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: true) }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id) }
         var owningProcess: RunningProcessRecord?
         var owningAgent: AgentWindowRecord?
         var terminalWindowWorkspaceID: String?

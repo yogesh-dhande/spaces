@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -10,6 +11,7 @@ struct SpacesTabView: View {
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var isShowingFilters = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
+    @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
@@ -47,8 +49,12 @@ struct SpacesTabView: View {
         } message: { workspace in
             Text(
                 workspace.isRunning
-                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and removes it from this list and the Mac sidebar. Unhide it from the Mac."
-                    : "\"\(workspace.displayName)\" will be removed from this list and the Mac sidebar. Unhide it from the Mac.")
+                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
+                    : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
+        }.sheet(item: $pendingDeleteWorkspace) { workspace in
+            WorkspaceDeleteSheet(workspace: workspace) { deleteLocalBranch, deleteRemoteBranch in
+                Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
+            }
         }
     }
 
@@ -99,29 +105,87 @@ struct SpacesTabView: View {
                     QRCodeScannerView { payload in model.prepareScannedPairingLink(payload) }
                 }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        homeControls.padding(.horizontal, 20).padding(.bottom, 12)
-                        if model.isActiveDeviceBlocked {
-                            // Fully blocked, scoped to this device: the banner in homeControls is the only
-                            // surface. Switch to another paired device or restart this device's daemon.
-                            EmptyView()
-                        } else if model.isLoading && model.overview == nil {
-                            ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360)
-                        } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
+                List {
+                    #if DEBUG
+                        let _ = SpacesListIdentityDump.record(
+                            listIdentitySections,
+                            state: "pendingDelete=\(pendingDeleteWorkspace?.id ?? "none") pendingHide=\(pendingHideWorkspace?.id ?? "none") "
+                                + "mutating=\(model.isMutating) marked=\(model.overview?.workspaces.filter { model.isWorkspacePendingDeletion($0.id) }.map(\.id).joined(separator: "+") ?? "")"
+                        )
+                    #endif
+                    Section {
+                        homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
+                    }
+                    if model.isActiveDeviceBlocked {
+                        // Fully blocked, scoped to this device: the banner in homeControls is the only
+                        // surface. Switch to another paired device or restart this device's daemon.
+                        EmptyView()
+                    } else if model.isLoading && model.overview == nil {
+                        Section {
+                            ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.loading)
+                        }
+                    } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
+                        Section {
                             ContentUnavailableView(
                                 "No Workspaces", systemImage: "rectangle.stack",
                                 description: Text("Create a workspace or adjust the current filters.")
-                            ).frame(maxWidth: .infinity, minHeight: 360)
-                        } else {
-                            ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
-                            ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
+                            ).frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.empty)
                         }
-                    }.padding(.vertical, 12)
-                }.id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden).refreshable { await model.refresh() }
+                    } else {
+                        ForEach(projectGroups) { projectGroup in projectSection(projectGroup) }
+                        ForEach(model.terminalGroups) { group in terminalGroupSection(group) }
+                    }
+                    if !model.isActiveDeviceBlocked { hiddenSection }
+                }.listStyle(.plain).listSectionSpacing(0).id(terminalListRefreshGeneration).background(Theme.bg).scrollContentBackground(.hidden)
+                    .refreshable { await model.refresh() }
             }
         }.background(Theme.bg.ignoresSafeArea())
     }
+
+    #if DEBUG
+        /// Every row `homeView`'s list is about to render, grouped into the sections it renders them in, in
+        /// the same order and under the same conditions, for `SpacesListIdentityDump`. Built from the same
+        /// `SpacesListRowID` values and the same `Section` boundaries the body uses, so the dump reports
+        /// what the list actually holds rather than a second description of it that could drift.
+        ///
+        /// Sectioned rather than flat because the collection view's inconsistency is a *per-section* count:
+        /// the dump is only comparable with UIKit's own `numberOfItems(inSection:)` if it is partitioned
+        /// the same way.
+        private var listIdentitySections: [[String]] {
+            var sections: [[String]] = [["controls@\(SpacesListRowID.controls)"]]
+            if model.isActiveDeviceBlocked {
+                // No rows: the compatibility banner in homeControls is the whole surface.
+            } else if model.isLoading && model.overview == nil {
+                sections.append(["loading@\(SpacesListRowID.loading)"])
+            } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
+                sections.append(["empty@\(SpacesListRowID.empty)"])
+            } else {
+                for projectGroup in projectGroups {
+                    sections.append(["projectCaption@\(SpacesListRowID.projectCaption(projectGroup.id))"])
+                    for group in projectGroup.workspaceGroups {
+                        var workspaceSection = ["band@\(SpacesListRowID.workspaceBand(group.id))"]
+                        if !model.collapsedWorkspaceIDs.contains(group.id) {
+                            workspaceSection.append("controlBar@\(SpacesListRowID.workspaceControlBar(group.id))")
+                            if group.rows.isEmpty { workspaceSection.append("noRows@\(SpacesListRowID.workspaceEmptyRows(group.id))") }
+                            workspaceSection.append(contentsOf: group.rows.map { "runtimeRow@\(SpacesListRowID.runtimeRow($0.id))" })
+                        }
+                        sections.append(workspaceSection)
+                    }
+                }
+                for group in model.terminalGroups {
+                    sections.append(["looseBand@\(SpacesListRowID.looseBand(group.workspaceID))"])
+                    sections.append(contentsOf: group.sessions.map { ["looseSession@\(SpacesListRowID.looseSession($0.id))"] })
+                }
+            }
+            if !model.isActiveDeviceBlocked, isHiddenSectionVisible {
+                sections.append(["hiddenHeader@\(SpacesListRowID.hiddenHeader)"])
+                if model.isHiddenSectionExpanded {
+                    sections.append(contentsOf: model.hiddenWorkspaces.map { ["hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))"] })
+                }
+            }
+            return sections
+        }
+    #endif
 
     private var homeControls: some View {
         VStack(spacing: 8) {
@@ -227,48 +291,94 @@ struct SpacesTabView: View {
         }
     }
 
-    private func projectSection(_ projectGroup: ProjectGroup) -> some View {
-        VStack(spacing: 0) {
+    /// One list section for the project's caption and one for each of its workspaces.
+    ///
+    /// The sections are what keep the list's bookkeeping sound rather than a visual device — they carry no
+    /// header and `listSectionSpacing(0)` keeps them from adding any spacing of their own, so the caption
+    /// and bands look exactly as they did when the whole tab was a single section. Every workspace being
+    /// its own section means adding or removing one is an insert or delete of a whole section instead of a
+    /// run of rows inside a 49-row section, which is the update the collection view was miscounting.
+    @ViewBuilder private func projectSection(_ projectGroup: ProjectGroup) -> some View {
+        Section {
             Text(projectGroup.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 8)
-            ForEach(projectGroup.workspaceGroups) { group in workspaceSection(group).padding(.bottom, 14) }
-        }.padding(.bottom, 4)
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 14).bandListRow().id(
+                    SpacesListRowID.projectCaption(projectGroup.id))
+        }
+        ForEach(Array(projectGroup.workspaceGroups.enumerated()), id: \.element.id) { index, group in
+            // The project caption already separates the first workspace from what is above it, so only
+            // the workspaces after it carry the full band lead-in gap.
+            Section { workspaceSection(group, topGap: index == 0 ? 8 : 14) }
+        }
     }
 
-    @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup) -> some View {
+    /// A workspace's band plus, when it is expanded, its control bar and runtime rows.
+    ///
+    /// Marking a workspace as deleting changes only what its rows draw and what they accept — it adds no
+    /// row and takes none away. Collapsing the workspace for the duration would read better, and was tried
+    /// three times, but removing its control bar and runtime rows at the moment the delete is confirmed
+    /// crashes the collection view (`attempt to delete item 6 from section 3 which only contains 6 items
+    /// before the update`): it counts one item fewer than the section actually holds, so a removal inside
+    /// a section walks off its end. Wrapping the publishes in an animation, which is the one code path
+    /// that never crashed, does not change that. Removing a whole section — what the daemon confirming
+    /// the delete does — is sound; removing rows within one is not. The only structural change a delete
+    /// makes is therefore the one the daemon confirms, when the workspace leaves the overview.
+    @ViewBuilder private func workspaceSection(_ group: SpacesMobileWorkspaceGroup, topGap: CGFloat) -> some View {
+        let isDeleting = model.isWorkspacePendingDeletion(group.id)
         let isCollapsed = model.collapsedWorkspaceIDs.contains(group.id)
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
-            } label: {
-                HeaderBand {
-                    WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
-                    Spacer(minLength: 0)
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { model.toggleWorkspaceCollapsed(group.id) }
+        } label: {
+            HeaderBand {
+                WorkspaceBandLabel(isGitWorkspace: group.workspace.isGitWorkspace, displayName: group.workspace.displayName)
+                Spacer(minLength: 0)
+                // The spinner takes the collapse chevron's place, so a deleting band reads as busy rather
+                // than merely collapsed.
+                if isDeleting {
+                    ProgressView().controlSize(.small).tint(Theme.mutedSecondary)
+                } else {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
                         Theme.mutedSecondary)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").modifier(
-                WorkspaceBandContextMenu(model: model, workspace: group.workspace) { pendingHideWorkspace = group.workspace })
-            if !isCollapsed {
-                VStack(spacing: 0) {
-                    WorkspaceControlBar(
-                        workspace: group.workspace, isMutating: model.isMutating, onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                        onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                        onStop: { Task { await model.stopWorkspace(group.workspace) } },
-                        // Demo Mode's backend does not open ad hoc terminals; hide the action there.
-                        onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) })
-                    if group.rows.isEmpty {
-                        Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(
-                            maxWidth: .infinity, alignment: .leading
-                        ).padding(.vertical, 9).padding(.horizontal, 20)
-                    }
-                    ForEach(group.rows) { row in runtimeRow(row) }
-                }.padding(.top, 4)
+                }
+            }.contentShape(Rectangle()).opacity(isDeleting ? 0.5 : 1)
+        }.buttonStyle(.plain).disabled(isDeleting).accessibilityIdentifier("workspace.band.\(group.id)").accessibilityValue(
+            isDeleting ? "Deleting" : ""
+        ).bandListHeaderRow(topGap: topGap).modifier(
+            WorkspaceBandActions(
+                model: model, workspace: group.workspace, onHide: { pendingHideWorkspace = group.workspace },
+                onDelete: { pendingDeleteWorkspace = group.workspace })
+        ).id(SpacesListRowID.workspaceBand(group.id))
+        if !isCollapsed {
+            // Dimmed and inert with the band while the delete runs: the rows stay listed (removing them is
+            // the structural change this deliberately avoids) but nothing under a workspace on its way out
+            // is worth acting on.
+            WorkspaceControlBar(
+                workspace: group.workspace, isMutating: model.isMutating || isDeleting,
+                onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } },
+                onStop: { Task { await model.stopWorkspace(group.workspace) } },
+                // Demo Mode's backend does not open ad hoc terminals; hide the action there.
+                onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
+            ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
+            if group.rows.isEmpty {
+                Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 9).padding(.horizontal, 20).bandListRow().id(SpacesListRowID.workspaceEmptyRows(group.id))
+            }
+            ForEach(group.rows) { row in
+                // Lifecycle actions reach a row two ways: a long press opens the full menu (Rename
+                // included), a trailing swipe offers the lifecycle subset. Full swipe is off so an
+                // over-swipe cannot run or stop something on its own.
+                // The swipe tray and the long-press menu are attached unconditionally so the row keeps its
+                // identity (a structural change here is what the collection view miscounts — see above),
+                // but they offer nothing while the workspace is deleting: `disabled` covers the row's own
+                // tap, not the action surfaces hanging off it.
+                runtimeRow(row, isDeleting: isDeleting).disabled(isDeleting).opacity(isDeleting ? 0.5 : 1).bandListRow().swipeActions(
+                    edge: .trailing, allowsFullSwipe: false
+                ) { if !isDeleting { runtimeSwipeActions(for: row) } }.id(SpacesListRowID.runtimeRow(row.id))
             }
         }
     }
 
-    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+    @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow, isDeleting: Bool) -> some View {
         if renamingRowID == row.id {
             renameRow(row)
         } else {
@@ -284,7 +394,7 @@ struct SpacesTabView: View {
             // Long-press only offers a menu when the row has something to offer. A row with neither a
             // lifecycle action nor a renamable name — an exited terminal whose session is gone, or a
             // process running without a configured entry — would otherwise open an empty menu.
-            if hasContextMenu(row) { button.contextMenu { runtimeContextMenu(for: row) } } else { button }
+            if hasContextMenu(row), !isDeleting { button.contextMenu { runtimeContextMenu(for: row) } } else { button }
         }
     }
 
@@ -331,6 +441,37 @@ struct SpacesTabView: View {
         if row.isBrowserSession || row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
     }
 
+    /// The lifecycle subset of `runtimeContextMenu`. Rename stays menu-only: it swaps a text field into
+    /// the row, which a swipe gesture that has just closed cannot hand focus to cleanly. The row being
+    /// renamed offers nothing at all — swiping it would only drop the field's focus and discard the edit.
+    @ViewBuilder private func runtimeSwipeActions(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if renamingRowID != row.id { runtimeLifecycleSwipeActions(for: row) }
+    }
+
+    @ViewBuilder private func runtimeLifecycleSwipeActions(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.canRun {
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .run)
+            } label: {
+                Label("Run", systemImage: "play.fill")
+            }.tint(Theme.accent).disabled(model.isMutating)
+        }
+        if row.canStop {
+            Button {
+                Task { await model.stop(row: row) }
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }.tint(Theme.red).disabled(model.isMutating)
+        }
+        if row.canRestart {
+            Button {
+                pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .restart)
+            } label: {
+                Label("Restart", systemImage: "arrow.clockwise")
+            }.tint(Theme.muted).disabled(model.isMutating)
+        }
+    }
+
     @ViewBuilder private func runtimeContextMenu(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
         if row.canRun {
             Button {
@@ -373,54 +514,213 @@ struct SpacesTabView: View {
         }
     }
 
+    // MARK: - Hidden workspaces
+
+    /// Demo Mode's backend cannot serve `setWorkspaceHidden`, so the recovery section that depends on it
+    /// stays off there — the same reasoning that keeps Hide itself out of `WorkspaceBandActions`. The
+    /// section is otherwise unfiltered by search or the row/state filters: it exists to recover a
+    /// workspace that the filtered browse below can no longer show, not to be browsed itself. Loose
+    /// terminal-session groups set the precedent for how search affects an auxiliary section here — they
+    /// stay on screen and filter their own contents rather than disappearing outright — so this section
+    /// likewise stays on screen while a search is active instead of hiding.
+    private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && !model.hiddenWorkspaces.isEmpty }
+
+    /// The Hidden header and each hidden workspace are separate list sections rather than rows of one
+    /// section, for the same reason each workspace is its own section: hiding and unhiding add and remove
+    /// a row while the section around it survives, and a row leaving a surviving section is the update the
+    /// collection view miscounts (see `workspaceSection`). A whole section arriving or leaving is sound,
+    /// so every row that can come and go independently owns one.
+    @ViewBuilder private var hiddenSection: some View {
+        if isHiddenSectionVisible {
+            Section {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { model.toggleHiddenSectionExpanded() }
+                } label: {
+                    HeaderBand {
+                        Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("\(model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+                        Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.mutedSecondary)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
+            }
+            if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in Section { hiddenWorkspaceRow(workspace) } } }
+        }
+    }
+
+    private func hiddenWorkspaceRow(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
+        BandRow(
+            dotKind: nil, tile: TypeIconTile(systemName: workspace.isGitWorkspace ? "arrow.triangle.branch" : "folder"), title: workspace.displayName,
+            detail: workspace.projectName, detailIsMonospaced: false
+        ) { EmptyView() }.bandListRow().accessibilityIdentifier("workspace.hidden.\(workspace.id)").contextMenu {
+            // A workspace hidden from another client while this one's delete is still unresolved lands
+            // here; it is leaving either way, so it offers no unhide.
+            if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) }
+        }.swipeActions(edge: .trailing, allowsFullSwipe: false) { if !model.isWorkspacePendingDeletion(workspace.id) { unhideButton(workspace) } }.id(
+            SpacesListRowID.hiddenWorkspace(workspace.id))
+    }
+
+    /// No confirmation: unlike Hide (which can stop a running workspace), unhiding only changes
+    /// visibility and cannot lose anything, so it fires directly from the swipe or the menu.
+    private func unhideButton(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
+        Button {
+            Task { await model.unhideWorkspace(workspace) }
+        } label: {
+            Label("Unhide", systemImage: "eye")
+        }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("workspace.unhide.\(workspace.id)")
+    }
+
     // MARK: - Loose terminal-session groups
 
-    private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
-        let workspace = model.overview?.workspaces.first { $0.id == group.id }
-        return VStack(spacing: 0) {
+    /// The band and each loose session are separate sections, like the Hidden section's rows: a session
+    /// ending drops its row while the band around it stays, and a row leaving a surviving section is what
+    /// the collection view miscounts.
+    @ViewBuilder private func terminalGroupSection(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        let workspace = model.overview?.workspaces.first { $0.id == group.workspaceID }
+        // A loose group belongs to a workspace this list is still showing, so a delete running against
+        // that workspace marks these rows exactly as it marks the workspace's own band: dimmed and inert,
+        // whether this device issued the delete or the daemon reports another client's teardown. Sessions
+        // of a workspace the overview has already dropped form no group at all (see `terminalGroups`), so
+        // what is marked here is always a workspace still listed beside these rows.
+        let isDeleting = model.isWorkspacePendingDeletion(group.workspaceID)
+        Section {
             HeaderBand {
                 WorkspaceBandLabel(isGitWorkspace: workspace?.isGitWorkspace ?? false, displayName: group.workspaceTitle)
                 Spacer(minLength: 0)
                 Text(group.projectName.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary).tracking(0.4)
                     .lineLimit(1)
-            }.accessibilityIdentifier("workspace.band.\(group.id)")
-            VStack(spacing: 0) { ForEach(group.sessions) { session in terminalSessionRow(session) } }.padding(.top, 4)
-        }.padding(.bottom, 14)
+                // Identified as the loose band it is, not as the workspace: the workspace's own band
+                // already carries `workspace.band.<id>`, and two rows answering to one identifier is what
+                // `SpacesMobileTerminalWorkspaceGroup.id` exists to avoid.
+            }.opacity(isDeleting ? 0.5 : 1).accessibilityIdentifier("workspace.looseBand.\(group.workspaceID)").accessibilityValue(
+                isDeleting ? "Deleting" : ""
+            ).bandListHeaderRow().id(SpacesListRowID.looseBand(group.workspaceID))
+        }
+        ForEach(group.sessions) { session in
+            Section { terminalSessionRow(session, isDeleting: isDeleting).bandListRow().id(SpacesListRowID.looseSession(session.id)) }
+        }
     }
 
-    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
+    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary, isDeleting: Bool) -> some View {
         Button {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
             BandRow(
-                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.workingDirectory
+                dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""
             ) { RowChevron() }
-        }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
-            "terminal.row.\(session.id)")
+        }.buttonStyle(.plain).disabled(isDeleting || model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).opacity(
+            isDeleting ? 0.5 : 1
+        ).accessibilityIdentifier("terminal.row.\(session.id)")
     }
 }
 
-/// The workspace band's context menu — its only entry is Hide. Demo Mode's backend cannot hide a
-/// workspace, and the band has no other menu entry, so in Demo Mode the band presents no context menu
-/// rather than an empty one.
-private struct WorkspaceBandContextMenu: ViewModifier {
+/// The identity of every row in the Spaces list.
+///
+/// Each row states its own identity with `.id(…)` rather than leaving SwiftUI to infer one from where the
+/// row sits in the builder. The Spaces list is one section assembled from sibling `ForEach`es and
+/// multi-row builder functions, and inferred identity there proved unstable: with the list's rows and
+/// their order provably unchanged (see `SpacesListIdentityDump`), the collection view was still told 15
+/// rows had been deleted and 15 inserted, and it counted one item fewer than the list actually had. An
+/// update against that mismatched bookkeeping is the inconsistent batch update that crashed the app while
+/// a workspace was being deleted.
+///
+/// A row's identity must therefore be unique across the whole list, not merely within its own `ForEach` —
+/// every case here is prefixed by the kind of row it is, so an id the daemon reuses across row families
+/// (a workspace id naming both a band and a loose band, say) still yields two distinct rows.
+private enum SpacesListRowID {
+    static let controls = "controls"
+    static let loading = "loading"
+    static let empty = "empty"
+    static let hiddenHeader = "hidden.header"
+
+    static func projectCaption(_ projectID: String) -> String { "project.caption.\(projectID)" }
+    static func workspaceBand(_ workspaceID: String) -> String { "workspace.band.\(workspaceID)" }
+    static func workspaceControlBar(_ workspaceID: String) -> String { "workspace.controlBar.\(workspaceID)" }
+    static func workspaceEmptyRows(_ workspaceID: String) -> String { "workspace.noRows.\(workspaceID)" }
+    static func runtimeRow(_ rowID: String) -> String { "runtime.row.\(rowID)" }
+    static func looseBand(_ workspaceID: String) -> String { "loose.band.\(workspaceID)" }
+    static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
+    static func hiddenWorkspace(_ workspaceID: String) -> String { "hidden.workspace.\(workspaceID)" }
+}
+
+/// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.
+/// Demo Mode's backend can do neither, so there the band presents no menu and no swipe rather than
+/// actions that would fail. A full swipe cannot fire either action: Delete needs its confirmation sheet
+/// and Hide its confirmation dialog, so neither is safe to trigger by over-swiping.
+private struct WorkspaceBandActions: ViewModifier {
     let model: SpacesMobileAppModel
     let workspace: SpacesDeviceWorkspaceSummary
     let onHide: () -> Void
+    let onDelete: () -> Void
+
+    /// The daemon refuses to delete a default workspace — a project's own directory goes when the project
+    /// does — so the action is hidden rather than offered and rejected.
+    private var canDelete: Bool { !workspace.isDefault }
 
     func body(content: Content) -> some View {
-        if model.isDemoModeEnabled {
+        // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
+        // workspace already marked for deletion is inert by contract. Disabling would still open the swipe
+        // tray and the context menu on a band whose workspace is on its way out; leaving the surfaces off
+        // entirely is what makes the row genuinely offer nothing. The mark outlives `isMutating` when a
+        // delete's outcome could not be confirmed, which is exactly when this matters.
+        if model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspace.id) {
             content
         } else {
             content.contextMenu {
-                Button {
-                    onHide()
-                } label: {
-                    Label("Hide", systemImage: "eye.slash")
-                }.disabled(model.isMutating)
+                hideButton
+                if canDelete { menuDeleteButton }
+            }.swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if canDelete { swipeDeleteButton }
+                hideButton.tint(Theme.muted)
             }
         }
     }
+
+    /// Hide carries no role for the same reason `swipeDeleteButton` does not: it opens a confirmation and
+    /// the band stays listed until a refreshed overview reports the workspace hidden.
+    private var hideButton: some View {
+        Button {
+            onHide()
+        } label: {
+            Label("Hide", systemImage: "eye.slash")
+        }.disabled(model.isMutating).accessibilityIdentifier("workspace.hide.\(workspace.id)")
+    }
+
+    /// Delete in the long-press menu, where `.destructive` is only what colours it red.
+    private var menuDeleteButton: some View {
+        Button(role: .destructive) {
+            onDelete()
+        } label: {
+            deleteLabel
+        }.disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+    }
+
+    /// Delete in the swipe tray — deliberately roleless, tinted red by hand instead of carrying
+    /// `.destructive`.
+    ///
+    /// A destructive swipe action tells the collection view its row is going away, and it drops that item
+    /// from its own bookkeeping the moment the button is tapped. This one removes nothing: it opens a
+    /// confirmation sheet, and the row stays listed through the confirmation, through the pending-deletion
+    /// mark, and until a refreshed overview stops carrying the workspace. From that tap onward the
+    /// collection view holds one item fewer than the list does for that section, and the update that
+    /// finally removes the workspace walks off the end — `attempt to delete item 8 from section 6 which
+    /// only contains 8 items before the update`, raised long after the tap that caused it, with the list's
+    /// own rows provably unchanged, uniquely identified, and identically ordered across the culprit update.
+    /// The same Delete taken from the long-press menu never desyncs, because a menu makes no such promise.
+    ///
+    /// The rule: `.destructive` in `swipeActions` is only correct when the action removes the row from the
+    /// data synchronously with the tap (the Alerts tab's dismiss does, and keeps its role). Any swipe
+    /// action that leaves its row in place must not carry it. `.tint(Theme.red)` keeps the tray identical.
+    private var swipeDeleteButton: some View {
+        Button {
+            onDelete()
+        } label: {
+            deleteLabel
+        }.tint(Theme.red).disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+    }
+
+    private var deleteLabel: some View { Label("Delete", systemImage: "trash") }
 }
 
 private struct ProjectGroup: Identifiable {
@@ -493,3 +793,103 @@ struct WorkspaceCreateSheet: View {
         }
     }
 }
+
+#if DEBUG
+    /// Test-support diagnostic, not product behavior: prints the identity of every row the Spaces list is
+    /// about to render, in render order, once per content evaluation.
+    ///
+    /// It exists because `UICollectionView`'s inconsistent-update exception reports only counts ("after the
+    /// update (42) must be (41)"), which cannot say *which* row the list lost or gained, and is raised on a
+    /// later update than the one that did the damage. Two lines are emitted per evaluation and compared:
+    ///
+    /// - `LISTDUMP` — what the list is about to hold, partitioned into the sections it renders, plus the
+    ///   presentation state driving that evaluation. A duplicate identity, two rows the list counts as one,
+    ///   is called out here.
+    /// - `UIKITCOUNTS` — what each `UICollectionView` in the key window believes it holds, read a main-queue
+    ///   hop later so this evaluation's update has been applied. These are the cached counts the exception
+    ///   is raised against, not a fresh data-source query.
+    ///
+    /// The first evaluation whose per-section counts disagree is the update that lost the row, which is the
+    /// one worth investigating; every later one merely inherits the drift. Note the collection views are
+    /// reported in hierarchy order, so a tab switch renumbers them — match a view to this list by its
+    /// section count, never by position.
+    ///
+    /// Each row is logged as `label@identity`: `label` is where the row sits in the builder, `identity` is
+    /// the value SwiftUI identifies it by (`-` for rows carrying structural identity only, which have no id
+    /// of their own). Duplicates are judged on the `identity` half, across the whole list rather than per
+    /// `ForEach`.
+    ///
+    /// Lives beside `SpacesTabView.listIdentitySections`, the mirror of the list body it dumps, so the two
+    /// are edited together. Off unless `SPACES_MOBILE_LIST_IDENTITY_DUMP=1` is set in the app's environment,
+    /// and compiled out of release builds entirely.
+    @MainActor enum SpacesListIdentityDump {
+        static let isEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_LIST_IDENTITY_DUMP"] == "1"
+
+        private static var sequence = 0
+
+        /// `sections` is an autoclosure so a disabled dump costs nothing but the flag read — the list body
+        /// is re-evaluated constantly while scrolling, and this runs inside that evaluation.
+        ///
+        /// Two lines are emitted per evaluation. `LISTDUMP` is what the list is about to hold, recorded
+        /// inside the body evaluation. `UIKITCOUNTS` is what the collection views backing the app's lists
+        /// believe they hold, read one main-queue hop later so the update this evaluation produced has been
+        /// applied. Comparing the two per section is the point: an inconsistent batch update is UIKit's
+        /// count drifting from the list's, and the first evaluation where they disagree is the update that
+        /// lost a row — not the later one that trips the exception.
+        static func record(_ sections: @autoclosure () -> [[String]], state: @autoclosure () -> String) {
+            guard isEnabled else { return }
+            sequence += 1
+            let seq = sequence
+            let sections = sections()
+            let identities = sections.flatMap { $0 }
+            let duplicates = duplicateIdentities(in: identities)
+            let counts = sections.map { String($0.count) }.joined(separator: ",")
+            let line =
+                "LISTDUMP seq=\(seq) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) count=\(identities.count) "
+                + "sections=\(sections.count) counts=\(counts) \(state()) "
+                + "duplicates=\(duplicates.isEmpty ? "none" : duplicates.joined(separator: ",")) rows=\(identities.joined(separator: " "))\n"
+            FileHandle.standardError.write(Data(line.utf8))
+            DispatchQueue.main.async { emitCollectionViewCounts(seq: seq) }
+        }
+
+        /// Every `UICollectionView` currently in the app's key window, with the section and per-section item
+        /// counts it believes it has. `numberOfSections` and `numberOfItems(inSection:)` report the cached
+        /// counts from the last applied update rather than re-asking the data source, which is exactly the
+        /// bookkeeping the inconsistency exception is raised against.
+        ///
+        /// Every list in the app is reported, not just the Spaces tab's: a `TabView` keeps a visited tab's
+        /// collection view alive and updating, so which one drifts is itself a finding.
+        private static func emitCollectionViewCounts(seq: Int) {
+            let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            guard let window = windows.first(where: \.isKeyWindow) ?? windows.first else { return }
+            var collectionViews: [UICollectionView] = []
+            func walk(_ view: UIView) {
+                if let collectionView = view as? UICollectionView { collectionViews.append(collectionView) }
+                for subview in view.subviews { walk(subview) }
+            }
+            walk(window)
+            let described = collectionViews.enumerated().map { index, collectionView -> String in
+                let sectionCount = collectionView.numberOfSections
+                let items = (0..<sectionCount).map { String(collectionView.numberOfItems(inSection: $0)) }.joined(separator: ",")
+                return "cv\(index)[sections=\(sectionCount) counts=\(items)]"
+            }
+            let line =
+                "UIKITCOUNTS seq=\(seq) t=\(String(format: "%.4f", Date().timeIntervalSince1970)) "
+                + "views=\(collectionViews.count) \(described.joined(separator: " "))\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+
+        /// The identities carried by more than one row, which is exactly what makes a batch update
+        /// inconsistent: the list then holds fewer distinct identities than it has rows. Structural-only
+        /// rows (`-`) are excluded — they are told apart by position, not by value.
+        private static func duplicateIdentities(in rows: [String]) -> [String] {
+            var seen: Set<String> = []
+            var duplicates: [String] = []
+            for row in rows {
+                guard let identity = row.split(separator: "@", maxSplits: 1).last.map(String.init), identity != "-" else { continue }
+                if !seen.insert(identity).inserted, !duplicates.contains(identity) { duplicates.append(identity) }
+            }
+            return duplicates
+        }
+    }
+#endif

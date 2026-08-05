@@ -29,3 +29,27 @@ enum DetailPane: Equatable {
     /// Device whose compatibility block is shown, or `nil` for any other pane.
     var compatibilityBlockDeviceID: String? { if case .compatibilityBlock(let deviceID) = self { deviceID } else { nil } }
 }
+
+/// Why the detail pane is being presented. The `show*` methods serve both roles — they are the
+/// navigation entry points *and* the pane's re-render — and only the caller knows which one it is, so
+/// the intent is passed in rather than inferred from what changed.
+///
+/// It decides one thing: whether the free-standing New Project / New Workspace / project settings
+/// windows are dismissed. Content changing is not evidence of navigation, because a background refresh
+/// changes it too — a remote device turning wire-incompatible swaps the pane for its compatibility
+/// block, recovery swaps it back, a failed reload swaps in the error placeholder, and a selected
+/// workspace deleted elsewhere drops the pane back to alerts. Dismissing a form the user is filling in
+/// on any of those loses their input.
+enum DetailPanePresentation {
+    /// The user asked for this pane: a sidebar row selection, the Alerts row or its shortcut, arrow
+    /// navigation, the compatibility caption's button. Moving the pane out from under a form window is
+    /// what dismisses it.
+    case userNavigation
+    /// A refresh or reconcile re-resolved the pane from new device state. Never dismisses a form
+    /// window, whatever it does to the pane's content.
+    ///
+    /// This is the default because it is the harmless verdict: a background path miscategorized as
+    /// navigation destroys work the user cannot get back, while navigation miscategorized as background
+    /// only leaves a dialog open a moment longer.
+    case backgroundRefresh
+}

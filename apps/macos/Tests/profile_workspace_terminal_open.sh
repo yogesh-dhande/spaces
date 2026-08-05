@@ -47,6 +47,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
   release_terminal_harness_lock
 }
 trap cleanup EXIT

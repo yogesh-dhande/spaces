@@ -33,7 +33,7 @@ import workspacecore
 
     var settingsWindow: NSWindow?
     var selectedSettingsSection: SettingsSection = .general
-    private var selectedMCPClient: MCPClient = .claudeCode
+    private var selectedMCPClient: CodingAgent = .claudeCode
     weak var settingsSectionContentContainer: NSView?
     var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
     private weak var mcpConfigTextView: NSTextView?
@@ -348,9 +348,9 @@ import workspacecore
     }
 
     private func mcpSettingsCards() -> [NSView] {
-        let clients = MCPClient.allCases
+        let clients = CodingAgent.allCases
         let picker = NSSegmentedControl(
-            labels: clients.map(\.title), trackingMode: .selectOne, target: self, action: #selector(mcpClientSegmentChanged(_:)))
+            labels: clients.map(\.mcpClientTitle), trackingMode: .selectOne, target: self, action: #selector(mcpClientSegmentChanged(_:)))
         picker.selectedSegment = clients.firstIndex(of: selectedMCPClient) ?? 0
         picker.setContentHuggingPriority(.required, for: .horizontal)
         picker.setAccessibilityIdentifier("settings-mcp-client-picker")
@@ -364,12 +364,12 @@ import workspacecore
         textView.isEditable = false
         textView.isSelectable = true
         textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        textView.string = selectedMCPClient.configSnippet(cliPath: cliPath)
+        textView.string = selectedMCPClient.mcpConfigSnippet(cliPath: cliPath)
         textView.setAccessibilityIdentifier("settings-mcp-config")
         mcpConfigTextView = textView
         let configScroll = host.scrollableTextView(textView, height: 90)
 
-        let hint = host.helpTextLabel(selectedMCPClient.configHint)
+        let hint = host.helpTextLabel(selectedMCPClient.mcpConfigHint)
         mcpConfigHintLabel = hint
 
         let setupCard = host.formSectionCard(icon: "puzzlepiece.extension", title: "MCP Client Setup", contentViews: [pickerRow, hint, configScroll])
@@ -378,12 +378,12 @@ import workspacecore
     }
 
     @objc private func mcpClientSegmentChanged(_ sender: NSSegmentedControl) {
-        let clients = MCPClient.allCases
+        let clients = CodingAgent.allCases
         guard clients.indices.contains(sender.selectedSegment) else { return }
         selectedMCPClient = clients[sender.selectedSegment]
         let cliPath = MCPClientConfiguration.resolvedCLIPath()
-        mcpConfigTextView?.string = selectedMCPClient.configSnippet(cliPath: cliPath)
-        mcpConfigHintLabel?.stringValue = selectedMCPClient.configHint
+        mcpConfigTextView?.string = selectedMCPClient.mcpConfigSnippet(cliPath: cliPath)
+        mcpConfigHintLabel?.stringValue = selectedMCPClient.mcpConfigHint
     }
 
     @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {

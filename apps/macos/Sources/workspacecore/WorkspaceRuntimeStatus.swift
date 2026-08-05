@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WorkspaceRuntimeStatus: Sendable {
+public struct WorkspaceRuntimeStatus: Hashable, Sendable {
     public let workspaceID: String
     public let lifecycleState: WorkspaceLifecycleState
     public let runtimeHealth: WorkspaceRuntimeHealth

@@ -17,7 +17,7 @@ export default function TroubleshootingDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>1. Check that Chrome is installed.</li>
-          <li>2. Confirm the workspace isn&apos;t archived.</li>
+          <li>2. Confirm the workspace is still listed in the sidebar and not hidden.</li>
           <li>3. If launch complains about existing runtime, run <code>spaces workspace restart --workspace &lt;id&gt;</code>.</li>
         </ol>
       </article>

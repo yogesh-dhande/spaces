@@ -13,14 +13,24 @@ import workspacecore
 final class DaemonReconcileStoreTests: XCTestCase {
     private var directory: URL!
     private var databasePath: String!
+    private var originalDatabasePath: String?
 
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-reconcile-store-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         databasePath = directory.appendingPathComponent("spaces.db").path
+        // Opening a store authorizes schema migration against the active profile, so the test database
+        // has to be the active profile too — otherwise the test resolves the developer's.
+        originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
     }
 
     override func tearDownWithError() throws {
+        if let originalDatabasePath {
+            setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+        } else {
+            unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+        }
         if let directory, FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
         directory = nil
         databasePath = nil
@@ -36,8 +46,8 @@ final class DaemonReconcileStoreTests: XCTestCase {
             ports: [], processes: [], browserSessions: [])
         try seedStore.upsert(project: project)
         let workspace = WorkspaceRecord(
-            id: "workspace-router", projectID: project.id, dir: "/projects/router", dirname: nil, branch: nil, isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-router", projectID: project.id, dir: "/projects/router", dirname: nil, branch: nil, isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         try seedStore.upsert(workspace: workspace)
         try seedStore.setWorkspacePorts(workspaceID: workspace.id, ports: [21001], names: ["web"])
 
@@ -45,7 +55,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
         let reconcileStore = DaemonReconcileStore(label: "test.reconcile.routes", databasePath: databasePath) { store in
             observedRoutes.set(try WorkspaceOrchestrator(store: store).caddyRouteTable())
         }
-        defer { reconcileStore.close() }
+        addTeardownBlock { await reconcileStore.close() }
 
         try await reconcileStore.runPass()
         let slug = SpacesProfile.workspaceHostSlug(
@@ -74,7 +84,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
             _ = try store.projects()
             if shouldFail.value { throw NSError(domain: "test.reconcile", code: 7) }
         }
-        defer { reconcileStore.close() }
+        addTeardownBlock { await reconcileStore.close() }
 
         try await reconcileStore.runPass()
 
@@ -104,7 +114,7 @@ final class DaemonReconcileStoreTests: XCTestCase {
         XCTAssertEqual(passCount.value, 1)
         XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
-        reconcileStore.close()
+        await reconcileStore.close()
         try await reconcileStore.runPass()
 
         XCTAssertEqual(passCount.value, 1, "A pass after close must not run.")
@@ -121,25 +131,68 @@ final class DaemonReconcileStoreTests: XCTestCase {
             _ = try store.projects()
         }
 
-        reconcileStore.close()
-        reconcileStore.close()
+        await reconcileStore.close()
+        await reconcileStore.close()
         try await reconcileStore.runPass()
 
         XCTAssertEqual(passCount.value, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: databasePath), "Close must not create the database.")
     }
 
-    /// `close()` and a pass submitted at the same moment race onto the owning queue in either order.
-    /// Whichever wins, the store must end up with no open connection.
-    func testCloseRacingAPassLeavesNoOpenConnection() async throws {
-        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in _ = try store.projects() }
+    /// `close()` submitted while a pass is running is the harder of the two queue orders: the close lands
+    /// behind work that still holds the connection. It must be terminal by the time it returns, and it must
+    /// reach that point by suspending its caller rather than by holding the caller's thread.
+    ///
+    /// Both properties come out of one constructed interleaving, and the gate is what constructs it. The
+    /// racing pass reports that it started and then parks on the gate, so it is provably still running — it
+    /// cannot have released the store's queue — for as long as the gate is held. The only thing that opens
+    /// the gate is a block enqueued on the MAIN queue before the close is called. This test is
+    /// `@MainActor`, so that block cannot run inside the same main-actor turn that submits it: it runs only
+    /// once the close yields the main actor.
+    ///
+    /// That makes each assertion a fact rather than a hope:
+    /// - A close that returns without waiting returns while the gate is still shut, so it observes an
+    ///   unfinished pass and an open connection.
+    /// - A close that waits by BLOCKING the main thread never lets the gate open at all. It is the shape
+    ///   the daemon must not have: a reconcile pass can reach the process-wide terminal terminator, which
+    ///   enters the terminal engine actor, which may hop synchronously back to main. The gate's wait is
+    ///   bounded so that shape fails this test with `mainQueueRanDuringClose` false instead of hanging the
+    ///   suite the way the real three-way deadlock would.
+    @MainActor func testCloseBehindARunningPassYieldsTheMainActorAndLeavesNoOpenConnection() async throws {
+        let progress = PassProgressBox()
+        let gate = PassGate()
+        let reconcileStore = DaemonReconcileStore(label: "test.reconcile.race", databasePath: databasePath) { store in
+            progress.noteStarted()
+            gate.waitUntilOpened()
+            _ = try store.projects()
+            progress.noteFinished()
+        }
+        // Opens the connection, so the WAL stays non-empty until the close checkpoints it. The gate starts
+        // open so this priming pass runs straight through.
+        gate.open()
         try await reconcileStore.runPass()
+        XCTAssertFalse(databaseIsCheckpointed(), "A pass should have opened the connection.")
 
+        gate.shut()
         async let racingPass: Void = reconcileStore.runPass()
-        reconcileStore.close()
-        try await racingPass
+        await progress.waitUntilStarted(2)
 
-        XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive close, whichever order the queue saw.")
+        // Enqueued while this main-actor test still owns the main actor, so it cannot run until the close
+        // below yields it. Nothing else opens the gate the racing pass is parked on.
+        let mainQueueRanDuringClose = LockedFlagBox()
+        DispatchQueue.main.async {
+            mainQueueRanDuringClose.set(true)
+            gate.open()
+        }
+        await reconcileStore.close()
+
+        XCTAssertTrue(
+            mainQueueRanDuringClose.value,
+            "Close must suspend the main actor while it waits, not hold its thread: main-queue work enqueued before the close has to run while it waits."
+        )
+        XCTAssertEqual(progress.finished, 2, "Close must not return while the pass it queued behind is still running.")
+        XCTAssertTrue(databaseIsCheckpointed(), "No connection may survive a close that has returned.")
+        try await racingPass
     }
 
     /// SQLite runs a truncating checkpoint when the last connection to a database closes, so an
@@ -172,6 +225,82 @@ private final class LockedRoutesBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return routes.first { $0.host == host }?.upstream
+    }
+}
+
+/// Progress reported by a reconcile pass from the store's own queue. `waitUntilStarted` lets a test wait
+/// until a particular pass is genuinely running there — so work submitted afterwards is unambiguously
+/// queued behind it — and `finished` says how many passes have returned. Continuation-based rather than
+/// semaphore-based because the waiting side is an async test, and blocking a cooperative thread to wait on
+/// a dispatch queue is exactly the shape that turns an ordering test into a scheduling one.
+private final class PassProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startCount = 0
+    private var finishedCount = 0
+    private var waiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func noteStarted() {
+        lock.lock()
+        startCount += 1
+        let reached = waiters.filter { $0.threshold <= startCount }
+        waiters.removeAll { $0.threshold <= startCount }
+        lock.unlock()
+        for waiter in reached { waiter.continuation.resume() }
+    }
+
+    func noteFinished() {
+        lock.lock()
+        finishedCount += 1
+        lock.unlock()
+    }
+
+    var finished: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return finishedCount
+    }
+
+    func waitUntilStarted(_ threshold: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if startCount >= threshold {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append((threshold, continuation))
+            lock.unlock()
+        }
+    }
+}
+
+/// Parks a reconcile pass on the store's own queue until the test opens it, so "a close submitted while a
+/// pass is still running" is a constructed fact rather than a hoped-for scheduling outcome. Blocking is the
+/// point: the pass body runs on the store's private serial queue, and holding that queue is the state under
+/// test. The wait is bounded so that a `close()` which blocks its caller's thread — leaving nothing able to
+/// open the gate — fails its test with a diagnosis rather than hanging the suite.
+private final class PassGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var opened = true
+
+    func open() {
+        condition.lock()
+        opened = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func shut() {
+        condition.lock()
+        opened = false
+        condition.unlock()
+    }
+
+    func waitUntilOpened() {
+        let deadline = Date().addingTimeInterval(10)
+        condition.lock()
+        while !opened, Date() < deadline { condition.wait(until: deadline) }
+        condition.unlock()
     }
 }
 

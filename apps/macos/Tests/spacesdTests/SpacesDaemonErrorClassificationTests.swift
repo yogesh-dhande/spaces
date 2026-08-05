@@ -23,7 +23,7 @@ import workspacecore
         func testWorkspaceErrorAndFallbackClassificationsAreUnchanged() {
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.missingWorkspace(project: "p", workspace: "w")), .notFound)
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.invalidArgument(message: "x")), .invalidArgument)
-            XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.daemonHandoffInProgress), .shuttingDown)
+            XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(WorkspaceError.daemonHandoffInProgress), .handingOff)
             struct Unclassified: Error {}
             XCTAssertEqual(SpacesDaemonErrorClassification.errorCode(Unclassified()), .internalError)
         }

@@ -143,7 +143,7 @@ extension WorkspaceOrchestrator {
         let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
         let defaultWorkspace = WorkspaceRecord(
             id: prepared.defaultWorkspace.id, projectID: record.id, dir: prepared.defaultWorkspace.dir, dirname: prepared.defaultWorkspace.dirname,
-            branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch, isDefault: true, isArchived: false,
+            branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch, isDefault: true,
             isHidden: prepared.defaultWorkspace.isHidden, isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
         try store.upsert(project: record)
         do {
@@ -174,7 +174,21 @@ extension WorkspaceOrchestrator {
         _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
     }
 
+    /// Under the project gate, resolving the record inside it. This is a read-modify-write of the project
+    /// row: a delete landing between an unprotected read and the `upsert` would put the deleted project
+    /// straight back, and `ensureDefaultWorkspace` would then recreate a default workspace pointing at
+    /// directories the teardown had already removed. Only the project key is claimed — the per-workspace
+    /// writes below all belong to workspaces of this project, which no teardown can be touching while the
+    /// project key is held — so the project-then-workspace order is preserved.
     @discardableResult public func updateProjectConfig(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
+        -> ProjectRecord
+    {
+        try withProjectLifecycleLock(projectID: projectID) {
+            try updateProjectConfigUnlocked(projectID: projectID, updateAllWorkspaces: updateAllWorkspaces, update: update)
+        }
+    }
+
+    private func updateProjectConfigUnlocked(projectID: String, updateAllWorkspaces: Bool, update: (inout ProjectRecord) -> Void) throws
         -> ProjectRecord
     {
         guard let originalProject = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
@@ -218,8 +232,27 @@ extension WorkspaceOrchestrator {
         try removeProject(project)
     }
 
+    /// Deleting a project stops and removes every workspace in it, so it holds the project's gate and
+    /// every one of those workspaces' lifecycle gates for the whole teardown. The project key blocks a
+    /// `createWorkspace` from adding a workspace to a project that is going away (no workspace key could
+    /// cover a workspace that does not exist yet); the workspace keys block a launch, stop, process or
+    /// agent start, or terminal open from stranding runtime in a workspace being removed. Both are
+    /// claimed before any destructive work, so a conflict rejects the delete instead of half-doing it.
     private func removeProject(_ project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        try withProjectLifecycleLock(projectID: project.id) {
+            // Both reads happen under the project gate, never before it. A workspace list read outside the
+            // gate can miss a `createWorkspace` that lands between the read and the claim: its record would
+            // be cascaded away by `store.deleteProject` while its runtime and worktree — which only this
+            // teardown removes, and only for the workspaces it snapshotted — were left behind. Re-reading
+            // the project itself keeps a second delete that queued behind this one from working off a
+            // record that has already been removed.
+            guard let project = try store.project(id: project.id) else { return }
+            let workspaces = try store.workspaces(projectID: project.id)
+            return try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) { try removeProjectUnlocked(project, workspaces: workspaces) }
+        }
+    }
+
+    private func removeProjectUnlocked(_ project: ProjectRecord, workspaces: [WorkspaceRecord]) throws {
         // Finalize every coding-agent row in the project through the termination chokepoint BEFORE the
         // bulk store delete. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so
         // `deleteProject`'s raw `DELETE FROM agent_sessions` throws if the scope still holds any agent
@@ -269,12 +302,12 @@ extension WorkspaceOrchestrator {
         try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, baseBranch: branch)
         return WorkspaceRecord(
             id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: branch, branch: branch, baseBranch: branch, isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
     }
 
     func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: !workspace.isArchived) }
+        let workspaces = try store.workspaces(projectID: project.id)
+        for workspace in workspaces { try applyProjectTemplate(project, to: workspace, syncPorts: true) }
     }
 
     func applyProjectTemplate(_ project: ProjectRecord, to workspace: WorkspaceRecord, syncPorts: Bool) throws {

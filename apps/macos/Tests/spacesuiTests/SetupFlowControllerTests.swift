@@ -10,7 +10,7 @@ import Testing
 @Suite @MainActor struct SetupFlowControllerTests {
     private let currentVersion = 7
 
-    private func agent(_ kind: SupportedCodingAgentHook, available: Bool, installState: AgentHookInstallState) -> AgentHookStatus {
+    private func agent(_ kind: CodingAgent, available: Bool, installState: AgentHookInstallState) -> AgentHookStatus {
         AgentHookStatus(kind: kind, displayName: kind.displayName, available: available, installState: installState)
     }
 

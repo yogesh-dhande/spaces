@@ -12,19 +12,68 @@
                 makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning),
                 makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
                 makeAgentRow(id: "agent-running-idle", runState: .running, activityState: .idle),
+                makeAgentRow(id: "agent-done", runState: .running, activityState: .done),
             ])
 
             let groups = SpacesMobileAgentGrouping.groups(in: overview)
 
-            XCTAssertEqual(groups.map(\.kind), [.waiting, .running, .notRunning])
-            XCTAssertEqual(groups.map { $0.entries.count }, [1, 2, 2])
+            XCTAssertEqual(groups.map(\.kind), [.blocked, .done, .working])
+            XCTAssertEqual(groups.map(\.kind.label), ["Blocked", "Done", "Working"])
+            XCTAssertEqual(groups.map { $0.entries.count }, [1, 1, 2])
             XCTAssertEqual(groups[0].entries.map { $0.row.id }, ["agent-waiting"])
-            XCTAssertEqual(groups[1].entries.map { $0.row.id }, ["agent-spinning", "agent-running-idle"])
-            XCTAssertEqual(groups[2].entries.map { $0.row.id }, ["agent-idle-exited", "agent-not-started"])
+            XCTAssertEqual(groups[1].entries.map { $0.row.id }, ["agent-done"])
+            XCTAssertEqual(groups[2].entries.map { $0.row.id }, ["agent-spinning", "agent-running-idle"])
+        }
+
+        /// Stopped agents are deliberately absent from the Agents tab: it surfaces agents with a state
+        /// worth acting on, and stopped agents stay reachable from their workspace on the Spaces tab.
+        func testNotRunningAgentsAreNeverListed() {
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-idle-exited", runState: .exited, activityState: .idle),
+                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
+                makeAgentRow(id: "agent-exited", runState: .running, activityState: .exited),
+            ])
+
+            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview), [])
+        }
+
+        /// A finished agent has a result the user has not read yet, so it bands ahead of the agents still
+        /// working — regardless of whether its terminal is still alive.
+        func testDoneAgentBandsBeforeWorkingRegardlessOfRunState() {
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-a", runState: .running, activityState: .done)), .done)
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-b", runState: .exited, activityState: .done)), .done)
+
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning),
+                makeAgentRow(id: "agent-done", runState: .exited, activityState: .done),
+            ])
+
+            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview).map(\.kind), [.done, .working])
+        }
+
+        /// An agent waiting for input is the one thing on this tab that needs the user, so it bands first.
+        func testBlockedAgentBandsFirst() {
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-a", runState: .running, activityState: .waiting)), .blocked)
+
+            let overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
+                makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning),
+                makeAgentRow(id: "agent-done", runState: .running, activityState: .done),
+                makeAgentRow(id: "agent-waiting", runState: .running, activityState: .waiting),
+            ])
+
+            XCTAssertEqual(SpacesMobileAgentGrouping.groups(in: overview).first?.kind, .blocked)
+        }
+
+        /// An idle agent says nothing about itself, so its terminal decides which band it lands in.
+        func testIdleAgentBandsOnItsTerminalRunState() {
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-a", runState: .running, activityState: .idle)), .working)
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-b", runState: .notStarted, activityState: .idle)), .notRunning)
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-c", runState: .exited, activityState: .idle)), .notRunning)
         }
 
         /// An exited agent still owns an interactive terminal (`runState == .running`), but the agent
-        /// process is gone. It must group under "Not running" rather than "Running", and its status dot
+        /// process is gone. It must group under "Not running" rather than "Working", and its status dot
         /// must read as exited rather than inheriting the terminal's still-running state.
         func testExitedAgentGroupsAsNotRunningDespiteRunningTerminal() {
             let row = makeAgentRow(id: "agent-exited-running-terminal", runState: .running, activityState: .exited)
@@ -34,20 +83,11 @@
         }
 
         func testOmitsEmptyGroups() {
-            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle)])
+            let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning)])
 
             let groups = SpacesMobileAgentGrouping.groups(in: overview)
 
-            XCTAssertEqual(groups.map(\.kind), [.notRunning])
-        }
-
-        func testSkipsArchivedWorkspaces() {
-            let workspace = makeWorkspace(
-                id: "workspace-archived", branch: "feature", isArchived: true,
-                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning)])
-            let overview = makeOverview(workspaces: [workspace])
-
-            XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
+            XCTAssertEqual(groups.map(\.kind), [.working])
         }
 
         func testSkipsHiddenWorkspaces() {
@@ -119,12 +159,12 @@
                     protocolVersion: SpacesWireProtocol.version))
         }
 
-        private func makeWorkspace(
-            id: String, branch: String?, isArchived: Bool = false, isHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
-        ) -> SpacesDeviceWorkspaceSummary {
+        private func makeWorkspace(id: String, branch: String?, isHidden: Bool = false, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [])
+            -> SpacesDeviceWorkspaceSummary
+        {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
-                isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0, codingAgentRows: codingAgentRows)
+                isHidden: isHidden, isDefault: false, sessionCount: 0, codingAgentRows: codingAgentRows)
         }
 
         private func makeAgentRow(id: String, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState)

@@ -444,7 +444,7 @@
         private func makeOverview(serviceName: String, url: String, branch: String, workspaceID: String) -> SpacesDeviceOverviewPayload {
             let workspace = SpacesDeviceWorkspaceSummary(
                 id: workspaceID, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(branch)",
-                isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+                isRunning: true, isHidden: false, isDefault: false, sessionCount: 0,
                 assignedPorts: [SpacesDeviceAssignedPort(name: serviceName, port: 3_000, url: url)])
             return SpacesDeviceOverviewPayload(
                 projects: [], workspaces: [workspace], sessions: [],

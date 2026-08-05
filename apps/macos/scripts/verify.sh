@@ -20,6 +20,47 @@ verify_stall_seconds="${SPACES_VERIFY_STALL_SECONDS:-600}"
 # handle_interrupt() can tear it down. Empty until that lane is launched.
 ios_lane_pid=""
 
+# Per-lane state for the closing summary. Each lane advances from "not started" to "started" to a
+# result as run_verify_steps progresses, so the summary describes what this run actually did. The
+# distinction matters in both directions: most runs that fail do so inside verify-prep.sh (lint, the
+# SwiftPM build, release bundle signing) before either lane exists, and a summary that reported those
+# lanes as having run would overstate the run's coverage.
+coverage_lane_state="not started"
+ios_lane_state="not started"
+verify_interrupted=0
+
+render_lane_state() {
+  case "$1" in
+    "not started") printf 'NOT STARTED' ;;
+    started) printf 'DID NOT FINISH' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Prints the closing report: what each lane did, and what no lane here covers. A pass otherwise reads
+# as "everything is checked", which is how a green local run coexists with a CI lane that rejects the
+# same commit. Called only from cleanup(), the EXIT trap, so it prints exactly once and on every way
+# this script can end — including the `set -e` failures inside verify-prep.sh that are the most
+# common way the gate fails, and an interrupt.
+print_lane_summary() {
+  printf '\n'
+  printf '========================================================================\n'
+  printf 'verify.sh lane summary\n'
+  if [ "$verify_interrupted" -eq 1 ]; then
+    printf '  run INTERRUPTED before it finished\n'
+  fi
+  printf '  macOS build, lint, unit tests   %s\n' "$(render_lane_state "$coverage_lane_state")"
+  printf '  iOS unit tests                  %s\n' "$(render_lane_state "$ios_lane_state")"
+  if [ "$coverage_lane_state" = "not started" ] && [ "$ios_lane_state" = "not started" ]; then
+    printf '  the run ended during preparation (simulator lifecycle checks, Ghostty artifact sync,\n'
+    printf '  formatting, lint, the SwiftPM build, or release bundle signing)\n'
+  fi
+  printf 'Not covered by any verify.sh lane:\n'
+  printf '  the desktop, mobile, and remote-daemon E2E suites\n'
+  printf '  the Linux daemon unit lane and the Linux artifact smoke test (CI only)\n'
+  printf '========================================================================\n'
+}
+
 run_verify_steps() {
   cd "$root"
 
@@ -37,13 +78,25 @@ run_verify_steps() {
   printf 'Starting iOS unit test lane in the background (log: %s)...\n' "$ios_log"
   "$root/scripts/ios-test-lane.sh" >"$ios_log" 2>&1 &
   ios_lane_pid=$!
+  ios_lane_state="started"
 
+  coverage_lane_state="started"
   local coverage_status=0
   "$root/scripts/coverage.sh" || coverage_status=$?
+  if [ "$coverage_status" -eq 0 ]; then
+    coverage_lane_state="PASSED"
+  else
+    coverage_lane_state="FAILED (exit $coverage_status)"
+  fi
 
   local ios_status=0
   wait "$ios_lane_pid" || ios_status=$?
   ios_lane_pid=""
+  if [ "$ios_status" -eq 0 ]; then
+    ios_lane_state="PASSED"
+  else
+    ios_lane_state="FAILED (exit $ios_status)"
+  fi
 
   printf '\n--- iOS unit test lane log (last 60 lines) ---\n'
   tail -n 60 "$ios_log" || true
@@ -64,10 +117,17 @@ run_verify_steps() {
 
 cleanup() {
   local exit_code=$?
-  spaces_ios_simulator_shutdown_owned "$exit_code"
+  # Tolerate a shutdown failure rather than letting `set -e` abort this trap partway through and
+  # suppress the summary. The run's exit status is $exit_code either way: a command failing inside an
+  # EXIT trap never changed it.
+  spaces_ios_simulator_shutdown_owned "$exit_code" || true
+  print_lane_summary
 }
 
 handle_interrupt() {
+  # Recorded so the summary cleanup() prints says the run was cut short, rather than presenting a
+  # half-finished run as a set of lane results.
+  verify_interrupted=1
   if [ -n "$ios_lane_pid" ]; then
     # Force-kill (not just signal) the whole background iOS lane tree, including any still
     # running xcodebuild/watchdog process: this shell may currently be blocked inside a

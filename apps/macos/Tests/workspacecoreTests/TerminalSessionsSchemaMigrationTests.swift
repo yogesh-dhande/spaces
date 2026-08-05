@@ -8,7 +8,8 @@ import spacesdatabase
     import SQLite3
 #endif
 
-/// Behavior coverage for the v7→v8 schema upgrade: the `terminal_sessions` rebuild that makes
+/// Behavior coverage for the automations schema upgrade (the v11→v12 step, reached here from a v7
+/// database that first climbs main's v7→v11 steps): the `terminal_sessions` rebuild that makes
 /// `workspace_id` optional and adds `automation_run_id`, plus the new `automations`/`automation_runs`
 /// tables. Asserts every existing terminal-session row is carried forward untouched (workspace_id
 /// intact, new column NULL), the unique `root_directory` constraint survives the rebuild, and a
@@ -19,20 +20,17 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
         let dbPath = dir.appendingPathComponent("v7.db").path
         try createV7Database(at: dbPath)
 
-        // Opening the database runs the v7→v8 migration in place.
+        // Opening the database runs every migration from v7 through the automations step in place.
         let database = try SpacesSQLiteDatabase(path: dbPath)
 
-        XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "8")
+        XCTAssertEqual(try scalar(database, "SELECT current_version FROM migration_state"), "\(DatabaseSchema.currentVersion)")
 
         // Every seeded row is carried forward, with workspace_id intact and automation_run_id NULL.
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM terminal_sessions"), "3")
         XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM terminal_sessions WHERE automation_run_id IS NOT NULL"), "0")
-        XCTAssertEqual(
-            try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-full'"), "ws-1")
-        XCTAssertEqual(
-            try scalar(database, "SELECT title FROM terminal_sessions WHERE session_id = 'session-full'"), "night's run ✨")
-        XCTAssertEqual(
-            try scalar(database, "SELECT user_title FROM terminal_sessions WHERE session_id = 'session-full'"), "Renamed")
+        XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-full'"), "ws-1")
+        XCTAssertEqual(try scalar(database, "SELECT title FROM terminal_sessions WHERE session_id = 'session-full'"), "night's run ✨")
+        XCTAssertEqual(try scalar(database, "SELECT user_title FROM terminal_sessions WHERE session_id = 'session-full'"), "Renamed")
         // Edge values survive: NULL command and NULL user_title are preserved as NULL, not coerced.
         XCTAssertEqual(try scalar(database, "SELECT command IS NULL FROM terminal_sessions WHERE session_id = 'session-null-cmd'"), "1")
         XCTAssertEqual(try scalar(database, "SELECT user_title IS NULL FROM terminal_sessions WHERE session_id = 'session-null-cmd'"), "1")
@@ -40,10 +38,8 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
         XCTAssertEqual(try scalar(database, "SELECT workspace_id FROM terminal_sessions WHERE session_id = 'session-third'"), "ws-3")
 
         // The new automation tables exist.
-        XCTAssertEqual(
-            try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automations'"), "1")
-        XCTAssertEqual(
-            try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'"), "1")
+        XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automations'"), "1")
+        XCTAssertEqual(try scalar(database, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'"), "1")
 
         // The unique root_directory constraint survives the rebuild.
         XCTAssertThrowsError(
@@ -66,9 +62,7 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
         XCTAssertEqual(try scalar(database, "SELECT automation_run_id FROM terminal_sessions WHERE session_id = 'session-automation'"), "run-1")
     }
 
-    private func scalar(_ database: SpacesSQLiteDatabase, _ sql: String) throws -> String? {
-        try database.queryRow(sql: sql)?.first
-    }
+    private func scalar(_ database: SpacesSQLiteDatabase, _ sql: String) throws -> String? { try database.queryRow(sql: sql)?.first }
 
     private func makeTempDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

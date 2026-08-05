@@ -89,6 +89,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             lock.unlock()
         }
 
+        /// Serves `payloads` in order, one per `.state` request, then repeats the last one — so a test can
+        /// put a payload the host applies but does not cache (a clipboard write) behind a fence payload it
+        /// does cache, and know the first was served and consumed once the fence is observable.
+        func setPayloads(_ payloads: [GhosttyRemoteSessionStatePayload]) {
+            lock.lock()
+            self.payloads = payloads
+            lock.unlock()
+        }
+
         func requests() -> [TerminalServiceRequest] {
             lock.lock()
             defer { lock.unlock() }
@@ -276,6 +285,183 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sentText.first?.1, true)
     }
 
+    // MARK: - Owner-targeted clipboard writes
+
+    /// The product behavior: a program's copy inside the session lands on the clipboard of the machine
+    /// the user is typing on. The daemon addresses the write to the owning client; this client owns the
+    /// session, so it writes its own pasteboard.
+    @MainActor func testOwnerAppliesAClipboardWriteAddressedToIt() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-owner")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-owner", targetClientID: fixture.clientID, text: "copied text"))
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied text"
+        }
+    }
+
+    /// The write fans out to every subscriber of the session, so a client that is not its target must
+    /// leave its own clipboard alone — otherwise a copy made on the Mac the user is typing on would also
+    /// overwrite the clipboard of every other device watching the session.
+    @MainActor func testNonTargetClientIgnoresAClipboardWrite() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-other")
+        defer { fixture.tearDown() }
+
+        // The clipboard payload is not cached by the host (it is an event, not state), so a following
+        // state payload the host DOES cache is the fence proving the clipboard payload was served first.
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-other", targetClientID: "someone-elses-client", text: "not for us"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-other", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    /// A clipboard write is an event, not state: the host applies the copy and reduces nothing, so an
+    /// out-of-order one cannot regress the title, runtime state, or ownership the pane is showing.
+    @MainActor func testClipboardWritePayloadDoesNotBecomeCachedState() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-not-state")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayloads([
+            clipboardPayload(sessionID: "remote-clipboard-not-state", targetClientID: fixture.clientID, text: "copied", title: "clipboard"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-not-state", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied"
+        }
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNotEqual(fixture.host.effectiveTitle, "clipboard")
+    }
+
+    /// A clipboard write is a one-shot: it rides exactly the payload that announced it. The client's
+    /// stored state drops the field on merge, so the payloads that follow — output, metadata, anything —
+    /// must not re-paste the same text over whatever the user has copied since.
+    @MainActor func testALaterPayloadDoesNotRepeatTheClipboardWrite() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-once")
+        defer { fixture.tearDown() }
+
+        fixture.recorder.setPayload(clipboardPayload(sessionID: "remote-clipboard-once", targetClientID: fixture.clientID, text: "copied once"))
+        waitForCondition("owner applies the clipboard write") {
+            _ = fixture.host.effectiveTitle
+            return fixture.pasteboard.string(forType: .string) == "copied once"
+        }
+
+        fixture.pasteboard.clearContents()
+        fixture.recorder.setPayload(
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-once", reason: TerminalRemoteSessionStateReason.output, title: "later"))
+        waitForCondition("the later payload is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "later"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    /// Another device took the session over. This pane's requested attachment mode still reads `.owner` —
+    /// a demotion releases the surface without re-attaching as a viewer — so gating the copy on that mode
+    /// would let a write addressed to the former owner land on this Mac's clipboard while somebody else
+    /// owns the session. Ownership has to come from the state the host holds, which says otherwise.
+    @MainActor func testDemotedOwnerIgnoresAClipboardWriteAddressedToIt() throws {
+        let fixture = try makeClipboardFixture(sessionID: "remote-clipboard-demoted")
+        defer { fixture.tearDown() }
+
+        let takeover = payloadClaimingOwner(
+            remoteStatePayloadWithTitle(
+                sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.attachmentState, title: "taken-over"),
+            ownerClientID: "another-mac")
+        fixture.recorder.setPayloads([
+            takeover, clipboardPayload(sessionID: "remote-clipboard-demoted", targetClientID: fixture.clientID, text: "not ours any more"),
+            remoteStatePayloadWithTitle(sessionID: "remote-clipboard-demoted", reason: TerminalRemoteSessionStateReason.output, title: "settled"),
+        ])
+        waitForCondition("the takeover is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.activeOwnerClientID() == "another-mac"
+        }
+        waitForCondition("the payload after the clipboard write is applied") {
+            _ = fixture.host.effectiveTitle
+            return fixture.host.effectiveTitle == "settled"
+        }
+        XCTAssertNil(fixture.pasteboard.string(forType: .string))
+    }
+
+    private struct ClipboardFixture {
+        let host: RemoteGhosttySessionHost
+        let recorder: DirectTerminalServiceRecorder
+        let pasteboard: NSPasteboard
+        let clientID: String
+        let tearDown: () -> Void
+    }
+
+    /// A running remote session this client owns, with a uniquely-named pasteboard injected so the tests
+    /// never touch the developer's real clipboard.
+    @MainActor private func makeClipboardFixture(sessionID: String) throws -> ClipboardFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let clientID = "mac-owner-\(sessionID)"
+        // The daemon's payload says this client owns the session, which is what the host reads to decide
+        // it is the live owner — the attachment it requested is not evidence of that on its own.
+        let ownerPayload = payloadClaimingOwner(fixture.payload, ownerClientID: clientID)
+        let recorder = DirectTerminalServiceRecorder(payload: ownerPayload)
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send)
+        waitForCondition("host renders the running session") { host.snapshotText() != nil }
+
+        try host.attach(
+            client: TerminalClient(
+                id: clientID, kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-28T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-clipboard-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        host.clipboardPasteboardOverrideForTesting = pasteboard
+        return ClipboardFixture(
+            host: host, recorder: recorder, pasteboard: pasteboard, clientID: clientID,
+            tearDown: {
+                pasteboard.releaseGlobally()
+                try? FileManager.default.removeItem(at: root)
+            })
+    }
+
+    /// Re-emits a running payload with an attachment snapshot naming `ownerClientID` as the live owner.
+    private func payloadClaimingOwner(_ payload: GhosttyRemoteSessionStatePayload, ownerClientID: String) -> GhosttyRemoteSessionStatePayload {
+        let owner = TerminalClient(
+            id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: ownerClientID), connectedAt: "2026-07-28T00:00:00Z")
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt, sessionStateRevision: payload.sessionStateRevision,
+            sessionStateFlags: payload.sessionStateFlags, screenStateRevision: payload.screenStateRevision, runtimeState: payload.runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                clients: [owner],
+                attachments: [
+                    TerminalAttachment(sessionID: payload.sessionID, clientID: ownerClientID, mode: .owner, attachedAt: "2026-07-28T00:00:00Z")
+                ]), title: payload.title, workingDirectory: payload.workingDirectory, outputByteCount: payload.outputByteCount,
+            outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: payload.renderUpdate)
+    }
+
+    private func clipboardPayload(sessionID: String, targetClientID: String, text: String, title: String = "remote")
+        -> GhosttyRemoteSessionStatePayload
+    {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.clipboardWrite, emittedAt: "2026-07-28T00:00:03Z",
+            sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+            workingDirectory: "/tmp/work", outputByteCount: nil,
+            clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
+    }
+
+    private func remoteStatePayloadWithTitle(sessionID: String, reason: String, title: String) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: reason, emittedAt: "2026-07-28T00:00:04Z", sessionStateRevision: nil, sessionStateFlags: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/work", outputByteCount: nil)
+    }
+
     @MainActor func testRemoteMirrorEncodesPreciseScrollMods() {
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed), 0b0000_0111)
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended), 0b0000_1001)
@@ -340,6 +526,90 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugRecordedMouseEvents.first, "position")
         XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:press:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
         XCTAssertTrue(mirrorView.debugRecordedMouseEvents.contains("button:release:\(GHOSTTY_MOUSE_LEFT.rawValue)"))
+    }
+
+    /// A click belongs to the pane's own selection until the application on the other end takes the
+    /// mouse; only then does it also travel to the session that can deliver it.
+    @MainActor func testRemoteMirrorForwardsClicksOnlyWhileTheApplicationTracksTheMouse() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-forwarding")
+        var forwarded: [(button: UInt8, pressed: Bool, pointer: TerminalScrollPointerPosition?)] = []
+        mirrorView.view.onSendMouseButton = { button, pressed, pointer in forwarded.append((button, pressed, pointer)) }
+
+        mirrorView.view.debugMouseCapturedForTesting = false
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+        XCTAssertTrue(forwarded.isEmpty, "a click must stay local while nothing is tracking the mouse")
+
+        mirrorView.view.debugMouseCapturedForTesting = true
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+
+        XCTAssertEqual(forwarded.map(\.pressed), [true, false], "the application must see both the press and the release")
+        XCTAssertEqual(forwarded.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
+        XCTAssertNotNil(forwarded.first?.pointer, "the click must carry the cell it landed on")
+    }
+
+    /// A session that exits with tracking still enabled leaves a final frame that says the
+    /// application owns the mouse, but there is nothing left to receive a report: once the host
+    /// marks the session non-interactive, clicks stay local.
+    @MainActor func testRemoteMirrorStopsForwardingClicksOnceTheSessionEnds() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-ended")
+        var forwardedCount = 0
+        mirrorView.view.onSendMouseButton = { _, _, _ in forwardedCount += 1 }
+        mirrorView.view.debugMouseCapturedForTesting = true
+
+        mirrorView.view.sessionPermitsMouseCapture = false
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber))
+        mirrorView.view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: mirrorView.windowNumber))
+
+        XCTAssertEqual(forwardedCount, 0, "an ended session must not receive clicks its application can no longer read")
+    }
+
+    /// Shift is the escape hatch that keeps a click local so text can still be selected out of an
+    /// application that has taken the mouse — unless that application explicitly asked for shift.
+    @MainActor func testRemoteMirrorKeepsShiftClickLocalUnlessTheTerminalRequestsShiftCapture() throws {
+        let mirrorView = try makeKeyWindowMirrorView(sessionID: "remote-mouse-shift")
+        var forwardedCount = 0
+        mirrorView.view.onSendMouseButton = { _, _, _ in forwardedCount += 1 }
+        mirrorView.view.debugMouseCapturedForTesting = true
+        mirrorView.view.debugRenderFrameApplyHandler = { _, _ in true }
+
+        mirrorView.view.update(
+            frame: GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha", mouseReportingActive: true)),
+            renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.shift]))
+        XCTAssertEqual(forwardedCount, 0, "shift-clicking must select text rather than report to the application")
+
+        mirrorView.view.update(
+            frame: GhosttyRenderFrame(
+                sessionRevision: 2, ownerEpoch: 0,
+                snapshot: snapshot(text: "alpha", mouseReportingActive: true, mouseShiftCapture: GhosttyTerminalSnapshot.mouseShiftCaptureEnabled)),
+            renderStateKey: "runtime=5x1|frame=5x1|ownerEpoch=0")
+        mirrorView.view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: mirrorView.windowNumber, modifierFlags: [.shift]))
+        XCTAssertEqual(forwardedCount, 1, "a terminal that asks for shift capture must receive the shift-click")
+    }
+
+    /// Builds a mirror view in a key window with its mouse events shunted away from a real surface, which
+    /// is what the focus-only-press suppression and the forwarding decision both need.
+    @MainActor private func makeKeyWindowMirrorView(sessionID: String) throws -> (view: GhosttyMirrorTerminalView, windowNumber: Int) {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil, createdAt: "2026-07-26T00:00:00Z",
+            workspaceID: "workspace-1", kind: .shell)
+        let view = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let window = ActivatingTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        container.addSubview(view)
+        view.frame = container.bounds
+        view.acceptsTerminalInput = true
+        view.debugMouseEventHandler = { _ in true }
+        addTeardownBlock { MainActor.assumeIsolated { window.close() } }
+        // The first press only makes the window key; the pane's own handling starts after that.
+        view.mouseDown(with: mouseEvent(type: .leftMouseDown, windowNumber: window.windowNumber))
+        view.mouseUp(with: mouseEvent(type: .leftMouseUp, windowNumber: window.windowNumber))
+        XCTAssertTrue(window.isKeyWindow)
+        return (view, window.windowNumber)
     }
 
     @MainActor func testRemoteMirrorDoesNotReapplyIdenticalRevisionedRenderFrame() {
@@ -589,6 +859,14 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(mirrorView.debugSearchStatusVisible)
     }
 
+    /// The bell is a tag-only action, so the parser must recognize it from the tag alone — it carries no
+    /// payload to validate, and an unrecognized tag is silently dropped.
+    func testGhosttyActionEventParserParsesRingBell() {
+        var bell = ghostty_action_s()
+        bell.tag = GHOSTTY_ACTION_RING_BELL
+        XCTAssertEqual(GhosttyActionEventParser.parse(bell), .ringBell)
+    }
+
     func testGhosttyActionEventParserParsesSearchEvents() {
         var start = ghostty_action_s()
         start.tag = GHOSTTY_ACTION_START_SEARCH
@@ -745,6 +1023,37 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             RemoteGhosttySessionHost.shouldSendViewportResize(
                 requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: (columns: 120, rows: 40),
                 runtimeSize: (columns: 60, rows: 20), force: true))
+    }
+
+    /// Re-attaching as owner is not itself a reason to resize. An attach that finds the same surface at the
+    /// size the session already runs at sends nothing — every refocus of an open pane re-attaches, and the
+    /// daemon answers such a resize by early-outing as a no-op after a control hop onto the queue that
+    /// carries every session's keystrokes. The attach's force, which it sets when the mirror surface was
+    /// rebuilt, cannot revive a request the session's own size proves is a no-op; what it does is override
+    /// the two skips that assume the last requested size still describes a live surface.
+    func testOwnerAttachResendsTheViewportOnlyForARebuiltSurface() {
+        // Same size, already attached, and the session runs at that size: nothing to say, rebuilt or not.
+        for force in [false, true] {
+            XCTAssertFalse(
+                RemoteGhosttySessionHost.shouldSendViewportResize(
+                    requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil,
+                    runtimeSize: (columns: 120, rows: 40), force: force))
+        }
+        // A rebuilt surface with no observed session size: the last requested size was measured against a
+        // surface that no longer exists, so the attach re-sends rather than trusting it.
+        XCTAssertFalse(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil, force: false
+            ))
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: (columns: 120, rows: 40), pendingSize: nil, runtimeSize: nil, force: true)
+        )
+        // A first owner attach has requested no size yet, so it sends without needing the force.
+        XCTAssertTrue(
+            RemoteGhosttySessionHost.shouldSendViewportResize(
+                requestedSize: (columns: 120, rows: 40), lastRequestedSize: nil, pendingSize: nil, runtimeSize: (columns: 120, rows: 40), force: false
+            ))
     }
 
     @MainActor func testStateStreamClientPreservesOutputBeforeInputOutputResync() throws {
@@ -1257,6 +1566,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
             createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try seedSessionRow(sessionID: sessionID, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-05T00:00:01Z",
@@ -1446,6 +1756,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-stale-size", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-stale-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1483,6 +1794,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-render", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-render", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-17T00:00:00Z",
@@ -1506,6 +1818,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-truncate", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-truncate", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1870,6 +2183,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-handoff-snapshot", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -1991,6 +2305,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-history-refresh", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-history-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -2029,6 +2344,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
+        try seedSessionRow(sessionID: "remote-query-responses", paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "remote-query-responses", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
@@ -2221,8 +2537,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         await host.drainInputQueueForTesting()
         XCTAssertEqual(
-            sender.controlRequestTexts, ["first"],
-            "the link-is-gone verdict on the first send must discard the queued backlog rather than deliver it")
+            sender.controlRequestTexts, ["first"], "the link-is-gone verdict on the first send must discard the queued backlog rather than deliver it"
+        )
     }
 
     /// The other half of Change 2's contract: a reachable daemon's coded rejection is not evidence the
@@ -2308,7 +2624,20 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTFail("Timed out waiting for \(label)")
     }
 
-    private func snapshot(text: String) -> GhosttyTerminalSnapshot {
+    /// Writes the `terminal_sessions` row a session's runtime state hangs off. The session host writes its
+    /// launch configuration as the first thing `startIfNeeded` does, before any runtime-state write, and
+    /// every other per-session table is keyed off that row — so a fixture that persists runtime state for a
+    /// session has to establish it the same way.
+    private func seedSessionRow(sessionID: String, paths: TerminalSessionPaths) throws {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+    }
+
+    private func snapshot(text: String, mouseReportingActive: Bool = false, mouseShiftCapture: UInt8 = GhosttyTerminalSnapshot.mouseShiftCaptureUnset)
+        -> GhosttyTerminalSnapshot
+    {
         let rows = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let columns = rows.map(\.count).max() ?? 0
         let paddedRows = rows.map { row in row.padding(toLength: columns, withPad: " ", startingAt: 0) }
@@ -2319,7 +2648,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
         return GhosttyTerminalSnapshot(
             columns: columns, rows: paddedRows.count, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
-            defaultBackgroundRGB: 0x000000, cells: cells)
+            defaultBackgroundRGB: 0x000000, cells: cells, mouseReportingActive: mouseReportingActive, mouseShiftCapture: mouseShiftCapture)
     }
 
     private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
@@ -2330,7 +2659,9 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// A running remote session's launch/paths/final-frame payload, shared by the lost-link tests above:
     /// each needs a running (interactive) session so its control sends are not turned away by
     /// `isInteractiveRuntimeStateForControl()`.
-    private struct RunningSessionFixture { let launchConfiguration: TerminalSessionLaunchConfiguration; let paths: TerminalSessionPaths
+    private struct RunningSessionFixture {
+        let launchConfiguration: TerminalSessionLaunchConfiguration
+        let paths: TerminalSessionPaths
         let payload: GhosttyRemoteSessionStatePayload
     }
 
@@ -2376,10 +2707,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 charactersIgnoringModifiers: "\u{7F}", isARepeat: false, keyCode: keyCode))
     }
 
-    @MainActor private func mouseEvent(type: NSEvent.EventType, windowNumber: Int) -> NSEvent {
+    @MainActor private func mouseEvent(type: NSEvent.EventType, windowNumber: Int, modifierFlags: NSEvent.ModifierFlags = []) -> NSEvent {
         try! XCTUnwrap(
             NSEvent.mouseEvent(
-                with: type, location: NSPoint(x: 20, y: 30), modifierFlags: [], timestamp: 0, windowNumber: windowNumber, context: nil,
+                with: type, location: NSPoint(x: 20, y: 30), modifierFlags: modifierFlags, timestamp: 0, windowNumber: windowNumber, context: nil,
                 eventNumber: 1, clickCount: 1, pressure: 1))
     }
 }

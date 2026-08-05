@@ -51,13 +51,13 @@ extension AppKitController: CodingAgentsHost {}
     private var status: [AgentHookStatus] = []
     /// The failure from the install just run, per agent, so a row that Spaces could not fix explains
     /// itself instead of only reporting "hooks not installed".
-    private var failures: [SupportedCodingAgentHook: String] = [:]
+    private var failures: [CodingAgent: String] = [:]
     /// Increments per reload so a stale in-flight fetch's result is discarded when the user switches devices.
     private var reloadToken = 0
     /// Increments per install so a stale completion cannot update rows for a different selected device.
     private var installToken = 0
     /// Non-nil while an Install/Update/Reinstall request is in flight.
-    private var installingKind: SupportedCodingAgentHook?
+    private var installingKind: CodingAgent?
 
     init(host: any CodingAgentsHost, onLocalStatusChange: ((LocalSummary) -> Void)? = nil) {
         self.host = host
@@ -141,7 +141,7 @@ extension AppKitController: CodingAgentsHost {}
         }
         status = []
         renderRows(message: nil, isLoading: true)
-        let profile = try? SpacesProfile.current()
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result { try SpacesDeviceClient.agentHooksStatus(device: device, profile: profile) }
             await self?.applyStatusFetch(result, token: token)
@@ -176,7 +176,7 @@ extension AppKitController: CodingAgentsHost {}
         }
 
         let canInstall = resolvedDevice() != nil && !isLoading && installingKind == nil
-        for (index, kind) in SupportedCodingAgentHook.allCases.enumerated() {
+        for (index, kind) in CodingAgent.allCases.enumerated() {
             let row = agentRow(kind: kind, status: status.first { $0.kind == kind }, index: index, isLoading: isLoading, canInstall: canInstall)
             container.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
@@ -189,7 +189,7 @@ extension AppKitController: CodingAgentsHost {}
         }
     }
 
-    private func agentRow(kind: SupportedCodingAgentHook, status: AgentHookStatus?, index: Int, isLoading: Bool, canInstall: Bool) -> NSView {
+    private func agentRow(kind: CodingAgent, status: AgentHookStatus?, index: Int, isLoading: Bool, canInstall: Bool) -> NSView {
         let available = status?.available ?? false
         let installState = status?.installState ?? .notInstalled
 
@@ -274,7 +274,7 @@ extension AppKitController: CodingAgentsHost {}
 
     @objc private func installHooks(_ sender: NSButton) {
         guard installingKind == nil else { return }
-        let kinds = SupportedCodingAgentHook.allCases
+        let kinds = CodingAgent.allCases
         guard kinds.indices.contains(sender.tag), let device = resolvedDevice() else { return }
         let kind = kinds[sender.tag]
         reloadToken += 1  // an in-flight status fetch must not overwrite this install's result
@@ -283,7 +283,7 @@ extension AppKitController: CodingAgentsHost {}
         let targetDeviceID = device.id
         installingKind = kind
         renderRows(message: nil, isLoading: false)
-        let profile = try? SpacesProfile.current()
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result { try SpacesDeviceClient.installAgentHooks([kind], device: device, profile: profile) }
             await self?.applyInstall(result, token: token, deviceID: targetDeviceID, kind: kind)
@@ -292,7 +292,7 @@ extension AppKitController: CodingAgentsHost {}
 
     /// An install request can succeed while the agent it targeted fails, so the per-agent failures are
     /// what decide whether the user sees an error.
-    private func applyInstall(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String, kind: SupportedCodingAgentHook) {
+    private func applyInstall(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String, kind: CodingAgent) {
         guard token == installToken, deviceID == self.deviceID else { return }
         installingKind = nil
         switch result {

@@ -139,6 +139,56 @@
             }
         }
 
+        /// Sending input is a keystroke, not a lifecycle event: it records no agent status transition.
+        /// ESC (byte 27) is the case that tempts an exception, because it is what an orchestrator sends
+        /// when it wants a child to stop — but ESC means whatever the child's TUI decides in its current
+        /// state (with a nested panel open it dismisses the panel and the agent keeps working), and Spaces
+        /// cannot see that state. So a delivered keystroke leaves the row exactly as the agent's own
+        /// signals left it, and only `agent signal` moves status.
+        func testSendingEscapeToASpinningAgentLeavesItsStatusUntouched() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "agent-session"
+                let agent = try seedAgentSession(
+                    terminalSessionID: sessionID, label: "Claude Code CLI", status: .spinning, note: nil, signalAt: "2026-07-14T10:00:00Z")
+
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                let recorder = AgentOrchestrationTerminalControlRecorder()
+                let controlServer = TerminalControlServer(
+                    socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.agent.orchestration.send")
+                ) { request in
+                    recorder.record(request)
+                    return TerminalControlResponse(ok: true, message: "Sent input.")
+                }
+                try controlServer.start()
+                defer { controlServer.stop() }
+
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .sendTerminalInput(.init(sessionID: sessionID, bytes: Data([27]))), authToken: token, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                // The ESC byte really reached the terminal, so the unchanged row below is the invariant
+                // holding rather than a send that quietly did nothing.
+                XCTAssertEqual(recorder.requests().map(\.bytes), [Data([27])])
+
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let reread = try XCTUnwrap(store.agentWindow(id: agent.id))
+                XCTAssertEqual(reread.status, .spinning)
+                // Any lifecycle write rewrites the row, so an unchanged `updatedAt` also rules out a
+                // status-preserving rewrite.
+                XCTAssertEqual(reread.updatedAt, agent.updatedAt)
+                XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: agent.id), "2026-07-14T10:00:00Z")
+                XCTAssertFalse(try store.agentSessionHasRecordedExitEvent(agentSessionID: agent.id))
+            }
+        }
+
         // MARK: - Fixtures
 
         @discardableResult private func seedAgentSession(
@@ -153,8 +203,8 @@
                     processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
-                    isRunning: false, lastLaunchedAt: nil))
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil))
             let agent = try orchestrator.registerAgentWindow(
                 workspaceID: "workspace-1", provider: .spaces, label: label, terminalTrackingID: terminalSessionID, status: status)
             if let note { try store.setAgentSessionNote(id: agent.id, note: note) }
@@ -209,6 +259,25 @@
 
         private func agentOrchestrationTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalServiceTLSIdentityStore.loadOrCreate(root: agentOrchestrationTestTLSRoot)
+        }
+    }
+
+    /// Records the control requests a stand-in terminal session receives. The control server dispatches
+    /// on its own queue, so access is lock-guarded.
+    private final class AgentOrchestrationTerminalControlRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedRequests: [TerminalControlRequest] = []
+
+        func record(_ request: TerminalControlRequest) {
+            lock.lock()
+            storedRequests.append(request)
+            lock.unlock()
+        }
+
+        func requests() -> [TerminalControlRequest] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedRequests
         }
     }
 

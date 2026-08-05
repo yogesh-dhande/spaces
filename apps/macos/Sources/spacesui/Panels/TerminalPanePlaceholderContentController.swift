@@ -12,6 +12,9 @@ import spacesterminalui
     let descriptor: PaneContentDescriptor
     let workspaceID: String
     let sessionID: String
+    /// The name the session was opened under. The placeholder's own labels describe the wait, so the
+    /// tab hosting it is titled from this instead.
+    private let requestTitle: String
     private let rootView = TerminalPanePlaceholderView()
     private let spinner = NSProgressIndicator()
     private let titleLabel = NSTextField(labelWithString: "Preparing terminal...")
@@ -23,12 +26,13 @@ import spacesterminalui
     init(request: AppKitController.DeviceTerminalOpenRequest, deviceID: String) {
         workspaceID = request.workspaceID
         sessionID = request.sessionID
+        requestTitle = request.title
         descriptor = .terminalSession(deviceID: deviceID, sessionID: request.sessionID)
         buildView(title: request.title)
     }
 
     var contentView: NSView { rootView }
-    var displayTitle: String { titleLabel.stringValue }
+    var displayTitle: String { requestTitle }
     var canPerformFindActions: Bool { false }
 
     func activate(focus: Bool) { if focus { _ = makeContentFirstResponder() } }
@@ -40,6 +44,10 @@ import spacesterminalui
     func handleCommandKeyEquivalent(_: NSEvent) -> Bool { false }
     func applyAppearance(_: ThemeAppearance) {}
     func requestOwnershipIfNeeded() { requestsOwnershipWhenReady = true }
+
+    /// A placeholder has no session attachment at all — its pane is still resolving — so a re-show of it
+    /// must run the full open path.
+    var holdsOwnerAttachedSurface: Bool { false }
     func find(_: Any?) {}
     func findNext(_: Any?) {}
     func findPrevious(_: Any?) {}

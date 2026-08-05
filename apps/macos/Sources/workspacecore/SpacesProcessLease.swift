@@ -75,6 +75,23 @@ public struct SpacesAppLaunchContext {
 
 public enum SpacesAppLaunchPreparationError: Error { case duplicateProfileOwner(profile: SpacesProfile, owner: SpacesProcessLeaseOwner) }
 
+/// Raised when the machine-wide desktop-control lease cannot be located because the password database
+/// has no readable home for this uid. There is no second-choice directory: the lease is only meaningful
+/// while every process on the machine agrees on one path for it.
+public enum SpacesLeaseCoordinatorError: Error, CustomStringConvertible, LocalizedError {
+    case accountHomeUnavailable
+
+    public var description: String {
+        switch self {
+        case .accountHomeUnavailable:
+            return "Could not read the account home directory from the password database, so the machine-wide desktop-control lease "
+                + "directory cannot be located."
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
 public enum SpacesLeaseCoordinator {
     private static let missingMetadataGraceSeconds: TimeInterval = 1
     private static let missingMetadataPollIntervalSeconds: TimeInterval = 0.05
@@ -104,8 +121,7 @@ public enum SpacesLeaseCoordinator {
         -> SpacesProcessLeaseAcquisitionResult
     {
         try acquireLease(
-            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL, fileManager: fileManager), profileRoot: profile.rootDirectory,
-            fileManager: fileManager)
+            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), profileRoot: profile.rootDirectory, fileManager: fileManager)
     }
 
     public static func currentProfileAppOwner(profile: SpacesProfile? = nil, fileManager: FileManager = .default) throws -> SpacesProcessLeaseOwner? {
@@ -116,11 +132,7 @@ public enum SpacesLeaseCoordinator {
 
     public static func currentDesktopControlOwner(fileManager: FileManager = .default, homeDirectoryURL: URL? = nil) throws
         -> SpacesProcessLeaseOwner?
-    {
-        try readLiveOwner(
-            fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL, fileManager: fileManager),
-            fileManager: fileManager)
-    }
+    { try readLiveOwner(fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), fileManager: fileManager) }
 
     @discardableResult public static func waitForDesktopControlAvailability(
         timeoutSeconds: TimeInterval, pollIntervalSeconds: TimeInterval = 1, logIntervalSeconds: TimeInterval = 5,
@@ -211,8 +223,17 @@ public enum SpacesLeaseCoordinator {
     /// Deliberately hard-coded to `~/.spaces` rather than the active profile root: desktop control
     /// (Carbon hotkeys, etc.) is machine-wide, so exactly one process — across every dev and
     /// installed profile — may hold this lease at a time.
-    static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil, fileManager: FileManager = .default) -> String {
-        let resolvedHomeDirectoryURL = homeDirectoryURL ?? currentUserHomeDirectoryURL(fileManager: fileManager)
+    /// Throws when the password database cannot name the account home. Desktop control is a machine-wide
+    /// singleton, so substituting a `HOME`-derived directory would not degrade gracefully — it would put
+    /// two processes' leases in two places and let both believe they hold the only one.
+    static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil) throws -> String {
+        let resolvedHomeDirectoryURL: URL
+        if let homeDirectoryURL {
+            resolvedHomeDirectoryURL = homeDirectoryURL
+        } else {
+            guard let accountHomePath = SpacesProfile.accountHomeDirectoryPath() else { throw SpacesLeaseCoordinatorError.accountHomeUnavailable }
+            resolvedHomeDirectoryURL = URL(fileURLWithPath: accountHomePath, isDirectory: true)
+        }
         return resolvedHomeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)
             .appendingPathComponent("desktop-control", isDirectory: true).path
     }
@@ -257,24 +278,6 @@ public enum SpacesLeaseCoordinator {
         URL(fileURLWithPath: profileRoot, isDirectory: true).appendingPathComponent("leases", isDirectory: true).appendingPathComponent(
             "app-owner", isDirectory: true
         ).path
-    }
-
-    private static func currentUserHomeDirectoryURL(fileManager: FileManager) -> URL {
-        if let accountHomePath = currentUserAccountHomePath() { return URL(fileURLWithPath: accountHomePath, isDirectory: true) }
-        return fileManager.homeDirectoryForCurrentUser
-    }
-
-    private static func currentUserAccountHomePath() -> String? {
-        let uid = getuid()
-        let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
-        let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
-        var buffer = [CChar](repeating: 0, count: bufferSize)
-        var record = passwd()
-        var result: UnsafeMutablePointer<passwd>?
-        let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
-        guard status == 0, let entry = result else { return nil }
-        let path = String(cString: entry.pointee.pw_dir)
-        return path.isEmpty ? nil : path
     }
 
     private static func metadataPath(forLeaseDirectoryPath leaseDirectoryPath: String) -> String {

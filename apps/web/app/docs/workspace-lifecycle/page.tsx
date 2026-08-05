@@ -3,14 +3,14 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Workspace Lifecycle",
-  description: "How workspace state changes from create to archive.",
+  description: "How workspace state changes from create to delete.",
 };
 
 export default function WorkspaceLifecycleDocsPage() {
   return (
     <DocsShell
       title="Workspace Lifecycle"
-      description="How workspace state changes from create through launch, stop, restart, and archive."
+      description="How workspace state changes from create through launch, stop, restart, and delete."
       pagePath="/docs/workspace-lifecycle"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -23,7 +23,7 @@ export default function WorkspaceLifecycleDocsPage() {
           <li>• <strong>Running</strong> &mdash; Spaces has started its processes. Browser sessions stay configured but open on demand when you focus them.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Visibility is separate from runtime state. Independently of being running or stopped, a workspace can be <strong>hidden</strong> (collapsed into the Hidden section at the bottom of the sidebar) or <strong>archived</strong> (retired from the sidebar &mdash; see below).
+          Visibility is separate from runtime state. Independently of being running or stopped, a workspace can be <strong>hidden</strong>, which collapses it into the Hidden section at the bottom of the sidebar and leaves it there until you unhide it.
         </p>
       </article>
 
@@ -69,9 +69,9 @@ export default function WorkspaceLifecycleDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Archive</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Delete</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Archive stops the workspace, releases its named ports, and hides it from the sidebar. For Git projects the worktree directory is removed; the branch itself is kept. The default workspace can&apos;t be archived.
+          Delete retires a workspace for good: it stops the workspace, releases its named ports, removes its Git worktree, and deletes the workspace and its settings from Spaces. Its branch name and checkout directory are free to use again right away. The branch itself is kept unless you tick the local- or remote-branch deletion boxes in the confirmation. The default workspace can&apos;t be deleted &mdash; delete the project to remove it.
         </p>
       </article>
     </DocsShell>

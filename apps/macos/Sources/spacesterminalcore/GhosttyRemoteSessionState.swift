@@ -14,11 +14,15 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let outputByteCount: Int?
     public let outputEndByteOffset: Int?
     public let renderUpdate: Data?
+    /// A one-shot OSC 52 clipboard write for the session's owner, present only on a
+    /// `clipboard_write` payload. Every carry-forward below drops it on purpose (see `merged(with:)`),
+    /// so a client applies it exactly once, on the payload that announced it.
+    public let clipboardWrite: TerminalClipboardWritePayload?
 
     public init(
         sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
         runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
-        outputByteCount: Int?, outputEndByteOffset: Int? = nil, renderUpdate: Data? = nil
+        outputByteCount: Int?, outputEndByteOffset: Int? = nil, renderUpdate: Data? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
     ) {
         self.sessionID = sessionID
         self.reason = reason
@@ -33,8 +37,13 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         self.outputByteCount = outputByteCount
         self.outputEndByteOffset = outputEndByteOffset
         self.renderUpdate = renderUpdate
+        self.clipboardWrite = clipboardWrite
     }
 
+    /// Folds an incoming payload onto the client's stored state. Every field here is carried forward
+    /// when the update omits it — EXCEPT `clipboardWrite`, which is deliberately absent from the
+    /// result: it is a one-shot event, not state. Inheriting it would make every later payload look
+    /// like a fresh clipboard write and re-paste over the user's clipboard on each output turn.
     public func merged(with update: Self) -> Self {
         precondition(sessionID == update.sessionID, "Cannot merge terminal state from a different session.")
         let previousOwnerClientID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: attachmentSnapshot)
@@ -47,7 +56,7 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
             sessionStateFlags: update.sessionStateFlags ?? sessionStateFlags, screenStateRevision: update.screenStateRevision ?? screenStateRevision,
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
             title: update.title, workingDirectory: update.workingDirectory, outputByteCount: update.outputByteCount,
-            outputEndByteOffset: update.outputEndByteOffset, renderUpdate: mergedRenderUpdate)
+            outputEndByteOffset: update.outputEndByteOffset, renderUpdate: mergedRenderUpdate, clipboardWrite: nil)
     }
 }
 
@@ -66,12 +75,17 @@ extension GhosttyRemoteSessionStatePayload {
 
     public var renderOwnerEpoch: UInt64? { decodedRenderUpdate?.ownerEpoch }
 
+    /// Rebuilds the payload around a different render update. `clipboardWrite` is dropped rather than
+    /// copied for the same reason `merged(with:)` drops it: the derived payload is a re-export of
+    /// screen state, and a clipboard write must be applied only from the payload that announced it. A
+    /// `clipboard_write` payload never carries a render update (the reason exports no screen state),
+    /// so nothing reaches a client through this path with the field to lose.
     public func replacingRenderUpdate(_ renderUpdate: Data?, screenStateRevision: UInt64? = nil) -> Self {
         .init(
             sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
             sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision ?? self.screenStateRevision, runtimeState: runtimeState,
             attachmentSnapshot: attachmentSnapshot, title: title, workingDirectory: workingDirectory, outputByteCount: outputByteCount,
-            outputEndByteOffset: outputEndByteOffset, renderUpdate: renderUpdate)
+            outputEndByteOffset: outputEndByteOffset, renderUpdate: renderUpdate, clipboardWrite: nil)
     }
 }
 

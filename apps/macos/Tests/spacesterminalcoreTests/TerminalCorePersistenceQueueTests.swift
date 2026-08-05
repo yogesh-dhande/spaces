@@ -69,8 +69,8 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // Park the serial queue so all five enqueues land before any runs; the gate then supersedes the
         // first four when the barrier releases.
         let barrier = DispatchSemaphore(value: 0)
-        queue.enqueueWrite { barrier.wait() }
-        for value in 1...5 { queue.enqueueCoalescedWrite(key: "k") { recorder.record(value) } }
+        queue.enqueueOrderedWork { barrier.wait() }
+        for value in 1...5 { queue.enqueueCoalescedWrite(key: "k") { _ in recorder.record(value) } }
         barrier.signal()
         queue.drain()
         XCTAssertEqual(recorder.recorded, [5])
@@ -81,11 +81,11 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.coalesce-keyed")
         let recorder = OrderRecorder()
         let barrier = DispatchSemaphore(value: 0)
-        queue.enqueueWrite { barrier.wait() }
-        queue.enqueueCoalescedWrite(key: "a") { recorder.record(1) }
-        queue.enqueueCoalescedWrite(key: "b") { recorder.record(10) }
-        queue.enqueueCoalescedWrite(key: "a") { recorder.record(2) }
-        queue.enqueueCoalescedWrite(key: "b") { recorder.record(20) }
+        queue.enqueueOrderedWork { barrier.wait() }
+        queue.enqueueCoalescedWrite(key: "a") { _ in recorder.record(1) }
+        queue.enqueueCoalescedWrite(key: "b") { _ in recorder.record(10) }
+        queue.enqueueCoalescedWrite(key: "a") { _ in recorder.record(2) }
+        queue.enqueueCoalescedWrite(key: "b") { _ in recorder.record(20) }
         barrier.signal()
         queue.drain()
         // Only the newest of each key runs, and FIFO preserves the enqueue order of those survivors.
@@ -96,7 +96,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     func testUncoalescedWritesRunFIFOAndDrainBlocks() {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.fifo")
         let recorder = OrderRecorder()
-        for value in 1...50 { queue.enqueueWrite { recorder.record(value) } }
+        for value in 1...50 { queue.enqueueOrderedWork { recorder.record(value) } }
         queue.drain()
         XCTAssertEqual(recorder.recorded, Array(1...50))
     }
@@ -105,7 +105,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     func testDrainAsyncAwaitsQueuedWrites() async {
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.drain-async")
         let recorder = OrderRecorder()
-        for value in 1...20 { queue.enqueueWrite { recorder.record(value) } }
+        for value in 1...20 { queue.enqueueOrderedWork { recorder.record(value) } }
         await queue.drainAsync()
         XCTAssertEqual(recorder.recorded, Array(1...20))
     }
@@ -151,10 +151,110 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         func releaseOneRetry() { release.signal() }
     }
 
+    /// A throwaway profile root, cleaned up with the rest of the test's temporary state.
+    private func makeProfileRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
     private func makeRunningState(sessionID: String, title: String) -> TerminalSessionRuntimeState {
         TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
             updatedAt: TerminalSessionTimestamp.string(from: Date()), title: title, workingDirectory: "/tmp/original")
+    }
+
+    /// A queued write commits to the database that was current when it was ENQUEUED, never to whatever
+    /// profile is current when the serial queue finally reaches it.
+    ///
+    /// A core's `terminate()` returns with its final writes still queued, so a test whose teardown restores
+    /// the profile environment would otherwise have those writes land in the restored profile — the exact
+    /// mechanism by which fixture sessions escaped tests that did isolate themselves. The barrier makes the
+    /// ordering explicit rather than timed: the write cannot run until the profile has already moved.
+    func testQueuedRuntimeStateWriteCommitsToTheProfileBoundWhenItWasEnqueued() throws {
+        let enqueueTimeDatabasePath = try makeProfileRoot().appendingPathComponent("spaces.db").path
+        let executionTimeDatabasePath = try makeProfileRoot().appendingPathComponent("spaces.db").path
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        try paths.ensureDirectories()
+        let state = makeRunningState(sessionID: "session-enqueue-time-profile", title: "queued")
+
+        setenv("SPACES_DB_PATH", enqueueTimeDatabasePath, 1)
+        // The session belongs to the enqueue-time profile, so its `terminal_sessions` row is written there —
+        // the way a core writes its launch configuration into the current profile before enqueuing any
+        // runtime-state write against it. Only this profile gets the row, which is what keeps the
+        // execution-time assertion below an honest "no row here at all".
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: state.sessionID, title: "queued", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: Date()), workspaceID: "workspace-1", kind: .shell), paths: paths)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.enqueue-time-profile")
+        // Park the serial queue so the runtime-state write is still pending when the profile moves.
+        let barrier = DispatchSemaphore(value: 0)
+        queue.enqueueOrderedWork { barrier.wait() }
+        queue.enqueueRuntimeStateWrite(state, at: Date(), paths: paths, onPersisted: { _, _ in })
+
+        // Stands in for a test teardown restoring the environment while the write is still queued.
+        setenv("SPACES_DB_PATH", executionTimeDatabasePath, 1)
+        barrier.signal()
+        queue.drain()
+
+        setenv("SPACES_DB_PATH", enqueueTimeDatabasePath, 1)
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "queued")
+        setenv("SPACES_DB_PATH", executionTimeDatabasePath, 1)
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths)) { error in
+            guard case TerminalSessionPersistenceError.unknownSession = error else {
+                return XCTFail("Expected no row in the profile that was current at execution time, got \(error).")
+            }
+        }
+    }
+
+    /// A write enqueued while the profile could NOT be resolved is abandoned, never re-attributed to
+    /// whatever profile is current when the queue reaches it.
+    ///
+    /// Resolution failing is reachable, not theoretical: profile resolution refuses a live user profile in
+    /// a test process, so binding `SPACES_DB_PATH` inside one makes the enqueue-time resolution throw. If
+    /// that failure collapsed into "no explicit database", the write would resolve the profile bound
+    /// afterwards and commit there — the reassignment the enqueue-time capture exists to prevent.
+    func testQueuedWriteWhoseProfileFailedToResolveIsNotReboundToALaterProfile() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath()), isDirectory: true)
+        let refusedRoot = accountHomeURL.appendingPathComponent(".spaces-dev/profiles/spaces/queue-\(UUID().uuidString)", isDirectory: true)
+        // The refusal means this is never created; the teardown matters when the guard is deliberately
+        // stubbed out to prove this test fails without it, which otherwise leaves fixtures in the
+        // developer's real profile — the very thing under test.
+        addTeardownBlock { try? FileManager.default.removeItem(at: refusedRoot) }
+        let laterDatabasePath = try makeProfileRoot().appendingPathComponent("spaces.db").path
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        try paths.ensureDirectories()
+        let state = makeRunningState(sessionID: "session-unresolved-profile", title: "abandoned")
+
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.unresolved-profile")
+        // Park the queue while the profile still resolves, so parking is not itself the failing step.
+        let barrier = DispatchSemaphore(value: 0)
+        queue.enqueueOrderedWork { barrier.wait() }
+
+        // Enqueue under a profile that resolution refuses.
+        setenv("SPACES_DB_PATH", refusedRoot.appendingPathComponent("spaces.db", isDirectory: false).path, 1)
+        queue.enqueueRuntimeStateWrite(state, at: Date(), paths: paths, onPersisted: { _, _ in })
+
+        // Bind a perfectly good profile afterwards — the one the abandoned write must never reach.
+        setenv("SPACES_DB_PATH", laterDatabasePath, 1)
+        barrier.signal()
+        queue.drain()
+
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths)) { error in
+            guard case TerminalSessionPersistenceError.unknownSession = error else {
+                return XCTFail("Expected the abandoned write to have committed nowhere, got \(error).")
+            }
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: refusedRoot.path), "A refused resolution must not have created the live profile directory.")
     }
 
     /// A failed NON-exited (running) runtime-state write must retry in place and eventually commit once the
@@ -184,8 +284,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         // production delay: it proves the first attempt genuinely failed and is now paused before we restore
         // the database.
         let retryGate = RetryGate()
-        let queue = TerminalCorePersistenceQueue(
-            label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         let updatedState = makeRunningState(sessionID: launchConfiguration.sessionID, title: "after")
         queue.enqueueRuntimeStateWrite(updatedState, at: Date(), paths: paths) { state, _ in recorder.record(state.title ?? "") }
@@ -252,6 +351,70 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "new")
     }
 
+    /// The termination fence: a runtime-state write that cannot commit yet retries IN PLACE and so keeps its
+    /// slot on the serial queue, which is what makes the writes a core's `terminate()` enqueues behind it —
+    /// detach-all, terminated payload, durable-end notification — run only once it commits. The detach has no
+    /// retry of its own, so it lands durably only if it waited behind the retrying exited write until the
+    /// database recovered. Before the fix the failed write surrendered its FIFO slot via `asyncAfter`, so the
+    /// detach ran immediately against the broken database and was lost while the (deferred) exited retry still
+    /// landed.
+    ///
+    /// The `RetryGate` is what makes this an ordering test rather than a timing one: the database is restored
+    /// while the retry loop is parked inside the gate, so the restore cannot race an attempt opening the
+    /// database — a race that surfaces as a mangled restore or an `unknownSession` read, both of which look
+    /// like persistence bugs rather than the test's own scheduling.
+    func testFailingRuntimeStateWriteFencesTheDetachQueuedBehindIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-fence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID,
+            client: TerminalClient(
+                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z"),
+            mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.writeRuntimeState(makeRunningState(sessionID: launchConfiguration.sessionID, title: "shell"), paths: paths)
+        XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
+
+        let databasePath = try SpacesProfile.current().databasePath
+        try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
+
+        let retryGate = RetryGate()
+        let queue = TerminalCorePersistenceQueue(
+            label: "test.persistence.termination-fence", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let exitedState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+            updatedAt: "2026-05-17T00:01:00Z", exitedAt: "2026-05-17T00:01:00Z", title: "shell", workingDirectory: "/tmp/original")
+        // The two writes `terminate()` enqueues, in the order it enqueues them.
+        queue.enqueueRuntimeStateWrite(exitedState, at: Date(), paths: paths, onPersisted: { _, _ in })
+        queue.enqueueWrite { databasePath in
+            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: "2026-05-17T00:01:00Z", databasePath: databasePath)
+        }
+
+        XCTAssertTrue(retryGate.waitForRetry(), "the exited write must genuinely fail against the broken database before the fence is asserted")
+        try Self.restoreDatabase(at: databasePath)
+        // The fence, observed while it is being held: the exited write is still retrying, so the detach behind
+        // it has not run — even though the database is healthy again and it would now succeed.
+        XCTAssertFalse(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach must not run while the exited write ahead of it is still retrying")
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+
+        retryGate.releaseOneRetry()
+        await queue.drainAsync()
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
+            "the retried exited write must commit once the database recovers")
+        XCTAssertTrue(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach released by the fence must commit after it, so it lands post-recovery instead of being lost")
+    }
+
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
     ///
@@ -259,6 +422,10 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// entry left by a sibling test (or a future test in this suite that forgets to reset the cache)
     /// could point this at a real, shared database. Refuse to touch anything outside this suite's own
     /// throwaway profile root instead of silently destroying it.
+    /// The process's own connections are released on both sides of the injection: moving the files aside is
+    /// invisible to a connection already open on them — it holds the file, not the path — so without this
+    /// the fault would not reach the write under test at all. Releasing is also what a database that
+    /// genuinely went away would force.
     private static func breakDatabase(at databasePath: String, allowedRoot: URL) throws {
         struct UnsafeDatabasePath: Error { let path: String }
         guard databasePath.hasPrefix(allowedRoot.path + "/") else {
@@ -268,6 +435,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
             XCTFail("refusing to break database at \(databasePath): outside this test's isolated root \(allowedRoot.path)")
             throw UnsafeDatabasePath(path: databasePath)
         }
+        TerminalSessionPersistence.closeDatabaseConnection()
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {
             let path = databasePath + suffix
@@ -283,5 +451,6 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
             let backup = databasePath + suffix + ".r47bak"
             if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
         }
+        TerminalSessionPersistence.closeDatabaseConnection()
     }
 }

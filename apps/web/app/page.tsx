@@ -3,6 +3,7 @@ import Link from "next/link";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
 import { PrimaryButton } from "./components/primary-button";
+import { PhoneFrame } from "./components/device-frames";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
@@ -769,22 +770,14 @@ export default function HomePage() {
             </div>
 
             <div className="mx-auto grid w-full max-w-[34rem] grid-cols-2 gap-4 sm:gap-6">
-              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-                <img
-                  src="/media/ios-sessions.png"
-                  alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
-                  className="h-auto w-full"
-                  loading="lazy"
-                />
-              </figure>
-              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-                <img
-                  src="/media/ios-terminal.png"
-                  alt="A live coding-agent terminal session open in the Spaces iOS app, with a terminal key row for typing into the same shell"
-                  className="h-auto w-full"
-                  loading="lazy"
-                />
-              </figure>
+              <PhoneFrame
+                src="/media/ios-sessions.png"
+                alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
+              />
+              <PhoneFrame
+                src="/media/ios-terminal.png"
+                alt="A live coding-agent terminal session open in the Spaces iOS app, with a terminal key row for typing into the same shell"
+              />
             </div>
           </div>
         </div>
@@ -837,7 +830,7 @@ export default function HomePage() {
             </p>
           </div>
 
-          <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
+          {/* <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
             <video
               src="/media/demo_nav_palette.mp4"
               autoPlay
@@ -846,7 +839,7 @@ export default function HomePage() {
               playsInline
               className="h-auto w-full rounded-sm"
             />
-          </figure>
+          </figure> */}
         </div>
       </section>
 

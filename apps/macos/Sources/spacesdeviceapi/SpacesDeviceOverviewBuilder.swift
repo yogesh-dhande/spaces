@@ -67,7 +67,7 @@ struct SpacesDeviceOverviewBuilder {
 
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus,
+        liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
         automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = []
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
@@ -98,10 +98,10 @@ struct SpacesDeviceOverviewBuilder {
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
                 branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
-                isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
-                isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
-                sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
-                environment: descriptor.environment, setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
+                isRunning: descriptor.workspace.isRunning, isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault,
+                notes: descriptor.workspace.notes, sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0,
+                assignedPorts: descriptor.assignedPorts, environment: descriptor.environment,
+                setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
                 processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
         }
@@ -127,21 +127,24 @@ struct SpacesDeviceOverviewBuilder {
             if lhs.effectiveWorkingDirectory != rhs.effectiveWorkingDirectory {
                 return lhs.effectiveWorkingDirectory.localizedStandardCompare(rhs.effectiveWorkingDirectory) == .orderedAscending
             }
-            return lhs.effectiveTitle.localizedStandardCompare(rhs.effectiveTitle) == .orderedAscending
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }.compactMap { session -> SpacesDeviceTerminalSessionSummary? in
             // Workspace-less sessions (e.g. automation runs) are not workspace-owned and stay invisible
             // in the workspace-scoped overview; only sessions with a workspace id produce a summary.
             guard let workspaceID = session.workspaceID else { return nil }
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
+            // Only an ad hoc shell carries a live title: a session claimed by a configured process or
+            // coding agent is described by that entry, so nothing displays what its program prints.
             return summary(
-                for: session, workspaceID: workspaceID, matchedWorkspace: matchedWorkspace, title: session.effectiveTitle, rowKind: .liveSession,
-                rowSourceID: nil, hasFinalRender: false)
+                for: session, workspaceID: workspaceID, matchedWorkspace: matchedWorkspace, title: session.name, liveTitle: session.liveTitle,
+                rowKind: .liveSession, rowSourceID: nil, hasFinalRender: false)
         }
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
             retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces),
-            daemonStatus: daemonStatus, automations: automations, automationRuns: automationRuns)
+            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
+            automationRuns: automationRuns)
     }
 
     /// The keep-set the daemon publishes on `SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`:
@@ -177,19 +180,20 @@ struct SpacesDeviceOverviewBuilder {
 
     private static func summary(
         for session: TerminalSessionCatalogEntry, workspaceID: String, matchedWorkspace: WorkspaceDescriptor?, title: String,
-        rowKind: SpacesDeviceTerminalSessionRowKind, rowSourceID: String?, hasFinalRender: Bool
+        liveTitle: String? = nil, rowKind: SpacesDeviceTerminalSessionRowKind, rowSourceID: String?, hasFinalRender: Bool
     ) -> SpacesDeviceTerminalSessionSummary {
         let isInteractive = session.runtimeState.state.isInteractive
         return SpacesDeviceTerminalSessionSummary(
-            id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
-            command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
-            lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-            childPID: session.runtimeState.childPID, workspaceID: workspaceID, workspaceTitle: matchedWorkspace?.workspace.displayName,
-            projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
-            updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
+            id: session.sessionID, title: title, liveTitle: liveTitle, workingDirectory: session.effectiveWorkingDirectory,
+            shell: session.launchConfiguration.shell, command: session.launchConfiguration.command, state: session.runtimeState.state,
+            backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
+            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: workspaceID,
+            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
+            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
+            isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender,
-            foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue)
+            foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue, bellAt: session.runtimeState.bellAt)
     }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {
@@ -415,23 +419,29 @@ struct SpacesDeviceOverviewBuilder {
             rows.append(
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
-                    title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
+                    // The session record is where a rename is stored, so it names the row while it exists;
+                    // the tracked window record (which a rename also rewrites, so the two agree) names only
+                    // rows whose session is already gone.
+                    title: session?.name ?? window.name ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
                     sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil,
-                    canStop: runState == .running && session?.sessionID != nil))
+                    canStop: runState == .running && session?.sessionID != nil, liveTitle: session?.liveTitle))
         }
 
-        for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
+        for (sessionID, session) in sessionsByID.sorted(by: { $0.key < $1.key }) where !includedSessionIDs.contains(sessionID) {
             guard session.workspaceID == descriptor.workspace.id else { continue }
             let sessionKey = "terminal:\(sessionID)"
             guard !claimedTerminalKeys.contains(sessionKey) else { continue }
             let runState = runState(for: session)
             rows.append(
                 SpacesDeviceWorkspaceTerminalRow(
-                    id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
+                    id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.name,
                     workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState, canOpenTerminal: true,
-                    canStop: runState == .running))
+                    canStop: runState == .running, liveTitle: session.liveTitle))
         }
 
+        // Rows are ordered by name, which moves only when the user renames one: what a program prints
+        // into its title never reorders the list, and palette and cycling requests may reference these
+        // rows by list index against a later overview.
         return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }
     }
 

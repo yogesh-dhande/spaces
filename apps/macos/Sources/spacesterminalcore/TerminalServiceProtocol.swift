@@ -290,15 +290,14 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let branch: String?
     public let baseBranch: String?
     public let isDefault: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isRunning: Bool
     public let lastLaunchedAt: String?
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isArchived: Bool,
-        isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isHidden: Bool,
+        isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
@@ -307,7 +306,6 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.branch = branch
         self.baseBranch = baseBranch
         self.isDefault = isDefault
-        self.isArchived = isArchived
         self.isHidden = isHidden
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt
@@ -918,7 +916,6 @@ public final class TerminalServiceServer {
     /// source reads each request on `queue` and hands only the non-liveness ones here, keeping the accept
     /// loop — and the ping fast path — free while a create runs.
     private let workQueue = DispatchQueue(label: "spaces.terminal.service.work")
-    private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     public init(
@@ -964,14 +961,21 @@ public final class TerminalServiceServer {
         // can't leak the listen socket into the new image.
         _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
 
-        listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-            if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-            try? self.removeSocketIfPresent()
-        }
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+        // The listening descriptor belongs to the dispatch source, not to this object. `server` is a
+        // `lazy var` that outlives a single `stop()`/`start()` cycle: `resumeInPlaceAfterFailedHandoff`
+        // stops this same instance and restarts it in place on the same socket path after a failed
+        // exec-in-place handoff. A cancel handler that reached back through `self` would run on
+        // `queue` asynchronously — possibly after the restarted `start()` has already bound a new
+        // descriptor to that path — so it must not read `self` at all. Capturing `socketFD` by value
+        // closes exactly the descriptor this source owns, whenever dispatch gets to it.
+        //
+        // The socket PATH is deliberately not touched here. `start()` already clears a stale path
+        // before binding, so a stray file left behind by a delayed cancel would be removed there; a
+        // cancel handler that unlinked it here could otherwise race the very same restart and delete
+        // the newly bound socket file instead, leaving the daemon's control socket unreachable.
+        source.setCancelHandler { close(socketFD) }
         acceptSource = source
         source.resume()
     }
@@ -981,7 +985,7 @@ public final class TerminalServiceServer {
         acceptSource = nil
     }
 
-    private func acceptReadyConnections() {
+    private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)
             if clientFD < 0 {

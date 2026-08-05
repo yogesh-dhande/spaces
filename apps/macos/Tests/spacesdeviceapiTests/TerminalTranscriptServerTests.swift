@@ -98,6 +98,12 @@
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try paths.ensureDirectories()
                 try Data("hello".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+                // A runtime row hangs off the session's own `terminal_sessions` row, which the session host
+                // writes before its first runtime-state write.
+                try TerminalSessionPersistence.writeLaunchConfiguration(
+                    TerminalSessionLaunchConfiguration(
+                        sessionID: sessionID, title: "transcript", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+                        createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
                 // The persisted runtime state's child PID + exit time identify the run the transcript was
                 // read from; the response must carry that identity so a client can reject a fetch that
                 // straddled a relaunch.

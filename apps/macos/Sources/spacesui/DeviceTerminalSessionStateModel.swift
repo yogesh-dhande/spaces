@@ -209,7 +209,7 @@
             { [weak self] payload in Task { @MainActor [weak self] in self?.applyControlResponseState(payload) } }
         }
 
-        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) async throws -> TerminalControlResponse {
+        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64?) async throws -> TerminalControlResponse {
             let sessionID = self.sessionID
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
@@ -634,7 +634,13 @@
         /// superseded client cannot feed state after replacement. Catch-up `.state` responses bypass this
         /// and call `apply` directly — they carry no generation and their staleness is handled by
         /// `apply`'s emission-time guard.
-        private func applyStreamEvent(_ payload: GhosttyRemoteSessionStatePayload, generation: UInt64) {
+        ///
+        /// Internal (not `private`) for the same reason as `handleStreamDisconnect`: the concrete stream
+        /// client offers no seam to force callback orderings, so `spacesuiTests` installs clients via
+        /// `installStreamClientForTesting` and calls this with a chosen generation — which is the only way
+        /// to prove that the one-shot delivery `apply` performs ahead of its staleness guard is still
+        /// refused for a superseded client.
+        func applyStreamEvent(_ payload: GhosttyRemoteSessionStatePayload, generation: UInt64) {
             guard generation == streamClientGeneration else { return }
             apply(payload)
         }
@@ -709,9 +715,7 @@
                 try? await Task.sleep(for: delay)
                 guard let self else { return }
                 self.reconnectTask = nil
-                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
-                    return
-                }
+                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else { return }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
             }
@@ -742,6 +746,29 @@
         /// metadata). The raw payload is forwarded unchanged so render deltas are
         /// not lost to metadata merging.
         private func apply(_ payload: GhosttyRemoteSessionStatePayload) {
+            // A clipboard write is a one-shot EVENT, not state, so it is fanned out ahead of the
+            // emission-time guard below and never subjected to it. The catch-up `.state` request runs on
+            // its own connection in parallel with the live subscription, so a response served after the
+            // event was emitted can still be installed before the event arrives here — and a state-ordering
+            // rule discarding the event would lose the user's copy permanently, with nothing to redeliver
+            // it. Ordering is meaningless for it anyway: the payload is addressed to one client and applied
+            // once, so applying it from an "older" event is always right.
+            //
+            // Nothing here is advanced by it, and it never becomes cached state: the reason exports no
+            // screen state, and the runtime/attachment snapshot it repeats was already delivered by the
+            // output turn that carried the escape sequence. The generation guard still applies — this runs
+            // downstream of `applyStreamEvent`, so an event from a superseded stream client never gets here.
+            //
+            // Ordering between clipboard events themselves inherits the transport's dispatch: each decoded
+            // stream line hops to the main actor in its own task, so two copies emitted within the same
+            // instant can apply reversed, leaving the older text until the next copy. Accepted — the
+            // window is per-line task scheduling, the result self-corrects, and closing it means an
+            // ordered drain across the whole stream transport for a race no state payload can hit
+            // (those carry timestamps and tolerate reordering by design).
+            if payload.reason == TerminalRemoteSessionStateReason.clipboardWrite {
+                for listener in listeners { listener.onUpdate(payload) }
+                return
+            }
             if let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) {
                 if let lastAppliedEmittedAt, emittedAt < lastAppliedEmittedAt { return }
                 lastAppliedEmittedAt = emittedAt
@@ -797,7 +824,7 @@
         /// made off that path and keep the default deadline.
         private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
             switch TerminalControlCommand(request: request) {
-            case .send, .key, .clearScreen, .resize, .scroll: true
+            case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
             case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
             }
         }

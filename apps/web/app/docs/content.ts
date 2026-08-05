@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux.",
+      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux, plus the SSH access, network reachability, and background-service requirements a remote machine or cloud VM has to meet before it can pair.",
   },
   {
     href: "/docs/getting-started",
@@ -32,7 +32,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/workspace-lifecycle",
     title: "Workspace Lifecycle",
     summary:
-      "Understand how workspaces move between stopped, running, and archived states across the GUI and the minimal CLI runtime flow.",
+      "Understand how workspaces move between stopped and running, and how deleting removes one, across the GUI and the minimal CLI runtime flow.",
   },
   {
     href: "/docs/services",
@@ -62,7 +62,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/coding-agents",
     title: "Coding Agents",
     summary:
-      "Track Claude Code, Codex, opencode, and other coding agents per workspace, and drive several of them from a single terminal — list, spawn, annotate, subscribe for blocked/done alerts, interrupt, and kill. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
+      "Track Claude Code, Codex, opencode, and other coding agents per workspace, and drive several of them from a single terminal — list, spawn, annotate, subscribe for blocked/done alerts, send keystrokes, and kill. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
   },
   {
     href: "/docs/orchestration",

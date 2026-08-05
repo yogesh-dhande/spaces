@@ -30,7 +30,7 @@ import spacesdevicecore
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace", projectID: "project", projectName: "Project", branch: "feature-123", baseBranch: "main", dir: "/project-feature",
-                    isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+                    isRunning: true, isHidden: false, isDefault: false, sessionCount: 0,
                     assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")],
                     config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
                         SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:32001/docs")

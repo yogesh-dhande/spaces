@@ -111,7 +111,7 @@ public final class PortAllocator {
         let projects = try store.projects()
         var all: Set<Int> = []
         for project in projects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            let workspaces = try store.workspaces(projectID: project.id)
             for workspace in workspaces {
                 if workspace.id == excludingWorkspaceID { continue }
                 let ports = try store.workspacePorts(workspaceID: workspace.id)

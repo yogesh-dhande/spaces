@@ -197,6 +197,30 @@ import spacesterminalcore
         return openSessionInNewTab(request)
     }
 
+    /// Re-shows a session whose pane is already the focused, owner-attached pane the user is looking at:
+    /// brings its panel forward and puts the caret back, and nothing else. Answers false — leaving the
+    /// caller on the full open path — for every other case, so a pane that is not focused, is on an
+    /// unselected tab, or whose session another client owns still gets its state refresh, attach, and
+    /// ownership reclaim.
+    ///
+    /// Skipping the rest is safe only because this pane already holds the owner attachment: the state
+    /// fetch, attach, and reclaim the open path would run are exactly the work that established that, and
+    /// re-running them against an unchanged attachment is what made every warm terminal switch pay two
+    /// no-op viewport resizes and a full render-frame export.
+    func refocusFocusedTerminalPane(forSessionID sessionID: String) -> Bool {
+        guard let placement = placement(forSessionID: sessionID), let content = contentControllers[sessionID] else { return false }
+        let layout = layout(for: placement.scope)
+        guard
+            AppKitController.canRefocusTerminalPaneWithoutReattaching(
+                paneIsFocused: layout.focusedPaneID == placement.paneID, paneIsInSelectedTab: layout.selectedTabID == placement.tabID,
+                paneHoldsOwnerAttachedSurface: content.holdsOwnerAttachedSurface)
+        else { return false }
+        host.showPanelScope(placement.scope)
+        host.noteWindowNavigationTerminalFocus(sessionID: sessionID)
+        content.makeContentFirstResponder()
+        return true
+    }
+
     /// Whether the layout may act on `request`, refusing — with the reason, naming the device — a
     /// request that would have to install a pane for a daemon that cannot be attached to. Every door a
     /// user action can install a pane through asks this first: opening it as a tab, moving it into its
@@ -617,6 +641,35 @@ import spacesterminalcore
         }
     }
 
+    /// Re-titles every materialized global panel window after an overview update.
+    ///
+    /// A rename (and its clearing) reaches this client only through the overview — nothing emits a
+    /// pane or metadata event for it — and only the visible workspace panel is re-titled on an
+    /// overview tick. A global panel window would otherwise keep the name it last derived until some
+    /// unrelated pane event happened to re-title it. One shared title pass covers every scope, so the
+    /// runtime-target lookup is built once per workspace rather than once per panel; a client with no
+    /// global panel open — the common case, and this runs on every sidebar rebuild — opens no pass at
+    /// all.
+    func refreshGlobalPanelTitles() {
+        let panelWindowIDs = Self.globalPanelWindowIDsNeedingOverviewTitleRefresh(panels.keys)
+        guard !panelWindowIDs.isEmpty else { return }
+        withRuntimeTargetTitlePass { for panelWindowID in panelWindowIDs { refreshTabTitles(scope: .globalWindow(panelWindowID: panelWindowID)) } }
+    }
+
+    /// Which of the coordinator's panel scopes an overview update has to re-title: the global panel
+    /// windows, in id order.
+    ///
+    /// Workspace scopes are deliberately excluded — the workspace-detail path already re-titles the
+    /// visible one in place on every overview tick, and one that is not visible is re-rendered (and so
+    /// re-titled) when it becomes visible. A global panel window has neither: it stands in its own
+    /// window that no overview update re-renders.
+    nonisolated static func globalPanelWindowIDsNeedingOverviewTitleRefresh(_ scopes: some Collection<PanelScope>) -> [String] {
+        scopes.compactMap { scope in
+            guard case .globalWindow(let panelWindowID) = scope else { return nil }
+            return panelWindowID
+        }.sorted()
+    }
+
     private func refreshTabTitles(forSessionID sessionID: String?) {
         withRuntimeTargetTitlePass {
             guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
@@ -666,18 +719,22 @@ import spacesterminalcore
         return true
     }
 
-    /// A tab is titled after its user-chosen name when set, else its first pane's
-    /// content.
+    /// A tab is titled after its user-chosen name when set, else after its selected pane —
+    /// the one the user is looking at, which in a split is the pane that last held focus
+    /// here. A tab's title therefore follows the user across a split instead of being
+    /// pinned to whichever pane happens to sit first in the tree.
     private func tabTitle(forTabID tabID: String, in layout: PanelLayout) -> String {
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return "Terminal" }
         if let custom = tab.title { return custom }
-        guard let first = PanelLayoutEngine.panes(in: tab).first, let sessionID = first.content.terminalSessionID else { return "Terminal" }
+        guard let sessionID = PanelLayoutEngine.selectedPane(in: tab)?.content.terminalSessionID else { return "Terminal" }
         return contentTitle(forSessionID: sessionID)
     }
 
     /// A pane's display title: the runtime target's name (what the sidebar row shows —
-    /// e.g. "codex", "npm:dev") when the session backs one, else the terminal's own
-    /// title.
+    /// e.g. "codex", "npm:dev", "shell-1") when the session backs one. What the program inside prints
+    /// never renames the pane; it reads as the row's secondary text in the sidebar instead. A session
+    /// no target claims — one whose workspace rows the overview no longer lists — has no name but the
+    /// terminal's own.
     private func contentTitle(forSessionID sessionID: String) -> String {
         guard let content = contentControllers[sessionID] else { return "Terminal" }
         return runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle

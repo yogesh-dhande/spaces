@@ -23,33 +23,8 @@ import XCTest
 /// A plain (non-`@MainActor`, non-engine) `XCTestCase` with an `async` method so it runs on a
 /// cooperative-pool thread — the only context from which the engine's `runSynchronously` bridge is legal.
 final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
-    private var originalDatabasePath: String?
-    private var originalRuntimeDirectory: String?
-    private var databaseRoot: URL?
 
-    /// Points the profile database at a per-suite temp root so the session core and the competing write-lock
-    /// holder contend an isolated database, never the user's real profile database (which may also be
-    /// schema-newer or daemon-owned, refusing to open).
-    override func setUpWithError() throws {
-        try super.setUpWithError()
-        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
-        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        databaseRoot = root
-        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
-        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
-    }
-
-    override func tearDownWithError() throws {
-        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
-        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
-        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
-        databaseRoot = nil
-        originalDatabasePath = nil
-        originalRuntimeDirectory = nil
-        try super.tearDownWithError()
-    }
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
 
     /// Carries the engine-isolated core to the engine bridge from a background thread; the core is only ever
     /// *used* on the engine actor.

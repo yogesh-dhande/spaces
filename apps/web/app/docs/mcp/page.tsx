@@ -75,13 +75,13 @@ args = ["mcp"]`}</CodeBlock>
         </p>
         <ul className="mt-3 space-y-1">
           <Tool name="spaces_project_list" description="List Spaces projects." />
-          <Tool name="spaces_workspace_list" description="List workspaces, optionally filtered by project and including archived workspaces." />
+          <Tool name="spaces_workspace_list" description="List workspaces, optionally filtered by project." />
           <Tool name="spaces_workspace_create" description="Create a workspace on this device. Requires a project and branch; accepts a title, base branch, and existing-branch reuse." />
           <Tool name="spaces_workspace_start" description="Ensure a workspace is running." />
           <Tool name="spaces_workspace_restart" description="Force a full stop and relaunch for a workspace." />
           <Tool name="spaces_terminal_list" description="List available Spaces terminal sessions." />
           <Tool name="spaces_terminal_tail" description="Read recent rendered output, omitting inline suggestions only in identified coding-agent sessions. Defaults to the last 20 lines." />
-          <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, optionally submitting text with a separate, spaced Enter keystroke that every supported agent TUI (Claude Code, Codex, OpenCode) reads as a distinct submit rather than an unsubmitted paste." />
+          <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, optionally submitting text as a paste followed by a separate Enter keystroke that every supported agent TUI (Claude Code, Codex, OpenCode) reads as a distinct submit rather than an unsubmitted paste." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent lifecycle signals are intentionally not MCP tools. Coding agents report state through the CLI hook <Cmd>spaces agent signal</Cmd> so those hooks stay out of the agent-callable tool surface.

@@ -48,6 +48,11 @@ final class DeviceTerminalSessionStateModelTranscriptTests: XCTestCase {
             try paths.ensureDirectories()
             let transcript = Data("row-1\nrow-2\nrow-3\n".utf8)
             try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
+            // A runtime row requires its session row, the way session creation writes it first.
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             // Persist runtime state so the server reports the run identity, and assert it round-trips
             // through the model unchanged — the render host validates it against the armed replay run.
             let runtimeState = TerminalSessionRuntimeState(

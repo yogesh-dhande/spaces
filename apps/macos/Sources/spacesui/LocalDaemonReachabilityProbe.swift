@@ -81,11 +81,13 @@ import spacesterminalcore
     /// (`DaemonLivenessState.pingResponse`), never reaching its main actor or serial work queue, and
     /// its socket timeout bounds the wait on a daemon that is alive but wedged.
     ///
-    /// Any failure counts as "did not answer", including the `.shuttingDown` reply of a daemon
-    /// mid-handoff to an updated image: the section's state is derived from a daemon that is about to
-    /// be replaced, and the reload this triggers waits the handoff out through `ensureRunning` and
-    /// re-derives it. The probe only decides that the section must be re-derived; the snapshot decides
-    /// what it becomes.
+    /// Any failure counts as "did not answer", including the `.handingOff` reply of a daemon mid-handoff
+    /// to an updated image and the `.shuttingDown` reply of one that is exiting for good: either way the
+    /// section's state is derived from a daemon that is going away, and the reload this triggers re-derives
+    /// it through `ensureRunning` (which waits out a handoff, or spawns immediately for a plain shutdown —
+    /// see `TerminalService.isTransitionalHandoffPing`). The probe only decides that the section must be
+    /// re-derived; the snapshot decides what it becomes, so which teardown reason produced the refusal
+    /// makes no difference here.
     static let pingLocalDaemon: LivenessAttempt = {
         do {
             try TerminalService.ping()
