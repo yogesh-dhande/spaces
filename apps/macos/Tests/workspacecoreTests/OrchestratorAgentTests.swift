@@ -2364,19 +2364,39 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
     }
 
-    /// Clearing skips the uniqueness check: it can only put back the name the row already had, and
-    /// refusing it would strand the row on a name with no way back.
-    func testClearingAnAgentRenameIsAllowedEvenWhenTheRestoredNameCollides() throws {
+    /// Clearing is never refused, and with the reported label free it is a plain revert: the stored rename
+    /// goes away and the row falls back to the name the agent reports for itself.
+    func testClearingAnAgentRenameRevertsToTheReportedLabelWhenItIsFree() throws {
         let (store, orchestrator, workspace) = try makeAgentRenameFixture()
         try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Codex", session: "session-1"))
         try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
-        // Inserted straight into the store so it keeps the colliding label that registering through the
-        // orchestrator would have uniquified away.
-        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-2", workspaceID: workspace.id, label: "Codex", session: "session-2"))
 
         try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "   ")
 
         XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel)
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.effectiveLabel, "Codex")
+    }
+
+    /// A rename hides the reported label, so another row can take it while the rename stands. Clearing
+    /// still has to succeed, but it must not put two rows under one name: the row comes back under the
+    /// suffixed variant registration would have given it, which the user can rename again.
+    func testClearingAnAgentRenameRecoversAFreeNameWhenTheReportedLabelWasTaken() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Codex", session: "session-1"))
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
+        // Registered through the orchestrator, which is free to take "Codex" precisely because the rename
+        // standing on agent-1 means nothing displays that name.
+        let second = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-2", status: .idle)
+        XCTAssertEqual(second.effectiveLabel, "Codex", "the reported label really was free while the rename stood")
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "   ")
+
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Codex-2")
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.effectiveLabel, "Codex-2")
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+        XCTAssertEqual(Set(names).count, names.count, "no two rows may share a visible name, got: \(names)")
+        XCTAssertTrue(names.contains("Codex") && names.contains("Codex-2"), "got: \(names)")
     }
 
     /// Launcher claims fold accents and casing the way every other name comparison does, so an agent

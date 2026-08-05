@@ -1224,9 +1224,8 @@ extension WorkspaceOrchestrator {
     ///
     /// A name the user sets has to stay unique among the workspace's visible rows, the same rule a config
     /// edit answers to, so the candidate name runs through `validateWorkspaceFocusNames` before it is
-    /// stored. Clearing skips that check on purpose: the name it puts back is the one the row already had
-    /// before the rename, so a clear can only ever restore a state the workspace was already in, and
-    /// refusing it would strand the row on a name with no way back.
+    /// stored. Clearing is never refused, since that would strand the row on a name with no way back; it
+    /// instead recovers a free name (see `clearedAgentSessionUserLabel`).
     public func renameAgentSession(workspaceID: String, agentID: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
@@ -1238,19 +1237,40 @@ extension WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(
                 message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
         }
-        if !title.isEmpty {
+        let userLabel: String?
+        if title.isEmpty {
+            userLabel = try clearedAgentSessionUserLabel(existing)
+        } else {
             // Validated as the workspace would look with the rename applied: the candidate replaces this
             // row's own name, so it is checked against the processes, browser sessions, launchers, and
             // other agents, and never against the name it is replacing.
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
+            userLabel = title
         }
         // The update names the row by id, so a stop or exit that deleted it between the lookup above and
         // this write matches nothing. That is the same "no such agent" the lookup reports, and reporting it
         // rather than success is what stops a client from believing a name it will never see took hold.
-        guard try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title) else {
+        guard try store.setAgentSessionUserLabel(id: existing.id, userLabel: userLabel) else {
             throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
         }
+    }
+
+    /// What a cleared rename leaves in `user_label`: nil when the agent's reported label is free, so the
+    /// row simply falls back to it, and a uniquified variant of that label when it is not.
+    ///
+    /// A rename hides the reported label, and only visible names are checked for uniqueness, so while the
+    /// rename stands another row can legitimately take that label. Clearing has to stay allowed, otherwise
+    /// a rename is a one-way door, but it must not put two rows under one name either. Reusing
+    /// `uniqueAgentFocusLabel` means the recovered name is chosen by the same numeric-suffix rule
+    /// registration applies ("Codex" taken yields "Codex-2"), and the user is free to rename again.
+    private func clearedAgentSessionUserLabel(_ existing: AgentWindowRecord) throws -> String? {
+        guard let reportedLabel = sanitizedFocusName(existing.label) else { return nil }
+        let uniqueLabel = try uniqueAgentFocusLabel(
+            workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id,
+            claimedLauncherName: existing.claimedLauncherName)
+        guard let uniqueLabel, normalizedFocusName(uniqueLabel) != normalizedFocusName(reportedLabel) else { return nil }
+        return uniqueLabel
     }
 
     /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
