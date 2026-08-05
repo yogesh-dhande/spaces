@@ -285,8 +285,8 @@ public enum DatabaseSchema {
         // import, and nothing writes that table any more. Each table this step did not create itself is
         // touched only when it is present, so a database that never had one is upgraded rather than failed on
         // work it does not need.
-        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Delete archived workspaces and drop is_archived", requiresBackup: true)
-        { handle in
+        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Delete archived workspaces and drop is_archived", requiresBackup: true) {
+            handle in
             guard try migrationTableExists(handle, table: "workspaces") else { return }
             if try migrationTableExists(handle, table: "agent_sessions") {
                 for table in ["agent_subscriptions", "agent_pending_notifications"] where try migrationTableExists(handle, table: table) {

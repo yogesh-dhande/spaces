@@ -17,8 +17,8 @@ struct AppKitControllerAlertsBuilderTests {
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
-            isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
-            config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
+            isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil, config: SpacesDeviceWorkspaceConfig(),
+            processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
     }
 
     private func exitedProcess(id: String, processID: String, exitedAt: String?) -> SpacesDeviceWorkspaceProcessRow {

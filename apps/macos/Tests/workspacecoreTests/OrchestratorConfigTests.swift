@@ -620,8 +620,7 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
         let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
 
@@ -720,8 +719,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo stop"
@@ -743,8 +741,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(
-            try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: { $0.isDefault }))
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo project-stop"
@@ -1206,7 +1203,6 @@ extension OrchestratorTests {
 
     // Tests openWorkspaceTerminal uses the window ID from a running Spaces process when the focused window is not Spaces by arranging representative inputs and asserting the expected result.
 
-
     // Tests updateProjectConfig leaves missing default workspace settings missing.
     func testUpdateProjectConfigDoesNotReseedMissingDefaultWorkspaceSettings() throws {
         let store = try makeTemporaryStore()
@@ -1222,8 +1218,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true,
-            isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 

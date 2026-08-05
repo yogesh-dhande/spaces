@@ -15,10 +15,6 @@ extension SpacesProfile {
     /// and loud is the entire point of the guard (see `SpacesProfileResolutionError` in
     /// `spacesterminalcore`).
     static func currentOrNilOnFailureFatalOnRefusal(file: StaticString = #fileID, line: UInt = #line) -> SpacesProfile? {
-        do {
-            return try currentOrNilIfUnresolved()
-        } catch {
-            fatalError("\(error)", file: file, line: line)
-        }
+        do { return try currentOrNilIfUnresolved() } catch { fatalError("\(error)", file: file, line: line) }
     }
 }

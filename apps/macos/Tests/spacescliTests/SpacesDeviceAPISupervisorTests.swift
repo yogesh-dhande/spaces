@@ -324,8 +324,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "utun4", address: "100.64.12.34", flags: activeFlags | IFF_POINTOPOINT, discoveryIndex: 0)
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: tailnetOnly), ["100.64.12.34"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: tailnetOnly), ["100.64.12.34"])
     }
 
     func testWildcardPairingLinkHostsWithOnlyLANInterfacesYieldsSingleEntry() {
@@ -335,8 +334,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "bridge100", address: "192.168.2.1", flags: activeFlags, discoveryIndex: 1),
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: lanOnly), ["192.168.1.24"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: lanOnly), ["192.168.1.24"])
     }
 
     func testWildcardPairingLinkHostsDoesNotTreatNonTunnelCGNATAddressAsTailnet() {
@@ -356,14 +354,12 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "en0", address: "192.168.1.24", flags: activeFlags, discoveryIndex: 0)
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "203.0.113.5", interfaceAddresses: interfaces), ["203.0.113.5"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "203.0.113.5", interfaceAddresses: interfaces), ["203.0.113.5"])
     }
 
     func testWildcardPairingLinkHostsWithNoInterfacesFallsBackToLoopback() {
         XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: []),
-            [SpacesDeviceAPIDefaults.loopbackHost])
+            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: []), [SpacesDeviceAPIDefaults.loopbackHost])
     }
 
     func testOwnerGatedTerminalCommandsRequireMobileClientID() async throws {

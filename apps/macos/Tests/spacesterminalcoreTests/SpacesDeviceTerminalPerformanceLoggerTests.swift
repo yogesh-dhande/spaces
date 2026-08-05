@@ -39,8 +39,7 @@ import Testing
 
         // ...and emitting, however many times, must never construct an event or write to the newly-set path.
         for index in 0..<1000 {
-            SpacesDeviceTerminalPerformanceLogger.emit(
-                .init(sessionID: "test-session", source: "test", name: "tick", count: index))
+            SpacesDeviceTerminalPerformanceLogger.emit(.init(sessionID: "test-session", source: "test", name: "tick", count: index))
         }
 
         #expect(!FileManager.default.fileExists(atPath: logPath))

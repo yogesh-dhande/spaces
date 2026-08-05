@@ -36,7 +36,5 @@ public enum SpacesTestHost {
     /// `spaces terminal command 'xcrun xctest ./Foo.xctest'`, or tailing a path under a `.xctest`
     /// directory, must not make the CLI classify itself as a test host and then refuse the user's own
     /// live profile. Empty arguments answer `false` rather than trapping.
-    static func executableIsTestBundle(arguments: [String]) -> Bool {
-        arguments.first?.hasSuffix(".xctest") ?? false
-    }
+    static func executableIsTestBundle(arguments: [String]) -> Bool { arguments.first?.hasSuffix(".xctest") ?? false }
 }

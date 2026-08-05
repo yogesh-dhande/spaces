@@ -82,7 +82,7 @@ extension SpacesDeviceAPICommand {
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
-    typealias AgentHookInstallHandler = @Sendable ([SupportedCodingAgentHook]) throws -> AgentHookInstallOutcome
+    typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
     /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
     /// that session id (the reader then falls through to the persisted/socket read).
     public typealias LiveTerminalSessionStateProvider = @Sendable (String) -> GhosttyRemoteSessionStatePayload?
@@ -2470,8 +2470,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the
-    /// local `spaces agent spawn` — the command must launch a supported coding agent (claude, codex, or
-    /// opencode). Hooks are not required. Unlike the local path there is no cwd to infer the workspace
+    /// local `spaces agent spawn` — the command must launch a supported coding agent (see `CodingAgent`).
+    /// Hooks are not required. Unlike the local path there is no cwd to infer the workspace
     /// from, so `workspaceID` is required. Returns the created session id (as a mutation).
     ///
     /// Remote spawn readiness is detection-based, matching the local path: the client polls the device

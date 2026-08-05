@@ -1,6 +1,6 @@
 import Foundation
 
-extension SupportedCodingAgentHook {
+extension CodingAgent {
     /// Parses the executable token from a shell command line and matches it against a supported coding
     /// agent by executable name. Leading `VAR=value` environment assignments and a leading `env` (with
     /// its own assignments) are skipped, then the executable's basename is compared to each agent's
@@ -8,7 +8,12 @@ extension SupportedCodingAgentHook {
     ///
     /// Used both to gate `spaces agent spawn` (only supported agents report the lifecycle signals spawn
     /// readiness depends on) and to derive a spawned session's default title from the agent it launches.
-    public static func matching(command: String) -> SupportedCodingAgentHook? {
+    ///
+    /// Distinct from `CodingAgent.matching(launcherText:)`, the fuzzier launcher-name/command matcher used
+    /// only for agent-launchers-row tile rendering: that one tokenizes the whole string and looks for
+    /// known-agent tokens anywhere in it, since a launcher's display name (not just its command) may be
+    /// the only readable hint. This one is the stricter shell-executable-token matcher.
+    public static func matching(command: String) -> CodingAgent? {
         guard let token = executableToken(inCommand: command) else { return nil }
         let name = (token as NSString).lastPathComponent
         return allCases.first { $0.executableNames.contains(name) }
@@ -35,8 +40,8 @@ extension SupportedCodingAgentHook {
     }
 }
 
-/// Gate for `spaces agent spawn`: the command must launch a supported coding agent (claude, codex, or
-/// opencode). This is only a command-shape gate — it identifies *which* coding agent the command
+/// Gate for `spaces agent spawn`: the command must launch a supported coding agent (see `CodingAgent`).
+/// This is only a command-shape gate — it identifies *which* coding agent the command
 /// launches so spawn readiness knows which foreground kind to await. Hooks are deliberately NOT a
 /// prerequisite: spawn readiness is foreground-detection-based (the daemon's foreground classification
 /// identifies the running agent), and a promptless Codex never emits `SessionStart`, so requiring a
@@ -48,15 +53,15 @@ public enum AgentSpawnCommandGate {
 
         public var errorDescription: String? {
             switch self {
-            case .unsupportedCommand: return "Agent spawn requires a supported coding agent command (claude, codex, or opencode)."
+            case .unsupportedCommand: return "Agent spawn requires a supported coding agent command (\(CodingAgent.commandListText))."
             }
         }
     }
 
     /// Resolves the supported agent a spawn command launches, throwing `GateError.unsupportedCommand`
     /// when the command does not launch one. Pure over the command string.
-    public static func resolveSpawnableAgent(command: String) throws -> SupportedCodingAgentHook {
-        guard let hook = SupportedCodingAgentHook.matching(command: command) else { throw GateError.unsupportedCommand }
-        return hook
+    public static func resolveSpawnableAgent(command: String) throws -> CodingAgent {
+        guard let agent = CodingAgent.matching(command: command) else { throw GateError.unsupportedCommand }
+        return agent
     }
 }

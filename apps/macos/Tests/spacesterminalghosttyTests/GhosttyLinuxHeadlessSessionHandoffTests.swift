@@ -195,8 +195,7 @@
                 try? await Task.sleep(for: .milliseconds(30))
             }
             await GhosttyLinuxHeadlessHangDiagnostics.report(
-                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout,
-                transcriptPath: transcriptPath)
+                wait: "waitAsync at \(sourceLocation)", elapsed: Date().timeIntervalSince(started), timeout: timeout, transcriptPath: transcriptPath)
             #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 

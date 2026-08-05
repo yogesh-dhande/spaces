@@ -1330,8 +1330,8 @@ public final class WorkspaceOrchestrator {
             let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
             let defaultTitle =
-                SupportedCodingAgentHook.matching(command: command)?.displayName
-                ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+                CodingAgent.matching(command: command)?.displayName
+                ?? (CodingAgent.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
                 defaultTitle: defaultTitle)
@@ -1585,9 +1585,7 @@ public final class WorkspaceOrchestrator {
             !matchedProcessIDs.contains(process.id) && terminalTargetID(process: process).map { !agentTerminalIDs.contains($0) } != false
         }.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
         for process in orphanedProcesses { targets.append(.process(process)) }
-        for record in agentWindows.sorted(by: {
-            ($0.effectiveLabel ?? "").localizedStandardCompare($1.effectiveLabel ?? "") == .orderedAscending
-        }) {
+        for record in agentWindows.sorted(by: { ($0.effectiveLabel ?? "").localizedStandardCompare($1.effectiveLabel ?? "") == .orderedAscending }) {
             targets.append(.agent(record))
         }
 

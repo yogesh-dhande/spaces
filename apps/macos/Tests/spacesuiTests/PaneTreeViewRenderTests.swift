@@ -5,9 +5,7 @@ import Testing
 
 /// A content view that can actually become first responder, unlike a plain `NSView`
 /// (which always refuses). Needed so the focus-retention test isn't vacuous.
-@MainActor private final class FocusableView: NSView {
-    override var acceptsFirstResponder: Bool { true }
-}
+@MainActor private final class FocusableView: NSView { override var acceptsFirstResponder: Bool { true } }
 
 @MainActor private final class FakePaneContent: PaneContentHosting {
     let descriptor: PaneContentDescriptor
@@ -31,13 +29,10 @@ import Testing
 }
 
 @MainActor @Suite struct PaneTreeViewRenderTests {
-    private func pane(_ id: String) -> Pane {
-        Pane(id: id, content: .terminalSession(deviceID: "device", sessionID: id))
-    }
+    private func pane(_ id: String) -> Pane { Pane(id: id, content: .terminalSession(deviceID: "device", sessionID: id)) }
 
     private func twoLeafSplit() -> PaneNode {
-        .split(
-            PaneSplit(id: "split-1", orientation: .horizontal, weights: [0.5, 0.5], children: [.leaf(pane("pane-1")), .leaf(pane("pane-2"))]))
+        .split(PaneSplit(id: "split-1", orientation: .horizontal, weights: [0.5, 0.5], children: [.leaf(pane("pane-1")), .leaf(pane("pane-2"))]))
     }
 
     private func threeLeafSplit() -> PaneNode {
@@ -110,9 +105,7 @@ import Testing
     @Test func reconfiguresPanesOnEveryRender() {
         let tree = PaneTreeView()
         var configureCounts: [String: Int] = [:]
-        tree.onConfigurePane = { _, pane in
-            configureCounts[pane.id, default: 0] += 1
-        }
+        tree.onConfigurePane = { _, pane in configureCounts[pane.id, default: 0] += 1 }
         let window = makeWindow(hosting: tree)
         defer { withExtendedLifetime(window) {} }
 

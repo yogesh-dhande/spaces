@@ -37,8 +37,7 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
 
     /// Creates a directory `name` directly under the sessions root and stamps its modification date to
     /// `age` seconds before `now`, so its position relative to the grace period is deterministic.
-    @discardableResult
-    private func makeSessionDirectory(_ name: String, age: TimeInterval) throws -> String {
+    @discardableResult private func makeSessionDirectory(_ name: String, age: TimeInterval) throws -> String {
         let path = URL(fileURLWithPath: try TerminalSessionPaths.sessionsRootDirectory()).appendingPathComponent(name).path
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: path)
@@ -51,12 +50,10 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
     }
 
     private func sweep(
-        known: Set<String> = [], active: Set<String> = [], fileManager: FileManager = .default,
-        onFailure: (String, any Error) -> Void = { _, _ in }
+        known: Set<String> = [], active: Set<String> = [], fileManager: FileManager = .default, onFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         try TerminalSessionOrphanSweep.sweep(
-            knownSessionIDs: known, activeSessionIDs: active, gracePeriod: gracePeriod, fileManager: fileManager, now: now,
-            onFailure: onFailure)
+            knownSessionIDs: known, activeSessionIDs: active, gracePeriod: gracePeriod, fileManager: fileManager, now: now, onFailure: onFailure)
     }
 
     /// Fails `removeItem` for the one entry whose path contains `failingName`, delegating every other call

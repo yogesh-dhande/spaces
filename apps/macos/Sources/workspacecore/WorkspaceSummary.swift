@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WorkspaceSummary: Sendable {
+public struct WorkspaceSummary: Hashable, Sendable {
     public let id: String
     public let branch: String?
     public let baseBranch: String?
@@ -12,8 +12,8 @@ public struct WorkspaceSummary: Sendable {
     public let deviceID: String
 
     public init(
-        id: String, branch: String?, baseBranch: String? = nil, dir: String, isRunning: Bool, isHidden: Bool = false,
-        isDefault: Bool, notes: String? = nil, deviceID: String = SpacesDeviceRecord.localDeviceID
+        id: String, branch: String?, baseBranch: String? = nil, dir: String, isRunning: Bool, isHidden: Bool = false, isDefault: Bool,
+        notes: String? = nil, deviceID: String = SpacesDeviceRecord.localDeviceID
     ) {
         self.id = id
         self.branch = branch

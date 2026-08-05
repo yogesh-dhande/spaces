@@ -134,9 +134,7 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// theoretical: profile resolution refuses a live user profile in a test process, so a test bound
     /// inside one throws here.
     private static func enqueueTimeDatabase() -> EnqueueTimeDatabase {
-        do { return .resolved(try TerminalSessionPersistence.currentDatabasePath()) } catch {
-            return .unresolved(reason: String(describing: error))
-        }
+        do { return .resolved(try TerminalSessionPersistence.currentDatabasePath()) } catch { return .unresolved(reason: String(describing: error)) }
     }
 
     /// Runs `write` against the enqueue-time database, or abandons it. A write that cannot be attributed

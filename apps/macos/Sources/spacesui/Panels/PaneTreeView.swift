@@ -82,8 +82,7 @@ import AppKit
         case .leaf(let pane):
             guard let view = paneViewsByID[pane.id] else { return }
             onConfigurePane?(view, pane)
-        case .split(let split):
-            for child in split.children { reconfigure(node: child) }
+        case .split(let split): for child in split.children { reconfigure(node: child) }
         }
     }
 

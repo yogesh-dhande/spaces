@@ -39,7 +39,7 @@ SPACESD_BIN="$BUILD_DIR/spacesd"
 source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 
 MATRIX_ENABLED="${SPACES_E2E_AGENT_MATRIX:-0}"
-# Providers probed by Part B: <SupportedCodingAgentHook display> maps to the PATH executable name.
+# Providers probed by Part B: <CodingAgent display> maps to the PATH executable name.
 MATRIX_PROVIDERS=(claude codex opencode)
 
 fail() {

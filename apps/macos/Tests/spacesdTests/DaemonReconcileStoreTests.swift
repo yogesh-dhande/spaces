@@ -46,8 +46,8 @@ final class DaemonReconcileStoreTests: XCTestCase {
             ports: [], processes: [], browserSessions: [])
         try seedStore.upsert(project: project)
         let workspace = WorkspaceRecord(
-            id: "workspace-router", projectID: project.id, dir: "/projects/router", dirname: nil, branch: nil, isDefault: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-router", projectID: project.id, dir: "/projects/router", dirname: nil, branch: nil, isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         try seedStore.upsert(workspace: workspace)
         try seedStore.setWorkspacePorts(workspaceID: workspace.id, ports: [21001], names: ["web"])
 

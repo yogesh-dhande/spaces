@@ -28,8 +28,8 @@ extension SQLiteStore {
                     """,
                 bindings: [
                     workspace.id, workspace.projectID, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "", workspace.baseBranch ?? "",
-                    workspace.isDefault ? "1" : "0", workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0",
-                    workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
+                    workspace.isDefault ? "1" : "0", workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
+                    workspace.notes ?? "",
                 ])
         }
     }

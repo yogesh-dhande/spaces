@@ -316,8 +316,9 @@ extension WorkspaceOrchestrator {
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
                 return record.id != excludingAgentWindowID
             }.map(\.name).map(normalizedFocusName))
-        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }
-            .compactMap(\.effectiveLabel).compactMap(sanitizedFocusName).map(normalizedFocusName)
+        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(
+            \.effectiveLabel
+        ).compactMap(sanitizedFocusName).map(normalizedFocusName)
         let reservedLauncherNames = Set(
             try store.workspaceAgentLaunchers(workspaceID: workspaceID).map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.filter
             { launcherName in
@@ -657,8 +658,8 @@ extension WorkspaceOrchestrator {
                 workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
                 claimedLauncherName: resolvedClaimedLauncherName)
             let updated = AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
+                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
@@ -716,8 +717,8 @@ extension WorkspaceOrchestrator {
                 workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
                 claimedLauncherName: resolvedClaimedLauncherName)
             let updated = AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
+                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
@@ -791,9 +792,8 @@ extension WorkspaceOrchestrator {
                 TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, trackingID: existing.terminalTrackingID)
             } else { nil }
         return AgentWindowRecord(
-            id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
-            userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget,
-            sessionKey: existing.sessionKey,
+            id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label, userLabel: existing.userLabel,
+            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
             claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
             detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
     }
@@ -1131,11 +1131,11 @@ extension WorkspaceOrchestrator {
         return value
     }
 
-    /// The coding agent kind (claude/codex/opencode) a terminal session's LIVE foreground state reports,
-    /// never the `.agent` launch title — keeping it off the launch title is what prevents a "Reviewer
-    /// (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings. This is the
-    /// detection source the kind is persisted from; it goes nil the moment the agent process ends, so no
-    /// consumer reads it alone (see `resolvedAgentKind`).
+    /// The coding agent kind (a `TerminalDetectedAgentKind` raw value) a terminal session's LIVE
+    /// foreground state reports, never the `.agent` launch title — keeping it off the launch title is what
+    /// prevents a "Reviewer (Reviewer)" duplication and preserves the detected-kind identity in listings.
+    /// This is the detection source the kind is persisted from; it goes nil the moment the agent process
+    /// ends, so no consumer reads it alone (see `resolvedAgentKind`).
     func liveDetectedAgentKind(terminalSessionID: String?) -> String? {
         guard let terminalSessionID, !terminalSessionID.isEmpty, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
             let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -1169,7 +1169,7 @@ extension WorkspaceOrchestrator {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
                     if let sessionID, terminalSessionID != sessionID { continue }
-                    // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
+                    // `agent:` carries the detected kind (`TerminalDetectedAgentKind` raw value), never the launch title;
                     // `label:` carries the row's visible name (`effectiveLabel`: the user's rename, else
                     // the reported label) — workspace-unique, which signals keep fresh and collisions
                     // uniquify ("Reviewer 2"), so two children never report the same label. Collapsing
@@ -1178,11 +1178,11 @@ extension WorkspaceOrchestrator {
                     let detectedKind = resolvedAgentKind(agent)
                     rows.append(
                         TerminalServiceAgentSessionRow(
-                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind, label: trimmedOrNilAgentField(agent.effectiveLabel),
-                            status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name,
-                            workspaceID: workspace.id, workspaceName: workspace.displayName, workspaceDir: workspace.dir,
-                            branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
-                            lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
+                            label: trimmedOrNilAgentField(agent.effectiveLabel), status: agent.status.rawValue,
+                            note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name, workspaceID: workspace.id,
+                            workspaceName: workspace.displayName, workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch),
+                            updatedAt: agent.updatedAt, lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
                 }
             }
         }

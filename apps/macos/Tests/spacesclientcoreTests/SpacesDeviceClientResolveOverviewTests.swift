@@ -122,9 +122,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
             try SpacesDeviceClient.resolveOverview(
                 device: Self.localDevice(port: Self.stalePort), clientApp: Self.clientApp, profile: Self.profile(root: root),
                 requestProvider: probe.requestProvider, database: database, bootstrap: probe.bootstrapProvider)
-        ) { error in
-            XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(error))
-        }
+        ) { error in XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(error)) }
         XCTAssertEqual(probe.bootstrapCount, 1)
         // One failed dial, then the recovery stopped — no second overview attempt against a daemon that
         // could not be started.

@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 import workspacecore
 
 @MainActor final class AgentLaunchersSection {
@@ -493,23 +494,11 @@ import workspacecore
     static func agentTileText(for launcher: AgentLauncher) -> String { agentTileText(name: launcher.name, command: launcher.command) }
 
     static func agentTileText(name: String, command: String) -> String {
-        for candidate in [name, command] { if let tileText = knownAgentTileText(in: candidate) { return tileText } }
+        for candidate in [name, command] { if let agent = CodingAgent.matching(launcherText: candidate) { return agent.tileText } }
 
         let letters = name.uppercased().unicodeScalars.filter { CharacterSet.letters.contains($0) }
         let text = letters.prefix(2).map { String($0) }.joined()
         return text.isEmpty ? "AI" : text
-    }
-
-    private static func knownAgentTileText(in text: String) -> String? {
-        let tokens = Set(usefulTokens(in: text))
-        if tokens.contains("codex") || tokens.contains("codexcli") { return "CX" }
-        if tokens.contains("claude") || tokens.contains("claudecode") || tokens.contains("claudecodecli") { return "CL" }
-        if tokens.contains("opencode") || tokens.contains("opencodecli") { return "OC" }
-        return nil
-    }
-
-    private static func usefulTokens(in text: String) -> [String] {
-        text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
     }
 
     private func updateRuntimeActionVisibility() {

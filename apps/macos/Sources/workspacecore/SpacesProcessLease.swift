@@ -121,8 +121,7 @@ public enum SpacesLeaseCoordinator {
         -> SpacesProcessLeaseAcquisitionResult
     {
         try acquireLease(
-            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), profileRoot: profile.rootDirectory,
-            fileManager: fileManager)
+            at: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), profileRoot: profile.rootDirectory, fileManager: fileManager)
     }
 
     public static func currentProfileAppOwner(profile: SpacesProfile? = nil, fileManager: FileManager = .default) throws -> SpacesProcessLeaseOwner? {
@@ -133,11 +132,7 @@ public enum SpacesLeaseCoordinator {
 
     public static func currentDesktopControlOwner(fileManager: FileManager = .default, homeDirectoryURL: URL? = nil) throws
         -> SpacesProcessLeaseOwner?
-    {
-        try readLiveOwner(
-            fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL),
-            fileManager: fileManager)
-    }
+    { try readLiveOwner(fromLeaseDirectoryPath: desktopControlLeaseDirectory(homeDirectoryURL: homeDirectoryURL), fileManager: fileManager) }
 
     @discardableResult public static func waitForDesktopControlAvailability(
         timeoutSeconds: TimeInterval, pollIntervalSeconds: TimeInterval = 1, logIntervalSeconds: TimeInterval = 5,

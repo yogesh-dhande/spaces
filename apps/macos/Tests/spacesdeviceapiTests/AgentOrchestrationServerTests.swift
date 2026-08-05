@@ -397,8 +397,7 @@
         }
 
         @discardableResult private func seedAgentSession(
-            terminalSessionID: String, label: String, status: AgentWindowStatus, note: String?, signalAt: String?,
-            claimedLauncherID: String? = nil
+            terminalSessionID: String, label: String, status: AgentWindowStatus, note: String?, signalAt: String?, claimedLauncherID: String? = nil
         ) throws -> AgentWindowRecord {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             let orchestrator = WorkspaceOrchestrator(store: store)
@@ -409,8 +408,8 @@
                     processes: [], browserSessions: []))
             try store.upsert(
                 workspace: WorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false,
-                    isRunning: false, lastLaunchedAt: nil))
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: false,
+                    lastLaunchedAt: nil))
             let agent = try orchestrator.registerAgentWindow(
                 workspaceID: "workspace-1", provider: .spaces, label: label, terminalTrackingID: terminalSessionID, status: status,
                 claimedLauncherID: claimedLauncherID)

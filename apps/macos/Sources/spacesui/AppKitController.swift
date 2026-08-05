@@ -2570,7 +2570,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localOfflineMessage: String?
     }
 
-    enum SidebarDeviceLoadState: Sendable, Equatable {
+    enum SidebarDeviceLoadState: Sendable, Hashable {
         case loading
         case offline(String)
         case loaded
@@ -3460,8 +3460,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return AgentWindowRecord(
                 id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
                 terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: row.launcherID,
-                claimedLauncherName: row.isConfigured ? row.name : nil, status: agentStatus(from: row.activityState), createdAt: now,
-                updatedAt: now)
+                claimedLauncherName: row.isConfigured ? row.name : nil, status: agentStatus(from: row.activityState), createdAt: now, updatedAt: now)
         }
     }
 
@@ -4506,7 +4505,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func toggleProjectExpanded(projectID: String) { sidebar.toggleProjectExpanded(projectID: projectID) }
     func canPreserveDetailPaneAfterSidebarReload() -> Bool { sidebar.canPreserveDetailPaneAfterSidebarReload() }
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
-    func applySidebarProjectExpansionState() { sidebar.applySidebarProjectExpansionState() }
+    /// Rebuilds the whole outline for a change the row diff does not model; see the sidebar's own method.
+    func fullReloadSidebarOutline() { sidebar.fullReloadSidebarOutline() }
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
     func updateAlertsRowAppearance() { sidebar.updateAlertsRowAppearance() }
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
@@ -4940,8 +4940,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             selectedProjectID = preferredProjectID
             selectedWorkspaceID = nil
         }
-        outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        fullReloadSidebarOutline()
         if !shouldPreserveDetailPane { refreshSelection() }
         updateAlertsSidebarBadge()
         if showingAlerts { showAlertsDetail() }
@@ -9239,7 +9238,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
         }
         rebuildFlatSidebarData()
-        outlineView.reloadData()
+        fullReloadSidebarOutline()
         showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
         if let window { revealTargetedHotkeyWindow(window) }
     }
@@ -9558,8 +9557,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// being deleted keeps its row — so only the row views and the expansion state (a marked row hides
     /// its runtime targets) have to be reapplied.
     private func applyPendingWorkspaceDeletionMarking() {
-        outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        fullReloadSidebarOutline()
         refreshSelection()
     }
 

@@ -34,11 +34,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMetadataWorkspaceMatchAssignsSessionToStampedWorkspace() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
-            id: "workspace-root", projectID: project.id, dir: "/repo", dirname: nil, branch: "main", isDefault: true,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-root", projectID: project.id, dir: "/repo", dirname: nil, branch: "main", isDefault: true, isRunning: true,
+            lastLaunchedAt: nil)
         let nestedWorkspace = WorkspaceRecord(
-            id: "workspace-nested", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-nested", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-metadata", title: "shell", workingDirectory: "/repo/apps/web/src", workspaceID: rootWorkspace.id,
             attachmentSnapshot: .init())
@@ -54,8 +54,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testWorkspaceEnvironmentFlowsThroughToSummary() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_WEB_PORT": "51023"]
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -67,8 +67,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMetadataWorkspaceMissingFromOverviewKeepsStampedWorkspaceIDButNoRow() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-missing-workspace", title: "shell", workingDirectory: workspace.dir, workspaceID: "workspace-archived",
             attachmentSnapshot: .init())
@@ -83,8 +83,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsWorkspaceCountsAndLeavesUnmatchedSessionsUngrouped() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let localClient = TerminalClient(
             id: "owner-1", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-05-18T08:00:00Z")
         let ownerAttachment = TerminalAttachment(
@@ -108,8 +108,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsConfiguredProcessRowsWithLiveAndExitedState() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let runningSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
@@ -142,8 +142,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testStartingTerminalSessionSummaryKeepsWorkspaceTerminalRowRunning() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-starting", title: "shell-1", workingDirectory: workspace.dir, state: .starting, workspaceID: workspace.id,
             attachmentSnapshot: .init(), isControlAvailable: false, isSubscriptionAvailable: false)
@@ -265,8 +265,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMatchesRenamedConfiguredProcessByTemplateID() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let processSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
@@ -298,8 +298,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsConfiguredAndAdHocCodingAgentRows() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
@@ -330,8 +330,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMatchesRenamedConfiguredAgentByLauncherID() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
@@ -362,8 +362,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsWorkspaceTerminalRowsWithoutClaimedProcessAndAgentSessions() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let shellSession = makeSessionCatalogEntry(
             sessionID: "session-shell", title: "Shell", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let processSession = makeSessionCatalogEntry(
@@ -394,8 +394,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testRenamedSessionUserTitleWinsOverRuntimeTitleInSummariesAndTerminalRows() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         // The runtime title mimics a Ghostty set_title update that arrived after the manual rename.
         let session = makeSessionCatalogEntry(
             sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
@@ -414,8 +414,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testTrackedShellRowKeepsItsNameAndCarriesTheLiveTitleBeside() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-shell", title: "shell-1", workingDirectory: "/repo/feature/apps/web", workspaceID: workspace.id,
             attachmentSnapshot: .init(), runtimeTitle: "vim main.swift")
@@ -436,8 +436,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testShellRowWithoutAReportedTitleCarriesNoLiveTitle() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let workspaceDescriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         func rows(runtimeTitle: String?) -> (row: SpacesDeviceWorkspaceTerminalRow?, session: SpacesDeviceTerminalSessionSummary?) {
             let session = makeSessionCatalogEntry(
@@ -464,8 +464,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testRenamedShellRowKeepsShowingItsLiveTitleBesideTheNewName() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-shell", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
             userTitle: "build watcher", runtimeTitle: "vim main.swift")
@@ -486,8 +486,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testTerminalRowOrderFollowsNamesNotLiveTitles() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let windows = [
             WindowRecord(
                 id: "window-1", workspaceID: workspace.id, app: "Spaces", name: "shell-1", terminalTrackingID: "session-1", role: "terminal",
@@ -517,8 +517,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testTrackedWorkspaceTerminalRequiresLiveSessionIDBeforeStopIsAvailable() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil, role: "terminal", orderIndex: 0,
             lastSeenAt: "now")
@@ -535,8 +535,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesEndedWorkspaceProcessRowsWithoutLiveControl() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let endedSession = makeSessionCatalogEntry(
             sessionID: "session-ended", title: "docs-watch", workingDirectory: "/repo/apps/web", state: .exited, workspaceID: workspace.id,
@@ -564,8 +564,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesEndedWorkspaceAgentRowsWithoutLiveControl() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let endedSession = makeSessionCatalogEntry(
             sessionID: "session-ended-agent", title: "review-agent", workingDirectory: "/repo/apps/web", state: .exited, workspaceID: workspace.id,
@@ -592,8 +592,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildKeepsTitleMatchedAdHocLiveSessionWhenSessionIDIsDistinct() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let currentAgentSession = makeSessionCatalogEntry(
             sessionID: "agent-current", title: "review-agent", workingDirectory: "/repo/apps/web", workspaceID: workspace.id,
@@ -622,8 +622,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testRetainedIncludesLiveAdHocSession() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let liveSession = makeSessionCatalogEntry(
             sessionID: "session-live", title: "Shell", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
 
@@ -640,8 +640,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testRetainedIncludesEndedSessionReferencedOnlyByRuntimeTargetRow() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let endedShellWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell", role: "terminal",
             orderIndex: 0, lastSeenAt: "now")
@@ -664,8 +664,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testEndedSessionHeldOnlyByATerminalWindowRowStaysOpenable() throws {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let endedShellWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell", role: "terminal",
             orderIndex: 0, lastSeenAt: "now")
@@ -707,15 +707,14 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testStoppedConfiguredProcessReportsNotStartedWhileItsEndedSessionStaysPublished() throws {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         // The process was stopped, so its `running_processes` row is gone; the terminal window it ran in
         // still references the ended session, which is what keeps that session retained.
         let leftoverWindow = WindowRecord(
             id: "window-parity", workspaceID: workspace.id, app: "Spaces", name: "parity-process", terminalTrackingID: "session-parity",
             role: "terminal", orderIndex: 0, lastSeenAt: "now")
-        let settings = WorkspaceSettings(
-            processes: [ProcessTemplate(id: "template-parity", name: "parity-process", command: "python3 -c pass")])
+        let settings = WorkspaceSettings(processes: [ProcessTemplate(id: "template-parity", name: "parity-process", command: "python3 -c pass")])
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
             project: project, workspace: workspace, settings: settings, runningProcesses: [], windows: [leftoverWindow])
         let endedSession = makeSessionCatalogEntry(
@@ -740,8 +739,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testLiveTerminalWindowSessionStaysAnAdHocSummaryCarryingItsLiveTitle() throws {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let shellWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-live-shell", role: "terminal",
             orderIndex: 0, lastSeenAt: "now")
@@ -750,8 +749,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-live-shell", title: "Shell", workingDirectory: "/repo/feature", workspaceID: workspace.id,
             attachmentSnapshot: .init(), runtimeTitle: "vim README.md")
 
-        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
-            projects: [project], workspaces: [descriptor], liveSessions: [liveSession])
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(projects: [project], workspaces: [descriptor], liveSessions: [liveSession])
 
         let summary = try XCTUnwrap(overview.sessions.first { $0.id == "session-live-shell" })
         XCTAssertEqual(summary.rowKind, .liveSession)
@@ -766,8 +764,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testEndedSessionClaimedByAProcessRowIsPublishedOnceAsThatProcess() throws {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let exitedProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
             terminalTrackingID: "session-shared", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")
@@ -792,8 +790,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testRetainedIncludesExitedProductRowsAndExcludesUnreferencedSession() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
         let exitedProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
             terminalTrackingID: "session-process", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")

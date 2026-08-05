@@ -21,8 +21,7 @@ extension ProcessProfileEnvironmentSuites {
     /// Nests under `ProcessProfileEnvironmentSuites` (rather than declaring its own `.serialized`) because
     /// it mutates the process-global `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` in `init`/`deinit`; see that
     /// parent's doc comment for why a per-suite trait alone is not enough.
-    @MainActor
-    @Suite final class MainWindowCloseBehaviorTests {
+    @MainActor @Suite final class MainWindowCloseBehaviorTests {
         private let root: URL
         private let originalDatabasePath: String?
         private let originalRuntimeDirectory: String?
@@ -51,14 +50,13 @@ extension ProcessProfileEnvironmentSuites {
                 isInstalledProfile: false, runtimeDirectory: root.appendingPathComponent("runtime").path,
                 ipcNotificationObject: "com.spaces.test.\(UUID().uuidString)", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
             let owner = SpacesProcessLeaseOwner(
-                pid: ProcessInfo.processInfo.processIdentifier, executablePath: "/tmp/spaces-test", profileRoot: root.path,
-                token: UUID().uuidString, acquiredAt: "2026-01-01T00:00:00Z")
+                pid: ProcessInfo.processInfo.processIdentifier, executablePath: "/tmp/spaces-test", profileRoot: root.path, token: UUID().uuidString,
+                acquiredAt: "2026-01-01T00:00:00Z")
             // A real SpacesProcessLease normally guards a live lease file; this one points at a directory
             // that is never created, so its deinit-time release() is a harmless no-op (readOwner finds
             // nothing to match against).
             let lease = SpacesProcessLease(
-                owner: owner, leaseDirectoryPath: root.appendingPathComponent("app-owner-lease").path, metadataPath: "unused",
-                fileManager: .default)
+                owner: owner, leaseDirectoryPath: root.appendingPathComponent("app-owner-lease").path, metadataPath: "unused", fileManager: .default)
             let context = SpacesAppLaunchContext(profile: profile, appOwnerLease: lease, desktopControlState: .passive(owner))
             return AppKitController(launchContext: context)
         }

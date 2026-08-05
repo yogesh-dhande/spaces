@@ -2273,8 +2273,7 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
         guard try orchestrator.store.workspace(id: workspace.id) == nil else {
             throw ValidationError("Workspace still present after delete: \(workspace.id)")
         }
-        try emitJSON(
-            WorkspaceDeletePayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, notice: outcome.notice))
+        try emitJSON(WorkspaceDeletePayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, notice: outcome.notice))
     }
 }
 
@@ -2683,13 +2682,11 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
-    WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
+    WorkspaceSummaryPayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceSummary) -> WorkspaceSummaryPayload {
-    WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
+    WorkspaceSummaryPayload(id: workspace.id, name: workspace.displayName, dir: workspace.dir, isRunning: workspace.isRunning, notes: workspace.notes)
 }
 
 private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> WorkspaceSettingsPayload {

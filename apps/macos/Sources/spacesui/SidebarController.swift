@@ -116,6 +116,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Set when a database-change signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
     private var pendingDatabaseReload = false
+    /// The signed outline rows the next applied change is diffed against, and the baseline every
+    /// wholesale rebuild refreshes. `nil` until the first apply, which therefore rebuilds everything.
+    ///
+    /// Stored rather than recomputed lazily at diff time because a device's section is mutated before
+    /// the outline work runs — `applyRemoteDeviceSection` installs the new overview and only then
+    /// rebuilds — so a "previous" snapshot taken at that point would already describe the new state and
+    /// every diff would come back unchanged.
+    private var lastOutlineRowSnapshot: [SidebarOutlineRow]?
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -360,12 +368,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // session's bell into that same set and writes it back, so a consume that ran against a not-yet
         // loaded (empty) set would persist itself over everything the user had dismissed.
         host.loadAlertsDismissedAttentionItemIDs()
-        rebuildFlatSidebarData()
-        host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
-        if !localOutlineUnchanged {
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
+        if localOutlineUnchanged {
+            // The merge still has to run for its side effects — the focused pane's bell is consumed here,
+            // and global panel titles are refreshed here — but an unchanged local overview cannot have
+            // changed a row, so nothing is signed or repainted.
+            rebuildFlatSidebarData()
+        } else {
+            applySidebarDataChange()
         }
+        host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         host.logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             host.refreshSelection()
@@ -454,10 +465,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
             addedSection = true
         }
-        if addedSection {
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
-        }
+        if addedSection { applySidebarDataChange() }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
@@ -504,9 +512,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: bypassesBackoff)
         }
         if updatedReconnectSection {
-            rebuildFlatSidebarData()
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
+            applySidebarDataChange()
             updateAlertsSidebarBadge()
             if rebuildWorkspaceDetail { host.refreshSelection() }
         }
@@ -892,11 +898,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.deviceSections[index].alertsGroups = []
                 host.deviceSections[index].overview = nil
                 host.deviceSections[index].loadState = .loaded
-                if changed {
-                    rebuildFlatSidebarData()
-                    host.outlineView.reloadData()
-                    applySidebarProjectExpansionState()
-                }
+                if changed { applySidebarDataChange() }
                 if selectedWorkspaceUnderThisDevice, let verdict = load.compatibility {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
                 }
@@ -965,9 +967,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.reconcileCompatibilityBlock(deviceID: deviceID)
             host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
-        rebuildFlatSidebarData()
-        host.outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        applySidebarDataChange()
         updateAlertsSidebarBadge()
         host.reopenPersistedPanelWindowsIfPossible()
         // The Alerts pane's cards and `alertsFocusRequestMap` were built from the pre-rebuild groups, so
@@ -1007,6 +1007,159 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // is typing in gets consumed — before anything reads the groups for the badge or the list.
         host.consumeFocusedSessionBellAlerts()
         host.panelCoordinator.refreshGlobalPanelTitles()
+    }
+
+    /// The single entry point for "the sidebar's data changed": re-merges the device sections and then
+    /// repaints only what the change actually altered.
+    ///
+    /// A paired device with live terminal sessions pushes a changed overview several times a second, and
+    /// nearly every one of those changes touches a single row. `NSOutlineView.reloadData()` rebuilds
+    /// every row view from scratch — tens of milliseconds of main-thread layout on a populated sidebar —
+    /// so the outline is reloaded wholesale only when the rows themselves changed (added, removed, or
+    /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
+    func applySidebarDataChange() {
+        rebuildFlatSidebarData()
+        let snapshot = outlineRowSnapshot()
+        let verdict = SidebarOutlineDiff.compute(previous: lastOutlineRowSnapshot, current: snapshot.rows)
+        lastOutlineRowSnapshot = snapshot.rows
+        switch verdict {
+        case .unchanged: break
+        case .rowsChanged(let cacheKeys):
+            // No height notification is owed: `heightOfRowByItem` reads only the selection and whether a
+            // runtime target is last in its workspace's list, and neither can change while the row keys
+            // stay identical — a selection move has its own reload path, which does note the heights.
+            for cacheKey in cacheKeys {
+                guard let item = snapshot.itemsByCacheKey[cacheKey] else { continue }
+                // Refreshing the cached ref's item is what makes this atomic: the row's model and its view
+                // are updated together, under the identity NSOutlineView already tracks.
+                host.outlineView.reloadItem(outlineItemRef(for: item))
+            }
+        case .structureChanged:
+            host.outlineView.reloadData()
+            applySidebarProjectExpansionState()
+        }
+    }
+
+    /// Rebuilds the whole outline and re-applies expansion, for the paths that repaint wholesale for
+    /// reasons the row diff does not model — a mutation response that also moves the selection, the local
+    /// compatibility block, the pending-deletion marking.
+    ///
+    /// Refreshing the stored snapshot is the point of routing them here: without it the next diff would
+    /// run against a baseline older than what is painted, and a change that happens to restore that
+    /// baseline would be called unchanged, leaving the stale rows on screen.
+    func fullReloadSidebarOutline() {
+        host.outlineView.reloadData()
+        applySidebarProjectExpansionState()
+        lastOutlineRowSnapshot = outlineRowSnapshot().rows
+    }
+
+    /// Walks the outline's logical tree — the same enumeration the `NSOutlineViewDataSource` methods
+    /// serve — signing each node, and returns the rows in order plus the item behind each cache key so a
+    /// changed row can be reloaded.
+    ///
+    /// The children of a collapsed project are deliberately left out. A project's collapse state arrives
+    /// in the applied data (it is a `ProjectSummary` field, read back from the client database on every
+    /// overview install), and the only code that materializes or hides those rows is
+    /// `applySidebarProjectExpansionState`, which runs on the wholesale path — so omitting them makes a
+    /// collapse flip a structural change, which is exactly what it is. Workspace expansion is the
+    /// opposite: client-only view state that never rides in the applied data and is materialized by the
+    /// click and selection handlers themselves, so a collapsed workspace's target rows stay listed here
+    /// and a change to one costs a reload of a row that is not currently on screen.
+    private func outlineRowSnapshot() -> (rows: [SidebarOutlineRow], itemsByCacheKey: [String: OutlineItem]) {
+        var rows: [SidebarOutlineRow] = []
+        var itemsByCacheKey: [String: OutlineItem] = [:]
+        func append(_ item: OutlineItem, _ signature: SidebarRowSignature) {
+            let cacheKey = item.cacheKey
+            rows.append(SidebarOutlineRow(cacheKey: cacheKey, signature: signature))
+            itemsByCacheKey[cacheKey] = item
+        }
+
+        let treatments = host.deviceSections.reduce(into: [String: SidebarRowDeviceTreatment]()) { treatments, section in
+            treatments[section.deviceID] = SidebarRowDeviceTreatment(loadState: section.loadState, displayName: section.displayName)
+        }
+        func treatment(deviceID: String) -> SidebarRowDeviceTreatment {
+            treatments[deviceID] ?? SidebarRowDeviceTreatment(loadState: nil, displayName: nil)
+        }
+
+        func appendProjects(deviceID: String) {
+            let device = treatment(deviceID: deviceID)
+            for project in deviceProjects(deviceID: deviceID) {
+                append(.project(project), projectRowSignature(project: project, device: device))
+                guard !project.isCollapsed else { continue }
+                guard project.isGitRepo else {
+                    guard let workspace = nonGitProjectTargetWorkspace(project) else { continue }
+                    for item in nonGitProjectRuntimeTargetChildren(project) {
+                        append(
+                            .runtimeTarget(project, workspace, item),
+                            runtimeTargetRowSignature(workspace: workspace, item: item, nestedUnderWorkspace: false, device: device))
+                    }
+                    continue
+                }
+                let workspaces = visibleWorkspaces(projectID: project.id)
+                guard !workspaces.isEmpty else {
+                    append(.emptyProject(project), .emptyProject(SidebarEmptyProjectRowSignature(device: device)))
+                    continue
+                }
+                for workspace in workspaces {
+                    append(.workspace(project, workspace), workspaceRowSignature(workspace: workspace, device: device))
+                    for item in workspaceRuntimeTargetChildren(workspace) {
+                        append(
+                            .runtimeTarget(project, workspace, item),
+                            runtimeTargetRowSignature(workspace: workspace, item: item, nestedUnderWorkspace: true, device: device))
+                    }
+                }
+            }
+        }
+
+        if showsDeviceHeaders {
+            for section in host.deviceSections {
+                append(.device(section.deviceID), deviceRowSignature(section: section))
+                appendProjects(deviceID: section.deviceID)
+            }
+        } else {
+            appendProjects(deviceID: singleDeviceID)
+        }
+        return (rows, itemsByCacheKey)
+    }
+
+    private func deviceRowSignature(section: DeviceSection) -> SidebarRowSignature {
+        // The compatibility branch the cell takes ahead of the caption, collapsed to what it renders.
+        let compatibilityActionTitle: String? = {
+            guard let compatibility = section.compatibility, !compatibility.isCompatible else { return nil }
+            return compatibility == .clientTooOld ? "Update app" : "Resolve"
+        }()
+        return .device(
+            SidebarDeviceRowSignature(
+                displayName: section.displayName, loadState: section.loadState, compatibilityActionTitle: compatibilityActionTitle,
+                isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: section.deviceID),
+                isUpdatePending: section.daemonStatus?.isUpdatePending == true))
+    }
+
+    private func projectRowSignature(project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
+        let standInWorkspace = nonGitProjectTargetWorkspace(project)
+        return .project(
+            SidebarProjectRowSignature(
+                device: device, project: project, standInWorkspace: standInWorkspace,
+                standInRuntimeStatus: standInWorkspace.flatMap { host.workspaceRuntimeStatusByID[$0.id] },
+                standInIsPendingDeletion: standInWorkspace.map { host.isWorkspaceMarkedDeleting($0.id) } ?? false,
+                isExpandable: project.isGitRepo || !nonGitProjectRuntimeTargetChildren(project).isEmpty))
+    }
+
+    private func workspaceRowSignature(workspace: WorkspaceSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
+        .workspace(
+            SidebarWorkspaceRowSignature(
+                device: device, workspace: workspace, runtimeStatus: host.workspaceRuntimeStatusByID[workspace.id],
+                isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id), isExpanded: isWorkspaceExpanded(workspace.id),
+                hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
+    }
+
+    private func runtimeTargetRowSignature(
+        workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool, device: SidebarRowDeviceTreatment
+    ) -> SidebarRowSignature {
+        .runtimeTarget(
+            SidebarRuntimeTargetRowSignature(
+                device: device, item: item, nestedUnderWorkspace: nestedUnderWorkspace,
+                isRenaming: renamingRuntimeTarget.map { $0.workspaceID == workspace.id && $0.item.key == item.key } ?? false))
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
@@ -1403,9 +1556,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             if project.isGitRepo {
                 // The marketing site's project glyph (connected nodes) marks a git project without reading
                 // as the ubiquitous branch icon.
-                let glyph = RowPrimitives.projectGlyphImage()
-                glyph.accessibilityDescription = "Git project"
-                leadingIcon.image = glyph
+                leadingIcon.image = RowPrimitives.projectGlyphImage
                 leadingIcon.contentTintColor = .tertiaryLabelColor
                 leadingIcon.toolTip = "Git repository"
             } else {
@@ -2152,8 +2303,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // section genuinely is loading, and a failure arriving from `.loading` re-runs the full offline
         // transition, so the caption picks up the new reason instead of being dropped as a repeat.
         host.deviceSections[index].loadState = .loading
-        host.outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        applySidebarDataChange()
     }
 
     @objc private func compatibilityActionClicked(_ sender: NSButton) {

@@ -1379,7 +1379,6 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
-
     // Tests delete project removes project workspaces and dependents by arranging representative inputs and asserting the expected result.
     func testDeleteProjectRemovesProjectWorkspacesAndDependents() throws {
         let store = try makeTemporaryStore()
@@ -1452,8 +1451,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isRunning: false,
-            lastLaunchedAt: nil)
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isRunning: false, lastLaunchedAt: nil)
         let secondWorkspace = WorkspaceRecord(
             id: "second", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isRunning: false,
             lastLaunchedAt: nil)
@@ -1830,11 +1828,11 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
@@ -1848,7 +1846,6 @@ final class StoreTests: XCTestCase {
         let notFound = try store.workspace(dir: "/nonexistent/path")
         XCTAssertNil(notFound)
     }
-
 
     func testStoreRejectsDuplicateWorkspaceBranchWithinProject() throws {
         let store = try makeTemporaryStore()

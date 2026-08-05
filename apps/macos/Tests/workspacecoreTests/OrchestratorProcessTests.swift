@@ -1656,8 +1656,8 @@ extension OrchestratorTests {
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)", dirname: workspace.dirname,
-            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
-            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden, isRunning: true,
+            lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop should succeed (skip script because dir is missing) rather than throw.
@@ -1684,8 +1684,8 @@ extension OrchestratorTests {
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname, branch: workspace.branch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden,
-            isRunning: true, lastLaunchedAt: nil, notes: nil)
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil,
+            notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop workspace: removes the tracked editor window record.

@@ -62,8 +62,8 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: projectDir.path)
         let workspace = WorkspaceRecord(
-            id: "workspace-stop-all-quit", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
-            isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
+            id: "workspace-stop-all-quit", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+            lastLaunchedAt: "2026-07-01T00:00:00Z")
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.upsert(
@@ -247,8 +247,7 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
         let orchestrator = makeTestOrchestrator(
-            store: store, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in },
-            builtInTerminalSessionTerminator: { _ in })
+            store: store, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-teardown")
