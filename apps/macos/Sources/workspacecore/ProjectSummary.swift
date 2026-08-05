@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ProjectSummary: Sendable {
+public struct ProjectSummary: Hashable, Sendable {
     public let id: String
     public let name: String
     public let dir: String
