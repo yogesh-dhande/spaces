@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WorkspaceSummary: Sendable {
+public struct WorkspaceSummary: Hashable, Sendable {
     public let id: String
     public let branch: String?
     public let baseBranch: String?
