@@ -195,10 +195,15 @@ import Foundation
             // spawned replacement.
             let deadline = Date().addingTimeInterval(timeout)
 
-            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
+            // The one place a spacesd is spawned on macOS, so it is where the daemon's environment is decided.
+            // `environmentServingThisProfile` is what makes the child resolve the SAME profile this call
+            // resolved: for a bound installed profile it drops every redirecting variable, which the child
+            // would otherwise inherit and resolve a different profile from.
+            let profile = try SpacesProfile.current()
+            let executableURL = try resolveExecutableURL(profile: profile)
             let process = Process()
             process.executableURL = executableURL
-            process.environment = ProcessInfo.processInfo.environment
+            process.environment = profile.environmentServingThisProfile()
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
@@ -481,7 +486,7 @@ import Foundation
         }
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {
-            SpacesTestHost.isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
+            SpacesTestHost.isRunningUnderXCTest() && ProcessInfo.processInfo.environment[SpacesProfile.daemonExecutableEnvironmentVariable] == nil
         }
 
         public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
@@ -584,12 +589,16 @@ import Foundation
         /// A profile is only ever served by a daemon that belongs to the build asking for it, so the
         /// candidate list is split by where a candidate comes from:
         ///
-        /// - `SPACESD_EXECUTABLE` wins for every profile. It names one binary outright, which makes it a
-        ///   deliberate choice rather than a silent substitution, and the terminal E2E scripts pin their
-        ///   daemon with it.
+        /// - `SPACESD_EXECUTABLE` wins for every profile the asking build owns. It names one binary outright,
+        ///   which makes it a deliberate choice rather than a silent substitution, and the terminal E2E
+        ///   scripts pin their daemon with it. It says nothing about a profile the process merely bound
+        ///   itself to (`spacese2e --installed-profile`), and is subtracted from the environment before the
+        ///   candidates are built there: a QA sweep is normally run from one of those very E2E shells, so it
+        ///   would otherwise arrive pinned to that checkout's daemon and start it on `~/.spaces`.
         /// - Candidates derived from the running executable — its sibling, its symlink-resolved sibling,
-        ///   and its bundle's resources — apply to every profile, because they necessarily belong to the
-        ///   build that is asking.
+        ///   and its bundle's resources — apply to every profile the asking build owns, because they
+        ///   necessarily belong to that build. They do NOT apply to a bound profile either, where the asking
+        ///   build owns nothing.
         /// - The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) apply only to the
         ///   installed profile. They are location-fixed and always point at whatever
         ///   `/Applications/Spaces.app` last installed, which is an unrelated release from a repo-local
@@ -611,6 +620,14 @@ import Foundation
             installedLinkURLs: [URL] = [SpacesBinaryLayout.userHelperLinkURL(for: .spacesd), SpacesBinaryLayout.systemLinkURL(for: .spacesd)]
                 .compactMap { $0 }
         ) throws -> URL {
+            // Which daemon may serve this profile is decided from what this process may act on, not from what
+            // it happened to inherit. For a BOUND installed profile that subtraction removes
+            // `SPACESD_EXECUTABLE` before it can become a candidate below — the shell that runs a QA sweep
+            // routinely exports it (every terminal E2E lane does), and honouring it would start that
+            // checkout's `spacesd` against `~/.spaces` and let it migrate the installed daemon's database.
+            // Reading it through the same subtraction that decides what children inherit is what keeps
+            // honouring and forwarding from disagreeing about a variable.
+            let environment = profile.environmentServingThisProfile(environment)
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
             let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
             let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
@@ -629,11 +646,22 @@ import Foundation
                 candidates.append(trimmed)
             }
 
-            appendCandidate(environment["SPACESD_EXECUTABLE"])
-            appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(environment[SpacesProfile.daemonExecutableEnvironmentVariable])
+            // Candidates derived from the RUNNING executable belong to the build that is asking, which is why
+            // they serve every profile that build owns. A process that BOUND itself to the installed profile
+            // (`spacese2e --installed-profile`) owns nothing here: it borrowed a profile that belongs to the
+            // installed build, so its own sibling and bundled daemons are as foreign to that profile as a
+            // checkout's `.build` products are. Only the installed layout's own daemon may serve it. Without
+            // this split a repo-built QA helper whose installed daemon happened to be down would start a
+            // development spacesd on `~/.spaces` and let it migrate the installed daemon's database.
+            // This reads the discovery ROUTE, which is the question being asked — how this process arrived at
+            // the profile — rather than using the route to decide what the profile is.
+            if profile.source != .explicitInstalledProfile {
+                appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+                appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            }
             // Split by what the profile IS — the installed profile, or any development one — rather than by
             // which resolution branch produced it, since the installed profile is reachable through more
             // than one branch.
@@ -673,19 +701,35 @@ import Foundation
         public var errorDescription: String? {
             switch self {
             case .daemonNotFound(let profile, let searchedPaths):
-                let described: (kind: String, explanation: String) =
-                    profile.isInstalledProfile
-                    ? (
+                // A BOUND invocation gets its own explanation because the remedy the other two share does not
+                // exist for it: `SPACESD_EXECUTABLE` is subtracted from what a bound process may act on
+                // (`SpacesProfile.environmentServingThisProfile`), so naming a daemon with it would only
+                // reproduce this failure. Nothing this process can point at may serve that profile — that is
+                // the rule, not a gap — so the only way forward is the installed daemon existing again.
+                let described: (kind: String, explanation: String)
+                if profile.source == .explicitInstalledProfile {
+                    described = (
+                        "installed",
+                        "This invocation is BOUND to that profile rather than belonging to it, so only the installed layout's own daemon "
+                            + "(~/.spaces/bin/spacesd, /usr/local/bin/spacesd) may serve it: neither this build's own spacesd nor SPACESD_EXECUTABLE "
+                            + "applies, and the variable is ignored here so a binding can never start another build against a profile a user relies "
+                            + "on. Repair or reinstall the Spaces app so the installed daemon is present again, or drop --installed-profile to act "
+                            + "on this checkout's own development profile."
+                    )
+                } else if profile.isInstalledProfile {
+                    described = (
                         "installed",
                         "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
                             + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
                     )
-                    : (
+                } else {
+                    described = (
                         "development",
                         "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
                             + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
                             + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
                     )
+                }
                 // The discovery route is carried as provenance only: it explains how a surprising profile was
                 // arrived at without being what decided anything above.
                 return "No spacesd was found for the \(described.kind) profile at \(profile.rootDirectory) "
@@ -807,7 +851,7 @@ import Foundation
                 switch profile.source {
                 case .deployedDevelopmentProfile:
                     return "spacesd@\(URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).lastPathComponent).service"
-                case .installedFallback, .developmentWorktree, .explicitDatabasePath: return nil
+                case .installedFallback, .developmentWorktree, .explicitDatabasePath, .explicitInstalledProfile: return nil
                 }
             }
 

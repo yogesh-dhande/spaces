@@ -9,6 +9,7 @@ import Security
 import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
+import spacese2ecore
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -18,6 +19,13 @@ import workspacecore
 struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
+        discussion: """
+            Commands act on the profile this binary resolves from where it sits — the development profile of \
+            the checkout it was built in. Pass --installed-profile before a command to act on the installed \
+            profile (~/.spaces) instead, for QA of the shipped build. Commands that create or remove \
+            projects, workspaces, or pairings there are refused, as are commands that overwrite \
+            configuration or delete rows the sweep did not create.
+            """,
         subcommands: [
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
             LookupWorkspaceCommand.self, ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self,
@@ -2001,11 +2009,17 @@ private struct DumpWorkspaceCommand: ParsableCommand {
     /// Dumps persisted workspace/runtime state as JSON so the manual E2E script
     /// can assert on the real database contents without reaching into SQLite
     /// directly.
+    ///
+    /// Settings are read WITHOUT the lazy seed `workspaceSettings` performs. This command is classified
+    /// read-only against the installed profile, and that has to be true of the whole run: a workspace with no
+    /// settings row yet would otherwise have a stop script, services, processes, browser sessions, and agent
+    /// launchers written into the user's profile by a command that promised only to report it. A workspace
+    /// with no settings of its own reports `null`, which is the fact rather than a gap.
     func run() throws {
         let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let payload = WorkspaceDumpPayload(
             workspace: workspaceSummaryPayload(workspace),
-            settings: try orchestrator.workspaceSettings(workspaceID: workspace.id).map(workspaceSettingsPayload),
+            settings: try orchestrator.workspaceSettingsWithoutSeeding(workspaceID: workspace.id).map(workspaceSettingsPayload),
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
@@ -3567,4 +3581,22 @@ private func postScrollEvent(at point: CGPoint, deltaY: Int, repetitions: Int) t
         firstScrollEventUptimeNanoseconds: firstScrollEventUptimeNanoseconds, lastScrollEventUptimeNanoseconds: lastScrollEventUptimeNanoseconds)
 }
 
-SpacesE2ECommand.main()
+// Which profile this process serves has to be settled before any command runs, so the `--installed-profile`
+// selector is consumed here rather than declared as an option on every command. A selector that names a
+// command the classification does not permit ends the run before ArgumentParser sees it: the point of the
+// gate is that the refused command never reaches a profile a user relies on.
+do {
+    let invocation = try SpacesE2EInstalledProfileSelection.parse(arguments: Array(CommandLine.arguments.dropFirst()))
+    if invocation.targetsInstalledProfile {
+        SpacesProfile.bindToInstalledProfile()
+        // Checked against the root the binding actually resolved, rather than a second spelling of
+        // `~/.spaces` that could disagree with it — which is why it runs after the binding rather than
+        // inside the classification call above. Binding writes nothing beyond the profile directories
+        // resolution always creates, so a refusal here still precedes every command's own side effects.
+        try invocation.refuseArgumentsInside(profileRoot: try SpacesProfile.current().rootDirectory)
+    }
+    SpacesE2ECommand.main(invocation.commandArguments)
+} catch {
+    FileHandle.standardError.write(Data("\(error)\n".utf8))
+    exit(EXIT_FAILURE)
+}

@@ -24,6 +24,31 @@ extension OrchestratorTests {
         XCTAssertEqual(updated.processes.first?.command, "PORT=${TYPO_PORT:-3000} npm run dev | tee log.txt")
     }
 
+    /// Reporting a workspace must not change it. `workspaceSettings` seeds a workspace that has no settings
+    /// row from its project's defaults, which is right for a caller about to act on those settings and wrong
+    /// for `spacese2e dump-workspace`, classified read-only against the installed profile: against a workspace
+    /// predating settings rows it would write a stop script, services, processes, browser sessions, and agent
+    /// launchers into a user's profile. The non-seeding read reports the absence instead, and leaves the
+    /// seeding read free to seed afterwards.
+    func testWorkspaceSettingsWithoutSeedingReportsAbsenceAndWritesNothing() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+        // The state a workspace predating settings rows is in on a long-lived profile — the case the seeding
+        // read exists for, and the one that made the dump write.
+        try store.deleteWorkspaceConfiguration(workspaceID: workspace.id)
+        XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspace.id), "Precondition: the workspace has no settings row.")
+
+        XCTAssertNil(try orchestrator.workspaceSettingsWithoutSeeding(workspaceID: workspace.id))
+
+        XCTAssertFalse(
+            try store.workspaceSettingsExists(workspaceID: workspace.id), "Reading settings without seeding must not create the row it reports.")
+        XCTAssertNotNil(try orchestrator.workspaceSettings(workspaceID: workspace.id), "The seeding read is unchanged and still seeds on demand.")
+        XCTAssertTrue(try store.workspaceSettingsExists(workspaceID: workspace.id))
+    }
+
     func testUpdateWorkspaceSettingsAcceptsShellVariableSyntaxAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()

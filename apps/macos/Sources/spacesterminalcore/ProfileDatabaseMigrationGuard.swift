@@ -56,6 +56,7 @@ public enum ProfileDatabaseMigrationGuard {
 
         let profile = try SpacesProfile.current()
         guard SpacesProfile.canonicalPath(databasePath) == SpacesProfile.canonicalPath(profile.databasePath) else { return try migration() }
+        if let refusal = boundProfileMigrationRefusal(profile: profile, databasePath: databasePath) { throw refusal }
 
         let lockPath = try TerminalServicePaths.instanceLockPath()
         if try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath) == ProcessInfo.processInfo.processIdentifier {
@@ -89,6 +90,37 @@ public enum ProfileDatabaseMigrationGuard {
         // lock or settle on one owner to wait for.
         throw ownerStillWorkingError(
             databasePath: databasePath, owner: try TerminalServiceInstanceLock.activeOwner(path: lockPath), ceiling: ownerWaitCeiling)
+    }
+
+    /// The refusal for a process that BOUND itself to a profile instead of belonging to it —
+    /// `spacese2e --installed-profile`, whose whole purpose is to read and drive the installed build's own
+    /// profile. Schema work belongs to the build that owns the profile: a repo-local helper is normally ahead
+    /// of the installed release, and letting it upgrade `~/.spaces/spaces.db` would leave the installed daemon
+    /// unable to open its own database, with no way back. The instance-lock authority below does not cover
+    /// this, because it protects a profile whose daemon is RUNNING and the sweeps that need this most are the
+    /// ones that stopped that daemon on purpose.
+    ///
+    /// `nil` for every process that owns its profile, which is every process other than that helper.
+    ///
+    /// The message deliberately does NOT tell the operator to start the installed app or daemon. In the case
+    /// that brings anyone here — a checkout ahead of the installed release — that build only knows its own
+    /// older schema, so starting it upgrades nothing and the same refusal returns forever. There is a narrow
+    /// case where starting it does help (an installed build that was updated and has not applied its own
+    /// pending migration yet), but this guard cannot tell the two apart: the installed build's schema target
+    /// is only observable from the instance-lock record of a RUNNING daemon, and a sweep that reaches here has
+    /// typically stopped it on purpose. Rather than advise something that resolves one case and loops in the
+    /// other, it states the requirement — a schema-compatible installed build — and the two things that
+    /// actually satisfy it.
+    static func boundProfileMigrationRefusal(profile: SpacesProfile, databasePath: String) -> SpacesDatabaseError? {
+        guard profile.source == .explicitInstalledProfile else { return nil }
+        return .migrationFailed(
+            message: "Cannot upgrade the Spaces database at \(databasePath) from a process bound to the installed profile at "
+                + "\(profile.rootDirectory). That database is at the schema version the installed build wrote, this build needs version "
+                + "\(DatabaseSchema.currentVersion), and only the build that owns a profile may raise its schema. Starting the installed app or "
+                + "daemon does not resolve this on its own: a build older than this one cannot produce this schema. A command that opens the store "
+                + "directly needs an installed Spaces release that includes schema version \(DatabaseSchema.currentVersion) — install one, or drop "
+                + "--installed-profile to run against this checkout's own development profile. Commands that reach the profile through the daemon's "
+                + "socket are unaffected.")
     }
 
     private enum ReservationOutcome<T> {

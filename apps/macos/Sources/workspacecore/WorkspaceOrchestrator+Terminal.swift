@@ -244,16 +244,24 @@ extension WorkspaceOrchestrator {
     /// the INSTALLED `spaces` binary, which resolves the installed profile, so its agent signal is a silent
     /// no-op for a workspace id that profile has never heard of. Agent-lifecycle reporting from
     /// development-profile terminals is explicitly not supported.
-    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) -> [String:
-        String]
+    ///
+    /// The rule has exactly one exception, and it is not a second rule: a process BOUND to the installed
+    /// profile (`spacese2e --installed-profile`) states which profile it serves on its own command line, so
+    /// the overrides in its environment describe a profile it is not serving and forwarding them would export
+    /// a `SPACES_DB_PATH` into an installed-profile terminal — the failure above, reached from the other
+    /// side. `SpacesProfile.environmentServingThisProfile` is that exception, shared with every other place this
+    /// codebase launches a process, so "a bound process hands no override to what it launches" has one
+    /// definition rather than one per launch site. Every profile a build owns still forwards exactly what its
+    /// own environment carries.
+    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) throws
+        -> [String: String]
     {
         var env = base
         if includeInheritedPath, let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
         if includeProfileEnvironment {
+            let forwardable = try SpacesProfile.current().environmentServingThisProfile()
             for key in [DatabaseLocator.databasePathEnvironmentVariable, "SPACES_RUNTIME_DIR", "SPACES_E2E_EVENTS_LOG", "DEBUG"] {
-                if let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
-                    env[key] = value
-                }
+                if let value = forwardable[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { env[key] = value }
             }
         }
         env[Self.terminalTrackingIDEnvVar] = env[Self.terminalTrackingIDEnvVar] ?? UUID().uuidString
@@ -315,7 +323,7 @@ extension WorkspaceOrchestrator {
         includeProfileEnvironment: Bool = true, commandPrelude: String? = nil
     ) throws -> String {
         let command = commandWithPrelude(try processLaunchCommand(template: template), prelude: commandPrelude)
-        let runtimeEnv = terminalLaunchEnvironment(
+        let runtimeEnv = try terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
         return commandPrefixedWithShellEnvironment(interactiveLoginShellCommand(command, shellPath: shellPath), env: runtimeEnv)
     }

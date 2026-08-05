@@ -203,6 +203,198 @@ import XCTest
             }
         }
 
+        // A repo-built helper that bound itself to the installed profile (`spacese2e --installed-profile`)
+        // does not belong to that profile's build, so its own sibling daemon is as foreign to it as a
+        // checkout's build products are. Starting that sibling would put a development spacesd on
+        // `~/.spaces`, where it would migrate the installed daemon's database out from under it.
+        func testResolveExecutableURLRefusesTheAskingBuildsDaemonForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let siblingDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: siblingDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager,
+                profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile), installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, layout.installedDaemon.path)
+        }
+
+        // `SPACESD_EXECUTABLE` is a redirection like any other, and a bound process does not act on the
+        // redirections it inherited. Every terminal E2E lane exports it, so a QA sweep run from one of those
+        // shells is the ordinary case rather than a contrived one: honouring it would start that checkout's
+        // spacesd against `~/.spaces` and let it migrate the installed daemon's database.
+        func testResolveExecutableURLIgnoresTheDaemonOverrideForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path, SpacesProfile.daemonExecutableEnvironmentVariable: overrideDaemon.path],
+                fileManager: layout.fileManager, profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile),
+                installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, layout.installedDaemon.path)
+        }
+
+        // With no installed daemon to serve it, a bound profile fails rather than falling back to ANY other
+        // binary it can see — the daemon beside the running executable, or the one the environment pins — and
+        // the searched paths show neither was ever a candidate.
+        func testResolveExecutableURLFailsRatherThanBorrowingADaemonForABoundInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let siblingDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: siblingDaemon)
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
+            let absentInstalledLink = layout.root.appendingPathComponent("absent-installed-spacesd", isDirectory: false)
+
+            XCTAssertThrowsError(
+                try TerminalService.resolveExecutableURL(
+                    environment: ["_": layout.buildCLI.path, SpacesProfile.daemonExecutableEnvironmentVariable: overrideDaemon.path],
+                    fileManager: layout.fileManager, profile: makeProfile(isInstalled: true, source: .explicitInstalledProfile),
+                    installedLinkURLs: [absentInstalledLink])
+            ) { error in
+                guard case TerminalServiceError.daemonNotFound(_, let searchedPaths) = error else {
+                    return XCTFail("Expected daemonNotFound, got \(error)")
+                }
+                XCTAssertFalse(searchedPaths.contains(siblingDaemon.path))
+                XCTAssertFalse(searchedPaths.contains(overrideDaemon.path))
+                XCTAssertTrue(searchedPaths.contains(absentInstalledLink.path))
+            }
+        }
+
+        // The message is what an operator acts on, so it is pinned. A bound invocation cannot be told to set
+        // `SPACESD_EXECUTABLE`: the variable is subtracted from what a bound process may act on, so following
+        // that advice reproduces this exact failure. It gets the remedies that exist instead, and it names the
+        // profile — the point of a bound run is that the operator is acting on one their checkout does not
+        // imply.
+        func testDaemonNotFoundForABoundInstalledProfileExplainsThatNoOverrideCanServeIt() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let message = TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: ["/absent/spacesd"]).localizedDescription
+
+            XCTAssertTrue(message.contains(profile.rootDirectory), "The failure must name the profile it is about: \(message)")
+            XCTAssertTrue(message.contains("BOUND to that profile"), "It must say why this profile's rules differ: \(message)")
+            XCTAssertTrue(
+                message.contains("SPACESD_EXECUTABLE") && message.contains("ignored here"),
+                "It must say the override is ignored rather than offer it as a remedy: \(message)")
+            XCTAssertTrue(message.contains("reinstall the Spaces app"), "It must offer the remedy that exists: \(message)")
+            XCTAssertTrue(message.contains("--installed-profile"), "It must offer the way out of bound mode: \(message)")
+        }
+
+        // The other profiles are unchanged: for them the override does work, and recommending it is the point.
+        func testDaemonNotFoundForProfilesTheBuildOwnsStillRecommendsTheOverride() {
+            for profile in [
+                makeProfile(isInstalled: true, source: .installedFallback), makeProfile(isInstalled: false, source: .developmentWorktree),
+            ] {
+                let message = TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: ["/absent/spacesd"]).localizedDescription
+
+                XCTAssertTrue(message.contains("set SPACESD_EXECUTABLE"), "A \(profile.source.rawValue) profile can still be pinned: \(message)")
+                XCTAssertFalse(message.contains("ignored here"), "Only a bound profile ignores the override: \(message)")
+            }
+        }
+
+        // The daemon `ensureRunning` spawns has to resolve the SAME profile the spawn was decided for. A
+        // bound installed profile is stated on this process's command line, which a child never sees, so an
+        // inherited `SPACES_DB_PATH` or `SPACES_RUNTIME_DIR` would be the only thing reaching it — and the
+        // daemon would come up on a scratch database, or with its socket and instance lock under another
+        // profile's runtime root, while the parent waited on the installed profile's socket.
+        // The subtraction is the whole Spaces namespace, not a list of the redirects anyone thought of. Three
+        // review rounds each found one more variable that had been reasoned safe because no permitted command
+        // read it — the profile paths, the daemon pin, then the Device API endpoint — and each was wrong the
+        // same way: the daemon inherits the environment whatever the command does. `SPACES_DEVICE_API_PORT=0`
+        // alone would have the user's installed daemon bind an ephemeral port and drop every paired device.
+        func testDaemonSpawnEnvironmentDropsTheWholeSpacesNamespaceForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let environment = profile.environmentServingThisProfile([
+                SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
+                SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
+                SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "SPACES_DEVICE_API_PORT": "0",
+                "SPACES_DEVICE_API_HOST": "127.0.0.1", "SPACES_DEVICE_API_DISABLED": "1", "SPACES_CLIENT_DB_PATH": "/tmp/scratch/client.db",
+                "SPACES_CLIENT_SECRET_DIR": "/tmp/scratch/secrets", "SPACES_E2E_EVENTS_LOG": "/tmp/scratch/events.log",
+                "SPACES_SOMETHING_INVENTED_NEXT_YEAR": "/tmp/scratch/whatever",
+            ])
+
+            XCTAssertEqual(
+                environment, [homeEnvironmentVariable: expectedBoundHome(of: profile)],
+                "A bound child inherits no Spaces variable at all, including ones this test does not know about — only the corrected home.")
+        }
+
+        // The other half of the namespace rule: it stops at the namespace. A terminal a bound sweep opens has
+        // to behave like the user's own terminal, which means inheriting the user's shell configuration —
+        // none of which can name a Spaces profile.
+        func testDaemonSpawnEnvironmentKeepsNonSpacesVariablesForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+            let inherited = ["PATH": "/usr/bin", "SHELL": "/bin/zsh", "TERM": "xterm-256color", "ZDOTDIR": "/Users/tester", "DEBUG": "1"]
+
+            let environment = profile.environmentServingThisProfile(inherited)
+
+            XCTAssertEqual(environment, inherited.merging([homeEnvironmentVariable: expectedBoundHome(of: profile)]) { _, new in new })
+        }
+
+        // `HOME` is the one redirect that cannot be dropped — a shell and everything it runs need a home — so
+        // it is corrected instead. A binding is in-process and a child never inherits one: a spawned `spacesd`
+        // resolves the installed profile as `<home>/.spaces`, so a redirected `HOME` (which the desktop E2E
+        // lanes export) would have it serve a throwaway profile while its parent waited on the account
+        // profile's socket.
+        func testDaemonSpawnEnvironmentCorrectsHomeToTheBoundProfilesOwnHomeForABoundInstalledProfile() {
+            let profile = makeProfile(isInstalled: true, source: .explicitInstalledProfile)
+
+            let environment = profile.environmentServingThisProfile([homeEnvironmentVariable: "/tmp/redirected-home", "PATH": "/usr/bin"])
+
+            XCTAssertEqual(
+                environment[homeEnvironmentVariable], expectedBoundHome(of: profile),
+                "The child must resolve `<home>/.spaces` onto the very profile its parent bound.")
+            XCTAssertEqual(environment["PATH"], "/usr/bin")
+        }
+
+        // A profile the build OWNS was reached from this process's own environment, so that environment
+        // already describes it — including the home a harness gave the whole run. Correcting it there would
+        // point the child at a different profile from its parent, which is this rule in reverse.
+        func testDaemonSpawnEnvironmentLeavesHomeUntouchedForAProfileTheBuildOwns() {
+            for source: SpacesProfileSource in [.explicitDatabasePath, .developmentWorktree, .deployedDevelopmentProfile, .installedFallback] {
+                let inherited = [homeEnvironmentVariable: "/tmp/harness-home"]
+
+                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).environmentServingThisProfile(inherited)
+
+                XCTAssertEqual(environment, inherited, "A \(source.rawValue) profile's child inherits the home that described it.")
+            }
+        }
+
+
+        // The exception list is what a reader is pointed at, so it is asserted rather than described: it is
+        // empty, and an entry added to it has to survive into a bound child for this to keep passing.
+        func testBoundProcessRedirectPredicateCoversTheNamespaceMinusItsDeclaredExceptions() {
+            for key in ["SPACES_DB_PATH", "SPACESD_EXECUTABLE", "SPACES_DEVICE_API_PORT", "SPACES_ANYTHING_AT_ALL"] {
+                XCTAssertTrue(SpacesProfile.isBoundProcessRedirect(key), "\(key) is in the Spaces namespace, so a bound process drops it.")
+            }
+            for key in ["PATH", "SHELL", "HOME", "TERM", "DEBUG", "SPACE_INVADERS"] {
+                XCTAssertFalse(SpacesProfile.isBoundProcessRedirect(key), "\(key) is outside the Spaces namespace and is inherited untouched.")
+            }
+        }
+
+        // The companion direction: every profile a process reached by belonging to it passes its environment
+        // to the daemon untouched, including the ephemeral scratch root that only the override can describe
+        // and the daemon the terminal E2E lanes pin. Dropping either there would leave the daemon serving a
+        // different profile from its parent, or a different binary than the lane chose — the very failure the
+        // bound case above exists to prevent, in reverse.
+        func testDaemonSpawnEnvironmentForwardsRedirectingVariablesForAProfileTheBuildOwns() {
+            for source: SpacesProfileSource in [.explicitDatabasePath, .developmentWorktree, .deployedDevelopmentProfile, .installedFallback] {
+                let inherited = [
+                    SpacesProfile.databasePathEnvironmentVariable: "/tmp/scratch/spaces.db",
+                    SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/scratch/runtime",
+                    SpacesProfile.daemonExecutableEnvironmentVariable: "/tmp/checkout/.build/debug/spacesd", "SPACES_DEVICE_API_PORT": "0",
+                ]
+
+                let environment = makeProfile(isInstalled: source == .installedFallback, source: source).environmentServingThisProfile(inherited)
+
+                XCTAssertEqual(environment, inherited, "A \(source.rawValue) profile's daemon inherits the environment that describes it.")
+            }
+        }
+
         func testResolveExecutableURLUsesDevelopmentBuildDaemonForDevelopmentProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }
@@ -232,7 +424,9 @@ import XCTest
         }
 
         // The override outranks the installed links for the installed profile too, so an operator can
-        // point the installed profile at a specific daemon without reinstalling.
+        // point the installed profile at a specific daemon without reinstalling. The profile here was
+        // REACHED by the build that is asking (it fell through to `~/.spaces`), which is what separates this
+        // from the bound case above — the same root, the opposite answer.
         func testResolveExecutableURLHonorsExplicitOverrideForInstalledProfile() throws {
             let layout = try makeDaemonResolutionLayout()
             defer { try? FileManager.default.removeItem(at: layout.root) }
@@ -328,6 +522,14 @@ import XCTest
                 "spacesd tests \(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             return root
+        }
+
+        private let homeEnvironmentVariable = "HOME"
+
+        /// The home a bound profile hands its children: the directory its own `.spaces` root sits in, taken
+        /// from the profile rather than from the account so it holds however the profile was resolved.
+        private func expectedBoundHome(of profile: SpacesProfile) -> String {
+            URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).deletingLastPathComponent().path
         }
 
         private func makeExecutableFile(at url: URL) throws {

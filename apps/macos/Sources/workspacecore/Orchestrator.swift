@@ -361,6 +361,25 @@ public final class WorkspaceOrchestrator {
         return try loadWorkspaceSettings(project: project, workspace: workspace)
     }
 
+    /// The workspace's settings as STORED, or `nil` when it has none of its own yet — the read that does not
+    /// seed.
+    ///
+    /// `workspaceSettings` funnels through `loadWorkspaceSettings`, which lazily seeds a workspace with no
+    /// settings row from its project's defaults, persisting a stop script, service definitions, processes,
+    /// browser sessions, and agent launchers. That is right for the callers about to act on those settings and
+    /// wrong for a caller that only reports them: `spacese2e dump-workspace` promises to observe a profile
+    /// without changing it, and against a workspace predating settings rows it would instead write
+    /// configuration into the user's profile that they never chose.
+    ///
+    /// `nil` is the honest answer to that read rather than a degraded one — "this workspace has no settings of
+    /// its own" is a fact worth reporting, and a caller that needs the effective values asks
+    /// `workspaceSettings` and accepts the seed that comes with them.
+    public func workspaceSettingsWithoutSeeding(workspaceID: String) throws -> WorkspaceSettings? {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        guard try store.workspaceSettingsExists(workspaceID: workspace.id) else { return nil }
+        return try storedWorkspaceSettings(workspaceID: workspace.id)
+    }
+
     /// Returns the workspace's browser sessions with environment variables (e.g. $PORT) resolved to their
     /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
     /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
@@ -1354,7 +1373,7 @@ public final class WorkspaceOrchestrator {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : defaultTitle
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
@@ -1417,7 +1436,7 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
@@ -1878,19 +1897,43 @@ public final class WorkspaceOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
+    /// The workspace's settings, SEEDING them from the project's defaults first when it has none yet. Every
+    /// caller that is about to act on the settings goes through here; a caller that only reports them uses
+    /// `workspaceSettingsWithoutSeeding`, which is the same read without the write.
     func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
-        let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
-        let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
-        let processes = try store.workspaceProcesses(workspaceID: workspace.id)
-        let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+        return try storedWorkspaceSettings(workspaceID: workspace.id)
     }
 
-    private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }
+    /// The five settings tables read back as one value, shared by the seeding and non-seeding reads so they
+    /// cannot report a workspace differently.
+    private func storedWorkspaceSettings(workspaceID: String) throws -> WorkspaceSettings {
+        WorkspaceSettings(
+            stopScript: try store.workspaceStopScript(workspaceID: workspaceID),
+            ports: try store.workspaceServiceDefinitions(workspaceID: workspaceID),
+            processes: try store.workspaceProcesses(workspaceID: workspaceID),
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
+            agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
+    }
+
+    private func runScript(_ script: String, cwd: String) throws {
+        _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd, environment: try workspaceScriptEnvironment())
+    }
+
+    /// The environment a workspace script (the stop script) runs with: this process's own environment, minus
+    /// anything a process bound to a profile it does not own must not pass on. A stop script is user-authored
+    /// shell that commonly calls `spaces`, so a `SPACES_DB_PATH` inherited from the shell that started
+    /// `spacese2e --installed-profile stop-workspace` would point those calls at a profile this run is not
+    /// serving. Shared with the terminal-session and daemon launch paths through
+    /// `SpacesProfile.environmentServingThisProfile`, so the exception is defined once.
+    ///
+    /// The base is `Shell.currentProcessEnvironment()` rather than the raw process environment because that
+    /// is what a script launched through `Shell` gets today: PATH merged with the login shell's and Homebrew's
+    /// directories, which the version-manager shims a stop script relies on live in.
+    func workspaceScriptEnvironment() throws -> [String: String] {
+        try SpacesProfile.current().environmentServingThisProfile(Shell.currentProcessEnvironment())
+    }
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
