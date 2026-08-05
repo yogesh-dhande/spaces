@@ -2399,6 +2399,31 @@ extension OrchestratorTests {
         XCTAssertTrue(names.contains("Codex") && names.contains("Codex-2"), "got: \(names)")
     }
 
+    /// A stale claim must not soften the clear's collision check. The agent survived its launcher's
+    /// deletion (stale claim id and name), was renamed while unconfigured, and a launcher with the same
+    /// name was then recreated under a new id: the recreated launcher's name is taken, so the clear
+    /// recovers the suffixed variant rather than parking the raw label next to the launcher's row.
+    func testClearingARenameBesideARecreatedSameNameLauncherRecoversASuffixedName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-1"), claimedLauncherID: "launcher-deleted",
+                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
+        // Recreated under a fresh id, so the stale claim id matches nothing and the agent stays
+        // unclaimed: the launcher write's claim-formation clearing must leave the rename standing.
+        try orchestrator.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-recreated", name: "Codex", command: "codex")])
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "")
+
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.effectiveLabel, "Codex-2")
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+        XCTAssertEqual(Set(names).count, names.count, "no two rows may share a visible name, got: \(names)")
+    }
+
     /// Launcher claims fold accents and casing the way every other name comparison does, so an agent
     /// reporting "reviewer" fills the "Réviewer" launcher's row and is named by that entry.
     func testLauncherClaimFoldsDiacriticsAndRefusesTheClaimedAgentsRename() throws {

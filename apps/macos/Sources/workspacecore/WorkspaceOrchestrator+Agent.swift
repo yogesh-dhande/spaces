@@ -1319,9 +1319,13 @@ extension WorkspaceOrchestrator {
         // already share the placeholder without any rename involved). Suffixing here would invent and
         // persist a name for a row that has none.
         guard let reportedLabel = sanitizedFocusName(existing.label) else { return nil }
+        // No claimed-name exemption here: an agent that reaches a clear is unclaimed by definition (a
+        // claimed agent's rename is refused above), so a `claimedLauncherName` it still carries is stale
+        // data from a deleted launcher. Exempting it would free the name of a launcher recreated under
+        // the same name, and the clear would put the recovered label right next to that launcher's row.
         let uniqueLabel = try uniqueAgentFocusLabel(
             workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id,
-            claimedLauncherName: existing.claimedLauncherName)
+            claimedLauncherName: nil)
         guard let uniqueLabel, normalizedFocusName(uniqueLabel) != normalizedFocusName(reportedLabel) else { return nil }
         return uniqueLabel
     }
