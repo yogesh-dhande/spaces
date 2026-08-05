@@ -7,8 +7,9 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let label: String?
     /// The name the user typed for this agent's row, or nil when it was never renamed. Kept apart from
     /// `label`, which the hook and foreground-detection writers rewrite from what the agent reports, so a
-    /// rename survives every later signal. Only the rename path writes it (see
-    /// `SQLiteStore.setAgentSessionUserLabel`); it is read-only on every other path.
+    /// rename survives every later signal. Two paths write it (both through
+    /// `SQLiteStore.setAgentSessionUserLabel`): the rename command, and claim formation, which clears it
+    /// when a configured launcher takes over naming the row. It is read-only on every other path.
     ///
     /// Read-only does not mean droppable. A lifecycle path that rebuilds a record from an existing one
     /// must copy this field across: the upsert leaves the stored column alone either way, but the record it

@@ -671,12 +671,15 @@ extension WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: existingAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
+            // This registration may be what binds the row to a launcher, and a launcher-named row carries
+            // no rename of its own.
+            let clearedRename = try clearRenameIfLauncherClaimed(updated)
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType, source: eventSource,
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return updated
+            return clearedRename ? updated.withUserLabel(nil) : updated
         }
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
         let record = AgentWindowRecord(
@@ -730,12 +733,15 @@ extension WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
+            // A signal can carry the launcher name that first binds this row to a launcher, and a
+            // launcher-named row carries no rename of its own.
+            let clearedRename = try clearRenameIfLauncherClaimed(updated)
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return updated
+            return clearedRename ? updated.withUserLabel(nil) : updated
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey,
@@ -1263,6 +1269,41 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Writes a workspace's configured agent launchers, and clears the session rename off any agent the
+    /// new launcher set now claims. Every launcher write goes through here: a claim can form at any of
+    /// them (a settings edit, a project's config propagating, the seed on first load, a rollback restore),
+    /// and a claimed agent must carry no rename, the same invariant `renameAgentSession` enforces from the
+    /// other side by refusing to rename a claimed agent.
+    ///
+    /// Left alone, that rename is invisible on the row the launcher now names, yet still feeds every other
+    /// name consumer (session summary titles, notification lines, focus names), and it would resurface as
+    /// the row's name the moment the launcher was removed again.
+    func setWorkspaceAgentLaunchers(workspaceID: String, launchers: [AgentLauncher]) throws {
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspaceID, launchers: launchers)
+        let agents = try store.agentWindows(workspaceID: workspaceID)
+        let claims = AgentLauncherClaim.resolve(agents: agents, launchers: launchers)
+        for agent in agents where agent.userLabel != nil && claims.claimedAgentIDs.contains(agent.id) {
+            try store.setAgentSessionUserLabel(id: agent.id, userLabel: nil)
+        }
+    }
+
+    /// Clears a stored rename off `record` when a configured launcher claims it, for the other direction:
+    /// the row was renamed while unclaimed and a registration has just bound it to a launcher. Reports
+    /// whether it cleared, so the caller's in-memory record can drop the rename too.
+    ///
+    /// Keyed on the claim actually resolving rather than on the record carrying a `claimedLauncher*`
+    /// field: a claim id or name naming no configured launcher leaves the row unclaimed and still named by
+    /// its rename.
+    private func clearRenameIfLauncherClaimed(_ record: AgentWindowRecord) throws -> Bool {
+        guard record.userLabel != nil else { return false }
+        let claims = AgentLauncherClaim.resolve(
+            agents: try store.agentWindows(workspaceID: record.workspaceID),
+            launchers: try store.workspaceAgentLaunchers(workspaceID: record.workspaceID))
+        guard claims.claimedAgentIDs.contains(record.id) else { return false }
+        try store.setAgentSessionUserLabel(id: record.id, userLabel: nil)
+        return true
+    }
+
     /// What a cleared rename leaves in `user_label`: nil when the agent's reported label is free, so the
     /// row simply falls back to it, and a uniquified variant of that label when it is not.
     ///
@@ -1272,6 +1313,11 @@ extension WorkspaceOrchestrator {
     /// `uniqueAgentFocusLabel` means the recovered name is chosen by the same numeric-suffix rule
     /// registration applies ("Codex" taken yields "Codex-2"), and the user is free to rename again.
     private func clearedAgentSessionUserLabel(_ existing: AgentWindowRecord) throws -> String? {
+        // A row with no reported label has no name to recover, and none to collide with either: the
+        // "Coding Agent" placeholder surfaces render for it is presentation, not a name, so such rows
+        // contribute no focus-name entry and take no part in uniqueness (two label-less registrations
+        // already share the placeholder without any rename involved). Suffixing here would invent and
+        // persist a name for a row that has none.
         guard let reportedLabel = sanitizedFocusName(existing.label) else { return nil }
         let uniqueLabel = try uniqueAgentFocusLabel(
             workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id,

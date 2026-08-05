@@ -401,7 +401,7 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
+        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         let appConfig = try store.appConfig()
         _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
@@ -1862,7 +1862,7 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
-        try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
+        try setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
@@ -1878,7 +1878,7 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
+        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 

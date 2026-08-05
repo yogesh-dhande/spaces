@@ -2471,6 +2471,58 @@ extension OrchestratorTests {
         XCTAssertFalse(try store.setAgentSessionUserLabel(id: "ghost-agent", userLabel: "Reviewer"))
     }
 
+    /// A launcher added after the rename claims the agent by its reported label, and the configured row
+    /// names it from then on. The now-hidden rename has to go: it would keep feeding every other name
+    /// consumer, and it would come back as the row's name if the launcher were removed again.
+    func testAddingALauncherThatClaimsARenamedAgentClearsItsRename() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]
+        }
+
+        let stored = try XCTUnwrap(store.agentWindow(id: agent.id))
+        XCTAssertNil(stored.userLabel)
+        XCTAssertEqual(stored.effectiveLabel, "Codex", "the launcher names the row now")
+    }
+
+    /// The other direction: the launcher already exists and a registration binds this row to it, which is
+    /// the same claim forming and the same stale rename to drop.
+    func testRegistrationThatBindsARenamedAgentToALauncherClearsItsRename() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Opencode", terminalTrackingID: "session-1", status: .idle)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+
+        let registered = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle,
+            claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex")
+
+        XCTAssertEqual(registered.id, agent.id, "the same row, now bound to the launcher")
+        XCTAssertNil(registered.userLabel, "the returned record drops the rename too, not just the stored row")
+        XCTAssertNil(try store.agentWindow(id: agent.id)?.userLabel)
+    }
+
+    /// A settings write that claims nothing leaves a rename standing: only the agent a launcher took over
+    /// naming loses its own name.
+    func testSettingsWriteThatClaimsNothingLeavesTheRenameStanding() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
+
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.agentLaunchers = [AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")]
+        }
+
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.userLabel, "Reviewer")
+    }
+
     private func makeAgentRenameFixture() throws -> (SQLiteStore, WorkspaceOrchestrator, WorkspaceRecord) {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path

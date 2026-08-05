@@ -114,10 +114,12 @@ extension SQLiteStore {
         """
 
     /// Neither upsert writes `user_label`: it is absent from the INSERT column list and from both conflict
-    /// clauses, so a lifecycle, hook, or detection write can neither set nor erase a user's rename. The
-    /// column has exactly one writer (`setAgentSessionUserLabel`), which is what keeps a rename stable
-    /// while the agent keeps signaling. `AgentWindowRecord.userLabel` is therefore read-only: a record
-    /// carrying one is not rejected here, it simply does not carry that field into the table.
+    /// clauses, so a lifecycle, hook, or detection write can neither set nor erase a user's rename, which
+    /// is what keeps a rename stable while the agent keeps signaling. Every write to the column goes
+    /// through `setAgentSessionUserLabel`, and only two callers reach it: the rename command, and claim
+    /// formation clearing a rename off an agent a configured launcher has taken over naming.
+    /// `AgentWindowRecord.userLabel` is therefore read-only here: a record carrying one is not rejected,
+    /// it simply does not carry that field into the table.
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
