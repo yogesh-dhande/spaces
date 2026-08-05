@@ -72,4 +72,26 @@ public struct AgentWindowRecord: Codable, Sendable {
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }
+
+    /// The name this agent answers to: the user's rename when it has one, else the label the agent
+    /// reports for itself, and nil when it has neither. This is the name every surface shows and the only
+    /// name a name-based lookup or a uniqueness check may read. Reading `label` directly for either
+    /// purpose leaves a renamed agent answering to a name nothing displays.
+    ///
+    /// Claim matching (`AgentLauncherClaim`) is the exception and stays on `label`: it asks which launcher
+    /// the agent reported itself as, which a rename does not change.
+    public var effectiveLabel: String? {
+        if let userLabel = userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !userLabel.isEmpty { return userLabel }
+        guard let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
+        return label
+    }
+
+    /// A copy of this record named `userLabel`, so a candidate rename can be run through the workspace's
+    /// name-uniqueness check before it is stored.
+    public func withUserLabel(_ userLabel: String?) -> AgentWindowRecord {
+        AgentWindowRecord(
+            id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
+            terminalTarget: terminalTarget, sessionKey: sessionKey, claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName,
+            status: status, note: note, detectedAgentKind: detectedAgentKind, createdAt: createdAt, updatedAt: updatedAt)
+    }
 }

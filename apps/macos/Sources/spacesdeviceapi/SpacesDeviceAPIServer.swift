@@ -1905,14 +1905,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
-                ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
+                ($0.effectiveLabel ?? "").localizedStandardCompare($1.effectiveLabel ?? "") == .orderedAscending
             }) {
                 guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID) else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
-                        entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
+                        entry: entry, workspace: descriptor, title: agent.effectiveLabel ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
                         hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
 
@@ -2596,8 +2596,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         guard let agentName = normalizedString(request.agentName) else { return nil }
         let normalizedAgentName = normalizedRowKey(agentName)
-        return try store.agentWindows(workspaceID: workspaceID).first { normalizedRowKey($0.label ?? $0.claimedLauncherName) == normalizedAgentName }?
-            .id
+        return try store.agentWindows(workspaceID: workspaceID).first {
+            normalizedRowKey($0.effectiveLabel ?? $0.claimedLauncherName) == normalizedAgentName
+        }?.id
     }
 
     private func normalizedString(_ value: String?) -> String? {

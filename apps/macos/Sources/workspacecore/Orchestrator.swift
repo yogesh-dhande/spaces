@@ -1585,7 +1585,9 @@ public final class WorkspaceOrchestrator {
             !matchedProcessIDs.contains(process.id) && terminalTargetID(process: process).map { !agentTerminalIDs.contains($0) } != false
         }.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending }
         for process in orphanedProcesses { targets.append(.process(process)) }
-        for record in agentWindows.sorted(by: { ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending }) {
+        for record in agentWindows.sorted(by: {
+            ($0.effectiveLabel ?? "").localizedStandardCompare($1.effectiveLabel ?? "") == .orderedAscending
+        }) {
             targets.append(.agent(record))
         }
 
@@ -1647,7 +1649,7 @@ public final class WorkspaceOrchestrator {
     private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
         switch target {
         case .agent(let record):
-            if let label = sanitizedFocusName(record.label) { return label }
+            if let label = sanitizedFocusName(record.effectiveLabel) { return label }
             return try fallbackAgentFocusName(record)
         case .browser(let window): return sanitizedFocusName(window.name)
         case .process(let process): return sanitizedFocusName(process.templateName)
@@ -1692,8 +1694,7 @@ public final class WorkspaceOrchestrator {
         let workspaceBrowserSessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspaceID)
         let workspaceAgentLaunchers = try agentLaunchers ?? store.workspaceAgentLaunchers(workspaceID: workspaceID)
         let workspaceAgentWindows = try agentWindows ?? store.agentWindows(workspaceID: workspaceID)
-        let configuredAgentNames = Set(
-            try workspaceAgentLaunchers.map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.map(normalizedFocusName))
+        let claims = AgentLauncherClaim.resolve(agents: workspaceAgentWindows, launchers: workspaceAgentLaunchers)
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
@@ -1706,8 +1707,13 @@ public final class WorkspaceOrchestrator {
                 (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
             })
             + workspaceAgentWindows.compactMap { record -> (name: String, kind: String)? in
-                guard let name = sanitizedFocusName(record.label) else { return nil }
-                guard !configuredAgentNames.contains(normalizedFocusName(name)) else { return nil }
+                // An agent a launcher claims is shown by that launcher's row, which already contributed
+                // the launcher's name above: one row, counted once. Whether a launcher claims it is the
+                // claim rule's answer, not a name comparison, so an agent that merely ends up named like a
+                // launcher (a rename to that name) still counts as its own row and collides, which is what
+                // makes two rows sharing one visible name impossible.
+                guard !claims.claimedAgentIDs.contains(record.id) else { return nil }
+                guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
             }
         try validateUniqueFocusNameEntries(entries)

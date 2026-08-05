@@ -25,9 +25,13 @@ public struct AgentLauncherClaims: Sendable, Equatable {
 /// This is deliberately not `WorkspaceOrchestrator.spacesAgentRecordIsConfiguredLauncher`, which asks a
 /// different question (may this record be restarted through its launcher) with different rules.
 public enum AgentLauncherClaim {
-    /// Names match case-insensitively once trimmed. A launcher and an agent that differ only in casing
-    /// or surrounding whitespace are the same row to a user, so they must be the same row here.
-    public static func normalizedName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    /// Names match once trimmed, case-insensitively and diacritic-insensitively, the same folding
+    /// `normalizedFocusName` applies. A launcher and an agent whose names differ only in casing, accents,
+    /// or surrounding whitespace are one row to a user, so they must be one row here: two normalizers
+    /// would let a row be claimed by one rule and named by the other.
+    public static func normalizedName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
 
     /// Resolves the claims for one workspace. `agents` must be in store order: when two agents would
     /// claim the same launcher, the first one wins and the rest stay unclaimed, so a second agent that

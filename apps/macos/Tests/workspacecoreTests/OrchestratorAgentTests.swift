@@ -2331,6 +2331,90 @@ extension OrchestratorTests {
         XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the kind the row carries, got: \(line)")
     }
 
+    /// A renamed agent has to answer to the name the user gave it. Focus resolution reads names, so a row
+    /// still listed under the label nothing displays is unreachable by the name on screen.
+    func testRenamingAnAgentMovesItsFocusNameToTheNewName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Claude", session: "session-1"))
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
+
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+        XCTAssertTrue(names.contains("Reviewer"), "got: \(names)")
+        XCTAssertFalse(names.contains("Claude"), "the old label must stop answering to focus, got: \(names)")
+    }
+
+    /// A rename obeys the same one-visible-name-per-row rule a config edit does, so it is refused when the
+    /// name is already taken by a process, a browser session, a launcher, or another agent.
+    func testRenamingAnAgentOntoATakenNameIsRefusedAndWritesNothing() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run dev")])
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")])
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Claude", session: "session-1"))
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-2", workspaceID: workspace.id, label: "Opencode", session: "session-2"))
+
+        for taken in ["web", "codex", "Opencode"] {
+            XCTAssertThrowsError(try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: taken), taken) { error in
+                guard case WorkspaceError.invalidArgument = error else { return XCTFail("expected invalidArgument for \(taken), got \(error)") }
+            }
+            XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel, "the refused rename must write nothing")
+        }
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
+    }
+
+    /// Clearing skips the uniqueness check: it can only put back the name the row already had, and
+    /// refusing it would strand the row on a name with no way back.
+    func testClearingAnAgentRenameIsAllowedEvenWhenTheRestoredNameCollides() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Codex", session: "session-1"))
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
+        // Inserted straight into the store so it keeps the colliding label that registering through the
+        // orchestrator would have uniquified away.
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-2", workspaceID: workspace.id, label: "Codex", session: "session-2"))
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "   ")
+
+        XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel)
+    }
+
+    /// Launcher claims fold accents and casing the way every other name comparison does, so an agent
+    /// reporting "reviewer" fills the "Réviewer" launcher's row and is named by that entry.
+    func testLauncherClaimFoldsDiacriticsAndRefusesTheClaimedAgentsRename() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try store.setWorkspaceAgentLaunchers(
+            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-reviewer", name: "Réviewer", command: "codex")])
+        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "reviewer", session: "session-1"))
+
+        let claims = AgentLauncherClaim.resolve(
+            agents: try store.agentWindows(workspaceID: workspace.id),
+            launchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+        XCTAssertEqual(claims.agentIDByLauncherID["launcher-reviewer"], "agent-1")
+
+        XCTAssertThrowsError(try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Auditor")) { error in
+            guard case WorkspaceError.invalidArgument = error else { return XCTFail("expected invalidArgument, got \(error)") }
+        }
+        XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel)
+    }
+
+    private func makeAgentRenameFixture() throws -> (SQLiteStore, WorkspaceOrchestrator, WorkspaceRecord) {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        return (store, makeTestOrchestrator(store: store), workspace)
+    }
+
+    private func makeRenameFixtureAgent(id: String, workspaceID: String, label: String, session: String) -> AgentWindowRecord {
+        AgentWindowRecord(
+            id: id, workspaceID: workspaceID, provider: .spaces, label: label,
+            terminalTarget: TerminalTargetRecord(trackingID: session), status: .idle, createdAt: "now", updatedAt: "now")
+    }
+
     private func agentSessionEventCount(store: SQLiteStore, agentSessionID: String) throws -> Int {
         let row = try store.queryRows(sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ?", bindings: [agentSessionID])
         return Int(row.first?.first ?? "") ?? -1

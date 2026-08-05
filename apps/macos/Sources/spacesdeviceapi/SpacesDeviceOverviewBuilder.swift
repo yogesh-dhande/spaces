@@ -341,7 +341,7 @@ struct SpacesDeviceOverviewBuilder {
             rows.append(
                 codingAgentRow(
                     id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id,
-                    name: agent.userLabel ?? agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
+                    name: agent.effectiveLabel ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
                     isConfigured: false, sessionsByID: sessionsByID))
         }

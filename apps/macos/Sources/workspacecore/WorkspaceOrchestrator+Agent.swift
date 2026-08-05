@@ -310,8 +310,8 @@ extension WorkspaceOrchestrator {
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
                 return record.id != excludingAgentWindowID
             }.map(\.name).map(normalizedFocusName))
-        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(\.label)
-            .compactMap(sanitizedFocusName).map(normalizedFocusName)
+        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }
+            .compactMap(\.effectiveLabel).compactMap(sanitizedFocusName).map(normalizedFocusName)
         let reservedLauncherNames = Set(
             try store.workspaceAgentLaunchers(workspaceID: workspaceID).map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.filter
             { launcherName in
@@ -1163,14 +1163,15 @@ extension WorkspaceOrchestrator {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
                     if let sessionID, terminalSessionID != sessionID { continue }
                     // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
-                    // `label:` carries the row's stored label — the workspace-unique visible name, which
-                    // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
-                    // report the same label. Collapsing kind and label made remote rendering emit
-                    // "Reviewer (Reviewer)" and dropped the kind from listings.
+                    // `label:` carries the row's visible name (`effectiveLabel`: the user's rename, else
+                    // the reported label) — workspace-unique, which signals keep fresh and collisions
+                    // uniquify ("Reviewer 2"), so two children never report the same label. Collapsing
+                    // kind and label made remote rendering emit "Reviewer (Reviewer)" and dropped the kind
+                    // from listings.
                     let detectedKind = resolvedAgentKind(agent)
                     rows.append(
                         TerminalServiceAgentSessionRow(
-                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind, label: trimmedOrNilAgentField(agent.label),
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind, label: trimmedOrNilAgentField(agent.effectiveLabel),
                             status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name,
                             workspaceID: workspace.id, workspaceName: workspace.displayName, workspaceDir: workspace.dir,
                             branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
@@ -1213,16 +1214,29 @@ extension WorkspaceOrchestrator {
     /// user can see. A client can arrive here holding an overview from before someone added or recreated
     /// the matching launcher, and the error tells it to refresh and rename that entry instead. Clearing a
     /// rename is refused for the same reason, hence the guard sits above the empty-title path.
+    ///
+    /// A name the user sets has to stay unique among the workspace's visible rows, the same rule a config
+    /// edit answers to, so the candidate name runs through `validateWorkspaceFocusNames` before it is
+    /// stored. Clearing skips that check on purpose: the name it puts back is the one the row already had
+    /// before the rename, so a clear can only ever restore a state the workspace was already in, and
+    /// refusing it would strand the row on a name with no way back.
     public func renameAgentSession(workspaceID: String, agentID: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
             throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
         }
-        let claims = AgentLauncherClaim.resolve(
-            agents: try store.agentWindows(workspaceID: workspaceID), launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
+        let agents = try store.agentWindows(workspaceID: workspaceID)
+        let claims = AgentLauncherClaim.resolve(agents: agents, launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
         guard !claims.claimedAgentIDs.contains(existing.id) else {
             throw WorkspaceError.invalidArgument(
                 message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
+        }
+        if !title.isEmpty {
+            // Validated as the workspace would look with the rename applied: the candidate replaces this
+            // row's own name, so it is checked against the processes, browser sessions, launchers, and
+            // other agents, and never against the name it is replacing.
+            try validateWorkspaceFocusNames(
+                workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
         }
         try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title)
     }

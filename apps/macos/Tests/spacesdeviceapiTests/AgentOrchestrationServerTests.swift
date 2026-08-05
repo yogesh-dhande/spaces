@@ -387,12 +387,9 @@
         /// Replaces the workspace's configured agent launchers. `seedAgentSession` must have run first,
         /// since it is what creates the workspace these belong to.
         ///
-        /// Written straight to the store rather than through `updateWorkspaceSettings`, which rejects a
-        /// launcher whose name collides with a live agent's label. That gate is exactly why an agent can
-        /// end up claimed by a launcher it never launched under: the launchers arrive from a path that
-        /// does not re-run it (a settings rollback restoring a snapshot), or after the agent adopted the
-        /// name. Loading settings once first materializes the workspace's settings row, so the overview's
-        /// own first load does not reseed it from the project and drop these.
+        /// Loading settings once first materializes the workspace's settings row: the first load seeds it
+        /// from the project, which would otherwise overwrite these launchers the next time anything reads
+        /// the workspace's settings.
         private func seedAgentLaunchers(_ launchers: [AgentLauncher]) throws {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
             _ = try WorkspaceOrchestrator(store: store).workspaceSettings(workspaceID: "workspace-1")
