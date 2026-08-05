@@ -1207,10 +1207,22 @@ extension WorkspaceOrchestrator {
     /// An empty (or whitespace-only) title clears the rename instead of being rejected, putting back the
     /// runtime label underneath it — the only way back from a rename, matching `renameTerminalSession`.
     /// An id that names no agent session in the workspace is a loud error, not a silent no-op.
+    ///
+    /// So is an agent a configured launcher has claimed: that agent's row is named by the launcher entry
+    /// and never reads the stored rename, so accepting one would report success and change nothing the
+    /// user can see. A client can arrive here holding an overview from before someone added or recreated
+    /// the matching launcher, and the error tells it to refresh and rename that entry instead. Clearing a
+    /// rename is refused for the same reason, hence the guard sits above the empty-title path.
     public func renameAgentSession(workspaceID: String, agentID: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let existing = try store.agentWindow(id: agentID), existing.workspaceID == workspaceID else {
             throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+        }
+        let claims = AgentLauncherClaim.resolve(
+            agents: try store.agentWindows(workspaceID: workspaceID), launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
+        guard !claims.claimedAgentIDs.contains(existing.id) else {
+            throw WorkspaceError.invalidArgument(
+                message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
         }
         try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title)
     }
