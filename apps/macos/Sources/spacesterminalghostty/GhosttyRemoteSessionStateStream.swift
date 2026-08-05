@@ -16,7 +16,6 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     private let socketPath: String
     private let queue: DispatchQueue
     private let initialStateProvider: @Sendable () -> GhosttyRemoteSessionStatePayload?
-    private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var clientSources: [Int32: DispatchSourceRead] = [:]
 
@@ -56,10 +55,21 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         }
         try Self.setNonBlocking(socketFD)
 
-        listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in self?.handleAcceptSourceCancel() }
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+        // The listening descriptor belongs to the dispatch source, not to this object: every caller
+        // stops a server and drops its last reference in the same breath, so a cancel handler that
+        // reached back through `self` would find it deallocated and never close the descriptor —
+        // leaking one per session for the daemon's lifetime. Dispatch runs this handler after every
+        // pending event handler on `queue`, so the captured descriptor stays valid for each accept
+        // and is closed exactly once here.
+        //
+        // The socket PATH is deliberately not touched here; removing it is the caller's job, which
+        // every stop site already does inline. This handler runs asynchronously on `queue`, so a caller
+        // that stops a server and immediately rebinds the same path (the resume-in-place path after a
+        // failed exec) could otherwise have this stale handler unlink the *new* server's socket file,
+        // leaving it bound to a path no client can reach.
+        source.setCancelHandler { close(socketFD) }
         acceptSource = source
         source.resume()
     }
@@ -80,7 +90,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
         }
     }
 
-    private func acceptReadyConnections() {
+    private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)
             if clientFD < 0 {
@@ -124,12 +134,6 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     private func closeClient(_ clientFD: Int32) {
         guard let source = clientSources.removeValue(forKey: clientFD) else { return }
         source.cancel()
-    }
-
-    private func handleAcceptSourceCancel() {
-        if listenSocketFD >= 0 { close(listenSocketFD) }
-        listenSocketFD = -1
-        try? removeSocketIfPresent()
     }
 
     private func removeSocketIfPresent() throws { try Self.removeSocketFile(at: socketPath) }

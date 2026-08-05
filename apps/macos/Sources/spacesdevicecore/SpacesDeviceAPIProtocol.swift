@@ -349,7 +349,13 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
 public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let workspaceID: String
+    /// The row's stable name: what the user renamed the terminal to, else the name it was launched
+    /// under (`shell-1`). It changes only when the user changes it.
     public let title: String
+    /// The title the program running in this terminal last reported (OSC 0/2), nil when it has reported
+    /// none. Clients show it as the row's secondary text beside `title`, which it never replaces: the
+    /// name says which terminal this is, the live title says what it is doing.
+    public let liveTitle: String?
     public let workingDirectory: String
     public let sessionID: String?
     public let runState: SpacesDeviceRunState
@@ -358,11 +364,12 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
 
     public init(
         id: String, workspaceID: String, title: String, workingDirectory: String, sessionID: String?, runState: SpacesDeviceRunState,
-        canOpenTerminal: Bool, canStop: Bool = false
+        canOpenTerminal: Bool, canStop: Bool = false, liveTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.title = title
+        self.liveTitle = liveTitle
         self.workingDirectory = workingDirectory
         self.sessionID = sessionID
         self.runState = runState
@@ -374,6 +381,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         case id
         case workspaceID
         case title
+        case liveTitle
         case workingDirectory
         case sessionID
         case runState
@@ -386,6 +394,7 @@ public struct SpacesDeviceWorkspaceTerminalRow: Codable, Sendable, Equatable, Id
         id = try container.decode(String.self, forKey: .id)
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
         title = try container.decode(String.self, forKey: .title)
+        liveTitle = try container.decodeIfPresent(String.self, forKey: .liveTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         runState = try container.decode(SpacesDeviceRunState.self, forKey: .runState)
@@ -402,7 +411,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
-    public let isArchived: Bool
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
@@ -419,11 +427,11 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isArchived: Bool,
-        isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
-        environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
-        config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isHidden: Bool,
+        isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [], environment: [String: String] = [:],
+        setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
+        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
+        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
     ) {
         self.id = id
         self.projectID = projectID
@@ -432,7 +440,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.baseBranch = baseBranch
         self.dir = dir
         self.isRunning = isRunning
-        self.isArchived = isArchived
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.notes = notes
@@ -454,7 +461,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case baseBranch
         case dir
         case isRunning
-        case isArchived
         case isHidden
         case isDefault
         case notes
@@ -477,7 +483,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
         isRunning = try container.decode(Bool.self, forKey: .isRunning)
-        isArchived = try container.decode(Bool.self, forKey: .isArchived)
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
@@ -507,7 +512,13 @@ public enum SpacesDeviceTerminalSessionRowKind: String, Codable, Sendable, Equat
 
 public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
+    /// The session's stable name: the user's rename when set, else the name it was launched under. A
+    /// session that backs a configured process or coding agent is named by that config entry.
     public let title: String
+    /// The title the program in this session last reported (OSC 0/2), nil when it reported none — and
+    /// always nil for a configured process or coding-agent session, which is described by the entry that
+    /// configured it rather than by what the program prints.
+    public let liveTitle: String?
     public let workingDirectory: String
     /// Shell and launch command from the session's persisted launch configuration, so a
     /// device-backed window shows the same shell/command the daemon launched with rather
@@ -537,17 +548,22 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     /// the same detection from `.terminalList`); it reports a detected kind even before the session's
     /// first hook signal, when no agent-orchestration row exists yet.
     public let foregroundDetectedAgentKind: String?
+    /// When this session's program last rang the terminal bell, as the daemon recorded it (nil until a
+    /// bell arrives). Clients derive a bell alert from it and use its value as the alert's dismissal
+    /// identity; the daemon coalesces repeats so the value only moves for a bell worth re-raising.
+    public let bellAt: String?
 
     public init(
-        id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
+        id: String, title: String, liveTitle: String? = nil, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
         backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String,
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
         rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
-        foregroundDetectedAgentKind: String? = nil
+        foregroundDetectedAgentKind: String? = nil, bellAt: String? = nil
     ) {
         self.id = id
         self.title = title
+        self.liveTitle = liveTitle
         self.workingDirectory = workingDirectory
         self.shell = shell
         self.command = command
@@ -569,11 +585,13 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
         self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
+        self.bellAt = bellAt
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case title
+        case liveTitle
         case workingDirectory
         case shell
         case command
@@ -595,12 +613,14 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowSourceID
         case hasFinalRender
         case foregroundDetectedAgentKind
+        case bellAt
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         title = try container.decode(String.self, forKey: .title)
+        liveTitle = try container.decodeIfPresent(String.self, forKey: .liveTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
         command = try container.decodeIfPresent(String.self, forKey: .command)
@@ -623,6 +643,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
         foregroundDetectedAgentKind = try container.decodeIfPresent(String.self, forKey: .foregroundDetectedAgentKind)
+        bellAt = try container.decodeIfPresent(String.self, forKey: .bellAt)
     }
 }
 
@@ -644,15 +665,27 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
     /// every refresh.
     public let daemonStatus: TerminalServiceDaemonStatus
+    /// Workspaces whose teardown this daemon is running right now — the archive work is on its teardown
+    /// queue, or queued to start on it, and has not finished. Includes every workspace of a project being
+    /// deleted. Ids are whitespace-trimmed and sorted.
+    ///
+    /// This exists because a client cannot tell the two reasons a workspace is still listed apart on its
+    /// own. After a delete whose response was lost, a client probes the overview; seeing the workspace
+    /// still there could mean the delete failed, or that a slow user stop script is still running and the
+    /// daemon will remove it shortly. Guessing "failed" is the destructive one — the client tells the user
+    /// the workspace survived, and the daemon deletes it moments later. Only the daemon knows which is
+    /// happening, so it reports it here rather than leaving clients to infer it from timing.
+    public let workspaceIDsWithTeardownInFlight: [String]
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
-        retainedTerminalSessionIDs: [String] = [], daemonStatus: TerminalServiceDaemonStatus
+        retainedTerminalSessionIDs: [String] = [], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
         self.retainedTerminalSessionIDs = retainedTerminalSessionIDs
+        self.workspaceIDsWithTeardownInFlight = workspaceIDsWithTeardownInFlight
         self.daemonStatus = daemonStatus
     }
 }
@@ -979,6 +1012,9 @@ public struct SpacesDeviceWorkspaceTerminalRequest: Codable, Sendable, Equatable
 public struct SpacesDeviceTerminalSessionRenameRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let sessionID: String
+    /// The session's new name. An empty (or whitespace-only) title clears the rename rather than
+    /// setting one, restoring the name the session was launched under — the only way back from a
+    /// rename, and the reason this command never rejects an empty title.
     public let title: String
 
     public init(workspaceID: String, sessionID: String, title: String) {
@@ -1123,6 +1159,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case clearScreen
     case resize
     case scroll
+    case mouseButton
     case setAppearance
 }
 
@@ -1144,6 +1181,11 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollPointerX: Double?
     public let scrollPointerY: Double?
     public let scrollPointerMods: UInt32?
+    public let mouseButton: UInt8?
+    public let mousePressed: Bool?
+    public let mousePointerX: Double?
+    public let mousePointerY: Double?
+    public let mousePointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
@@ -1156,7 +1198,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
-        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
+        mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1175,6 +1218,11 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollPointerX = scrollPointerX
         self.scrollPointerY = scrollPointerY
         self.scrollPointerMods = scrollPointerMods
+        self.mouseButton = mouseButton
+        self.mousePressed = mousePressed
+        self.mousePointerX = mousePointerX
+        self.mousePointerY = mousePointerY
+        self.mousePointerMods = mousePointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
@@ -1184,11 +1232,15 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
 public struct SpacesDeviceTerminalPasteImageRequest: Codable, Sendable, Equatable {
     public let sessionID: String
     public let clientID: String
-    public let ownerEpoch: UInt64
+    /// The owner generation the client composed this paste against, or `nil` when the client holds no
+    /// cached render owner epoch — the same contract every other terminal input path uses, where `nil`
+    /// means "do not epoch-gate this input". A client's cache is legitimately empty in normal operation,
+    /// so an absent epoch must not read as epoch 0.
+    public let ownerEpoch: UInt64?
     public let fileExtension: String
     public let imageData: Data
 
-    public init(sessionID: String, clientID: String, ownerEpoch: UInt64, fileExtension: String, imageData: Data) {
+    public init(sessionID: String, clientID: String, ownerEpoch: UInt64?, fileExtension: String, imageData: Data) {
         self.sessionID = sessionID
         self.clientID = clientID
         self.ownerEpoch = ownerEpoch
@@ -1771,12 +1823,21 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     public let projectID: String?
     public let workspaceID: String?
     public let sessionID: String?
+    /// What the mutation did beyond succeeding, when that is something the user asked for and has to be
+    /// told about — deleting a workspace's branches reports each branch it deleted, could not find, skipped
+    /// as protected, or failed to delete. `nil` when the mutation has nothing extra to report, which is what
+    /// lets a client show it only when there is something to show.
+    public let notice: String?
 
-    public init(overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil) {
+    public init(
+        overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
+        notice: String? = nil
+    ) {
         self.overview = overview
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.sessionID = sessionID
+        self.notice = notice
     }
 }
 
@@ -1889,6 +1950,9 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
         default: nil
         }
     }
+
+    /// The mutation's extra outcome, when it had one (see `SpacesDeviceMutationResult.notice`).
+    public var mutationNotice: String? { if case .mutation(let payload) = result { payload.notice } else { nil } }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
 

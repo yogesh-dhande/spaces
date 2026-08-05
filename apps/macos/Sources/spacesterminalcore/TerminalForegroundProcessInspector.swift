@@ -20,9 +20,7 @@ public struct TerminalForegroundProcessSnapshot: Codable, Sendable, Equatable {
     }
 
     private static func basename(_ value: String) -> String? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return URL(fileURLWithPath: trimmed).lastPathComponent.nilIfEmpty
+        TerminalForegroundProcessInspector.lastPathComponent(of: value.trimmingCharacters(in: .whitespacesAndNewlines)).nilIfEmpty
     }
 }
 
@@ -63,13 +61,13 @@ public enum TerminalForegroundProcessInspector {
         #if os(macOS)
             let executablePath = processExecutablePath(pid: pid)
             let argv = processArguments(pid: pid)
-            let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
+            let executableName = executablePath.flatMap { Self.lastPathComponent(of: $0).nilIfEmpty }
             guard executableName != nil || !argv.isEmpty else { return nil }
             return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
         #elseif os(Linux)
             let executablePath = processExecutablePath(pid: pid)
             let argv = processArguments(pid: pid)
-            let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
+            let executableName = executablePath.flatMap { Self.lastPathComponent(of: $0).nilIfEmpty }
             guard executableName != nil || !argv.isEmpty else { return nil }
             return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
         #else
@@ -245,9 +243,26 @@ public enum TerminalForegroundProcessInspector {
     }
 
     private static func normalizedBasename(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+        lastPathComponent(of: value.trimmingCharacters(in: .whitespacesAndNewlines)).lowercased()
+    }
+
+    /// The trailing name in a path, computed as string arithmetic.
+    ///
+    /// This runs for the executable path and for every argv element of every foreground process the
+    /// daemon inspects, once a second per live session. `URL(fileURLWithPath:)` was doing it, and each
+    /// construction cost a `stat` to decide whether the path is a directory plus a `getcwd` to resolve a
+    /// relative one — file-system work to answer a question about a string.
+    ///
+    /// The semantics are the ones this job needs rather than `URL`'s incidental ones: trailing slashes
+    /// are ignored, so `/usr/bin/` names `bin`; a value that is empty or only slashes names nothing; and
+    /// `.` and `..` are returned unchanged instead of being resolved against the daemon's own working
+    /// directory, which named a directory that has nothing to do with the inspected process.
+    static func lastPathComponent(of value: String) -> String {
+        var name = Substring(value)
+        while name.hasSuffix("/") { name = name.dropLast() }
+        guard !name.isEmpty else { return "" }
+        if let separator = name.lastIndex(of: "/") { name = name[name.index(after: separator)...] }
+        return String(name)
     }
 
     private static func appendProcArgument(_ bytes: Data.SubSequence, to arguments: inout [String]) {

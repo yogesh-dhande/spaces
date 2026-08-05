@@ -4,8 +4,6 @@
     import GhosttyKit
     import spacesterminalcore
 
-    @MainActor private final class GhosttyHeadlessSessionHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
-
     private final class GhosttyHostManagedOutputPipe: @unchecked Sendable {
         private let lock = NSLock()
         private var session: ghostty_session_t?
@@ -73,11 +71,6 @@
 
         private var session: ghostty_session_t?
         private var hostPTY: HostManagedPTYTerminalSessionDriver?
-        /// The headless AppKit host view. It is an `NSView` subclass (implicitly `@MainActor`) created on
-        /// the main thread via a synchronous hop and only ever handed to GhosttyKit as an opaque pointer;
-        /// nothing on the engine actor calls `NSView` methods on it afterward, so it is stored
-        /// `nonisolated(unsafe)` and merely retained.
-        private nonisolated(unsafe) var headlessHostView: GhosttyHeadlessSessionHostView?
         private var surfaceUserData: GhosttyEmbeddedSurfaceUserData?
         private let outputPipe = GhosttyHostManagedOutputPipe()
         private let handoffOutputDeliveryFence = GhosttyEmbeddedHandoffOutputDeliveryFence()
@@ -93,12 +86,30 @@
         private var hasLiveResources = false
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastDeliveredSessionStateRevision: UInt64 = 0
-        private var sessionStateDeliveryScheduled = false
+        /// Coalesces the engine-actor catch-up that PTY deliveries and Ghostty's session-state
+        /// callback both ask for. See `requestEngineCatchUp`.
+        private let engineCatchUp = CoalescedEngineWork()
         private var debugRefreshRequestCountValue = 0
         private var debugLastScrollModsValue: Int32 = 0
-        private var surfaceScaleFactor = 1.0
+        /// A headless session has no screen to read a backing scale from, so it fixes one. This is the
+        /// value that decides the session's cell size in pixels, which reaches the running program as the
+        /// PTY winsize pixel dimensions and as mode-2048 in-band size reports. It stays at the Retina
+        /// factor these sessions have always reported so that pixel-sized output (sixel, Kitty graphics)
+        /// is unaffected by the session having no view.
+        private static let contentScale = 2.0
+
+        /// A null session is all `ghostty_session_new_headless` can report across the C boundary: the
+        /// reason stays inside libghostty's log, and one cause — GhosttyKit artifacts whose compiled
+        /// code disagrees with the headers they ship — produces exactly this null while passing every
+        /// artifact check, so the message names both the log switch and the rebuild that repairs it.
+        private static let headlessSessionCreationFailure = """
+            ghostty_session_new_headless failed. Set GHOSTTY_LOG=stderr to see the reason libghostty rejected the session; \
+            if the installed GhosttyKit artifacts may be ABI-skewed, rebuild them with apps/macos/scripts/setup_ghostty.sh --build.
+            """
 
         var onActionEvent: (@TerminalEngineActor (GhosttyActionEvent) -> Void)?
+        /// A program's OSC 52 copy, already decoded and capped; empty text is a clear.
+        var onClipboardWrite: (@TerminalEngineActor (String) -> Void)?
         var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
         var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
         var onSessionStateChanged: (@TerminalEngineActor (GhosttyEmbeddedSessionStateChange) -> Void)?
@@ -119,15 +130,6 @@
             precondition(
                 !leakedLiveResources,
                 "GhosttyEmbeddedTerminalSessionDriver was released while still live; every owning path must call terminate() first")
-            // The headless AppKit host view must never make its final release on the engine queue (AppKit
-            // deallocation off-main is undefined). Normal teardown hands it to the main actor via
-            // `releaseHeadlessHostViewOnMainActor()`; this covers a driver dropped after a rollback (which
-            // leaves the view retained) so the residual release still lands on main.
-            if let view = headlessHostView {
-                headlessHostView = nil
-                let releaseBox = GhosttyHeadlessHostViewReleaseBox(view)
-                Task { @MainActor in releaseBox.release() }
-            }
         }
 
         var surface: ghostty_surface_t? {
@@ -175,10 +177,9 @@
 
             let (createdSession, hostPTY) = try configureNewSession()
 
-            // The session is created parked/occluded like a fresh one; the read loop is
-            // not running yet (adopt below starts it), so nothing can race the replay.
+            // The read loop is not running yet (adopt below starts it), so nothing can
+            // race the replay.
             ghostty_session_set_focus(createdSession, false)
-            ghostty_session_set_occlusion(createdSession, true)
 
             // 1. Converge the grid to the persisted size BEFORE replay so wrapping/reflow
             //    of the replayed scrollback matches what the pre-handoff daemon rendered.
@@ -193,12 +194,19 @@
             //    output.log gets written in the first place), so leaving it wired would
             //    append the entire transcript to output.log a second time. The screen is
             //    still fully reconstructed — the callback only tees, it does not parse.
+            //    The clipboard is suppressed for the same window (see
+            //    `GhosttyEmbeddedSurfaceUserData.isReplayingHistoricalOutput`): re-pushing every OSC 52
+            //    the transcript ever carried would overwrite the owner's clipboard with stale text. The
+            //    suppression outlives the replay by one `tick`, which is what drains the surface
+            //    messages the replay queued and therefore fires their clipboard callbacks.
             let restoreOutputHandler = outputHandler
             outputHandler = nil
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
             outputHandler = restoreOutputHandler
             ghostty_session_refresh(createdSession)
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
 
             finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: (columns: columns, rows: rows), startReadLoop: false)
 
@@ -218,16 +226,8 @@
             guard let app = GhosttyEmbeddedAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
 
             let hostPTY = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
-            let hostView = headlessSurfaceHostView()
-            // NSScreen is main-only; resolve the backing scale via the legal engine→main hop.
-            let scaleFactor = Self.mainActorSync { Double(NSScreen.main?.backingScaleFactor ?? 2.0) }
-            surfaceScaleFactor = scaleFactor
-
             var sessionConfig = ghostty_session_config_new()
-            sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_MACOS
-            sessionConfig.surface.platform = ghostty_platform_u(
-                macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(hostView).toOpaque()))
-            sessionConfig.surface.scale_factor = scaleFactor
+            sessionConfig.surface.scale_factor = Self.contentScale
             sessionConfig.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
             sessionConfig.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
             sessionConfig.surface.receive_userdata = Unmanaged.passUnretained(hostPTY).toOpaque()
@@ -235,21 +235,17 @@
             sessionConfig.surface.receive_resize = Self.hostManagedReceiveResizeCallback
 
             let surfaceUserData = GhosttyEmbeddedSurfaceUserData(
-                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface })
+                closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface },
+                clipboardWriteHandler: { [weak self] text in self?.onClipboardWrite?(text) })
             self.surfaceUserData = surfaceUserData
             sessionConfig.surface.userdata = Unmanaged.passUnretained(surfaceUserData).toOpaque()
-
-            sessionConfig.parked_host.platform_tag = GHOSTTY_PLATFORM_MACOS
-            sessionConfig.parked_host.platform = ghostty_platform_u(
-                macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(hostView).toOpaque()))
-            sessionConfig.parked_host.scale_factor = scaleFactor
 
             let workingDirectory = launchConfiguration.workingDirectory
             let createdSession = workingDirectory.withCString { cwd in
                 sessionConfig.surface.working_directory = cwd
                 return ghostty_session_new_headless(app, &sessionConfig)
             }
-            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_session_new_headless failed") }
+            guard let createdSession else { throw GhosttyEmbeddedAppServiceError.configuration(Self.headlessSessionCreationFailure) }
 
             session = createdSession
             self.hostPTY = hostPTY
@@ -262,11 +258,10 @@
                 GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.onActionEvent?(event) }
             }
             hostPTY.setOutputHandler { [weak self, outputPipe] data in
+                // The bytes are parsed synchronously here, on the PTY reader thread. Only the
+                // follow-up bookkeeping is handed to the engine actor.
                 outputPipe.process(data)
-                Task { @TerminalEngineActor [weak self] in
-                    GhosttyEmbeddedAppService.shared.tick()
-                    self?.deliverSessionStateChange()
-                }
+                self?.requestEngineCatchUp()
             }
             hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
             return (createdSession, hostPTY)
@@ -297,7 +292,6 @@
         ) {
             if startReadLoop {
                 ghostty_session_set_focus(createdSession, false)
-                ghostty_session_set_occlusion(createdSession, true)
                 _ = resizeCellGrid(columns: initialSize.columns, rows: initialSize.rows)
             }
             ghostty_session_refresh(createdSession)
@@ -378,9 +372,11 @@
         /// Ghostty data callback remains disabled, so replay updates the renderer without
         /// appending those bytes to the transcript a second time.
         func replayPersistedHandoffOutput(at path: String, startingAt offset: UInt64) async {
+            surfaceUserData?.setReplayingHistoricalOutput(true)
             await replayOutputLogOffMainActor(at: path, startingAt: offset)
             if let session { ghostty_session_refresh(session) }
             GhosttyEmbeddedAppService.shared.tick()
+            surfaceUserData?.setReplayingHistoricalOutput(false)
         }
 
         /// Final failed-`execv` fallback step: restore the data callback and normal PTY
@@ -415,22 +411,9 @@
             hasLiveResources = false
             surfaceUserData = nil
             lastDeliveredSessionStateRevision = 0
-            sessionStateDeliveryScheduled = false
             currentHostPTY?.terminate()
             if let currentSession { ghostty_session_free(currentSession) }
             lastKnownSurfaceSize = nil
-            releaseHeadlessHostViewOnMainActor()
-        }
-
-        /// Releases the headless AppKit host view on the main actor and clears the ivar. NSView/CALayer
-        /// deallocation off the main thread is undefined (Main Thread Checker violations, intermittent
-        /// crashes), and this driver runs on the terminal engine executor, so the view's final release must
-        /// be handed to main rather than dropped on the engine queue.
-        private func releaseHeadlessHostViewOnMainActor() {
-            guard let view = headlessHostView else { return }
-            headlessHostView = nil
-            let releaseBox = GhosttyHeadlessHostViewReleaseBox(view)
-            Task { @MainActor in releaseBox.release() }
         }
 
         func requestSurfaceRefresh() {
@@ -470,6 +453,14 @@
             GhosttyEmbeddedAppService.shared.tick()
             requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
+        }
+
+        /// Whether the running application currently has bracketed paste (DECSET 2004) enabled — the
+        /// same live mode `sendTextAsPaste`'s encoding is derived from, so the submit path can know
+        /// ahead of the write whether the text will reach the PTY framed.
+        func bracketedPasteActive() -> Bool {
+            guard let surface else { return false }
+            return ghostty_surface_bracketed_paste(surface)
         }
 
         func foregroundPID() -> Int32? {
@@ -540,18 +531,36 @@
         ) -> Bool {
             guard let session, let surface else { return false }
             debugLastScrollModsValue = scrollMods
-            if let pointerPosition {
-                guard pointerPosition.isValid else { return false }
-                let size = ghostty_session_size(session)
-                let widthPixels = max(Double(size.width_px), 1)
-                let heightPixels = max(Double(size.height_px), 1)
-                let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
-                let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
-                ghostty_surface_mouse_pos(
-                    surface, xPixels / surfaceScaleFactor, yPixels / surfaceScaleFactor, ghostty_input_mods_e(pointerPosition.mods))
-            }
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
             ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), scrollMods)
             requestSurfaceRefresh()
+            return true
+        }
+
+        /// Delivers one button press or release to the session's terminal. The surface encodes the
+        /// mouse report against its own live mouse mode and writes it to the child through the same
+        /// receive buffer that carries keyboard input, so nothing here has to know the reporting
+        /// format the application asked for.
+        @discardableResult func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            guard let session, let surface else { return false }
+            let mods = ghostty_input_mods_e(pointerPosition?.mods ?? GHOSTTY_MODS_NONE.rawValue)
+            if let pointerPosition { guard movePointer(to: pointerPosition, session: session, surface: surface) else { return false } }
+            _ = ghostty_surface_mouse_button(
+                surface, pressed ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE, ghostty_input_mouse_button_e(UInt32(button)), mods)
+            requestSurfaceRefresh()
+            return true
+        }
+
+        /// Converts a client's normalized pointer into this surface's own point coordinates. Raw client
+        /// pixels are never transported because client and daemon display scales differ.
+        private func movePointer(to pointerPosition: TerminalScrollPointerPosition, session: ghostty_session_t, surface: ghostty_surface_t) -> Bool {
+            guard pointerPosition.isValid else { return false }
+            let size = ghostty_session_size(session)
+            let widthPixels = max(Double(size.width_px), 1)
+            let heightPixels = max(Double(size.height_px), 1)
+            let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
+            let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
+            ghostty_surface_mouse_pos(surface, xPixels / Self.contentScale, yPixels / Self.contentScale, ghostty_input_mods_e(pointerPosition.mods))
             return true
         }
 
@@ -589,33 +598,6 @@
             return Self.takeString(ghostty_session_working_directory(session))
         }
 
-        private func headlessSurfaceHostView() -> GhosttyHeadlessSessionHostView {
-            if let headlessHostView { return headlessHostView }
-            // NSView construction + `wantsLayer` are main-only; build the view via the legal engine→main
-            // synchronous hop. The engine actor never sends it AppKit messages afterward — it only hands
-            // the opaque pointer to GhosttyKit — so retaining it `nonisolated(unsafe)` is sound.
-            let view = Self.mainActorSync {
-                let view = GhosttyHeadlessSessionHostView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
-                view.wantsLayer = true
-                return view
-            }
-            headlessHostView = view
-            return view
-        }
-
-        /// Runs `body` synchronously on the main actor from the terminal engine actor — the one legal
-        /// direction of the one-way rule (AppKit view/screen affinity). Runs inline when already on main.
-        private static func mainActorSync<T>(_ body: @escaping @MainActor () -> T) -> T {
-            let box = GhosttyDriverMainActorSyncBox<T>()
-            if Thread.isMainThread {
-                MainActor.assumeIsolated { box.value = body() }
-            } else {
-                DispatchQueue.main.sync { MainActor.assumeIsolated { box.value = body() } }
-            }
-            guard let value = box.value else { preconditionFailure("main-actor driver work did not return a value") }
-            return value
-        }
-
         private func notifySurfaceCellSizeIfChanged() {
             guard let size = surfaceCellSize() else { return }
             guard lastKnownSurfaceSize?.columns != size.columns || lastKnownSurfaceSize?.rows != size.rows else {
@@ -646,13 +628,26 @@
             onSurfaceClosed()
         }
 
-        private func scheduleSessionStateDelivery() {
-            guard !sessionStateDeliveryScheduled else { return }
-            sessionStateDeliveryScheduled = true
-            Task { @TerminalEngineActor [weak self] in
-                guard let self else { return }
-                self.sessionStateDeliveryScheduled = false
-                self.deliverSessionStateChange()
+        /// Asks the engine actor to drain Ghostty's app mailbox and publish any resulting session
+        /// state change, coalescing repeat requests onto one task.
+        ///
+        /// Both callers want exactly this and nothing more: a PTY delivery has already been parsed by
+        /// the time it calls, and Ghostty's session-state callback only reports that a revision moved.
+        /// Under a flood these arrive per PTY read, so one task each made task allocation a
+        /// measurable share of IO-thread time. The work reads current state, so running it once after
+        /// a run of requests is the same as running it once per request.
+        private nonisolated func requestEngineCatchUp() {
+            guard engineCatchUp.requestShouldSpawnTask() else { return }
+            // The coalescer is captured strongly so the loop still releases the in-flight slot if the
+            // driver is torn down while this task is running.
+            Task { @TerminalEngineActor [weak self, engineCatchUp] in
+                while engineCatchUp.claimPendingRequest() {
+                    GhosttyEmbeddedAppService.shared.tick()
+                    self?.deliverSessionStateChange()
+                    // Suspend between passes so a sustained request stream cannot hold the
+                    // engine actor: queued input, resize, and termination work interleave here.
+                    await Task.yield()
+                }
             }
         }
 
@@ -681,7 +676,7 @@
         private nonisolated static let sessionStateCallback: ghostty_session_state_cb = { userdata, _ in
             guard let userdata else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
-            Task { @TerminalEngineActor in runtime.scheduleSessionStateDelivery() }
+            runtime.requestEngineCatchUp()
         }
 
         private nonisolated static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, bytes, len in
@@ -703,17 +698,5 @@
             let bytes = UnsafeRawBufferPointer(start: UnsafeRawPointer(pointer), count: Int(raw.len))
             return String(decoding: bytes, as: UTF8.self)
         }
-    }
-
-    /// Carries a main-actor-produced value back across `DispatchQueue.main.sync` into the engine actor.
-    private final class GhosttyDriverMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
-
-    /// Smuggles the non-Sendable headless host view to the main actor so its final release runs there.
-    /// The view is only ever retained (never messaged) off-main, and the sole main-actor action is
-    /// dropping the last reference, so `@unchecked Sendable` is sound.
-    private final class GhosttyHeadlessHostViewReleaseBox: @unchecked Sendable {
-        private var view: GhosttyHeadlessSessionHostView?
-        init(_ view: GhosttyHeadlessSessionHostView) { self.view = view }
-        @MainActor func release() { view = nil }
     }
 #endif

@@ -99,7 +99,7 @@ extension AppKitController {
 
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
-            value: config.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
+            value: config.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and delete.")
         stopScriptSection.onCommit = { value in commit { $0.stopScript = value.isEmpty ? nil : value } }
 
         for section in [

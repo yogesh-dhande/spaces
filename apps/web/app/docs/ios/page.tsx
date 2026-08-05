@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
+import { PhoneFrame } from "../../components/device-frames";
 
 export const metadata: Metadata = {
   title: "iOS App",
@@ -25,13 +26,12 @@ export default function IOSDocsPage() {
             </ul>
           </div>
 
-          <figure className="mx-auto w-full max-w-[280px] overflow-hidden rounded-[2rem] border border-line/80 bg-surface/60 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-            <img
+          <div className="mx-auto w-full max-w-[280px]">
+            <PhoneFrame
               src="/media/ios-sessions.png"
               alt="The Spaces iOS app showing a workspace's live terminal sessions and coding agents with their status"
-              className="aspect-[9/19.5] h-auto w-full object-cover"
             />
-          </figure>
+          </div>
         </div>
       </article>
 
@@ -46,13 +46,12 @@ export default function IOSDocsPage() {
             </ul>
           </div>
 
-          <figure className="mx-auto w-full max-w-[280px] overflow-hidden rounded-[2rem] border border-line/80 bg-surface/60 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
-            <img
+          <div className="mx-auto w-full max-w-[280px]">
+            <PhoneFrame
               src="/media/ios-terminal.png"
               alt="A live terminal session open in the Spaces iOS app, showing output and an input field"
-              className="aspect-[9/19.5] h-auto w-full object-cover"
             />
-          </figure>
+          </div>
         </div>
       </article>
 

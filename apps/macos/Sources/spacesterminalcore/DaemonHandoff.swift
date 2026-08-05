@@ -17,10 +17,16 @@ public struct DaemonHandoffSessionRecord: Codable, Sendable {
     public let ownerEpoch: UInt64
     public let screenStateRevision: UInt64
     public let appearance: String?
+    /// Transcript byte count at quiesce: the boundary between output the pre-exec image's terminal
+    /// already parsed — answering any queries it carried — and the handoff-window suffix the old
+    /// image appended to `output.log` unparsed. The resuming Linux core replays that suffix with
+    /// terminal events live so its unanswered queries still get replies. Optional because the
+    /// table's evolution rule requires it (see `DaemonHandoffTable`).
+    public let transcriptOffsetAtQuiesce: UInt64?
 
     public init(
         sessionID: String, masterFD: Int32, childPID: Int32, columns: Int, rows: Int, ownerEpoch: UInt64, screenStateRevision: UInt64,
-        appearance: String?
+        appearance: String?, transcriptOffsetAtQuiesce: UInt64?
     ) {
         self.sessionID = sessionID
         self.masterFD = masterFD
@@ -30,6 +36,7 @@ public struct DaemonHandoffSessionRecord: Codable, Sendable {
         self.ownerEpoch = ownerEpoch
         self.screenStateRevision = screenStateRevision
         self.appearance = appearance
+        self.transcriptOffsetAtQuiesce = transcriptOffsetAtQuiesce
     }
 }
 

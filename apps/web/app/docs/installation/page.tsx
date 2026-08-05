@@ -8,14 +8,14 @@ const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/late
 export const metadata: Metadata = {
   title: "Installation & Setup",
   description:
-    "Download Spaces, install dependencies, and verify your setup on macOS and Linux.",
+    "Download Spaces, install dependencies, verify your setup on macOS and Linux, and prepare a remote machine or cloud VM for pairing.",
 };
 
 export default function InstallationDocsPage() {
   return (
     <DocsShell
       title="Installation & Setup"
-      description="Download the latest release, install dependencies, and get Spaces running on your Mac, plus the daemon on any Linux machine you want to work on."
+      description="Download the latest release, install dependencies, and get Spaces running on your Mac, plus the daemon on any Linux machine you want to work on and what a remote machine or cloud VM needs before it can pair."
       pagePath="/docs/installation"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -147,7 +147,7 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Installs the daemon under <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/.spaces</code> and puts the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI on your PATH at <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/.local/bin/spaces</code>.</li>
           <li>• Registers <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spacesd.service</code> as a systemd user service and starts it. The service keeps running after you disconnect, so your terminal sessions survive closing SSH.</li>
-          <li>• Listens for clients on port <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">47847</code>. Open that port to the devices you pair from on your local network; a device reaching it over Tailscale needs no port forwarding at all.</li>
+          <li>• Listens for clients on port <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">47847</code>, which the devices you pair from need to reach — see <strong>Remote Machines &amp; Cloud VMs</strong> below.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           It needs <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">curl</code>, <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">tar</code>, <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">sha256sum</code>, <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">openssl</code>, and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">python3</code>. If it can&apos;t keep background services running for your account on its own, it stops and tells you to run <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">sudo loginctl enable-linger $USER</code> and try again.
@@ -175,6 +175,44 @@ rm -f ~/.local/bin/spaces
 rm -rf ~/.spaces ~/spaces`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           As on macOS, <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/.spaces</code> holds the daemon&apos;s local database and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">~/spaces</code> holds its repos and workspace worktrees. Leave them alone if you want to keep that state.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Remote Machines &amp; Cloud VMs</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          A machine you want to work on from your Mac or iPhone — a Linux box under your desk, a cloud VM, or a second Mac — has to meet a few requirements before it can pair. Set them up first and pairing goes through on the first attempt.
+        </p>
+
+        <h3 className="mt-6 text-sm font-semibold text-foreground">Spaces on the machine</h3>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Pairing connects two Spaces installs, so the machine needs its own. A Linux machine needs the daemon on Ubuntu 24.04 (x86_64 or arm64) — run the installer there yourself, or let the pairing screen do it with <strong>Install Spaces over SSH</strong>, both covered under <strong>Linux</strong> above. A second Mac needs <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> installed and opened once, exactly like the Mac in front of you.
+        </p>
+
+        <h3 className="mt-6 text-sm font-semibold text-foreground">SSH access that needs no prompts</h3>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <strong>Key-based access.</strong> Spaces pairs over SSH with no terminal for you to type into, so a password prompt can never be answered. The account you pair as needs key-based SSH access, or an SSH agent that is unlocked and can authenticate for it.</li>
+          <li>• <strong>A host you already trust.</strong> Spaces connects only to a machine whose host key is already in your <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">known_hosts</code>. Connecting to it once by hand — <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">ssh user@host</code> — records the key and is enough. If that host key changes later, on a rebuilt VM for example, pairing fails until you replace the stale <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">known_hosts</code> entry.</li>
+          <li>• <strong>A non-default SSH port.</strong> Supported — set the port when you add the device.</li>
+        </ul>
+
+        <h3 className="mt-6 text-sm font-semibold text-foreground">Reaching the machine on port 47847</h3>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Pairing itself rides SSH, but nothing after it does: once paired, your Mac or iPhone talks to the machine&apos;s Spaces daemon on TCP <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">47847</code>. That port has to be reachable from the client over whatever network you use — LAN, VPN, or Tailscale.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          On a cloud VM that means an ingress firewall rule allowing <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">tcp:47847</code> from the addresses you connect from, alongside the rule for SSH (<code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">tcp:22</code> unless you moved it). Reaching the machine at its tailnet address rather than its public address needs no ingress rule at all.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          This is the failure worth recognizing, because working SSH makes it look like the network is fine: pairing gets all the way through the SSH step, and then Spaces reports that the remote Device API is not reachable at that address and port. Open the port and pair again.
+        </p>
+
+        <h3 className="mt-6 text-sm font-semibold text-foreground">Work that outlives your SSH session</h3>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          The daemon keeps workspaces, terminals, and coding agents running on the machine after your SSH session ends, which the machine has to allow for your account. The Linux installer arranges that for you; if it can&apos;t, it stops and prints the one command to run on the machine before you install again (see <strong>Linux</strong> above). On a Mac, the background service the installer sets up already covers it.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A client and a machine also have to run matching Spaces versions before they will connect at all — see <strong>Update</strong> under <strong>Linux</strong> above.
         </p>
       </article>
     </DocsShell>

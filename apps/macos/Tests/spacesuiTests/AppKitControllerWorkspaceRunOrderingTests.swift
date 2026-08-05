@@ -514,7 +514,7 @@ import workspacecore
         let adminURL = "http://localhost:3000/admin"
         let workspace = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
-            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+            isRunning: true, isHidden: false, isDefault: false, sessionCount: 0,
             config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
                 SpacesDeviceBrowserSession(name: "root", url: rootURL), SpacesDeviceBrowserSession(name: "admin", url: adminURL),
             ]))
@@ -597,7 +597,7 @@ import workspacecore
             ])
         return SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
-            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            isRunning: true, isHidden: false, isDefault: false, sessionCount: 3, config: config,
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "process-web",

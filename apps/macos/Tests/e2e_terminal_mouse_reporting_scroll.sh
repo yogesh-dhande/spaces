@@ -22,7 +22,6 @@ APP_LOG="$WORK_ROOT/spaces-app.log"
 PROBE_SCRIPT="$WORK_ROOT/mouse-reporting-scroll.py"
 PROBE_OUTPUT="$WORK_ROOT/mouse-reporting-input.bin"
 APP_PID=""
-SERVICE_PID=""
 session_id=""
 
 cleanup() {
@@ -34,10 +33,7 @@ cleanup() {
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
-    kill "$SERVICE_PID" >/dev/null 2>&1 || true
-    wait "$SERVICE_PID" >/dev/null 2>&1 || true
-  fi
+  stop_terminal_service_for_runtime_dir "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -56,24 +52,6 @@ extract_session_id() {
   printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
 }
 
-terminal_service_pid() {
-  local target_session_id="$1"
-  python3 - "$DB_PATH" "$RUNTIME_DIR/terminal/sessions/$target_session_id" <<'PY'
-import os
-import sqlite3
-import sys
-
-with sqlite3.connect(sys.argv[1]) as db:
-    row = db.execute(
-        "SELECT service_pid FROM terminal_runtime_states WHERE root_directory = ?",
-        (os.path.normpath(sys.argv[2]),),
-    ).fetchone()
-if not row:
-    raise SystemExit("missing terminal runtime state")
-print(row[0])
-PY
-}
-
 wait_for_tail_contains() {
   local needle="$1"
   local deadline=$((SECONDS + 30))
@@ -90,7 +68,9 @@ wait_for_tail_contains() {
 }
 
 wait_for_probe_output() {
-  local deadline=$((SECONDS + 15))
+  # Must outlast the probe's own 30s capture deadline so a failed run still
+  # flushes the partial capture for diagnosis instead of dying with no data.
+  local deadline=$((SECONDS + 45))
   while (( SECONDS < deadline )); do
     if [[ -f "$PROBE_OUTPUT" ]]; then
       return 0
@@ -134,7 +114,11 @@ try:
         if not readable:
             continue
         captured.extend(os.read(fd, 128))
-        if re.search(rb"\\x1b\\[<(64|65);[0-9]+;[0-9]+M", captured):
+        if (
+            re.search(rb"\\x1b\\[<(64|65);[0-9]+;[0-9]+M", captured)
+            and re.search(rb"\\x1b\\[<0;[0-9]+;[0-9]+M", captured)
+            and re.search(rb"\\x1b\\[<0;[0-9]+;[0-9]+m", captured)
+        ):
             break
 finally:
     with open(sys.argv[1], "wb") as output:
@@ -173,7 +157,6 @@ command_output="$(
 )"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
-SERVICE_PID="$(terminal_service_pid "$session_id")"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal show "$session_id" >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" focus-terminal-session-window --session-id "$session_id" >/dev/null
@@ -181,6 +164,8 @@ wait_for_tail_contains "MOUSE_SCROLL_READY"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
   scroll-application-window --executable-name SpacesApp --normalized-x 0.75 --normalized-y 0.5 --delta-y 120 --repetitions 2 >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+  click-application-window --executable-name SpacesApp --normalized-x 0.75 --normalized-y 0.5 >/dev/null
 wait_for_probe_output
 
 python3 - "$PROBE_OUTPUT" <<'PY'
@@ -198,4 +183,24 @@ if column < 1 or row < 1:
     raise SystemExit(f"Invalid application mouse coordinates: column={column} row={row}")
 PY
 
-echo "Spaces macOS mouse-reporting terminal scroll E2E passed for session $session_id"
+python3 - "$PROBE_OUTPUT" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+captured = Path(sys.argv[1]).read_bytes()
+press = re.search(rb"\x1b\[<0;([0-9]+);([0-9]+)M", captured)
+release = re.search(rb"\x1b\[<0;([0-9]+);([0-9]+)m", captured)
+if not press:
+    raise SystemExit(f"Mac click press did not reach the mouse-reporting terminal application: {captured!r}")
+if not release:
+    raise SystemExit(f"Mac click release did not reach the mouse-reporting terminal application: {captured!r}")
+press_column, press_row = int(press.group(1)), int(press.group(2))
+release_column, release_row = int(release.group(1)), int(release.group(2))
+if press_column < 1 or press_row < 1:
+    raise SystemExit(f"Invalid application click press coordinates: column={press_column} row={press_row}")
+if release_column < 1 or release_row < 1:
+    raise SystemExit(f"Invalid application click release coordinates: column={release_column} row={release_row}")
+PY
+
+echo "Spaces macOS mouse-reporting terminal scroll and click E2E passed for session $session_id"

@@ -20,6 +20,9 @@ import XCTest
 /// cooperative-pool thread: neither the main actor nor the engine actor (which a background
 /// `runSynchronously` would deadlock against if the test occupied it).
 final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     /// Carries the engine-isolated core reference to the engine bridge from a background thread — the core
     /// is only ever *used* on the engine actor; this box merely moves the reference.
     private final class CoreBox: @unchecked Sendable {

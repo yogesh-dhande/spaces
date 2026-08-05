@@ -83,7 +83,17 @@ struct TerminalDetailView: View {
                             onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
                                 sendTerminalScroll(
                                     horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
-                            }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true }
+                            },
+                            onSendMouseButton: { button, pressed, pointerPosition in
+                                sendTerminalMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+                            }, onOpenLink: { link in openTerminalLink(link) }, onOpenComposer: { isShowingComposer = true },
+                            // A clipboard image pasted at the terminal lands in the composer pre-attached
+                            // rather than in the session: sending an image stays a deliberate composer action.
+                            onPasteClipboardImage: {
+                                guard model.pasteClipboardImageIntoComposer() else { return false }
+                                isShowingComposer = true
+                                return true
+                            }
                         ).accessibilityIdentifier("terminal.surface").allowsHitTesting(model.shouldPresentLiveSurface).accessibilityHidden(
                             !model.shouldPresentLiveSurface
                         ).background(Self.surfaceBackground)
@@ -135,6 +145,12 @@ struct TerminalDetailView: View {
     private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
         Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
+    }
+
+    private func sendTerminalMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
+        writeE2EEventIfNeeded(kind: "send_mouse_button", detail: "\(button),\(pressed)")
+        // Direct call, not a Task: press and release arrive back-to-back and must enqueue in order.
+        model.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
     }
 
     private func openTerminalLink(_ link: String) {

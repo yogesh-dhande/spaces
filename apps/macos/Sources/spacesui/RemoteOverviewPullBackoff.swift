@@ -12,9 +12,9 @@ import Foundation
 /// The pull's schedule is deliberately its own rather than the subscription's, even though both
 /// target the same device: the two attempts succeed and fail independently — a reachable but
 /// wire-incompatible remote answers pulls, which is what paints its compatibility badge, while its
-/// subscription keeps failing — so a single shared failure count would either starve the pull behind
-/// a backoff its own attempts never earned, or let a pull's success flatten the subscription's
-/// backoff into a reconnect storm.
+/// subscription is parked entirely (see `SidebarController.overviewSubscriptionDesiredIDs`) — so a
+/// single shared failure count would either starve the pull behind a backoff its own attempts never
+/// earned, or let a pull's success flatten the subscription's backoff into a reconnect storm.
 ///
 /// Nothing here re-drives a pull. The hold only suppresses; the reachability watchdog's tick is what
 /// attempts a held-back device again once its hold has elapsed.

@@ -60,7 +60,7 @@ export default function WorkspacesDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Each service is exposed as <code>SPACES_&lt;SERVICE&gt;_PORT</code>, <code>SPACES_&lt;SERVICE&gt;_HOST</code>, and <code>SPACES_&lt;SERVICE&gt;_URL</code> to every workspace process, plus the setup and stop scripts.</li>
           <li>• Remote Linux workspace services keep their daemon-local port, and the Mac app forwards that port over SSH when a browser session targets the service URL.</li>
-          <li>• Spaces keeps each port assignment pinned to the workspace until archive.</li>
+          <li>• Spaces keeps each port assignment pinned to the workspace until it is deleted.</li>
           <li>• Stopped workspaces hold placeholder reservations for assigned ports; running workspaces release those placeholders so processes can bind normally.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">

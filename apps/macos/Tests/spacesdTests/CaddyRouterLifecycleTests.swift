@@ -90,13 +90,39 @@ import XCTest
             ensureThread.start()
             XCTAssertTrue(waitForFile(at: runStarted.path, timeout: 30))
 
+            let stopEntered = LockedFlag()
             let stopFinished = LockedFlag()
             let stopThread = Thread {
-                lifecycle.stop()
+                // `stop(debugOnEnter:)` fires the instant this call is made, before it can even attempt to
+                // acquire the internal lock -- see its doc comment for why a flag set by the caller right
+                // before the call cannot serve the same purpose (a preemption there can let this test
+                // release the fake Caddy's `run` loop while `stop()` has not been entered at all, so a
+                // `stop()` that does not wait for an in-flight call could still pass).
+                lifecycle.stop(debugOnEnter: { stopEntered.set() })
                 stopFinished.set()
             }
             stopThread.start()
-            Thread.sleep(forTimeInterval: 0.1)
+            // Wait for the stop thread to have entered `stop()` — a signal the call itself emits — instead of
+            // sleeping for a guessed interval and hoping it got that far. `ensureRunning` is still blocked
+            // inside `CaddyService.ensureRunning`'s poll loop, holding `lifecycle`'s lock, until `releaseRun`
+            // is written below: the fake caddy's `run` branch only touches the admin socket file (the signal
+            // that poll loop waits on) once `releaseRun` exists, and we have not written it yet. So the
+            // assertion right after this wait proves, by construction rather than by scheduling luck, that a
+            // `stop()` which serializes on that same lock cannot have returned: it establishes exactly "stop()
+            // must not return until the ensureRunning it interrupted has released the lock", i.e. has
+            // returned.
+            //
+            // Accepted detection limit: against a regressed `stop()` that skips the lock, these two asserts
+            // alone can still pass — `stopEntered` fires before the lock attempt, and a lock-free `stop()`
+            // spends milliseconds in its caddy-stop child, so `stopFinished` can legitimately still read
+            // false here. What catches that regression is the tail of the test: a `stop()` that ran early
+            // removed no socket (none existed yet) and never released the fake's `run` loop, so the final
+            // no-socket assert fails whenever stop's cleanup landed before the fake touched the socket.
+            // That makes detection scheduling-dependent (an intermittent failure, not a certain one);
+            // proving "stop is blocked on the lock" deterministically would require instrumenting the
+            // production lock itself, and any such seam is deleted by the same regression it would guard
+            // against.
+            XCTAssertTrue(waitUntil(timeout: 30) { stopEntered.value })
             XCTAssertFalse(stopFinished.value)
 
             try Data().write(to: releaseRun)

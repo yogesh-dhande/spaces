@@ -2,12 +2,21 @@
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-repo_root="$(cd "$root/../.." && pwd)"
-source "$repo_root/scripts/spaces-profile-helpers.sh"
 . "$root/scripts/silence-watchdog.sh"
 start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
 coverage_dir="$root/.build/coverage"
+# Coverage builds get a scratch path of their own, never the shared .build that holds the product
+# executables. `--enable-code-coverage` instruments every target it builds, executables included, and
+# an instrumented binary with no LLVM_PROFILE_FILE writes a default.profraw into whatever directory
+# it was run from -- so instrumenting the shared .build/debug binaries left every later `spaces`,
+# `spacesd`, or `SpacesApp` invocation dropping profile dumps around the machine. One of the places
+# they landed was the Ghostty submodule, where the Linux artifact build's clean-tree check failed on
+# a file the host's global excludes made invisible. A separate scratch path also keeps the two builds
+# from invalidating each other: toggling the coverage flag in one scratch tree recompiles the whole
+# package, so a plain build followed by a coverage build used to pay for both from scratch. It is
+# persistent, so both trees stay incremental across runs.
+coverage_scratch_path="$root/.build/coverage-scratch"
 test_config_home="$root/.build/test-config-home"
 test_log_path="$coverage_dir/swift-test.log"
 test_status_path="$coverage_dir/swift-test-status"
@@ -25,13 +34,9 @@ if [ "${SPACES_TEST_SKIP_BUILD:-0}" = "1" ]; then
     exit 1
 fi
 
-cli="$root/.build/debug/spaces"
-if [ -x "$cli" ]; then
-    spaces_profile_eval_shell_env "$cli"
-fi
 unset SPACES_DEVICE_API_PORT
 
-codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path)"
+codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path --scratch-path "$coverage_scratch_path")"
 codecov_dir="$(dirname "$codecov_json_path")"
 profdata_path="$codecov_dir/default.profdata"
 mkdir -p "$codecov_dir"
@@ -99,14 +104,21 @@ PY
 }
 
 echo "Building SwiftPM tests with coverage..."
-# scripts/verify.sh pre-builds with this exact flag set before calling this script, so this is
-# normally an incremental no-op; it stays here (rather than being skipped) because it is the
-# correctness guarantee for anyone invoking coverage.sh directly, and costs nothing when the
-# flags already match the last build.
-"$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage
+# This is the only build of the coverage scratch tree, so it is a full compile the first time and
+# incremental afterwards. verify.sh's own build produces the uninstrumented product binaries in the
+# shared .build and never touches this tree.
+"$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage --scratch-path "$coverage_scratch_path"
 
 echo "Running SwiftPM coverage tests..."
-set -- test --skip-build --enable-code-coverage --disable-sandbox
+# The mirror-surface suites (GhosttyMirrorGraphemeClusterTests, GhosttyMirrorSurfaceMRUTests) drive
+# a REAL mirror-owned ghostty app, and only one embedded ghostty app may be live per process
+# (GhosttyProcessAppRuntime.initializeOnce). Every test class in the package shares one
+# spacesPackageTests bundle, so a parallel worker process that ran any daemon-core suite first
+# cannot host the mirror app afterwards — worker assignment is arbitrary, which makes these suites
+# crash their worker only in full runs and take innocent tests down with the redistribution. They
+# are skipped here and run together in their own process below.
+set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
+    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorSurfaceMRUTests
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
@@ -169,6 +181,23 @@ if [ "$swiftpm_status" -ne 0 ]; then
     else
         exit "$swiftpm_status"
     fi
+fi
+
+# The mirror-surface suite skipped above, in a process of its own so the mirror service is the
+# process's one embedded ghostty app. Serial and filtered: one suite, fresh process, same coverage
+# scratch so its raw profiles merge into the artifacts generated below.
+#
+# Not on CI runners: the suite needs a real rendering ghostty surface to export a frame, and the
+# GitHub macOS runner never produces one — both tests time out at SurfaceSnapshotTimeout even in
+# this dedicated serial process, with the runner consuming artifacts byte-identical (object md5 and
+# resources) to ones that pass on developer machines, so the difference is the runner environment,
+# not the build. Local verify remains this suite's gate, like the desktop e2e lanes.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "SKIPPING mirror-surface coverage tests: CI runners cannot host a rendering ghostty surface (gated by local verify)."
+else
+    echo "Running mirror-surface coverage tests in their own process..."
+    run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" test --skip-build --enable-code-coverage \
+        --disable-sandbox --scratch-path "$coverage_scratch_path" --filter "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorSurfaceMRUTests"
 fi
 
 generate_codecov_artifacts

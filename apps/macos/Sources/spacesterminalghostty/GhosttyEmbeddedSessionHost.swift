@@ -109,6 +109,8 @@
             return true
         }
 
+        func bracketedPasteActive() -> Bool { sessionDriver.bracketedPasteActive() }
+
         func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
 
         func childPID() -> Int32? { sessionDriver.childPID() }
@@ -163,6 +165,10 @@
         @discardableResult public func sendScroll(
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
         ) -> Bool { sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
+
+        @discardableResult public func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) -> Bool {
+            sessionDriver.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+        }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
@@ -269,8 +275,8 @@
         /// daemon reads a complete mirror; termination enqueues its final writes last so FIFO ordering lands
         /// the terminated payload after every pending mirror write.
         private let persistence: TerminalCorePersistenceQueue
-        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
-        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session so a
+        /// submit's pasted text and its carriage return stay an adjacent pair; see
         /// `TerminalControlInputSequencer`.
         private let controlInputSequencer = TerminalControlInputSequencer()
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
@@ -283,10 +289,32 @@
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
+        /// Bounds `output.log` for this session, running the expensive preamble replay off the engine so a
+        /// trim cannot stall other sessions' terminal I/O. See `TerminalTranscriptTrimCoordinator`.
+        private lazy var transcriptTrim = TerminalTranscriptTrimCoordinator(
+            outputPath: paths.outputPath,
+            liveTranscriptEndOffset: { [weak self] in
+                guard let self, let outputHandle else { return nil }
+                return try? outputHandle.seekToEnd()
+            },
+            // The committed end offset is discarded: this core re-derives the transcript's end from the
+            // handle on every append (`seekToEnd`) rather than tracking a byte count, so the adopted
+            // handle's position is the only state that has to change.
+            adoptTrimmedTranscript: { [weak self] handle, _ in
+                guard let self else { return }
+                // The trim replaced output.log with a fresh inode; adopt its handle before closing the old
+                // one so the stored property always holds a valid handle even if the close fails.
+                let previousHandle = outputHandle
+                outputHandle = handle
+                try? previousHandle?.close()
+            })
         private var started = false
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        /// When the running program last rang the bell, coalesced by `bellCoalescer`.
+        private var currentBellAt: String?
+        var bellCoalescer = TerminalBellCoalescer()
         private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
@@ -304,10 +332,9 @@
         private var latestRuntimeState: TerminalSessionRuntimeState?
         /// Durable persist marker — mirrors what was last SUCCESSFULLY written to disk. Advanced only on a
         /// successful write so `shouldPersistRuntimeState` retries after a failure rather than being
-        /// suppressed by a stale success marker/timestamp. Not the broadcast source (that is
+        /// suppressed by a stale success marker. Not the broadcast source (that is
         /// `latestRuntimeState`); this exists to drive persistence/retry decisions.
         private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
-        private var lastRuntimeStateWriteAt: Date?
         private var sessionStartedAt: Date?
         private var foregroundPIDOverrideForTesting: Int32?
         private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
@@ -401,6 +428,7 @@
             sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
             self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [sessionDriver] in sessionDriver.requestSurfaceRefresh() }
             sessionDriver.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
+            sessionDriver.onClipboardWrite = { [weak self] text in self?.forwardClipboardWriteToOwner(text) }
             sessionDriver.onSessionStateChanged = { [weak self] change in self?.applySessionStateChange(change) }
             sessionDriver.onSurfaceCellSizeChanged = { [weak self] columns, rows in
                 guard let self else { return }
@@ -538,8 +566,8 @@
             started = false
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: childPID,
-                state: .exited, updatedAt: now, exitedAt: now, title: effectiveTitle, workingDirectory: effectiveWorkingDirectory,
-                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
+                state: .exited, updatedAt: now, exitedAt: now, title: currentTitle, workingDirectory: effectiveWorkingDirectory,
+                columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows, bellAt: currentBellAt)
             // All three terminal writes are enqueued (not written inline) so teardown never blocks the engine
             // on the DB lock; FIFO ordering on the serial persistence queue lands them after every pending
             // mirror write and in this order: exited runtime state, detach-all, terminated payload. They
@@ -547,7 +575,9 @@
             // value types), so the durable mirror converges even if the core is dropped right after.
             persistExitedRuntimeState(exitedState)
             let detachPaths = paths
-            enqueuePersistenceWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: now) }
+            enqueuePersistenceWrite { databasePath in
+                try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: now, databasePath: databasePath)
+            }
             // Every client's durable row is being detached, so no coalesced-write record survives this run:
             // a relaunch of this core re-attaches from scratch and its first touch per client must write.
             leaseTouchCoalescer.forgetAll()
@@ -558,7 +588,9 @@
             let finalPayload = currentRemoteSessionState(reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil)
             if let finalPayload {
                 let payloadPaths = paths
-                enqueuePersistenceWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
+                enqueuePersistenceWrite { databasePath in
+                    try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths, databasePath: databasePath)
+                }
                 broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
             }
             // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
@@ -571,7 +603,7 @@
             // to post the notifications (persistence closures return to the engine only via async Task). It
             // captures only the session id (a value type), so it survives this core's release.
             let terminatedSessionID = launchConfiguration.sessionID
-            enqueuePersistenceWrite {
+            persistence.enqueueOrderedWork {
                 Task { @TerminalEngineActor in
                     TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
                     TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)
@@ -596,11 +628,11 @@
 
         /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
         /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-        private func enqueuePersistenceWrite(_ write: @escaping @Sendable () -> Void) { persistence.enqueueWrite(write) }
+        private func enqueuePersistenceWrite(_ write: @escaping @Sendable (String) -> Void) { persistence.enqueueWrite(write) }
 
         /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
         /// collapses to one write of the newest value. FIFO order across keys.
-        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable () -> Void) {
+        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable (String) -> Void) {
             persistence.enqueueCoalescedWrite(key: key, write)
         }
 
@@ -634,19 +666,16 @@
             // this core's release (e.g. a session-close that drops the core right after termination).
             persistence.enqueueRuntimeStateWrite(
                 state, at: writeAt, paths: paths,
-                onPersisted: { [weak self] persistedState, persistedAt in
-                    Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState, at: persistedAt) }
-                })
+                onPersisted: { [weak self] persistedState, _ in Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState) } })
         }
 
         /// Advances the durable persist marker after a successful off-engine write and, when the persisted
         /// signature changed, fires the runtime-state notification/broadcast — so DB-reading consumers (the
         /// overview) observe the change only once it is durable while live subscribers still see live truth
         /// from `latestRuntimeState`.
-        private func markRuntimeStatePersisted(_ state: TerminalSessionRuntimeState, at writeAt: Date) {
+        private func markRuntimeStatePersisted(_ state: TerminalSessionRuntimeState) {
             let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
             lastPersistedRuntimeState = state
-            lastRuntimeStateWriteAt = writeAt
             if previousSignature != runtimeStateSignature(for: state) { postRuntimeStateDidChange() }
         }
 
@@ -673,10 +702,10 @@
             guard clientLivenessDependsOnLease(clientID: clientID) else { return }
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: touchedAtDate) else { return }
             let paths = paths
-            enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
+            enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") { databasePath in
                 // `disconnected_at IS NULL` inside `touchClient` makes this a no-op for an already-detached
                 // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
-                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
+                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt, databasePath: databasePath)
             }
         }
 
@@ -734,12 +763,13 @@
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
 
-            // Drain accepted-but-unwritten control input before handing off. A `terminal send --submit`
-            // splits into the text write and a carriage return the sequencer holds back by its separation
-            // delay; the host PTY write queue is likewise asynchronous. The control server is stopped above,
-            // so no new sends can enqueue — await the sequencer chain and then the PTY write queue so the
-            // `execv` that inherits this same master fd cannot destroy either with the CR (or the whole line)
-            // unwritten. The child's echo of the drained input flows through the normal output path below.
+            // Drain accepted-but-unwritten control input before handing off. A control send is acknowledged
+            // before its bytes reach the PTY: a `terminal send --submit` becomes two sequencer writes (the
+            // pasted text, then the carriage return), and the host PTY write queue behind them is likewise
+            // asynchronous. The control server is stopped above, so no new sends can enqueue — await the
+            // sequencer chain and then the PTY write queue so the `execv` that inherits this same master fd
+            // cannot destroy either with the CR (or the whole line) unwritten. The child's echo of the
+            // drained input flows through the normal output path below.
             await controlInputSequencer.drain()
             await rendererHostStorage.drainPendingInputWrites()
 
@@ -781,7 +811,7 @@
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: size.columns,
                 rows: size.rows, ownerEpoch: ownerEpoch, screenStateRevision: lastScreenStateRevision ?? 0,
-                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue)
+                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue, transcriptOffsetAtQuiesce: handoffTranscriptReplayOffset)
         }
 
         /// Holds the PTY sink boundary while the daemon performs its final persistence
@@ -828,6 +858,18 @@
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             // Preserve output.log: adoptFromHandoff replays it to rebuild the screen.
             try openOutputHandlePreservingTranscript()
+
+            // Seed the bell from the row the pre-exec image wrote, before anything in this resume writes
+            // runtime state from this core's (empty) state — the first such write would put NULL over the
+            // bell and silently retract an alert the user has not dealt with. Title and cwd are
+            // deliberately not seeded (the surface replay re-establishes them), but no replay can
+            // re-establish a bell: it is an event, not screen state, and a trimmed transcript may not even
+            // carry the BEL. The coalescing window is restored with it, so a bell moments after the
+            // handoff — including one the replayed transcript re-rings through the live action handler —
+            // is absorbed into the alert the user already has instead of minting a second one.
+            let persistedBellAt = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.bellAt
+            currentBellAt = persistedBellAt
+            bellCoalescer.seedLastAdvanced(at: persistedBellAt.flatMap(TerminalSessionTimestamp.date(from:)))
 
             // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
             // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
@@ -955,6 +997,7 @@
             case .takeover: controlResponseForTakeoverRequest(request)
             case .resize: controlResponseForResizeRequest(request)
             case .scroll: controlResponseForScrollRequest(request)
+            case .mouseButton: controlResponseForMouseButtonRequest(request)
             case .setAppearance: controlResponseForSetAppearanceRequest(request)
             case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
@@ -1035,15 +1078,33 @@
                 // The upsert rewrote this client's durable lease, so any coalesced-write record from an
                 // earlier attachment of the same client id is void; the first touch of this attachment writes.
                 leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
+                // Resize serials are scoped to an attachment, not to a client id. A client that reconnects
+                // to a session it already owns keeps its id — an app relaunch reattaches as the same owner
+                // in the same mode, which advances no epoch and changes no attachment — while its host
+                // counts serials from zero again. Carrying the previous attachment's high-water mark across
+                // that would reject every serial the reconnected client sends and pin the session to the
+                // grid it had before. Accepted residual: nothing distinguishes incarnations on the wire,
+                // so a resize still in flight from the PREVIOUS host of this same id could land after the
+                // reset and outrank the new host's early serials. That needs a same-process host swap with
+                // a send mid-flight, misorders at most a few sends (serials keep incrementing past the
+                // stale mark and every state payload re-announces the viewport), and the alternative —
+                // carrying an attachment incarnation in every resize request — is a wire change this
+                // corner does not justify.
+                lastResizeSerialByClientID.removeValue(forKey: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
-                if currentAttachment?.mode != mode {
+                let attachmentChanged = currentAttachment?.mode != mode
+                if attachmentChanged {
                     try TerminalSessionPersistence.attachClient(
                         sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
                     if mode == .owner, previousOwnerClientID != authoritativeClient.id { advanceOwnerEpoch(reason: "control_attach") }
                     postAttachmentStateDidChange()
                 }
-                refreshRuntimeState(force: true)
+                // Only an attach that actually moved this session's attachments can have changed anything
+                // the runtime state carries. Re-attaching the same client in the same mode — what every
+                // refocus of an already-open pane does — leaves the unforced refresh, which persists only
+                // when the state's own signature moved.
+                refreshRuntimeState(force: attachmentChanged)
                 // Set after the attachment broadcast above so the recolored screen (delivered by the
                 // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
                 // frame rather than a color-only delta from a stale baseline. There is no host-side
@@ -1158,10 +1219,7 @@
                 if request.appendNewline { text.append("\n") }
                 guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
                 markLocalOwnerCommandInputOutputResyncPending()
-                let pasteText = text
-                controlInputSequencer.enqueueWrite { [weak self] in
-                    await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) }
-                }
+                enqueueControlInputPaste(text)
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
@@ -1172,21 +1230,27 @@
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
                 // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
-                // Agent TUIs (Claude Code, Codex, OpenCode) treat text bytes immediately followed by the
-                // carriage return, arriving in one PTY read burst, as a pasted block and leave it
-                // unsubmitted in the composer. So the text (which may itself contain newlines, e.g. a
-                // multi-line notification) is written first, and the CR (0x0D) is written as a separate
-                // burst after a delay (see `TerminalControlInputSequencer`) so the TUI reads it as a
-                // distinct Enter keystroke that submits. Enter is a CR because shells and Claude Code
-                // accept LF or CR while Codex and OpenCode submit only on CR. An empty text with
-                // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
-                // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
-                // keep the single inline write. Writes land shortly after the response through the
-                // sequencer, which keeps the text+CR pair ordered against every later input write.
-                let isTextPayload = request.bytes == nil
-                if request.appendNewline, isTextPayload, !payload.isEmpty {
-                    enqueueControlInputWrite(payload)
-                    enqueueControlSubmitCarriageReturn()
+                // Agent TUIs (Claude Code, Codex, OpenCode) group bytes that arrive in one PTY read burst
+                // into a paste, so text merged with its own carriage return lands in the composer
+                // unsubmitted. The text (which may itself contain newlines, e.g. a multi-line notification)
+                // goes in as a paste and the CR (0x0D) follows as its own write. Ghostty derives the paste
+                // encoding from the live terminal state: an application that enabled bracketed paste
+                // (DECSET 2004) receives the text framed by paste markers — the frame closes before the CR
+                // arrives, making the CR a distinct Enter keystroke no matter how the bytes are batched into
+                // read bursts, so the CR follows immediately. An application with bracketed paste OFF — an
+                // agent TUI still initializing right after a detection-based spawn is the case that matters —
+                // receives the text unframed, so only time can keep the CR out of the text's read burst:
+                // that CR goes through the sequencer's separated path instead (issue #187). Enter is a CR
+                // because shells and Claude Code accept LF or CR while Codex and OpenCode submit only on CR.
+                // An empty text with appendNewline is a bare Enter (e.g. answering a TUI dialog): there is
+                // nothing to frame, so the CR goes in alone. Byte payloads are opaque input rather than
+                // composer text, so they keep the single inline write. Both writes funnel through the
+                // sequencer, which keeps the text+CR pair adjacent and ordered against every later input
+                // write.
+                if request.appendNewline, request.bytes == nil, let text = request.text, !text.isEmpty {
+                    let framed = rendererHostStorage.bracketedPasteActive()
+                    enqueueControlInputPaste(text)
+                    if framed { enqueueControlInputWrite(Data([0x0D])) } else { enqueueSeparatedControlInputCarriageReturn() }
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
@@ -1203,16 +1267,27 @@
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
+        /// The CR of a submit whose text went out unframed (bracketed paste off): spaced from the text
+        /// and from the next write so the receiving composer reads it as a distinct Enter keystroke.
+        private func enqueueSeparatedControlInputCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+            }
+        }
+
+        /// Writes text through ghostty's paste encoder, which frames it with bracketed-paste markers when
+        /// the running application enabled DECSET 2004 and passes it through verbatim otherwise. Used both
+        /// for an explicit paste request and for the text half of a submit, where the framing is what keeps
+        /// the following carriage return a distinct Enter keystroke.
+        private func enqueueControlInputPaste(_ text: String) {
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(text) }
+            }
+        }
+
         /// Queued through the same sequencer as text writes so a key press never overtakes the text it was
         /// meant to follow.
         private func enqueueControlKeyPress(_ spec: TerminalKeySpec) {
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendKey(spec) } }
-        }
-
-        private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
-            }
         }
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1270,17 +1345,9 @@
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
             let pointerPosition: TerminalScrollPointerPosition?
-            switch (request.scrollPointerX, request.scrollPointerY, request.scrollPointerMods) {
-            case (nil, nil, nil): pointerPosition = nil
-            case (let x?, let y?, let mods):
-                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
-                guard position.isValid else {
-                    return TerminalControlResponse(ok: false, message: "Invalid terminal scroll pointer position.", errorCode: .invalidArgument)
-                }
-                pointerPosition = position
-            default:
-                return TerminalControlResponse(
-                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+            switch resolvedPointerPosition(x: request.scrollPointerX, y: request.scrollPointerY, mods: request.scrollPointerMods, command: "scroll") {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
             }
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
                 return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
@@ -1297,6 +1364,69 @@
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: scrolled)
             return TerminalControlResponse(ok: scrolled, message: scrolled ? "Scrolled terminal." : "Unable to scroll terminal.")
+        }
+
+        /// Resolves a control request's normalized pointer fields. Absent coordinates leave the daemon's
+        /// pointer where it is; a partial or out-of-range pair is a malformed request, not a no-op.
+        private enum PointerPositionResolution {
+            case resolved(TerminalScrollPointerPosition?)
+            case rejected(TerminalControlResponse)
+        }
+
+        private func resolvedPointerPosition(x: Double?, y: Double?, mods: UInt32?, command: String) -> PointerPositionResolution {
+            switch (x, y, mods) {
+            case (nil, nil, nil): return .resolved(nil)
+            case (let x?, let y?, let mods):
+                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
+                guard position.isValid else {
+                    return .rejected(
+                        TerminalControlResponse(ok: false, message: "Invalid terminal \(command) pointer position.", errorCode: .invalidArgument))
+                }
+                return .resolved(position)
+            default:
+                return .rejected(
+                    TerminalControlResponse(
+                        ok: false, message: "Terminal \(command) pointer coordinates must be provided together.", errorCode: .invalidArgument))
+            }
+        }
+
+        private func controlResponseForMouseButtonRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            touchClientLease(request.clientID)
+            if let rejection = ownerRequestRejection(for: request, commandName: "mouseButton", startedAt: startedAt) { return rejection }
+            guard let button = request.mouseButton, let pressed = request.mousePressed else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse button.", errorCode: .invalidArgument)
+            }
+            guard button >= TerminalControlMouseButtonPayload.minimumButton, button <= TerminalControlMouseButtonPayload.maximumButton else {
+                return TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument)
+            }
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch resolvedPointerPosition(
+                x: request.mousePointerX, y: request.mousePointerY, mods: request.mousePointerMods, command: "mouse button")
+            {
+            case .resolved(let position): pointerPosition = position
+            case .rejected(let response): return response
+            }
+            // A click carries its own position: unlike a scroll, which can legitimately ride whatever the
+            // pointer was last moved to, a button with no position names no cell.
+            guard let pointerPosition else {
+                return TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument)
+            }
+            if let ownerClient = activeOwnerClient() {
+                logMobileTakeoverPerformance(
+                    name: "owner_input_activity",
+                    attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "mouse_button"])
+            }
+            // No state broadcast, unlike scroll: a button press changes nothing on its own. Whatever the
+            // application draws in response arrives as terminal output and is broadcast with that output.
+            let delivered = rendererHostStorage.sendMouseButton(button: button, pressed: pressed, pointerPosition: pointerPosition)
+            TerminalPerformance.logMetric(
+                "terminal_control_mouse_button", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: delivered)
+            return TerminalControlResponse(ok: delivered, message: delivered ? "Delivered mouse button." : "Unable to deliver mouse button.")
         }
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1414,15 +1544,18 @@
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now),
-                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
+                // The raw reported title, not `effectiveTitle`: the runtime state records what the program
+                // said, and folding the launch title in would leave every reader unable to tell an untitled
+                // session from one that titled itself after its own name.
+                title: currentTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
                 rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
-                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+                foregroundDisplayCommand: foregroundAgent?.displayCommand, bellAt: currentBellAt)
             // Advance the in-memory authoritative state first so broadcasts show live truth immediately,
             // independent of when (or whether) the enqueued durable write lands.
             latestRuntimeState = state
-            let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
+            let shouldPersist = force || shouldPersistRuntimeState(state)
             guard shouldPersist else { return }
             // Persist off the engine. The durable marker advances and the change notification fires only when
             // the write succeeds (see `enqueueRuntimeStateWrite`/`markRuntimeStatePersisted`), so a failed
@@ -1445,11 +1578,36 @@
         /// the DB, which would still show the not-yet-committed detach — and the durable detach +
         /// ownership-transfer writes are enqueued (in order) onto the persistence queue so a burst of
         /// expiries can never block the engine on the DB lock.
+        ///
+        /// This runs once a second for every live session, so it first asks the in-memory attachment
+        /// snapshot whether the session has any client a lease could expire at all, and does nothing when it
+        /// does not. That is the overwhelming majority of sessions and of ticks: a local window client is
+        /// lease-exempt and a session nobody has attached to has no clients. The cache is authoritative for
+        /// this question by the same single-writer invariant that lets owner gating read it (see
+        /// `cachedAttachmentSnapshot`) — a lease-governed client can only appear through an attach on this
+        /// core, which invalidates the cache — so the gate can only skip a tick that had nothing to expire.
+        ///
+        /// The gate also requires `expiredRemoteClientIDs` to be empty. A client already marked expired here
+        /// is, by construction, no longer in `hasLeaseGovernedAttachedClient()`'s view — `markClientsExpiredInCache`
+        /// optimistically detaches it in the same cache this gate reads, before its durable detach write has
+        /// committed. Without this second condition, the very first tick after an expiry decision would see
+        /// no lease-governed attached client and take the fast path below, which clears `expiredRemoteClientIDs`.
+        /// That erases the pending marker `isClientDurablyDisconnected` depends on to veto a rescuing heartbeat
+        /// (see its doc comment) while the expiry write can still be sitting in the queue — e.g. behind a
+        /// contended SQLite write lock — so a heartbeat arriving in that window would be rejected instead of
+        /// vetoing the pending detach, disconnecting a client that was actually still alive. Keeping the ids
+        /// around costs nothing while nothing is pending; it only routes ticks with an in-flight decision
+        /// through the full (still cheap) logic below, which already ignores ids it re-derives as no longer
+        /// stale.
         @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
             let cutoff = now.addingTimeInterval(-TerminalSessionPersistence.remoteClientLeaseInterval)
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
+            guard hasLeaseGovernedAttachedClient() || !expiredRemoteClientIDs.isEmpty else {
+                expiredRemoteClientIDs.removeAll(keepingCapacity: true)
+                return []
+            }
             guard let databaseStaleClients = try? TerminalSessionPersistence.staleRemoteClients(paths: paths, now: now), !databaseStaleClients.isEmpty
             else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
@@ -1528,11 +1686,11 @@
             //     (`reconcileStaleClientExpiryAfterSupersededDecision`), letting the next tick derive a FRESH
             //     decision. Keeping these paths separate is load-bearing: routing supersession through the
             //     failure retry would re-apply a stale decision and could stomp a legitimate new owner.
-            enqueuePersistenceWrite { [weak self] in
+            enqueuePersistenceWrite { [weak self] databasePath in
                 do {
                     let outcome = try TerminalSessionPersistence.expireClients(
                         expiringClients, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths, detachedAt: detachedAt,
-                        heartbeatGate: heartbeatGate, observedHeartbeatGenerations: observedHeartbeatGenerations)
+                        heartbeatGate: heartbeatGate, observedHeartbeatGenerations: observedHeartbeatGenerations, databasePath: databasePath)
                     if outcome == .superseded {
                         Task { @TerminalEngineActor in self?.reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: staleClientIDs) }
                     }
@@ -1591,27 +1749,19 @@
             do {
                 let outputHandle = try ensureOutputHandle()
                 try outputHandle.write(contentsOf: data)
-                // The preamble grid only affects cursor placement (mode capture is size-independent), so
-                // an unobserved surface size falls back to the universal 80x24 default rather than
-                // skipping the trim and letting the transcript grow unbounded.
+                let endOffset = try outputHandle.seekToEnd()
+                // Head-truncate the durable transcript once it grows past the live-transcript bound so a
+                // long-running session stops accumulating disk without bound. This only snapshots offsets
+                // on the engine; the trim's expensive work runs off it and swaps in the bounded file on a
+                // later engine turn. The preamble grid only affects cursor placement (mode capture is
+                // size-independent), so an unobserved surface size falls back to the universal 80x24
+                // default rather than skipping the trim and letting the transcript grow unbounded.
                 let terminalSize = observedSurfaceSize() ?? (columns: 80, rows: 24)
-                var outputEndByteOffset: Int?
-                if let trim = try? Self.appendedTranscriptEndOffset(
-                    outputHandle: outputHandle, outputPath: paths.outputPath, columns: terminalSize.columns, rows: terminalSize.rows)
-                {
-                    if trim.writeHandle !== outputHandle {
-                        // A trim replaced output.log with a fresh inode; adopt its handle before closing
-                        // the old one so the stored handle is always valid. A failed trim throws (caught
-                        // here as nil), leaving the original handle at the just-appended end — still valid.
-                        self.outputHandle = trim.writeHandle
-                        try? outputHandle.close()
-                    }
-                    outputEndByteOffset = Self.clampedInt(trim.endOffset)
-                }
+                transcriptTrim.trimIfNeeded(currentEndOffset: endOffset, columns: terminalSize.columns, rows: terminalSize.rows)
                 requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 postOutputDidChange(
-                    data: data, outputEndByteOffset: outputEndByteOffset, interactiveResync: interactiveResync,
+                    data: data, outputEndByteOffset: Self.clampedInt(endOffset), interactiveResync: interactiveResync,
                     shouldBroadcastState: shouldBroadcastState)
                 TerminalPerformance.logMetric(
                     "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
@@ -1683,6 +1833,26 @@
             switch event {
             case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
+            case .ringBell:
+                // A bell changes no metadata a title is derived from, so it skips the metadata
+                // announcement below and only forces the runtime-state write the clients read the
+                // timestamp from. `ring` returning nil is the coalescing window absorbing this bell.
+                //
+                // A daemon handoff replays the transcript through this same surface, so every bell the
+                // scrollback ever carried is re-emitted here and stamps a fresh timestamp. The window
+                // collapses that whole replay into a single alert, which is the bound accepted for it:
+                // GhosttyKit delivers surface actions asynchronously, so nothing at this layer can tell
+                // a replayed bell from a live one.
+                //
+                // One timestamp per session is the alert model: a later bell REPLACES the identity, so a
+                // bell a client suppresses as watched can supersede an earlier unwatched one that never
+                // alerted (two rings over 30s apart straddling a client's watch window with no refresh
+                // between). Accepted: closing it means per-session bell history on the wire, and the
+                // user is already looking at this terminal when the superseding bell rings.
+                guard let bellAt = bellCoalescer.ring() else { return }
+                currentBellAt = TerminalSessionTimestamp.string(from: bellAt)
+                refreshRuntimeState(force: true)
+                return
             case .openURL(_, let value):
                 // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
                 // this is effectively a no-op there, but keep it correct via an async engine→main hop
@@ -1693,6 +1863,23 @@
             }
             postSessionMetadataDidChange()
             refreshRuntimeState(force: true)
+        }
+
+        /// Sends a program's OSC 52 copy to the client that owns the session, so the text lands on the
+        /// machine the user is typing on rather than on this daemon's host.
+        ///
+        /// Dropped when nothing owns the session: a copy is a one-shot with no destination then, and
+        /// queueing it for a future owner would paste text the user copied in a session they had walked
+        /// away from. Replayed writes never reach here — the driver's replay bracket refuses them at
+        /// the runtime callback, where a replayed write is still distinguishable from a live one.
+        ///
+        /// The copy rides the state stream and touches no runtime state, so this deliberately does not
+        /// force a runtime-state write the way the metadata and bell paths do.
+        private func forwardClipboardWriteToOwner(_ text: String) {
+            guard let ownerClientID = activeOwnerClientID() else { return }
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.clipboardWrite,
+                clipboardWrite: TerminalClipboardWritePayload(targetClientID: ownerClientID, text: text))
         }
 
         func applySessionStateChange(_ change: GhosttyEmbeddedSessionStateChange) {
@@ -1842,20 +2029,6 @@
             return Int(value)
         }
 
-        /// Positions `outputHandle` at the transcript's end and returns that offset plus the write handle
-        /// to append through, head-truncating the durable `output.log` first when it has grown past the
-        /// live-transcript bound so a long-running session stops accumulating disk without bound. A trim
-        /// atomically replaces `output.log` and returns a fresh handle the caller must adopt (the passed
-        /// `outputHandle` then points at the unlinked old inode); with no trim the same handle is returned.
-        /// See `TerminalTranscriptTrim`.
-        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String, columns: Int, rows: Int) throws
-            -> TerminalTranscriptTrim.TrimResult
-        {
-            let endOffset = try outputHandle.seekToEnd()
-            return try TerminalTranscriptTrim.trimIfNeeded(
-                outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset, columns: columns, rows: rows)
-        }
-
         private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
             guard let value else { return nil }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1891,6 +2064,16 @@
         /// the cache the broadcasts advertise. See `cachedAttachmentSnapshot`.
         private func currentActiveAttachments() -> [TerminalAttachment] {
             (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
+        }
+
+        /// Whether any still-attached client is one whose liveness the lease decides, i.e. whether the
+        /// stale-client sweep has anything it could possibly expire. Mirrors the predicate
+        /// `TerminalSessionPersistence.staleRemoteClients` runs in SQL — attached, connected, and a kind
+        /// `livenessDependsOnLease` covers — against `currentAttachmentSnapshot()` instead of the database.
+        private func hasLeaseGovernedAttachedClient() -> Bool {
+            guard let snapshot = currentAttachmentSnapshot() else { return false }
+            let attachedClientIDs = Set(snapshot.attachments.filter { $0.detachedAt == nil }.map(\.clientID))
+            return snapshot.clients.contains { $0.disconnectedAt == nil && $0.kind.livenessDependsOnLease && attachedClientIDs.contains($0.id) }
         }
 
         /// Drops the cached attachment snapshot so the next read reseeds from disk. Called by every in-core
@@ -1983,16 +2166,24 @@
             detachedClientWasOwner || remainingOwnerClientID == nil
         }
 
-        private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState, now: Date) -> Bool {
-            if let lastPersistedRuntimeState, runtimeStateSignature(for: lastPersistedRuntimeState) != runtimeStateSignature(for: state) {
-                return true
-            }
-            guard let lastRuntimeStateWriteAt else { return true }
-            return now.timeIntervalSince(lastRuntimeStateWriteAt) >= 5
+        /// A runtime state is persisted when it says something the stored row does not: the signature covers
+        /// every field of the row except `updated_at`, which is derived from the write itself.
+        ///
+        /// There is deliberately no periodic rewrite of an unchanged row. The 1 Hz refresh runs per session
+        /// for as long as the session lives, so rewriting on a timer meant every idle terminal committed a
+        /// transaction every few seconds forever, purely to move `updated_at` forward. Nothing reads that
+        /// column as a freshness signal: session liveness is decided by the service pid, stale recovery by
+        /// pid liveness, garbage collection by `exited_at`, and client liveness by
+        /// `terminal_clients.lease_refreshed_at`. Its readers — the overview payload, a terminated session's
+        /// `emittedAt`, the pane debug overlay — display it or pass it through, and a session that exits or
+        /// changes anything at all writes immediately because the signature changes.
+        private func shouldPersistRuntimeState(_ state: TerminalSessionRuntimeState) -> Bool {
+            guard let lastPersistedRuntimeState else { return true }
+            return runtimeStateSignature(for: lastPersistedRuntimeState) != runtimeStateSignature(for: state)
         }
 
         private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
-            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")|\(state.bellAt ?? "nil")"
         }
 
         private static func isProcessAlive(pid: Int32) -> Bool {
@@ -2034,7 +2225,20 @@
             currentRemoteSessionState(reason: reason, outputByteCount: nil, exportMode: .selfContained)
         }
 
-        private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
+        /// The payload a one-shot state read is answered with, byte-for-byte what this session's own
+        /// subscription socket would have exported for a fresh subscriber: a self-contained frame that also
+        /// arms the next broadcast to carry a full render update when this export could not produce one, so
+        /// a reader left without a baseline still converges. Serving a Device API `.state` from here lets the
+        /// daemon skip dialing its own session's unix socket to ask itself a question it can answer directly.
+        public func currentOneShotStatePayload() -> GhosttyRemoteSessionStatePayload? {
+            currentRemoteSessionState(
+                reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
+                markNextBroadcastFullWhenMissingRenderUpdate: true)
+        }
+
+        private func broadcastCurrentState(
+            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+        ) {
             guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
             let ownerClient = activeOwnerClient()
@@ -2044,7 +2248,8 @@
             )
             guard stateStreamServer != nil,
                 let payload = currentRemoteSessionState(
-                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed)
+                    reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed,
+                    clipboardWrite: clipboardWrite)
             else { return }
             broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
         }
@@ -2089,7 +2294,8 @@
 
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
-            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
+            markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
+            clipboardWrite: TerminalClipboardWritePayload? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2152,7 +2358,7 @@
                     sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                     screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                     title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate)
+                    outputEndByteOffset: bootstrapOutputEndByteOffset, renderUpdate: renderUpdate, clipboardWrite: clipboardWrite)
             }
             if markNextBroadcastFullWhenMissingRenderUpdate { forceNextBroadcastFullRenderUpdate = true }
             return GhosttyRemoteSessionStatePayload(
@@ -2160,7 +2366,7 @@
                 sessionStateRevision: lastSessionStateRevision, sessionStateFlags: lastSessionStateFlags?.rawValue,
                 screenStateRevision: lastScreenStateRevision, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
                 title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, outputByteCount: bootstrapOutputByteCount,
-                outputEndByteOffset: bootstrapOutputEndByteOffset)
+                outputEndByteOffset: bootstrapOutputEndByteOffset, clipboardWrite: clipboardWrite)
         }
 
         private func makeRenderUpdate(
@@ -2291,7 +2497,7 @@
         /// work runs. Signal the semaphore to release the queue.
         func debugHoldPersistenceQueue() -> DispatchSemaphore {
             let gate = DispatchSemaphore(value: 0)
-            enqueuePersistenceWrite { gate.wait() }
+            persistence.enqueueOrderedWork { gate.wait() }
             return gate
         }
         func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
@@ -2315,11 +2521,19 @@
             return "\(columns)x\(rows)"
         }
 
-        private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
+        /// `elapsedMS`/`count`/`attributes` are `@autoclosure` so a disabled logger never evaluates the
+        /// dictionary literals callers build inline (e.g. `applySessionStateChange`'s "state_change" event,
+        /// which fires on every `.screen` change — i.e. every terminal output tick) — the `isEnabled()`
+        /// guard below runs first, and only then are the closures forced.
+        private func logMobileTakeoverPerformance(
+            name: String, elapsedMS: @autoclosure () -> Int? = nil, count: @autoclosure () -> Int? = nil,
+            attributes: @autoclosure () -> [String: String] = [:]
+        ) {
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
             SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
-                    sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS, count: count,
-                    attributes: attributes))
+                    sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS(), count: count(),
+                    attributes: attributes()))
         }
 
     }

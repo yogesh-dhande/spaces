@@ -31,7 +31,7 @@
             let hasExitedProcess = overview.workspaces.contains { workspace in workspace.processRows.contains { $0.runState == .exited } }
             XCTAssertTrue(hasExitedProcess, "The demo overview should contain an exited process.")
 
-            let events = SpacesMobileAttention.events(in: overview)
+            let events = SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:])
             XCTAssertFalse(events.isEmpty, "The loaded overview should derive at least one attention event.")
             XCTAssertTrue(events.contains { $0.kind == .waitingForInput })
             XCTAssertTrue(events.contains { $0.kind == .exited })

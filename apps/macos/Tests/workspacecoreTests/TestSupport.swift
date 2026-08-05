@@ -12,24 +12,35 @@ func makeTempDirectory() throws -> URL {
 }
 
 extension XCTestCase {
-    /// A store backed by a fresh temporary database, with the profile environment scoped to this test.
+    /// Points the profile environment at `databasePath` for the rest of this test, restoring the previous
+    /// values in a teardown block so the override never leaks into later tests in the same process.
     ///
-    /// `SQLiteStore` is given the explicit path, but downstream code (terminal-session persistence, runtime
-    /// paths) still resolves the active profile from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`. Those are set
-    /// here and restored in a teardown block so the override never leaks into later tests in the same
-    /// process — previously they were set and never restored, which left a stale (deleted) profile path
-    /// pinned for the rest of the run.
-    func makeTemporaryStore() throws -> SQLiteStore {
-        _ = installHermeticGitEnvironment
-        let dir = try makeTempDirectory()
-        let dbURL = dir.appendingPathComponent("spaces-test.db")
-        let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
+    /// Anything a test reaches — the workspace store's migration authorization, terminal-session
+    /// persistence, runtime paths — resolves the active profile from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`,
+    /// so passing an explicit database path to one component is not isolation on its own.
+    func bindSpacesProfileForTest(databasePath: String) {
+        let runtimePath = URL(fileURLWithPath: databasePath).deletingLastPathComponent().appendingPathComponent("runtime", isDirectory: true).path
         let keys = [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]
         let originalValues = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
         addTeardownBlock { for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
-        setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
-        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
-        return try SQLiteStore(path: dbURL.path)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimePath, 1)
+    }
+
+    /// Binds the profile environment to a fresh throwaway profile for the rest of this test. Use it in
+    /// `setUpWithError` so no code path a test reaches — including work its background queues finish
+    /// later — can resolve the developer's profile.
+    func useIsolatedSpacesProfile() throws {
+        bindSpacesProfileForTest(databasePath: try makeTempDirectory().appendingPathComponent("spaces.db").path)
+    }
+
+    /// A store backed by a fresh temporary database, with the profile environment scoped to this test.
+    func makeTemporaryStore() throws -> SQLiteStore {
+        _ = installHermeticGitEnvironment
+        let dir = try makeTempDirectory()
+        let databasePath = dir.appendingPathComponent("spaces-test.db").path
+        bindSpacesProfileForTest(databasePath: databasePath)
+        return try SQLiteStore(path: databasePath)
     }
 }
 
@@ -40,9 +51,7 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
 }
 
 func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String, branch: String? = nil) -> WorkspaceRecord {
-    WorkspaceRecord(
-        id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isArchived: false, isRunning: false,
-        lastLaunchedAt: nil)
+    WorkspaceRecord(id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isRunning: false, lastLaunchedAt: nil)
 }
 
 /// Seeds the tracked terminal-session window that a live Spaces terminal session creates before any
@@ -54,6 +63,23 @@ func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionI
         window: WindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
             terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+}
+
+/// Writes the `terminal_sessions` row that has to exist before any runtime state is persisted for a
+/// session.
+///
+/// Production establishes it inside the session host: `startIfNeeded` writes the launch configuration as
+/// its first persistence action, before the host's first runtime-state write, and every other per-session
+/// table is keyed off that row. The real `builtInTerminalWindowOpener` writes nothing durable at all — it
+/// posts an IPC notification asking the app to open a pane — so a fixture that uses the opener as a
+/// stand-in for a live session host must seed the row the host would have written.
+func seedTerminalSessionRow(
+    sessionID: String, paths: TerminalSessionPaths, workspaceID: String = "workspace-1", createdAt: String = "2026-05-09T17:00:00Z"
+) throws {
+    try TerminalSessionPersistence.writeLaunchConfiguration(
+        TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: sessionID, workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: createdAt,
+            workspaceID: workspaceID, kind: .shell), paths: paths)
 }
 
 /// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is

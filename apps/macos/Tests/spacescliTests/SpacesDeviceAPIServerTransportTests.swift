@@ -9,6 +9,265 @@ import spacesterminalcore
 @testable import workspacecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
+    /// Deleting a workspace can be asked to delete its branches, and each branch's outcome — deleted, not
+    /// found, skipped as protected, or failed — is something the user is owed. The daemon computes that
+    /// report, so it has to reach the client on the response rather than being dropped for a fixed
+    /// "Deleted workspace." message.
+    func testDeleteWorkspaceCarriesBranchDeletionOutcomeToTheClient() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+
+            // A real repository with a real branch checked out in a real worktree: the delete has to remove
+            // the worktree and the branch for its report to mean anything.
+            let projectDir = root.appendingPathComponent("delete-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("delete-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-report", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-delete", name: "Delete Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            let workspace = WorkspaceRecord(
+                id: "workspace-delete", projectID: project.id, dir: worktreeDir.path, dirname: "delete-worktree", branch: "feature-report",
+                baseBranch: "main", isDefault: false, isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-DELETE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .archiveWorkspace(.init(workspaceID: workspace.id, deleteLocalBranch: true, deleteRemoteBranch: false)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            let notice = try XCTUnwrap(response.mutationNotice, "the branch-deletion report must reach the client")
+            XCTAssertTrue(notice.contains("Deleted local branch 'feature-report'."), notice)
+            XCTAssertNil(try store.workspace(id: workspace.id), "the workspace record is gone")
+            XCTAssertFalse(GitClient().branchExists(path: projectDir.path, branch: "feature-report"))
+        }
+    }
+
+    /// A delete that was not asked to touch any branch has nothing extra to report, so it carries no notice
+    /// and the client stays silent instead of showing an empty report.
+    func testDeleteWorkspaceWithoutBranchDeletionCarriesNoNotice() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("quiet-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("quiet-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-quiet", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-quiet", name: "Quiet Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            try store.upsert(project: project)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-quiet", projectID: project.id, dir: worktreeDir.path, dirname: "quiet-worktree", branch: "feature-quiet",
+                    baseBranch: "main", isDefault: false, isRunning: false, lastLaunchedAt: nil))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-DELETE-QUIET", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .archiveWorkspace(.init(workspaceID: "workspace-quiet", deleteLocalBranch: false, deleteRemoteBranch: false)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertNil(response.mutationNotice)
+            XCTAssertNil(try store.workspace(id: "workspace-quiet"))
+            XCTAssertTrue(GitClient().branchExists(path: projectDir.path, branch: "feature-quiet"), "an untouched branch survives the delete")
+        }
+    }
+
+    /// Deleting a workspace stops its terminals, removes its git worktree, and can delete its branches —
+    /// seconds of work. Every other client keeps polling the overview throughout, so the delete must not
+    /// hold the Device API request queue: when it did, those polls waited for the whole delete and the
+    /// phone showed a connection error exactly as the deleted workspace disappeared.
+    func testDeletingAWorkspaceDoesNotBlockOverviewRequestsFromOtherConnections() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let teardownStarted = DispatchSemaphore(value: 0)
+            let releaseTeardown = DispatchSemaphore(value: 0)
+            let deleteFinished = DispatchSemaphore(value: 0)
+            let deleteResult = DeviceAPITransportTestResultBox()
+            // The workspace's terminal is terminated partway through the delete, so blocking the terminator
+            // holds a real delete open for as long as the test needs without depending on timing.
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionTerminator: { _ in
+                    teardownStarted.signal()
+                    releaseTeardown.wait()
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("busy-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("busy-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-busy", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-busy", name: "Busy Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            try store.upsert(project: project)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-busy", projectID: project.id, dir: worktreeDir.path, dirname: "busy-worktree", branch: "feature-busy",
+                    baseBranch: "main", isDefault: false, isRunning: true, lastLaunchedAt: nil))
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "process-busy", workspaceID: "workspace-busy", templateName: "api", command: "npm start",
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-busy", pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-DELETE-QUEUE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let deleteRequest = SpacesDeviceAPIRequest(
+                command: .archiveWorkspace(.init(workspaceID: "workspace-busy", deleteLocalBranch: true, deleteRemoteBranch: false)),
+                authToken: pairingStore.authToken, clientApp: clientApp)
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { deleteFinished.signal() }
+                do {
+                    let client = try SpacesDeviceAPIRequestClient(
+                        host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                    deleteResult.setResponseData(try SpacesDeviceAPICodec.encodeResponse(try client.request(deleteRequest)))
+                } catch { deleteResult.setError(error) }
+            }
+
+            XCTAssertEqual(teardownStarted.wait(timeout: .now() + 15), .success, "the delete must reach the workspace teardown")
+            defer { releaseTeardown.signal() }
+
+            // The refresh poll a client issues on its own connection while the delete is still running.
+            let pollClient = try SpacesDeviceAPIRequestClient(
+                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, timeoutSeconds: 5)
+            let overview = try pollClient.request(SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp))
+            XCTAssertTrue(overview.ok, overview.message)
+
+            releaseTeardown.signal()
+            XCTAssertEqual(deleteFinished.wait(timeout: .now() + 30), .success)
+            if let error = deleteResult.error() { throw error }
+            // Moving the work off the request queue must not change what the client gets back: one
+            // synchronous response carrying the branch-deletion report and the refreshed overview.
+            let deleteResponse = try SpacesDeviceAPICodec.decodeResponse(deleteResult.responseData())
+            XCTAssertTrue(deleteResponse.ok, deleteResponse.message)
+            let notice = try XCTUnwrap(deleteResponse.mutationNotice, "the branch-deletion report must still reach the client")
+            XCTAssertTrue(notice.contains("Deleted local branch 'feature-busy'."), notice)
+            XCTAssertNil(try store.workspace(id: "workspace-busy"))
+        }
+    }
+
+    /// A client whose delete response was lost probes the overview to learn what happened, and a workspace
+    /// still listed means two very different things: the delete failed, or a slow stop script is still
+    /// running and the daemon is about to remove it. Only the daemon knows which, so it reports the
+    /// workspaces it is currently tearing down — and stops reporting one the moment its teardown ends.
+    func testOverviewReportsAWorkspaceAsTearingDownOnlyWhileItsDeleteIsRunning() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let teardownStarted = DispatchSemaphore(value: 0)
+            let releaseTeardown = DispatchSemaphore(value: 0)
+            let deleteFinished = DispatchSemaphore(value: 0)
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionTerminator: { _ in
+                    teardownStarted.signal()
+                    releaseTeardown.wait()
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("teardown-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try runDeviceAPITestGit(["init", "-b", "main"], cwd: projectDir.path)
+            try "hello".write(to: projectDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runDeviceAPITestGit(["add", "README.md"], cwd: projectDir.path)
+            try runDeviceAPITestGit(
+                ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: projectDir.path)
+            let worktreeDir = root.appendingPathComponent("teardown-worktree", isDirectory: true)
+            try runDeviceAPITestGit(["worktree", "add", "-b", "feature-teardown", worktreeDir.path], cwd: projectDir.path)
+
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-teardown", name: "Teardown", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
+            try store.upsert(project: project)
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-teardown", projectID: project.id, dir: worktreeDir.path, dirname: "teardown-worktree", branch: "feature-teardown",
+                    baseBranch: "main", isDefault: false, isRunning: true, lastLaunchedAt: nil))
+            // A running process gives the delete a terminal to tear down, which is where it parks.
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "process-teardown", workspaceID: "workspace-teardown", templateName: "api", command: "npm start",
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "session-teardown", pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: nil, exitedAt: nil))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-TEARDOWN-SET", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { deleteFinished.signal() }
+                _ = try? self.sendTLSRequest(
+                    SpacesDeviceAPIRequest(
+                        command: .archiveWorkspace(.init(workspaceID: "workspace-teardown", deleteLocalBranch: false, deleteRemoteBranch: false)),
+                        authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint)
+            }
+            XCTAssertEqual(teardownStarted.wait(timeout: .now() + 30), .success, "the delete must reach the workspace teardown")
+
+            let duringDelete = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(duringDelete.ok, duringDelete.message)
+            let midOverview = try XCTUnwrap(duringDelete.overview)
+            XCTAssertEqual(
+                midOverview.workspaceIDsWithTeardownInFlight, ["workspace-teardown"],
+                "a workspace still listed while its delete runs must be reported as tearing down")
+            XCTAssertTrue(midOverview.workspaces.contains { $0.id == "workspace-teardown" }, "and it is still listed, which is the whole ambiguity")
+
+            releaseTeardown.signal()
+            XCTAssertEqual(deleteFinished.wait(timeout: .now() + 60), .success)
+
+            let afterDelete = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+            let finalOverview = try XCTUnwrap(afterDelete.overview)
+            XCTAssertTrue(finalOverview.workspaceIDsWithTeardownInFlight.isEmpty, "the id is released once the teardown ends")
+            XCTAssertNil(try store.workspace(id: "workspace-teardown"))
+        }
+    }
+
     func testAgentHookStatusDoesNotBlockOtherDeviceAPIRequests() throws {
         try withTemporaryProfile { _ in
             let identity = try testTLSIdentity()
@@ -517,8 +776,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-                isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
+                id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+                lastLaunchedAt: "2026-06-18T12:00:00Z")
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -591,8 +850,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-impact", name: "Impact Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-impact", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-                isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
+                id: "workspace-impact", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+                lastLaunchedAt: "2026-06-18T12:00:00Z")
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             // One running and one exited process: only the running one is restart-impacting.
@@ -655,8 +914,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-                isRunning: false, lastLaunchedAt: nil)
+                id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+                lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -713,7 +972,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
-                isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -780,8 +1039,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-process", name: "Process Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-                isRunning: false, lastLaunchedAt: nil)
+                id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: false,
+                lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -837,7 +1096,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 defaultBranch: nil)
             let workspace = WorkspaceRecord(
                 id: "workspace-terminal-overview-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
-                isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -1427,8 +1686,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
         let project = ProjectRecord(id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
         let workspace = WorkspaceRecord(
-            id: "workspace-\(sessionID)", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: nil, isDefault: true,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-\(sessionID)", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+            lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1616,5 +1875,36 @@ private final class DeviceAPITransportTestResultBox: @unchecked Sendable {
         let data = storedResponseData
         lock.unlock()
         return data
+    }
+}
+
+/// Runs `git` for the Device API server tests' repository fixtures. The Device API delete path shells out to
+/// real git, so these tests need real repositories rather than seeded rows.
+private func runDeviceAPITestGit(_ arguments: [String], cwd: String) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = arguments
+    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    var environment = ProcessInfo.processInfo.environment
+    environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    environment["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    environment["GIT_AUTHOR_NAME"] = "spaces-test"
+    environment["GIT_AUTHOR_EMAIL"] = "test@example.com"
+    environment["GIT_COMMITTER_NAME"] = "spaces-test"
+    environment["GIT_COMMITTER_EMAIL"] = "test@example.com"
+    environment.removeValue(forKey: "GIT_DIR")
+    environment.removeValue(forKey: "GIT_WORK_TREE")
+    process.environment = environment
+    let errorPipe = Pipe()
+    process.standardOutput = Pipe()
+    process.standardError = errorPipe
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        throw NSError(
+            domain: "spaces.tests", code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"])
     }
 }

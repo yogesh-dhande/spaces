@@ -171,7 +171,7 @@
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: workspaceID, projectID: "project-1", dir: "/tmp/project/\(workspaceID)", dirname: workspaceID, branch: "main",
-                    isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil))
+                    isDefault: false, isRunning: true, lastLaunchedAt: nil))
             try store.setWorkspacePorts(workspaceID: workspaceID, ports: [port], names: [serviceName])
         }
 

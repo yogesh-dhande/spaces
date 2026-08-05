@@ -187,76 +187,6 @@ mkdir -p "$(dirname "$FAKE_ZIG_BIN")"
 cp "$STUB_BIN/zig" "$FAKE_ZIG_BIN"
 chmod +x "$FAKE_ZIG_BIN"
 
-RELEASE_BUILD_ROOT="$TMP_ROOT/release-build"
-mkdir -p \
-    "$RELEASE_BUILD_ROOT/kit/GhosttyKit.xcframework" \
-    "$RELEASE_BUILD_ROOT/resources/ghostty/shell-integration" \
-    "$RELEASE_BUILD_ROOT/resources/terminfo" \
-    "$RELEASE_BUILD_ROOT/vt/include/ghostty" \
-    "$RELEASE_BUILD_ROOT/vt/lib"
-: > "$RELEASE_BUILD_ROOT/vt/include/ghostty/vt.h"
-: > "$RELEASE_BUILD_ROOT/vt/lib/libghostty-vt.a"
-cp "$FAKE_VT_LIB" "$RELEASE_BUILD_ROOT/vt/lib/$FAKE_VT_LIB_NAME"
-
-tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.gz" "GhosttyKit.xcframework"
-tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
-tar -C "$RELEASE_BUILD_ROOT/vt" -czf "$RELEASE_DIR/libghostty-vt.tar.gz" "include" "lib"
-
-# The fixture's build_script_version comes from the script under test: it is part of the artifact
-# key, so a hardcoded copy would go stale on the next bump and quietly turn this into a
-# build-script-mismatch test instead of the Xcode-mismatch test it is meant to be.
-BUILD_SCRIPT_VERSION="$(sed -n 's/^BUILD_SCRIPT_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
-[[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
-
-# host_arch is the real host architecture for the same reason: it is part of the artifact key, so a
-# placeholder would reject this release on the architecture axis and stop it from being the
-# Xcode-mismatch test it is meant to be.
-python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" "$BUILD_SCRIPT_VERSION" "$(uname -m)" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-release_dir = pathlib.Path(sys.argv[1])
-ghostty_sha = sys.argv[2]
-build_script_version = int(sys.argv[3])
-host_arch = sys.argv[4]
-assets = [
-    "GhosttyKit.xcframework.tar.gz",
-    "GhosttyKit-resources.tar.gz",
-    "libghostty-vt.tar.gz",
-]
-checksums = {
-    asset: hashlib.sha256((release_dir / asset).read_bytes()).hexdigest()
-    for asset in assets
-}
-manifest = {
-    "schema_version": 1,
-    "ghostty_sha": ghostty_sha,
-    "source_url": "https://example.invalid/ghostty.git",
-    "zig_version": "0.16.0",
-    "build_script_version": build_script_version,
-    "xcode_version": "17.0",
-    "xcode_build_version": "17C529",
-    "swift_version": "Swift release fixture",
-    "host_arch": host_arch,
-    "build_optimize": "ReleaseFast",
-    "dirty": False,
-    "mode": "build",
-    "artifact_checksums": checksums,
-}
-(release_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-
-(
-    cd "$RELEASE_DIR"
-    shasum -a 256 \
-        "GhosttyKit.xcframework.tar.gz" \
-        "GhosttyKit-resources.tar.gz" \
-        "libghostty-vt.tar.gz" \
-        "manifest.json" > "SHA256SUMS"
-)
-
 SETUP_ENV=(
     "PATH=$STUB_BIN:$PATH"
     "SPACES_GHOSTTY_SETUP_SKIP_API_VERIFY=1"
@@ -271,6 +201,50 @@ SETUP_ENV=(
     "SPACES_TEST_FAKE_VT_LIB=$FAKE_VT_LIB"
     "SPACES_TEST_FAKE_VT_LIB_NAME=$FAKE_VT_LIB_NAME"
 )
+
+# The release fixture is produced by the script under test (--build --package), so every field a
+# consumer validates -- the build script version, the Zig version, the host architecture, and the
+# digest of the packaged artifact trees -- is the one this checkout computes. Only the recorded
+# Xcode build version is then moved off the stub's value, which is the single mismatch this test is
+# about. The packaging build writes to a throwaway cache so the runs below still exercise the
+# download rather than a cache restore.
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$TMP_ROOT/ghostty-cache-package" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --build --package "$RELEASE_DIR" \
+    > "$TMP_ROOT/release-package.out" 2>&1; then
+    echo "--- release package output ---" >&2
+    cat "$TMP_ROOT/release-package.out" >&2
+    fail "could not package the release fixture with --build --package"
+fi
+
+python3 - "$RELEASE_DIR/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["xcode_build_version"] = "17C529"
+path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+
+(
+    cd "$RELEASE_DIR"
+    shasum -a 256 \
+        "GhosttyKit.xcframework.tar.gz" \
+        "GhosttyKit-resources.tar.gz" \
+        "libghostty-vt.tar.gz" \
+        "manifest.json" > "SHA256SUMS"
+)
+
+# Put the fixture back to the state the runs below start from: nothing installed (the Zig stub
+# stays), a clean Ghostty source tree, and an empty build log.
+rm -rf \
+    "$TEMP_APP_ROOT/.local/ghosttykit" \
+    "$TEMP_APP_ROOT/.local/ghostty-artifacts" \
+    "$TEMP_APP_ROOT/.local/ghosttyvt/include" \
+    "$TEMP_APP_ROOT/.local/ghosttyvt/lib"
+git -C "$TEMP_GHOSTTY_ROOT" clean -fdx >/dev/null 2>&1
+: > "$BUILD_LOG"
 
 set +e
 env "${SETUP_ENV[@]}" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --download-only > "$TMP_ROOT/download-only.out" 2>&1

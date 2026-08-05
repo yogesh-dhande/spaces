@@ -148,6 +148,24 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         return errno == EPERM
     }
 
+    /// What actually became of a PTY child. `kill(pid, 0)` cannot tell a zombie from a running process, so
+    /// a child that exited but was never `waitpid`ed looks alive forever — the exact leak the termination
+    /// tests below must catch. `sysctl(KERN_PROC_PID)` reports the zombie state directly and stops
+    /// reporting the pid at all once it has been reaped.
+    private enum ProcessLifecycle: String {
+        case running
+        case zombie
+        case reaped
+    }
+
+    private static func processLifecycle(_ pid: Int32) -> ProcessLifecycle {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return .reaped }
+        return Int32(info.kp_proc.p_stat) == SZOMB ? .zombie : .running
+    }
+
     /// Shared by both `python3` READY probes below: reports what the surface actually shows and
     /// whether the child process is still around, so a timeout on "READY never appeared" says why
     /// instead of just that it happened. `.debugDescription` renders control characters (the mouse
@@ -247,9 +265,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let shellPID = try XCTUnwrap(driver.childPID())
         driver.sendRawBytes(Data("\(scriptPath.path)\n".utf8))
 
-        try await waitUntil { FileManager.default.fileExists(atPath: pidPath.path) }
-        let foregroundPIDText = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        let foregroundPID = try XCTUnwrap(Int32(foregroundPIDText))
+        // Wait for the pid itself, not for the file that will hold it: the script's redirection creates the
+        // file before `printf` writes to it, so a read taken on `fileExists` can see it empty. The value is
+        // observable only once a complete line has landed, which is also the only way to know the pid is not
+        // a partially written prefix of itself.
+        let foregroundPIDBox = MutableBox<Int32?>(nil)
+        try await waitUntil {
+            guard let text = try? String(contentsOf: pidPath, encoding: .utf8), text.hasSuffix("\n") else { return false }
+            foregroundPIDBox.value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            return foregroundPIDBox.value != nil
+        }
+        let foregroundPID = try XCTUnwrap(foregroundPIDBox.value)
         try await waitUntil { driver.foregroundPID() == foregroundPID }
 
         XCTAssertNotEqual(foregroundPID, shellPID)
@@ -283,7 +309,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { driver.terminate() }
 
         try driver.startIfNeeded()
-        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        // Interrupt only once the marker actually says `ready`. The script's redirection creates the marker
+        // before `printf` writes to it, so interrupting on `fileExists` can kill the script in between —
+        // leaving a marker that never gains the content asserted below. Waiting for the content also fixes
+        // where the interrupt lands: after the write, while the script is in `sleep`.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
         driver.sendRawBytes(Data([0x03]))
         try await waitUntil(timeout: 30) { driver.childPID() == nil }
 
@@ -316,7 +346,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell), terminationEscalationIntervals: .init(hupGrace: 0.05, termGrace: 2.0, killGrace: 2.0))
 
         try driver.startIfNeeded()
-        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        // Wait for `ready` to be IN the marker, not for the marker to exist. Both traps are installed before
+        // the script writes anything, so a terminate() taken on `fileExists` can deliver SIGHUP into the gap
+        // between the `>` redirection creating the file and `printf` writing it — and that redirection then
+        // TRUNCATES the handler's `hup` line back out, failing the assertion below for a reason that is
+        // entirely the test's own scheduling. Once `ready` is there the truncating write has already
+        // happened, so every trap's append survives it.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
         let childPID = try XCTUnwrap(driver.childPID())
 
         driver.terminate()
@@ -325,11 +361,213 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
             return markerText.contains("term")
         }
-        try await waitUntil(timeout: 30) { !Self.processIsAlive(childPID) }
+        try await waitUntilChildIsReaped(childPID)
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("hup"))
         XCTAssertTrue(markerText.contains("term"))
+    }
+
+    func testHostManagedPTYTerminateReapsChildThatExitsOnHangup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("ready-marker")
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-reaps-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-reaps", workingDirectory: root.path,
+                shell: "/bin/zsh", command: "printf 'ready\\n' > \"\(markerPath.path)\"; exec /bin/sleep 120", createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell))
+        // terminate() is idempotent; this only matters when an assertion below throws before the explicit
+        // call, so a failing run does not leave the sleep behind.
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        // The marker means the login shell is up and has run the `printf`. It does NOT mean the `exec` that
+        // follows has happened — the marker is written by the shell, one command earlier — so the leader may
+        // still be zsh rather than the sleep when terminate() lands. That does not change what this test
+        // asserts: `exec` keeps the pid, so `childPID` names the leader either way, and neither image ignores
+        // SIGHUP, so the graceful stage ends and reaps it without escalating. Wait for the content rather
+        // than the file so the marker at least means the shell reached that command: the `>` redirection
+        // creates the file before `printf` writes into it.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        // The ordinary teardown path: the child dies on the graceful SIGHUP, so the escalation's first
+        // stage completes. That stage is the only reaper during an explicit terminate(), so the leader
+        // must be collected before it returns.
+        try await waitUntilChildIsReaped(childPID)
+    }
+
+    /// A leader that releases the PTY slave while it is still alive. `read()` on the master returns as
+    /// soon as the last slave descriptor closes, so `readLoopFinished` is set with the leader running --
+    /// the read loop exiting does not imply the leader is collectable. An escalation stage that stopped
+    /// there would report the session torn down and leave this process running forever, unreaped and
+    /// unsignalled, because the graceful SIGHUP is ignored and nothing escalates past it.
+    func testHostManagedPTYTerminateEscalatesWhenTheLeaderReleasesThePTYButSurvives() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("released-marker")
+        // Python rather than a shell script: closing exactly the three stdio descriptors and then staying
+        // alive has to be precise, and a shell may keep its own descriptor on the tty for job control,
+        // which would leave the slave open and test nothing. `exec` makes this process the PTY leader.
+        //
+        // The slave is released from inside the SIGHUP handler, not at startup, so the read loop finishes
+        // while terminate() is unwinding -- the escalation's own window. Releasing it earlier would end the
+        // session through the natural-exit path and terminate() would return at its `closed` guard, so no
+        // escalation stage would run at all.
+        let script = """
+            import os, signal, time
+
+            def release_pty_and_survive(signum, frame):
+                for fd in (0, 1, 2):
+                    os.close(fd)
+
+            signal.signal(signal.SIGHUP, release_pty_and_survive)
+            with open("\(markerPath.path)", "w") as marker:
+                marker.write("ready")
+            time.sleep(120)
+            """
+        let scriptPath = root.appendingPathComponent("release-pty.py")
+        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-released",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
+                createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        // Existence is the whole signal here, unlike the marker waits above: this marker is created by the
+        // python leader itself, after it has installed the SIGHUP handler and therefore after zsh has already
+        // `exec`ed it. Nothing this test does next depends on the marker's contents, so there is no
+        // created-before-written gap to fall into.
+        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        // SIGHUP is ignored, so only escalation ends this: the first stage must run to its deadline
+        // despite the finished read loop, and the SIGTERM that follows -- which the process does not
+        // ignore -- kills it. Then it must be collected.
+        try await waitUntilChildIsReaped(childPID)
+    }
+
+    /// The same leader that outlives its PTY, reached through the NATURAL-exit path: it releases the slave
+    /// at startup rather than from a SIGHUP handler, so `read()` hits EOF with nobody terminating anything.
+    /// EOF says every slave descriptor is closed -- a fact about descriptors, not about the process -- so the
+    /// session is over while its leader runs on.
+    ///
+    /// The driver forked that leader, so ending and collecting it is the driver's own job: no other part of
+    /// the daemon reaps children (there is no SIGCHLD handler and no `waitpid(-1)` sweep), and a caller's
+    /// later `terminate()` cannot rescue it because the session is already closed. Without that the process
+    /// keeps running with nothing able to stop it and then sits as a zombie for the daemon's lifetime.
+    func testHostManagedPTYNaturalExitEndsALeaderThatOutlivesThePTY() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let pidPath = root.appendingPathComponent("leader.pid")
+        // Python rather than a shell script: closing exactly the three stdio descriptors and then staying
+        // alive has to be precise, and a shell may keep its own descriptor on the tty for job control, which
+        // would leave the slave open and test nothing. `exec` makes this process the PTY leader, so the pid
+        // it records is the pid the driver forked. The rename publishes the pid file atomically, so reading
+        // it can never observe a partial write.
+        let script = """
+            import os, time
+
+            pid_path = "\(pidPath.path)"
+            with open(pid_path + ".tmp", "w") as pid_file:
+                pid_file.write(str(os.getpid()))
+            os.rename(pid_path + ".tmp", pid_path)
+            for fd in (0, 1, 2):
+                os.close(fd)
+            time.sleep(300)
+            """
+        let scriptPath = root.appendingPathComponent("release-pty-at-startup.py")
+        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+        // The close is a callback the driver makes, so wait on the callback itself rather than polling a flag
+        // it sets: the poller would suspend on the cooperative pool and hop onto the shared engine actor once
+        // per tick, neither of which this observation needs, and both of which can strand it for tens of
+        // seconds while the machine is saturated (#236) even though the session closed on time.
+        let sessionClosed = DispatchSemaphore(value: 0)
+        var driver: HostManagedPTYTerminalSessionDriver? = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "natural-exit-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "natural-exit-released",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
+                createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
+        driver?.setSessionClosedHandler { sessionClosed.signal() }
+
+        try driver?.startIfNeeded()
+        // The session closes as soon as the slave is released, which is also the point the pid file is
+        // guaranteed to be there: the leader writes it before closing its descriptors.
+        XCTAssertEqual(sessionClosed.wait(timeout: .now() + 30), .success, "the session must report closed once the leader releases the PTY slave")
+        let recordedPID = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let childPID = try XCTUnwrap(Int32(recordedPID))
+        // A failing run must not leave the leader behind: it sleeps far longer than the test does, so kill
+        // and collect it here rather than leaking a live process (or a zombie) out of the test.
+        defer {
+            if Self.processLifecycle(childPID) != .reaped {
+                kill(childPID, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(childPID, &status, 0) == -1, errno == EINTR {}
+            }
+        }
+
+        // Release the driver the way a session core does the moment a session reports closed. The leader's
+        // teardown cannot depend on a caller still holding the driver.
+        driver = nil
+
+        try await waitUntilChildIsReaped(childPID)
+    }
+
+    /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
+    /// generously; the reap that follows it is bounded tightly because a stage only reports success once
+    /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
+    /// masquerading as a live process until a liveness poll times out.
+    private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) async throws {
+        try await waitForProcess(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
+            Self.processLifecycle(childPID) != .running
+        }
+        try await waitForProcess(
+            timeout: 5, file: file, line: line,
+            diagnostics: { "child pid \(childPID) is \(Self.processLifecycle(childPID).rawValue): terminate() left it unreaped" }
+        ) { Self.processLifecycle(childPID) == .reaped }
+    }
+
+    /// Polls a kernel-level condition without going anywhere near the cooperative executor's shared state.
+    ///
+    /// `waitUntil` suspends on `Task.sleep` between ticks too, but it also evaluates its condition with a
+    /// synchronous hop onto the shared terminal engine actor. A process's state read through `sysctl` needs
+    /// no such hop, and taking one anyway couples the observation to a resource the thing being observed
+    /// does not use: a sibling test occupying the engine actor would block every tick here for no reason.
+    /// `Task.sleep` itself only ever suspends the calling task, so unlike `Thread.sleep` it never pins a
+    /// cooperative-executor worker while it waits — that pinning is exactly how a saturated pool starved
+    /// this same wait and blew a 30s timeout under load (#236) even though the reaper (a `Task.detached` in
+    /// `HostManagedPTYTerminalSessionDriver.escalateUntilLeaderIsCollected`) had already finished its work.
+    private func waitForProcess(
+        timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line, diagnostics: (() -> String)? = nil, _ condition: () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .seconds(0.02))
+        }
+        if condition() { return }
+
+        var message = "Timed out waiting for condition."
+        if let diagnostics { message += " \(diagnostics())" }
+        XCTFail(message, file: file, line: line)
+        throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
     }
 
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
@@ -353,6 +591,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DEVICE_API_PORT"))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DB_PATH"))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("PATH"))
+    }
+
+    /// The child of `forkpty` cannot safely allocate, so its environment is assembled in the parent.
+    /// What the shell ends up with must still be exactly what the old post-fork `unsetenv`/`setenv`
+    /// pass produced: daemon-only keys gone, terminal overrides present exactly once, everything else
+    /// carried through untouched.
+    func testHostManagedPTYBuildsChildEnvironmentBeforeForking() {
+        let inheritedTerm = ProcessInfo.processInfo.environment["TERM"]
+        setenv("NOTIFY_SOCKET", "/run/systemd/notify", 1)
+        setenv("SPACES_CHILD_ENVIRONMENT_PROBE", "carried", 1)
+        setenv("TERM", "dumb", 1)
+        defer {
+            unsetenv("NOTIFY_SOCKET")
+            unsetenv("SPACES_CHILD_ENVIRONMENT_PROBE")
+            if let inheritedTerm { setenv("TERM", inheritedTerm, 1) } else { unsetenv("TERM") }
+        }
+
+        let entries = HostManagedPTYTerminalSessionDriver.childEnvironmentForExec(overrides: [("TERM", "xterm-ghostty"), ("COLORTERM", "truecolor")])
+
+        XCTAssertFalse(entries.contains { $0.hasPrefix("NOTIFY_SOCKET=") })
+        XCTAssertTrue(entries.contains("SPACES_CHILD_ENVIRONMENT_PROBE=carried"))
+        XCTAssertEqual(entries.filter { $0.hasPrefix("TERM=") }, ["TERM=xterm-ghostty"])
+        XCTAssertEqual(entries.filter { $0.hasPrefix("COLORTERM=") }, ["COLORTERM=truecolor"])
     }
 
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
@@ -913,6 +1174,49 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertEqual(host.effectiveTitle, "live-title")
             XCTAssertEqual(host.effectiveWorkingDirectory, "/tmp/updated")
 
+            // A metadata action refreshes runtime state on the spot rather than leaving it to the periodic
+            // timer, so the row every overview and alert reads carries the new title in the same turn the
+            // program reported it. Read through the state payload, which serves the in-memory
+            // authoritative copy that refresh advances.
+            let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
+            XCTAssertEqual(payload?.runtimeState?.title, "live-title")
+            XCTAssertEqual(payload?.runtimeState?.workingDirectory, "/tmp/updated")
+        }
+    }
+
+    /// The durable runtime-state row records what the program reported and nothing else. A shell that has
+    /// set no title stores none, so a reader asking what the session is doing
+    /// (`TerminalSessionCatalogEntry.liveTitle`, the sidebar's secondary text) gets nothing instead of the
+    /// session's own name echoed back beside it. `effectiveTitle` — what a pane displays — still falls back
+    /// to the launch title, which is why the two must not share one stored value.
+    func testPersistedRuntimeStateCarriesOnlyTheReportedTitle() async throws {
+        try useIsolatedSpacesProfile()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        try await TerminalEngineActor.run {
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "runtime-title-session", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.debugSetLastKnownChildPID(4242)
+
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "nothing has been reported yet")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
+
+            host.applyActionEvent(.setTitle("vim main.swift"))
+            host.debugPersistRuntimeState()
+            XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "vim main.swift")
+
+            host.applyActionEvent(.setTitle("   "))
+            host.debugPersistRuntimeState()
+            XCTAssertNil(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "a cleared title reports nothing again")
+            XCTAssertEqual(host.effectiveTitle, "shell-1")
         }
     }
 
@@ -1184,7 +1488,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
         }
-        try? await Task.sleep(for: .milliseconds(100))
+        // Order the absence assertion behind the resync rather than timing it out. A delayed input/output
+        // resync is a `DispatchWorkItem` the scheduler puts on the engine's serial queue with a short fixed
+        // deadline, taken while the output above was drained — so it is already scheduled by the time that
+        // payload arrives. This marker goes on the same serial queue afterwards with a strictly later
+        // deadline, so a scheduled resync runs first, and its broadcast reaches the subscriber first as well
+        // (every broadcast is serialized through one stream queue onto one socket). Seeing the marker
+        // therefore means an `input_output` payload would already be here if one were ever coming.
+        let settleMarker = "settle_marker"
+        TerminalEngineActor.shared.queue.asyncAfter(deadline: .now() + .milliseconds(50)) {
+            TerminalEngineActor.assumeIsolated { hostBox.value.debugBroadcastCurrentStateForTesting(reason: settleMarker) }
+        }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == settleMarker } }
         XCTAssertFalse(receivedPayloads.snapshot.contains { $0.reason == "input_output" })
     }
 
@@ -1339,8 +1654,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
         }
 
+        // No settle window is needed for the negative below. The flush this test is about happens INSIDE the
+        // state export, before the stateChange payload is built, so a nested output broadcast would be handed
+        // to the stream server ahead of it — and both travel the same serial stream queue and socket in
+        // order. Once the stateChange payload has arrived, a nested output payload would already have.
         try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
-        try? await Task.sleep(for: .milliseconds(50))
 
         XCTAssertFalse(
             receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
@@ -1378,6 +1696,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-4", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
                 command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             let process = Process()
@@ -1410,6 +1729,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-foreground-agent-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             let foregroundPID: Int32 = 42
@@ -1444,6 +1764,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-foreground-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             host.debugSetLastKnownChildPID(childPID)
@@ -1483,6 +1804,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-dead-child-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
                 shell: "/bin/zsh", command: "printf done", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             let process = Process()
@@ -1558,6 +1880,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-5", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
                 command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.terminate()
@@ -1584,6 +1907,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 sessionID: "session-deferred-refresh-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
                 kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.debugMarkStartedForTesting()
@@ -1672,6 +1996,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let launchConfiguration = TerminalSessionLaunchConfiguration(
                 sessionID: "session-close-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
                 shell: "/bin/zsh", command: "printf done", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             host.debugPersistRuntimeState()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
@@ -2133,12 +2458,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let marker = "OpenAI Codex synchronized marker"
         let output = "\u{1B}[?2026h\u{1B}[3;1H\u{1B}[J\u{1B}[4;1H\(marker)\u{1B}[?2026l"
         TerminalEngineActor.runSynchronously { sessionDriver.sendRawBytes(Data(output.utf8)) }
-        try await waitUntil { transcript.string().contains(marker) }
+        // This round trip takes tens of milliseconds against a 30s deadline, so a timeout here is a stall
+        // rather than slowness, and the two waits stall for different reasons: the first means the echo never
+        // came back through the PTY (the session's IO is pumped by `ghostty_app_tick` hops onto the shared
+        // engine actor, so a sibling test occupying it starves this one), the second means it came back but
+        // the terminal never exported it. Say which, and with what state, so a recurrence is evidence.
+        try await waitUntil(diagnostics: { self.synchronizedOutputDiagnostics(sessionDriver: sessionDriver, transcript: transcript) }) {
+            transcript.string().contains(marker)
+        }
         TerminalEngineActor.runSynchronously { sessionDriver.requestSurfaceRefresh() }
-        try await waitUntil {
+        try await waitUntil(diagnostics: { self.synchronizedOutputDiagnostics(sessionDriver: sessionDriver, transcript: transcript) }) {
             guard let snapshot = sessionDriver.snapshot() else { return false }
             return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
         }
+    }
+
+    /// What the session actually holds when a synchronized-output wait times out: the bytes that came back
+    /// through the PTY, what the terminal exported, and whether the child is still alive.
+    private func synchronizedOutputDiagnostics(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, transcript: TranscriptBuffer) -> String {
+        let (snapshotText, childPID) = TerminalEngineActor.runSynchronously { (sessionDriver.snapshotText(), sessionDriver.childPID()) }
+        let alive = childPID.map { Self.processIsAlive($0) }
+        return "transcript=\(String(transcript.string().suffix(400)).debugDescription) "
+            + "snapshot=\(String((snapshotText ?? "<nil>").suffix(400)).debugDescription) "
+            + "childPID=\(childPID.map(String.init) ?? "nil") alive=\(alive.map(String.init) ?? "nil")"
     }
 
     func testHeadlessDriverExportsCodexStyleHostManagedFrame() async throws {
@@ -2570,6 +2912,43 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A click names the cell it landed on, so an incomplete or absent pointer is a malformed request
+    /// rather than a click at wherever the pointer happened to be.
+    func testControlMouseButtonRequiresACompletePointerPosition() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-mouse-button-pointer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let owner = TerminalClient(
+                id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-26T00:00:00Z")
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true, mousePointerX: 0.5)),
+                TerminalControlResponse(
+                    ok: false, message: "Terminal mouse button pointer coordinates must be provided together.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(.init(command: "mouseButton", clientID: owner.id, mouseButton: 1, mousePressed: true)),
+                TerminalControlResponse(ok: false, message: "Missing mouse pointer position.", errorCode: .invalidArgument))
+
+            XCTAssertEqual(
+                host.handleControlRequest(
+                    .init(command: "mouseButton", clientID: owner.id, mouseButton: 0, mousePressed: true, mousePointerX: 0.5, mousePointerY: 0.5)),
+                TerminalControlResponse(ok: false, message: "Unsupported mouse button.", errorCode: .invalidArgument))
+        }
+    }
+
     func testControlKeyCommandKClearsScreenThroughHostAction() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
@@ -2677,6 +3056,40 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertFalse(stale.ok)
             XCTAssertEqual(stale.message, "Ignoring stale resize serial 1; latest accepted serial is 2.")
 
+        }
+    }
+
+    /// A client that reconnects to a session it already owns keeps its client id — the app reattaches as
+    /// the same owner after a relaunch — while the host behind it is new and counts resize serials from
+    /// zero again. That attach neither moves the attachment nor advances the owner epoch, so nothing else
+    /// retires the previous attachment's serials: without the attach itself starting a fresh serial
+    /// incarnation, every resize the reconnected client sends is rejected as stale and its pane stays
+    /// pinned to the grid it had before.
+    func testControlAcceptsResizeSerialsRestartedByAReattachingOwner() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-reattach-resize", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-07-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            host.core.debugSetLastKnownSurfaceSize(columns: 80, rows: 24)
+            let owner = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-29T00:00:00Z")
+
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            XCTAssertTrue(host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 5)).ok)
+
+            // The same client attaches again in the same mode: no ownership change, no epoch advance.
+            XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .owner)).ok)
+            let restarted = host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, resizeSerial: 1))
+
+            XCTAssertTrue(restarted.ok, "a reconnected owner's restarted resize serial was rejected as stale: \(restarted.message)")
         }
     }
 
@@ -2937,6 +3350,53 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
     }
 
+    /// Regression for the fast-path gate at the top of `expireStaleRemoteClientsIfNeeded`: once a tick decides
+    /// to expire a client, `markClientsExpiredInCache` optimistically detaches it in the in-memory attachment
+    /// cache immediately, before the durable detach (parked here on the persistence queue) commits. A second
+    /// tick that runs in that window sees `hasLeaseGovernedAttachedClient() == false` — the cache already shows
+    /// nothing left to expire — so a gate that only checks that predicate takes the fast path and clears
+    /// `expiredRemoteClientIDs`. That erases the pending marker `isClientDurablyDisconnected` relies on to
+    /// veto a rescuing heartbeat, so a heartbeat arriving after the wipe is rejected as durably-disconnected
+    /// instead of vetoing the still-pending detach. Deterministic: the persistence queue is held with
+    /// `debugHoldPersistenceQueue()` rather than relying on real write contention or a sleep, so the parked
+    /// window is exact, not timing-dependent.
+    func testSecondTickWhilePendingExpiryIsUncommittedDoesNotDropHeartbeatVeto() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-second-tick-pending", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // A stale (2000-era lease) remote viewer so the first tick decides to expire it.
+            let staleClient = TerminalClient(
+                id: "remote-second-tick", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            // Park the persistence queue so the first tick's atomic detach is enqueued but cannot commit.
+            let gate = host.debugHoldPersistenceQueue()
+            let firstTick = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(firstTick, [staleClient.id], "the first tick must decide to expire the stale viewer")
+            // Second tick while the detach is still parked: the cache already shows the client detached, so
+            // this must not re-decide the expiry NOR clear the pending marker.
+            let secondTick = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(secondTick, [], "the second tick must not re-decide an already-pending expiry")
+            let heartbeat = host.handleControlRequest(.init(command: "heartbeat", clientID: staleClient.id))
+            XCTAssertTrue(
+                heartbeat.ok,
+                "a heartbeat for a client whose expiry is still pending (parked, not yet committed) must be accepted, vetoing the pending "
+                    + "detach — not rejected as durably disconnected")
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+        }
+    }
+
     /// Enforcement/advertisement coherence: a stale-client expiry promotes the transfer target to owner in the
     /// in-memory attachment cache and broadcasts that immediately, while the atomic `expireClients` write is
     /// only enqueued (here held off by a competing write lock, standing in for the up-to-5s busy-timeout window).
@@ -3181,6 +3641,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
     /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;
     /// restoring it lets the bounded retry land the exited state.
+    ///
+    /// This test is bounded by a real interval rather than by an interleaving it constructs, which no wait on
+    /// a signal can fix here: the retry loop's only synchronization point is the `sleep` closure the
+    /// persistence queue is built with, and a session host builds its own queue, so nothing at this level can
+    /// park a retry attempt or observe that one failed. `TerminalCorePersistenceQueueTests` drives the queue
+    /// directly and has that seam; its `testFailingRuntimeStateWriteFencesTheDetachQueuedBehindIt` asserts
+    /// this same "the retried exited write commits once the database recovers" contract against a retry
+    /// parked in a `RetryGate`, so the mechanism is covered deterministically there. What is left here is the
+    /// end-to-end path: that `terminate()`'s exited write is the one that retries.
+    ///
+    /// So the remaining timing dependence is deliberately kept to the narrowest shape available. The restore
+    /// is the next straight-line statement on this thread after `terminate()` returns, with no suspension
+    /// between them, and `breakDatabase`/`restoreDatabase` change only a file mode — a single syscall with no
+    /// window in which a concurrent write attempt can be observed half-restored. The write's five attempts
+    /// span roughly 0.8s, so only a thread preemption longer than that between the two statements could fail
+    /// this, and a restore that instead wins the race against the FIRST attempt costs the test its retry
+    /// coverage rather than failing it.
     func testFailedExitedRuntimeStateWriteRetriesUntilItLands() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -3223,59 +3700,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
-    /// Fix 2 (FIFO fence): the exited runtime-state write retries IN PLACE and so keeps its slot on the serial
-    /// persistence queue. The detach-all/payload/durable-end items `terminate()` enqueues after it therefore
-    /// run only once it commits. The detach has no retry of its own, so it lands durably only if it waited
-    /// behind the retrying exited write until the database recovered — a faithful proxy for the fence. Before
-    /// the fix the failed exited write surrendered its FIFO slot via `asyncAfter`, so the detach ran
-    /// immediately against the broken database and was lost while the (deferred) exited retry still landed.
-    func testExitedRuntimeStateWriteHoldsFIFOFenceForLaterDetach() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try paths.ensureDirectories()
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-fence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        let client = TerminalClient(
-            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
-        try TerminalSessionPersistence.attachClient(
-            sessionID: launchConfiguration.sessionID, client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
-        let runningState = TerminalSessionRuntimeState(
-            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
-            updatedAt: TerminalSessionTimestamp.string(from: Date()), title: "shell", workingDirectory: "/tmp/original")
-        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
-        XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
-
-        let databasePath = try SpacesProfile.current().databasePath
-        try Self.breakDatabase(at: databasePath)
-
-        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            host.terminate()
-            return Box(host)
-        }
-        // The exited write fails against the broken database and is now retrying in place, holding the queue.
-        // Sleep long enough that the pre-fix design's immediate (broken) detach would already have run and been
-        // lost, then restore the database while the retry is still holding the fence.
-        try await Task.sleep(nanoseconds: 100_000_000)
-        try Self.restoreDatabase(at: databasePath)
-
-        await TerminalEngineActor.run { box.value.debugDrainPersistenceQueue() }
-        XCTAssertEqual(
-            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
-            "the retried exited write must commit before the drain completes")
-        XCTAssertTrue(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
-            "the detach enqueued after the exited write must run only after that write commits, so it lands post-recovery")
-        _ = box
-    }
-
     /// Fix 1: `drainPersistenceForShutdown` — the awaitable drain SpacesdMain runs after terminating a core in
     /// `shutdown()` and the nil-quiesce handoff branch — must not return until every write `terminate()`
-    /// enqueued has committed, including an exited runtime-state write a competing transaction delayed. Without
+    /// enqueued has committed, including an exited runtime-state write the queue has not reached yet. Without
     /// it, `exit(0)`/`execv` destroys the still-queued exited write and strands the durable row at `.running`
     /// (and, across `execv`, the unchanged pid makes `recoverStaleSessions` skip that `.running` row forever).
     func testDrainPersistenceForShutdownAwaitsDelayedExitedWrite() async throws {
@@ -3294,24 +3721,58 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
 
-        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
-        lockHolder.startHolding(maxHoldSeconds: 10)
-        lockHolder.waitUntilHolding()
-
         let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            host.terminate()
-            return Box(host)
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
         }
-        // Hold the competing transaction long enough for the enqueued exited write to be blocking on it, then
-        // release so the write can commit. The drain must not return until it does.
-        try await Task.sleep(nanoseconds: 200_000_000)
-        lockHolder.release()
-
-        await box.value.core.drainPersistenceForShutdown()
+        // Park the persistence queue before terminating and keep it parked across the drain call. The delay
+        // this test needs is then a fact rather than a guess: whatever else is happening on the machine, the
+        // exited runtime-state write terminate() enqueues has demonstrably NOT committed when the drain is
+        // entered. (Delaying it with a competing SQLite transaction instead means guessing how long to hold
+        // that transaction: hold too briefly and the write commits before the drain is even called; hold past
+        // SQLite's 5s busy timeout — which a saturated machine can turn a 200ms sleep into — and the write
+        // fails, exhausts its retries and is abandoned, failing the test for no product reason.)
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        TerminalEngineActor.runSynchronously { box.value.terminate() }
         XCTAssertEqual(
-            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
-            "drainPersistenceForShutdown must block until the competing-delayed exited write commits")
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running,
+            "the exited write must still be queued behind the parked persistence queue when the drain is entered")
+
+        // Release the park only once `drainPersistenceForShutdown()` has already reached ITS OWN suspension
+        // point — inside `drainAsync()`, after it has enqueued its completion continuation onto the
+        // persistence queue — rather than once the surrounding `Task` has merely started running. A signal
+        // set by the caller before invoking the drain (the previous version of this test) fires as soon as
+        // the `Task` body starts, which races the actor hop into `drainPersistenceForShutdown()`: the
+        // detached thread releasing the park is not ordered against that hop at all, so it could let the
+        // exited write commit before the drain call has even been entered — and a no-op/broken drain would
+        // still observe `.exited` on read, false-passing exactly the regression this test exists to catch.
+        //
+        // The fix exploits a fact stated in `TerminalEngineActor.swift`'s own doc comment: the actor's
+        // executor and `TerminalEngineActor.runSynchronously` share one literal `DispatchSerialQueue`, which
+        // gives a hard FIFO guarantee (not a heuristic) — jobs submitted to it run in submission order, one
+        // at a time, to completion or to a genuine suspension. Creating the drain task from INSIDE a
+        // `runSynchronously` closure submits its job onto that queue while this thread is already running on
+        // it, so the drain task cannot even begin until this closure returns. A second, empty
+        // `runSynchronously` call made immediately after cannot itself return until every job ahead of it on
+        // that queue — including the drain task — has run to completion or suspended. The drain task's only
+        // suspension point is the one described above, so by the time the second call returns the persistence
+        // queue is guaranteed to already hold the drain's completion barrier — or, if the implementation never
+        // touches the queue at all, the drain has already finished, which fails the assertion below instead
+        // of hanging.
+        let exitedAtDrainReturn = MutableBox<Bool>(false)
+        let drainTaskBox = MutableBox<Task<Void, Never>?>(nil)
+        TerminalEngineActor.runSynchronously {
+            drainTaskBox.value = Task { @TerminalEngineActor in
+                await box.value.core.drainPersistenceForShutdown()
+                exitedAtDrainReturn.value = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
+            }
+        }
+        TerminalEngineActor.runSynchronously {}
+        gate.signal()
+        await drainTaskBox.value?.value
+
+        XCTAssertTrue(
+            exitedAtDrainReturn.value, "drainPersistenceForShutdown must not return until the exited write enqueued ahead of it has committed")
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited)
         _ = box
     }
 
@@ -3615,24 +4076,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(after.contains { $0.clientID == remoteOwner.id }, "R must remain attached")
     }
 
-    /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
-    /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
+    /// Makes every open of the SQLite database fail, and `restoreDatabase` makes them succeed again. The
+    /// database file itself is never moved or replaced, so the committed data comes back exactly as it was.
+    ///
+    /// Breaking it by moving the file aside and putting a directory in its place — the obvious alternative —
+    /// leaves the path with nothing at it for the width of the restore, which is a real hazard rather than a
+    /// theoretical one: a retrying writer that opens the path in that gap CREATES an empty database there,
+    /// and the restore's move onto an existing path then fails, so the test reports a mangled restore or an
+    /// `unknownSession` read instead of what it was actually asserting. Permissions have no such gap: the
+    /// file exists throughout, and an open either runs before the mode changes or after it.
+    ///
+    /// The process's own connections are released on both sides, and that is what makes a mode change bite
+    /// at all. A connection's access is decided when it is opened, so the long-lived read and write
+    /// connections would carry their existing permission straight through the injection and the fault would
+    /// never reach the code under test. Releasing is also what a database that genuinely became unusable
+    /// would force.
     private static func breakDatabase(at databasePath: String) throws {
-        let fileManager = FileManager.default
-        for suffix in ["", "-wal", "-shm"] {
-            let path = databasePath + suffix
-            if fileManager.fileExists(atPath: path) { try fileManager.moveItem(atPath: path, toPath: path + ".b4bak") }
-        }
-        try fileManager.createDirectory(atPath: databasePath, withIntermediateDirectories: false)
+        TerminalSessionPersistence.closeDatabaseConnection()
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: databasePath)
     }
 
     private static func restoreDatabase(at databasePath: String) throws {
-        let fileManager = FileManager.default
-        try? fileManager.removeItem(atPath: databasePath)
-        for suffix in ["", "-wal", "-shm"] {
-            let backup = databasePath + suffix + ".b4bak"
-            if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
-        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: databasePath)
+        TerminalSessionPersistence.closeDatabaseConnection()
     }
 
     private static func renderBaseline(from payload: GhosttyRemoteSessionStatePayload, baseline: GhosttyRenderUpdateBaseline?) throws

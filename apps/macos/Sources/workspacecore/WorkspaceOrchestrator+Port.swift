@@ -18,7 +18,7 @@ extension WorkspaceOrchestrator {
         return config
     }
 
-    /// Builds the full Caddy route table: one route per service across every non-archived workspace,
+    /// Builds the full Caddy route table: one route per service across every workspace,
     /// mapping `<service>.<workspace-slug>.localhost` to the service's assigned local port. All
     /// non-archived workspaces are routed (not just running ones) so service URLs stay stable; Caddy
     /// returns 502 until the upstream binds. Duplicate hosts (an astronomically unlikely slug+service
@@ -27,7 +27,7 @@ extension WorkspaceOrchestrator {
         var routes: [CaddyRoute] = []
         var seenHosts = Set<String>()
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 let assigned = try store.workspacePortsAssigned(workspaceID: workspace.id)
                 guard !assigned.isEmpty else { continue }
                 let slug = SpacesProfile.workspaceHostSlug(

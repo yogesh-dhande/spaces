@@ -45,21 +45,113 @@ terminal_harness_spacese2e() {
   printf '%s\n' "$(cd "$script_dir/.." && pwd)/.build/debug/spacese2e"
 }
 
-terminal_service_socket_path_for_runtime_dir() {
+terminal_harness_profile_socket_path() {
   local runtime_dir="$1"
+  local key="$2"
   local e2e_cli
   e2e_cli="$(terminal_harness_spacese2e)"
   SPACES_RUNTIME_DIR="$runtime_dir" "$e2e_cli" profile-socket-paths | python3 -c '
 import json, sys
 payload = json.load(sys.stdin)
-print(payload["serviceSocketPath"])
-'
+print(payload[sys.argv[1]])
+' "$key"
 }
 
-stop_terminal_service_for_runtime_dir() {
+terminal_service_socket_path_for_runtime_dir() {
+  terminal_harness_profile_socket_path "$1" serviceSocketPath
+}
+
+# Process IDs holding the given unix domain socket open.
+#
+# `lsof -t <path>` resolves regular files but not unix domain sockets on macOS, so it silently returns
+# nothing for these; the socket appears only in the `-U` listing, whose NAME column is the path exactly
+# as the process bound it — spacesd binds the plain absolute path, while Caddy's admin address yields a
+# doubled leading slash. Match either exact form rather than a substring so a longer sibling socket
+# path in the same directory can never be mistaken for this one.
+terminal_harness_pids_owning_unix_socket() {
+  local socket_path="$1"
+  [[ -n "$socket_path" ]] || return 0
+  lsof -nP -U 2>/dev/null | awk -v name="$socket_path" -v doubled="/$socket_path" \
+    '$NF == name || $NF == doubled { print $2 }' | sort -u
+}
+
+# Stops the Caddy router belonging to the profile at `runtime_dir`.
+#
+# The daemon spawns Caddy as a detached `Process().run()` child and reaps it only in its own shutdown
+# teardown, so Caddy outlives any daemon end that skips that teardown — a SIGKILL, a crash, or a
+# wedged daemon that never answers its shutdown command. Every harness step builds its own throwaway
+# profile, so nothing ever adopts the orphan Caddy the way a restarted daemon on a persistent profile
+# would, and one accumulates per step.
+#
+# After a clean daemon shutdown the admin socket is already unlinked and this is a no-op, which is what
+# makes it a backstop rather than a second teardown path. Scoping is by that admin socket, whose name
+# embeds a hash of this runtime directory: another worktree's profile and the installed profile own
+# different sockets and are never reached.
+stop_caddy_router_for_runtime_dir() {
   local runtime_dir="$1"
   local timeout="${2:-5}"
   [[ -n "$runtime_dir" ]] || return 0
+
+  local admin_socket
+  admin_socket="$(terminal_harness_profile_socket_path "$runtime_dir" routerAdminSocketPath)"
+  [[ -S "$admin_socket" ]] || return 0
+
+  local pids pid command
+  pids="$(terminal_harness_pids_owning_unix_socket "$admin_socket")"
+  for pid in $pids; do
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [[ "$command" == *"caddy"* ]] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+
+  local waited=0
+  local wait_steps=$((timeout * 4))
+  while (( waited < wait_steps )); do
+    local any_live=0
+    for pid in $pids; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        any_live=1
+        break
+      fi
+    done
+    (( any_live == 0 )) && break
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+
+  for pid in $pids; do
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [[ "$command" == *"caddy"* ]] || continue
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+  rm -f "$admin_socket" >/dev/null 2>&1 || true
+}
+
+# Stops everything the profile at `runtime_dir` is running: its terminal service daemon and the Caddy
+# router that daemon owns. Harness cleanup must route daemon teardown through here rather than
+# `kill`ing the daemon's pid: the `.shutdown` socket command is the supported stop — it reports
+# whether the daemon accepted it and waits for the socket to disappear — and the Caddy backstop
+# covers a daemon that died without running its teardown.
+stop_terminal_service_for_runtime_dir() {
+  local runtime_dir="$1"
+  local timeout="${2:-5}"
+  # Optional: the launched daemon's own pid, for the one gap the socket-scoped stop cannot cover — a
+  # daemon that wedged or died before binding its service socket leaves nothing to address the
+  # graceful shutdown to, so a caller that recorded the pid at launch passes it here and a still-live
+  # process is KILLed (a wedge that never bound its socket is not trusted to honor TERM either, and a
+  # pre-bind daemon has no children to reap).
+  local fallback_pid="${3:-}"
+  [[ -n "$runtime_dir" ]] || return 0
+  stop_terminal_service_daemon_for_runtime_dir "$runtime_dir" "$timeout"
+  stop_caddy_router_for_runtime_dir "$runtime_dir" "$timeout"
+  if [[ -n "$fallback_pid" ]] && kill -0 "$fallback_pid" >/dev/null 2>&1; then
+    kill -9 "$fallback_pid" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_terminal_service_daemon_for_runtime_dir() {
+  local runtime_dir="$1"
+  local timeout="${2:-5}"
 
   local service_socket
   service_socket="$(terminal_service_socket_path_for_runtime_dir "$runtime_dir")"
@@ -88,7 +180,7 @@ PY
   done
 
   local pids
-  pids="$(lsof -nP -t "$service_socket" 2>/dev/null | sort -u || true)"
+  pids="$(terminal_harness_pids_owning_unix_socket "$service_socket")"
   if [[ -z "$pids" ]]; then
     rm -f "$service_socket" >/dev/null 2>&1 || true
     return 0

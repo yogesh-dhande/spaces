@@ -120,7 +120,7 @@ import workspacecore
         var rows: [WorkspaceVisibilityRow] = []
         for project in host.projects {
             let deviceName = host.deviceSection(id: project.deviceID)?.deviceName ?? project.deviceID
-            for workspace in host.workspacesByProject[project.id] ?? [] where !workspace.isArchived {
+            for workspace in host.workspacesByProject[project.id] ?? [] {
                 rows.append(
                     WorkspaceVisibilityRow(
                         workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.displayName, projectName: project.name,

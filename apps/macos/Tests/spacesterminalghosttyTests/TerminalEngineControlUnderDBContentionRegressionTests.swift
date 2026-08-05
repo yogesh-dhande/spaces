@@ -23,6 +23,9 @@ import XCTest
 /// A plain (non-`@MainActor`, non-engine) `XCTestCase` with an `async` method so it runs on a
 /// cooperative-pool thread — the only context from which the engine's `runSynchronously` bridge is legal.
 final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     /// Carries the engine-isolated core to the engine bridge from a background thread; the core is only ever
     /// *used* on the engine actor.
     private final class CoreBox: @unchecked Sendable {

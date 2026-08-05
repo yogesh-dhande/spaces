@@ -16,9 +16,10 @@ import Foundation
     ///
     /// So the app creates one mirror lazily and hands it between terminal views instead. The view
     /// that is rendering holds it; a view that mounts while another holds it takes it over, and the
-    /// previous holder falls back to its plain black background and re-acquires when it is on
-    /// screen again. Only a view that is in a window and has something to render ever asks, so a
-    /// takeover always moves the mirror towards the terminal the user is looking at.
+    /// previous holder falls back to its plain black background until it is on screen as the
+    /// terminal again or the mirror comes free. Only a view that is in a window and has something to
+    /// render ever asks, so a takeover always moves the mirror towards the terminal the user is
+    /// looking at.
     ///
     /// Handing the mirror over re-parents ``surfaceHostView`` into the new holder. The surface host
     /// pointer Ghostty renders against never changes, so the renderer keeps its existing
@@ -36,9 +37,17 @@ import Foundation
         /// without reallocating any of it.
         let surfaceHostView = UIView(frame: .zero)
 
+        private struct WeakHostView { weak var view: GhosttyRemoteTerminalHostView? }
+
         private var mirror: ghostty_mirror_t?
         private var appliedFontSize: TerminalFontSize?
         private weak var holder: GhosttyRemoteTerminalHostView?
+        /// Views that lost the mirror to a later holder and are still latched out of asking for it,
+        /// oldest first. Held weakly: a surrendered view that goes away must not be kept alive, and
+        /// must not be resurrected as a candidate once it is gone. The stack mirrors how terminals
+        /// cover each other, so the mirror comes back to the one directly underneath the view that
+        /// gave it up.
+        private var surrenderedHolders: [WeakHostView] = []
 
         private init() {
             surfaceHostView.translatesAutoresizingMaskIntoConstraints = false
@@ -60,9 +69,13 @@ import Foundation
         /// at a different size.
         func acquire(for view: GhosttyRemoteTerminalHostView, fontSize: TerminalFontSize, scaleFactor: Double) throws -> ghostty_mirror_t {
             if holder !== view {
-                holder?.surrenderSharedMirror()
+                if let holder {
+                    holder.surrenderSharedMirror()
+                    surrenderedHolders.append(WeakHostView(view: holder))
+                }
                 park()
             }
+            surrenderedHolders.removeAll { $0.view == nil || $0.view === view }
             attachSurfaceHost(to: view)
             holder = view
 
@@ -78,11 +91,43 @@ import Foundation
             return mirror
         }
 
-        /// Parks the mirror when `view` stops rendering. A view that has already lost the mirror to
-        /// a newer holder is a no-op here, so a late teardown cannot disturb the current holder.
+        /// Parks the mirror when `view` stops rendering, and hands it on to whoever is still waiting
+        /// for it. A view that has already lost the mirror to a newer holder parks nothing, so a
+        /// late teardown cannot disturb the current holder; it still drops out of the waiting list
+        /// and runs the hand-on, which does nothing while anyone holds the mirror.
         func release(from view: GhosttyRemoteTerminalHostView) {
-            guard holder === view else { return }
-            park()
+            if holder === view { park() }
+            surrenderedHolders.removeAll { $0.view == nil || $0.view === view }
+            offerParkedMirrorToLatestSurrenderedHolder()
+        }
+
+        /// Hands the parked mirror back to the most recently covered terminal view that will take it.
+        ///
+        /// This is the second release edge for ``GhosttyRemoteTerminalHostView/surrenderSharedMirror()``'s
+        /// latch, and the `holder == nil` guard is what keeps it from undoing the latch's purpose: a
+        /// takeover leaves the mirror held by the incoming view within one synchronous ``acquire(for:fontSize:scaleFactor:)``
+        /// call, so the only moment a surrendered view is offered the mirror is after the view that
+        /// took it over has released it for good. An outgoing view being laid out during a
+        /// navigation transition never reaches this path and so can never trade the mirror back.
+        ///
+        /// The candidate takes the mirror inside ``GhosttyRemoteTerminalHostView/reclaimSurrenderedSharedMirror()``,
+        /// before this returns, so the whole hand-back is one uninterrupted run on the main actor.
+        /// That is what makes the entitlement mean something: a terminal that mounted in the same
+        /// update has an acquisition of its own pending, and if the hand-back were merely decided
+        /// here and carried out a turn later it would take the mirror off that terminal — the one the
+        /// user is actually looking at. Either that acquisition runs before this, in which case there
+        /// is a holder and no offer is made at all, or it runs after and takes over as the newer view.
+        ///
+        /// A candidate that is not on screen with something to render declines, and the offer falls
+        /// through to the view beneath it; if none takes it the mirror stays parked for the next
+        /// terminal that mounts. A candidate that declines is still let out of the latch, because it
+        /// is off the waiting list and would otherwise never be offered the mirror again.
+        private func offerParkedMirrorToLatestSurrenderedHolder() {
+            guard holder == nil else { return }
+            while let candidate = surrenderedHolders.popLast() {
+                guard let view = candidate.view else { continue }
+                if view.reclaimSurrenderedSharedMirror() { return }
+            }
         }
 
         /// Retunes the live mirror to a new font size. The mirror is not rebuilt: Ghostty's

@@ -72,8 +72,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-visible", projectID: "project-1", projectName: "Project", branch: "feature/visible", baseBranch: "main",
-                    dir: "/device/project-visible", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: "Visible notes",
-                    sessionCount: 2,
+                    dir: "/device/project-visible", isRunning: true, isHidden: false, isDefault: false, notes: "Visible notes", sessionCount: 2,
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-visible", name: "web", command: "npm run dev", processID: "running-web",
@@ -92,7 +91,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                     ]),
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-hidden", projectID: "project-1", projectName: "Project", branch: "feature/hidden", baseBranch: "main",
-                    dir: "/device/project-hidden", isRunning: false, isArchived: false, isHidden: true, isDefault: false, sessionCount: 0),
+                    dir: "/device/project-hidden", isRunning: false, isHidden: true, isDefault: false, sessionCount: 0),
             ], sessions: [], daemonStatus: Self.status())
 
         let model = SpacesDeviceOverviewViewModel(overview: overview)
@@ -169,7 +168,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     private func fullWorkspaceSummary(dir: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: dir, isRunning: true,
-            isArchived: false, isHidden: false, isDefault: false, notes: "Workspace notes", sessionCount: 3,
+            isHidden: false, isDefault: false, notes: "Workspace notes", sessionCount: 3,
             assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
             setupState: SpacesDeviceWorkspaceSetupState(
                 status: .failed, errorMessage: "setup failed", startedAt: "2026-06-18T00:00:00Z", finishedAt: "2026-06-18T00:00:05Z"),

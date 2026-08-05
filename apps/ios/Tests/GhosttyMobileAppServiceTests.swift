@@ -1599,6 +1599,29 @@
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
         }
 
+        func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugTapLinkHandlerForTesting = { _ in
+                XCTFail("link probe should be skipped while the mirror captures the mouse")
+                return false
+            }
+            hostView.debugMouseCapturedForTesting = true
+            var sentButtons: [(button: UInt8, pressed: Bool)] = []
+            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .sentClick)
+
+            XCTAssertEqual(sentButtons.map(\.button), [UInt8(GHOSTTY_MOUSE_LEFT.rawValue), UInt8(GHOSTTY_MOUSE_LEFT.rawValue)])
+            XCTAssertEqual(sentButtons.map(\.pressed), [true, false])
+
+            hostView.debugMouseCapturedForTesting = false
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
+            sentButtons.removeAll()
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
+            XCTAssertTrue(sentButtons.isEmpty)
+        }
+
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var openedLinks: [String] = []
@@ -1657,7 +1680,9 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(
-                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
+                scrollableButtons.compactMap(\.accessibilityLabel),
+                ["Paste", "tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
+            XCTAssertEqual(scrollableButtons.first?.accessibilityIdentifier, "terminal.accessory.paste")
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -1671,7 +1696,10 @@
             XCTAssertEqual(phoneFrames.joystickButton.width, 40, accuracy: 0.5)
             XCTAssertEqual(phoneFrames.keyboardButton.width, 40, accuracy: 0.5)
             let phoneWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .phone)
-            for width in phoneWidths.scrollable { XCTAssertEqual(width, 44, accuracy: 0.5) }
+            // The leading Paste button is an icon button, so it takes the icon width the pinned icon
+            // buttons use; the rest of the scrollable row keeps the text-button width.
+            XCTAssertEqual(phoneWidths.scrollable.first ?? 0, 40, accuracy: 0.5)
+            for width in phoneWidths.scrollable.dropFirst() { XCTAssertEqual(width, 44, accuracy: 0.5) }
             for width in phoneWidths.pinned { XCTAssertEqual(width, 40, accuracy: 0.5) }
 
             let padFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .pad)
@@ -1682,7 +1710,8 @@
             XCTAssertEqual(padFrames.joystickButton.width, 48, accuracy: 0.5)
             XCTAssertEqual(padFrames.keyboardButton.width, 48, accuracy: 0.5)
             let padWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .pad)
-            for width in padWidths.scrollable { XCTAssertEqual(width, 58, accuracy: 0.5) }
+            XCTAssertEqual(padWidths.scrollable.first ?? 0, 48, accuracy: 0.5)
+            for width in padWidths.scrollable.dropFirst() { XCTAssertEqual(width, 58, accuracy: 0.5) }
             for width in padWidths.pinned { XCTAssertEqual(width, 48, accuracy: 0.5) }
 
             hostView.setSoftwareKeyboardVisible(false)
@@ -1838,6 +1867,158 @@
             XCTAssertEqual(sentText.count, 1)
             XCTAssertEqual(sentText.first?.0, "line one\nline two")
             XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        func testRemoteTerminalAccessoryPasteButtonSendsClipboardAsPaste() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        /// The accessory Command modifier followed by "v" is the only way to reach cmd+v without a
+        /// hardware keyboard. It has to paste rather than fall through to the text path, which would type
+        /// a literal "v"; an empty clipboard still consumes the keystroke instead of typing one.
+        func testRemoteTerminalAccessoryCommandVPastesClipboard() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [(String, Bool)] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            let commandButton = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Command" })
+
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(sentKeys, [])
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+
+            // The modifier is consumed, so the next "v" is plain typed text again.
+            hostView.insertText("v")
+            XCTAssertEqual(sentText.count, 2)
+            XCTAssertEqual(sentText.last?.0, "v")
+            XCTAssertEqual(sentText.last?.1, false)
+
+            hostView.setClipboardTextForTesting(nil)
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(sentText.count, 2, "an empty clipboard must swallow cmd+v rather than type a literal v")
+            XCTAssertEqual(sentKeys, [])
+        }
+
+        /// An image on the clipboard belongs in the composer, not in the session: every paste route hands
+        /// the paste to the image handler and sends nothing, even when the clipboard also carries text.
+        func testRemoteTerminalAccessoryPasteButtonWithClipboardImageDefersToImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(imageHandlerCallCount, 1)
+            XCTAssertEqual(sentText.count, 0, "a clipboard image must not be pasted into the terminal")
+
+            // The system Paste command shares the same route.
+            hostView.paste(nil)
+            XCTAssertEqual(imageHandlerCallCount, 2)
+            XCTAssertEqual(sentText.count, 0)
+        }
+
+        func testRemoteTerminalAccessoryCommandVWithClipboardImageDefersToImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let commandButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Command" })
+
+            commandButton.sendActions(for: .touchUpInside)
+            hostView.insertText("v")
+
+            XCTAssertEqual(imageHandlerCallCount, 1)
+            XCTAssertEqual(sentText.count, 0, "cmd+v with a clipboard image must consume the keystroke without pasting")
+            XCTAssertEqual(sentKeys, [])
+        }
+
+        /// The cheap type probe can declare an image the handler cannot actually read; the paste then falls
+        /// through to the text path rather than doing nothing.
+        func testRemoteTerminalPasteFallsThroughToTextWhenImageHandlerDeclines() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = { false }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
+            XCTAssertEqual(sentText.first?.1, true)
+        }
+
+        /// A text-only clipboard must never reach the image handler: the probe gates it, so no paste
+        /// prompt for image data is triggered on the common path.
+        func testRemoteTerminalPasteWithoutClipboardImageSkipsImageHandler() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            var imageHandlerCallCount = 0
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.onPasteClipboardImage = {
+                imageHandlerCallCount += 1
+                return true
+            }
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setClipboardTextForTesting("clipboard payload")
+            hostView.setClipboardHasImageForTesting(false)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let pasteButton = try XCTUnwrap(descendants(of: accessoryView, matching: UIButton.self).first { $0.accessibilityLabel == "Paste" })
+            pasteButton.sendActions(for: .touchUpInside)
+
+            XCTAssertEqual(imageHandlerCallCount, 0)
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "clipboard payload")
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {
@@ -2206,14 +2387,93 @@
 
             // The surrendering view keeps its place in the hierarchy without clawing the mirror back,
             // so an outgoing view cannot trade it with the incoming one for the whole transition.
-            firstHostView.setNeedsLayout()
-            firstHostView.layoutIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
-            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            // Both views are laid out repeatedly, which is what a navigation transition does to a
+            // pair of terminals that are briefly on screen together.
+            for _ in 0..<4 {
+                firstHostView.setNeedsLayout()
+                firstHostView.layoutIfNeeded()
+                secondHostView.setNeedsLayout()
+                secondHostView.layoutIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+                XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            }
 
             firstHostView.removeFromSuperview()
             secondHostView.removeFromSuperview()
+        }
+
+        /// A terminal presented over another — a sheet, a non-fullscreen cover, or a split layout —
+        /// leaves the view it covers parented, so window re-entry never happens for it. When the
+        /// newcomer goes away the mirror is parked and unheld, and it has to go back to the view that
+        /// surrendered it instead of leaving that view permanently black.
+        func testMirrorReturnsToTheSurrenderingViewWhenTheNewcomerGoesAwayWhileItStaysInTheWindow() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let coveredHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reclaim-covered")
+            let coveringHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reclaim-covering")
+            defer { coveredHostView.removeFromSuperview() }
+
+            XCTAssertTrue(coveringHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+
+            coveringHostView.removeFromSuperview()
+
+            let deadline = Date().addingTimeInterval(2)
+            while !coveredHostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(coveredHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertTrue(GhosttySharedTerminalMirror.shared.isSurfaceHostAttachedForTesting)
+        }
+
+        /// One update can both dismiss the terminal that covered another and mount a different one —
+        /// closing a sheet while routing to another session does exactly this. The covered view is
+        /// offered the parked mirror at the moment of that release, but the terminal that mounted in
+        /// the same update is the one the user ends up looking at, so the hand-back must never end
+        /// with the mirror taken off it.
+        func testHandbackLeavesTheMirrorWithATerminalThatMountedDuringTheRelease() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let coveredHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handback-covered")
+            let coveringHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handback-covering")
+            XCTAssertTrue(coveringHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+
+            // The incoming terminal is mounted and the covering one is torn down in the same
+            // uninterrupted run, so the incoming view is already asking for the mirror when the
+            // release offers it back to the view underneath.
+            let incomingHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            viewController.view.addSubview(incomingHostView)
+            incomingHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            incomingHostView.update(
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=handback-incoming",
+                fallbackText: "Waiting for terminal state...")
+            coveringHostView.removeFromSuperview()
+            defer {
+                coveredHostView.removeFromSuperview()
+                incomingHostView.removeFromSuperview()
+            }
+
+            let deadline = Date().addingTimeInterval(2)
+            while !incomingHostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            // Settling past the acquisition is the point of the test: a hand-back that was decided
+            // before the incoming view acquired would strip it a turn later.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+            XCTAssertTrue(incomingHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
         }
 
         /// Two sessions in succession share one surface, so the surface must stay hidden from the

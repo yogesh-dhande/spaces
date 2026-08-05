@@ -94,7 +94,7 @@ extension OrchestratorTests {
         try store.upsert(
             workspace: WorkspaceRecord(
                 id: UUID().uuidString, projectID: importedProject.id, dir: importedWorkspaceDir, dirname: "main", branch: "main", baseBranch: "main",
-                isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                isDefault: true, isRunning: false, lastLaunchedAt: nil))
 
         try orchestrator.rollbackFailedImportedProjectCreation(project: importedProject, workspaceDirectory: importedWorkspaceDir)
 
@@ -310,29 +310,27 @@ extension OrchestratorTests {
         XCTAssertEqual(apiAssignment.definitionID, api.id)
     }
 
-    func testImportSpacesYAMLUpdatesActiveAndArchivedWorkspacesWhenWorkspaceSyncIsOn() throws {
-        let repo = try makeTempGitRepo(name: "import-sync-archived")
+    func testImportSpacesYAMLUpdatesEveryWorkspaceWhenWorkspaceSyncIsOn() throws {
+        let repo = try makeTempGitRepo(name: "import-sync-all")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
         let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "active")
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
-        _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
+        let secondWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "second")
         try spacesYAMLFixture(stopScript: "echo synced-stop").write(
             to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
 
         _ = try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: true)
 
         let activeSettings = try orchestrator.workspaceSettings(workspaceID: activeWorkspace.id)
-        let archivedSettings = try orchestrator.workspaceSettings(workspaceID: archivedWorkspace.id)
+        let secondSettings = try orchestrator.workspaceSettings(workspaceID: secondWorkspace.id)
         XCTAssertEqual(activeSettings?.stopScript, "echo synced-stop")
         XCTAssertEqual(activeSettings?.ports.map(\.name) ?? [], ["api"])
         XCTAssertEqual(activeSettings?.processes.first?.name, "api")
-        XCTAssertEqual(archivedSettings?.stopScript, "echo synced-stop")
-        XCTAssertEqual(archivedSettings?.browserSessions.first?.name, "app")
-        XCTAssertTrue(try XCTUnwrap(store.workspace(id: archivedWorkspace.id)).isArchived)
+        XCTAssertEqual(secondSettings?.stopScript, "echo synced-stop")
+        XCTAssertEqual(secondSettings?.browserSessions.first?.name, "app")
     }
 
     func testImportSpacesYAMLWithWorkspaceSyncRollsBackProjectAndEarlierWorkspacesOnFailure() throws {

@@ -73,6 +73,23 @@ fi
 
 acquire_lock "$@"
 
+# A test run gets a throwaway profile for its whole lifetime. Profile resolution refuses the installed
+# profile in a test process, and the developer's worktree profile is live state the debug app serves, so
+# neither is a legitimate target for tests. Suites that scope the profile per test restore this value
+# rather than clearing it, which is what keeps a suite that restores mid-run from stranding a concurrent
+# suite with no profile at all — Swift Testing runs distinct suites in parallel in one process.
+if [ "${1:-}" = "test" ]; then
+  test_profile_dir="$root/.build/test-profile"
+  rm -rf "$test_profile_dir"
+  mkdir -p "$test_profile_dir"
+  SPACES_DB_PATH="$test_profile_dir/spaces.db"
+  export SPACES_DB_PATH
+  # The runtime root derives from the database path, so an inherited override would leave the run half
+  # bound: sockets, locks, and session directories in one profile while the database is in another. Tests
+  # that scope a profile per test set only the database path and get a matching runtime root for free.
+  unset SPACES_RUNTIME_DIR
+fi
+
 xcrun swift "$@" \
   --cache-path "$cache_dir" \
   --config-path "$config_dir" \

@@ -42,6 +42,40 @@ extension WorkspaceOrchestrator {
         return path
     }
 
+    /// Records one setup-state transition, unless the workspace was deleted while setup was running.
+    ///
+    /// Setup deliberately does not hold the workspace lifecycle gate: a setup script can run for minutes,
+    /// and deleting a workspace whose setup is still going has to stay possible. So the record can vanish
+    /// underneath a running setup. The `workspace_settings` foreign key already stops the row itself from
+    /// outliving the workspace — an unguarded write raises `FOREIGN KEY constraint failed`, which escapes
+    /// `runWorkspaceSetup` as a raw SQLite error and surfaces to whoever triggered the setup (a workspace
+    /// launch reports it as a setup failure). Checking first turns that into what it actually means: the
+    /// delete won, so the write has nothing to record and is discarded.
+    ///
+    /// The existence check and the write share one `BEGIN IMMEDIATE` transaction, which is what makes the
+    /// pair atomic against a concurrent delete rather than a check followed by a hopeful write: whichever
+    /// of the two takes the write lock first, the row never outlives the workspace. The lifecycle gate is
+    /// deliberately not used for this — `triggerDeferredWorkspaceSetupIfNeeded` runs inside
+    /// `launchWorkspaceUnlocked`, which already holds that gate, and the gate rejects re-entry.
+    private func recordWorkspaceSetupState(
+        workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
+        exitCode: Int? = nil, logPath: String? = nil
+    ) throws {
+        try store.withTransaction {
+            guard try store.workspace(id: workspaceID) != nil else { return }
+            try store.setWorkspaceSetupState(
+                workspaceID: workspaceID, status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt,
+                exitCode: exitCode, logPath: logPath)
+        }
+    }
+
+    /// Runs the setup script to completion in the foreground. The `Process` is a local: nothing retains a
+    /// handle to it, so no other path — the archive included — can terminate a setup that is still
+    /// running. A delete that removes the worktree under a live setup script leaves that script running on
+    /// a deleted working directory until it fails or finishes on its own, and its state write is then
+    /// discarded by `recordWorkspaceSetupState`. That is the accepted behavior: the script is a
+    /// user-authored command, killing it would need a process registry this path has never had, and the
+    /// only durable evidence it could leave behind is the row that write drops.
     func runWorkspaceSetupScript(_ script: String, cwd: String, logPath: String) throws -> WorkspaceSetupRunResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -66,10 +100,10 @@ extension WorkspaceOrchestrator {
         let setupScript = project.setupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
         let startedAt = nowISO8601()
         let logPath = try prepareWorkspaceSetupLog(workspaceID: workspace.id)
-        try store.setWorkspaceSetupState(
+        try recordWorkspaceSetupState(
             workspaceID: workspace.id, status: .running, errorMessage: nil, startedAt: startedAt, finishedAt: nil, exitCode: nil, logPath: logPath)
         guard let setupScript, !setupScript.isEmpty else {
-            try store.setWorkspaceSetupState(
+            try recordWorkspaceSetupState(
                 workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: 0,
                 logPath: logPath)
             return
@@ -82,19 +116,19 @@ extension WorkspaceOrchestrator {
             result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            try store.setWorkspaceSetupState(
+            try recordWorkspaceSetupState(
                 workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(), exitCode: nil,
                 logPath: logPath)
             throw error
         }
         guard result.exitCode == 0 else {
             let message = "Setup script exited with code \(result.exitCode)."
-            try store.setWorkspaceSetupState(
+            try recordWorkspaceSetupState(
                 workspaceID: workspace.id, status: .failed, errorMessage: message, startedAt: startedAt, finishedAt: nowISO8601(),
                 exitCode: result.exitCode, logPath: result.logPath)
             throw WorkspaceError.invalidArgument(message: "\(message) See log: \(result.logPath)")
         }
-        try store.setWorkspaceSetupState(
+        try recordWorkspaceSetupState(
             workspaceID: workspace.id, status: .succeeded, errorMessage: nil, startedAt: startedAt, finishedAt: nowISO8601(),
             exitCode: result.exitCode, logPath: result.logPath)
     }

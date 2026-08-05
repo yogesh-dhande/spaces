@@ -24,6 +24,13 @@ enum PanelLayoutEngine {
     /// Depth-first panes of one tab, in visual order (left-to-right, top-to-bottom).
     static func panes(in tab: PanelTab) -> [Pane] { panes(in: tab.root) }
 
+    /// The pane a tab stands for: the one that last held focus here, so selecting the tab and
+    /// naming the tab agree. A tab that has never been focused stands for its first pane.
+    static func selectedPane(in tab: PanelTab) -> Pane? {
+        let panes = panes(in: tab)
+        return panes.first { $0.id == tab.lastFocusedPaneID } ?? panes.first
+    }
+
     private static func panes(in node: PaneNode) -> [Pane] {
         switch node {
         case .leaf(let pane): return [pane]

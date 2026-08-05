@@ -124,6 +124,7 @@ KNOWN_SPACES_NOISY_SESSION_ID=""
 REMOTE_DEVICE_RESULT_JSON=""
 REMOTE_DEVICE_PROJECT_ID=""
 REMOTE_DEVICE_WORKSPACE_ID=""
+REMOTE_DEVICE_DEFAULT_WORKSPACE_ID=""
 REMOTE_DEVICE_WEB_BROWSER_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
@@ -928,99 +929,37 @@ mac_client_installation_id() {
     "$SPACES_E2E_CLI" mac-client-installation-id
 }
 
+# Records the remote daemon this run already paired with (over SSH, inside the remote Device API
+# E2E) in the app's client store, so the launched app lists the remote device's projects.
+#
+# The write goes through `spacese2e seed-paired-device` rather than SQL from here: the client
+# database creates its schema only when the file has no tables at all, so a hand-written
+# `paired_devices` row would leave every other client table missing and the app would fail its first
+# client-store read instead of loading the sidebar.
 seed_remote_device_for_macos() {
   [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 0
-  python3 - "$REMOTE_DEVICE_RESULT_JSON" "$TMP_CLIENT_DB" "$TMP_CLIENT_SECRET_DIR" <<'PY'
-import json
-import os
-import sqlite3
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-result_path = Path(sys.argv[1])
-client_db = Path(sys.argv[2])
-secret_dir = Path(sys.argv[3])
-payload = json.loads(result_path.read_text())
-device_id = payload["deviceID"]
-now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-client_db.parent.mkdir(parents=True, exist_ok=True)
-with sqlite3.connect(client_db) as db:
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS paired_devices (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          platform TEXT NOT NULL,
-          host TEXT NOT NULL,
-          port INTEGER NOT NULL,
-          certificate_fingerprint TEXT NOT NULL,
-          ssh_host TEXT,
-          ssh_user TEXT,
-          ssh_port INTEGER,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          last_selected_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS migration_state (
-          current_version INTEGER NOT NULL
-        );
-        """
-    )
-    db.execute("DELETE FROM migration_state")
-    db.execute("INSERT INTO migration_state(current_version) VALUES (1)")
-    db.execute(
-        """
-        INSERT INTO paired_devices(
-          id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name = excluded.name,
-          platform = excluded.platform,
-          host = excluded.host,
-          port = excluded.port,
-          certificate_fingerprint = excluded.certificate_fingerprint,
-          ssh_host = excluded.ssh_host,
-          ssh_user = excluded.ssh_user,
-          ssh_port = excluded.ssh_port,
-          updated_at = excluded.updated_at,
-          last_selected_at = excluded.last_selected_at
-        """,
-        (
-            device_id,
-            payload.get("name") or "Remote Device",
-            "linux",
-            payload["remoteDaemonHost"],
-            int(payload["remoteDaemonPort"]),
-            payload["certificateFingerprint"],
-            os.environ.get("SPACES_E2E_REMOTE_SSH_HOST", ""),
-            os.environ.get("SPACES_E2E_REMOTE_SSH_USER", ""),
-            os.environ.get("SPACES_E2E_REMOTE_SSH_PORT", "") or None,
-            now,
-            now,
-            now,
-        ),
-    )
-
-def sanitize(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-    sanitized = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
-    return sanitized or "device"
-
-secret_dir.mkdir(parents=True, exist_ok=True)
-os.chmod(secret_dir, 0o700)
-safe_id = sanitize(device_id)
-path = secret_dir / f"device-auth-token-{safe_id}.secret"
-path.write_text(str(payload["macAuthToken"]).strip())
-os.chmod(path, 0o600)
-PY
+  local -a seed_args=(
+    seed-paired-device
+    --device-id "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "deviceID")"
+    --name "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "name")"
+    --host "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonHost")"
+    --port "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonPort")"
+    --certificate-fingerprint "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "certificateFingerprint")"
+    --auth-token "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "macAuthToken")"
+  )
+  [[ -n "${SPACES_E2E_REMOTE_SSH_HOST:-}" ]] && seed_args+=(--ssh-host "$SPACES_E2E_REMOTE_SSH_HOST")
+  [[ -n "${SPACES_E2E_REMOTE_SSH_USER:-}" ]] && seed_args+=(--ssh-user "$SPACES_E2E_REMOTE_SSH_USER")
+  [[ -n "${SPACES_E2E_REMOTE_SSH_PORT:-}" ]] && seed_args+=(--ssh-port "$SPACES_E2E_REMOTE_SSH_PORT")
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" \
+    SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" "$SPACES_E2E_CLI" "${seed_args[@]}" \
+    || fail "failed seeding the paired remote device into the app's client store"
   REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
   REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
+  REMOTE_DEVICE_DEFAULT_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "defaultWorkspaceID")"
   REMOTE_DEVICE_WEB_BROWSER_URL="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteWebBrowserURL")"
   [[ -n "$REMOTE_DEVICE_PROJECT_ID" ]] || fail "remote Device API result missing projectID"
   [[ -n "$REMOTE_DEVICE_WORKSPACE_ID" ]] || fail "remote Device API result missing workspaceID"
+  [[ -n "$REMOTE_DEVICE_DEFAULT_WORKSPACE_ID" ]] || fail "remote Device API result missing defaultWorkspaceID"
   [[ -n "$REMOTE_DEVICE_WEB_BROWSER_URL" ]] || fail "remote Device API result missing remoteWebBrowserURL"
 }
 
@@ -1356,8 +1295,10 @@ run_remote_device_ui_parity() {
   wait_for_ui_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID" "remote workspace row"
   ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
   wait_for_ui_identifier "workspace-detail-title-label" "remote workspace detail title"
+  # Lifecycle controls offer only the actions that apply to the workspace's current state, so the
+  # remote workspace — which the remote Device API lane leaves stopped — shows Launch and no Stop
+  # here. Stop is asserted after the remote process starts, below.
   wait_for_ui_identifier "workspace-detail-launch-restart" "remote workspace lifecycle action"
-  wait_for_ui_identifier "workspace-detail-stop" "remote workspace stop action"
   wait_for_ui_identifier "workspace-detail-overflow" "remote workspace overflow action"
   # The panel rework (#109) moved workspace browser sessions out of the detail view and into the
   # sidebar as runtime-target rows: sidebar-target-<workspaceID>-browser:<resolved service URL>.
@@ -1367,6 +1308,17 @@ run_remote_device_ui_parity() {
   remote_device_wait_service_port_state "bindable"
   remote_device_run_workspace_process "remote-web-server"
   remote_device_wait_service_port_state "open"
+  # The remote process running makes its workspace running, so its detail footer must offer Stop
+  # alongside Restart. The footer's lifecycle controls are built when the workspace is selected, and a
+  # remote overview arriving on the device subscription repaints the sidebar rows without rebuilding
+  # them, so reselect the workspace until the footer is built from the overview that reports it
+  # running. Selecting the already-selected row is a no-op, hence the hop through the sibling row.
+  local stop_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS * 3))
+  while ! ui_identifier_exists "workspace-detail-stop"; do
+    (( SECONDS < stop_deadline )) || fail "timed out waiting for UI identifier: remote workspace stop action (workspace-detail-stop)"
+    ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_DEFAULT_WORKSPACE_ID"
+    ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
+  done
   ui_click_identifier "$remote_web_target_id"
   # The local Caddy router port is profile-scoped (dev/worktree profiles no longer share the
   # well-known 7391), and a remote browser session is served by the LOCAL router. The result JSON's
@@ -1687,6 +1639,21 @@ wait_for_workspace_lookup() {
   fail "workspace not found: $title"
 }
 
+wait_for_workspace_absent() {
+  # Archiving deletes the workspace record, so the harness waits for the lookup to stop
+  # resolving the name rather than for a flag to flip on a row that no longer exists.
+  local title="$1"
+  local out="$TMP_ROOT/workspace-absent-lookup.json"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! lookup_workspace "$title" "$out" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "workspace still present after archive: $title"
+}
+
 wait_for_workspace_running_state() {
   local workspace_dir="$1"
   local expected="$2"
@@ -1731,7 +1698,7 @@ with open(sys.argv[1]) as fh:
 target = sys.argv[2]
 for process in data.get("runningProcesses", []):
     if process.get("name") == target:
-        print(process.get("terminalNativeID") or process.get("terminalTrackingID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 }
@@ -2303,19 +2270,18 @@ archive_workspace_via_gui() {
   wait_for_spaces_frontmost_ready
   ui_select_outline_row 2
   sleep 0.5
-  ui_click_button_description "Archive"
+  ui_click_button_description "Delete"
   osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application "System Events"
   tell process "SpacesApp"
-    if exists sheet 1 of window 1 then click button "Archive" of sheet 1 of window 1
+    if exists sheet 1 of window 1 then click button "Delete" of sheet 1 of window 1
   end tell
 end tell
 APPLESCRIPT
   local out="$TMP_ROOT/archive-workspace-state.json"
   local deadline=$((SECONDS + 4))
   while (( SECONDS < deadline )); do
-    lookup_workspace "$WORKSPACE_BRANCH" "$out" >/dev/null 2>&1 || true
-    if [[ -f "$out" ]] && [[ "$(json_get "$out" "isArchived")" == "true" ]]; then
+    if ! lookup_workspace "$WORKSPACE_BRANCH" "$out" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -2558,7 +2524,7 @@ on run argv
                 repeat with dialogButton in buttons of targetWindow
                   try
                     set buttonTitle to (title of dialogButton as text)
-                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
                   end try
                 end repeat
           end try
@@ -2590,7 +2556,7 @@ on run argv
                 repeat with sheetButton in buttons of targetSheet
                   try
                     set buttonTitle to (title of sheetButton as text)
-                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Archive", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
+                    if buttonTitle is not "" and buttonTitle is not "missing value" and buttonTitle is in {"OK", "Cancel", "Recover", "Stop", "Restart", "Delete", "Close", "Install", "Open System Settings"} then set end of buttonLabels to buttonTitle
                   end try
                 end repeat
               end try
@@ -4876,6 +4842,35 @@ measure_spaces_cycle_transition() {
   MEASURED_CYCLE_TARGET="$cycle_target"
 }
 
+# Seeds a focus-history chain for MRU cycle measurements: each target name is focused in
+# order through the normal open path ("docs" focuses the tracked Chrome tab; anything else a
+# Spaces window). Relies on the caller's $host, $workspace_dir, $browser_docs_url, and
+# $docs_window_id via bash dynamic scoping. Seeding through the focus paths also clears any
+# lingering cycle-burst session, so the following press starts a fresh burst.
+seed_cycle_focus_history() {
+  local seed_label="$1"
+  shift
+  local seed_target
+  for seed_target in "$@"; do
+    run_spaces_logged "/tmp/spaces-e2e-cycle-seed-${seed_label}-${seed_target// /-}.log" open "$seed_target" "$workspace_dir"
+    transition_pause "$host seed $seed_target focus ($seed_label)"
+    if [[ "$seed_target" == "docs" ]]; then
+      activate_google_chrome
+      chrome_focus_window_if_present "$docs_window_id"
+      wait_for_condition "chrome_front_url" "$browser_docs_url"
+    else
+      wait_for_spaces_front_window_title "$seed_target"
+    fi
+  done
+}
+
+# Cycling follows most-recently-focused order (docs/spec.md): a fresh press orders targets
+# [current, most-recent..., least-recent, never-focused in natural order]; `next` steps to the
+# most recently focused other window and `previous` to the least recently focused one. Every
+# measurement seeds an explicit focus history first, so each expected target is deterministic:
+# `next` measurements seed <expected> then <origin>; `previous` measurements tour every open
+# target starting with <expected> (making it least-recent) and ending on <origin>.
+# measure_spaces_cycle_transition fails on an expectation mismatch, so no re-checks follow.
 run_window_cycle_profile_loop() {
   local host="$1"
   local workspace_scope="$2"
@@ -4886,12 +4881,14 @@ run_window_cycle_profile_loop() {
   local cycle_profile_warmups=0
   local cycle_profile_iteration
   local cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
-  local browser_docs_url cycle_target
+  local browser_docs_url
 
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 || ONLY_WINDOW_CYCLE_SMALL == 1 )); then
     cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
     cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
   fi
+
+  browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
 
   for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
     if (( cycle_profile_iteration <= cycle_profile_warmups )); then
@@ -4900,126 +4897,54 @@ run_window_cycle_profile_loop() {
       PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
     fi
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
-    activate_google_chrome
-    chrome_focus_window_if_present "$docs_window_id"
-    transition_pause "$host seed docs focus for cycling"
-    browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
-    wait_for_condition "chrome_front_url" "$browser_docs_url"
+    seed_cycle_focus_history "browser-to-frontend" frontend docs
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "browser_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "browser_tracked_tab" "next" \
       "$host cycle next browser to frontend" \
-      "terminal:frontend" \
-      "process:frontend"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:frontend|process:frontend) ;;
-      *) fail "browser to frontend cycle target: expected frontend, got '$cycle_target'" ;;
-    esac
+      "terminal:frontend" "process:frontend"
 
+    seed_cycle_focus_history "frontend-to-browser" docs backend "$adhoc_name" "$MOCK_AGENT_LABEL" frontend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "previous" \
       "$host cycle previous frontend to browser" \
       "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "frontend to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
-    transition_pause "$host reseed frontend focus after browser round trip"
-    wait_for_spaces_front_window_title "frontend"
-
+    seed_cycle_focus_history "frontend-to-backend" backend frontend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "next" \
       "$host cycle next frontend to backend" \
-      "terminal:backend" \
-      "process:backend"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:backend|process:backend) ;;
-      *) fail "frontend to backend cycle target: expected backend, got '$cycle_target'" ;;
-    esac
+      "terminal:backend" "process:backend"
 
+    seed_cycle_focus_history "backend-to-adhoc" "$adhoc_name" backend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "next" \
       "$host cycle next backend to ad hoc terminal" \
       "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "backend to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
 
+    seed_cycle_focus_history "adhoc-to-agent" "$MOCK_AGENT_LABEL" "$adhoc_name"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "terminal_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "terminal_tracked_tab" "next" \
       "$host cycle next ad hoc terminal to agent" \
       "agent:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      agent:*) ;;
-      *) fail "ad hoc terminal to agent cycle target: expected agent, got '$cycle_target'" ;;
-    esac
 
+    seed_cycle_focus_history "agent-to-browser" docs "$MOCK_AGENT_LABEL"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "agent_tracked_tab" "next" \
       "$host cycle next agent to browser" \
       "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "agent to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
-    transition_pause "$host reseed agent focus after browser round trip"
-    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
-
+    seed_cycle_focus_history "agent-to-adhoc" "$adhoc_name" docs backend frontend "$MOCK_AGENT_LABEL"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "previous" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "agent_tracked_tab" "previous" \
       "$host cycle previous agent to ad hoc terminal" \
       "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
   done
 
   PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
@@ -5218,7 +5143,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5239,7 +5164,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")
@@ -5443,7 +5368,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5462,7 +5387,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     if session_id and session_id not in known:
         print(session_id)
         break
@@ -5488,7 +5413,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 session_id = sys.argv[2]
 for window in data["windows"]:
-    if (window.get("terminalTrackingID") or window.get("terminalNativeID") or "") == session_id:
+    if (window.get("terminalTrackingID") or "") == session_id:
         print("1")
         break
 else:
@@ -5510,7 +5435,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )"
@@ -5525,7 +5450,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for process in data["runningProcesses"]:
     if process["name"] == "frontend":
-        print(process.get("terminalTrackingID") or process.get("terminalNativeID") or "")
+        print(process.get("terminalTrackingID") or "")
         break
 PY
 )" "frontend session stable after closing process terminal window"
@@ -5623,7 +5548,7 @@ with open(sys.argv[1]) as fh:
     data = json.load(fh)
 for window in data["windows"]:
     if window.get("role") == "terminal":
-        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        session_id = window.get("terminalTrackingID") or ""
         if session_id:
             print(session_id)
 PY
@@ -5642,7 +5567,7 @@ with open(sys.argv[1]) as fh:
 for window in data["windows"]:
     if window.get("role") != "terminal":
         continue
-    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    session_id = window.get("terminalTrackingID") or ""
     name = window.get("name") or ""
     if session_id and session_id not in known:
         print(f"{session_id}\t{name}")
@@ -6419,8 +6344,7 @@ EOF
   begin_case "archive branch workspaces"
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-harbor-branch.json
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$lantern_branch_workspace_dir" >/tmp/spaces-e2e-archive-lantern-branch.json
-  wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
-  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "harbor branch workspace archived"
+  wait_for_workspace_absent "$WORKSPACE_BRANCH"
   pass_case
 }
 

@@ -15,11 +15,39 @@ spaces_profile_e2e_cli() {
   printf '%s\n' "$cli_dir/spacese2e"
 }
 
-spaces_profile_eval_shell_env() {
+# Clears an inherited SPACES_DB_PATH / SPACES_RUNTIME_DIR from the CALLING shell. Every entry point below
+# calls this before it resolves or touches a profile.
+#
+# A profile's identity is where its binary sits, so an inherited binding at an entry point is never what the
+# caller wants -- it is left over from a shell someone bound earlier, and it is actively harmful in both
+# directions. Pointing inside ~/.spaces or ~/.spaces-dev/profiles, profile resolution refuses it and the
+# script aborts (under `set -e`, before any work). Pointing at some unrelated throwaway root, it silently
+# retargets the whole run at a profile nobody asked for.
+#
+# Clearing outright is the single intended path: there is deliberately no attempt to interpret, validate, or
+# re-target the inherited value. A run that genuinely wants a throwaway profile sets one AFTER this, which is
+# what SPACES_DEV_DB_PATH and the mobile demo's isolated mode do.
+spaces_profile_clear_inherited_binding() {
+  unset SPACES_DB_PATH SPACES_RUNTIME_DIR
+}
+
+# Prints one field of the resolved profile — `profileRoot`, `databasePath`, `runtimeDirectory`,
+# `ipcObject`, `source` — for a script that needs a concrete path (sqlite inspection, log and socket
+# locations). This is where scripts read paths from: a path is a fact to look up from the binary that
+# resolved it, not a binding to put in the environment and have children inherit.
+spaces_profile_field() {
   local cli="$1"
+  local field="$2"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  eval "$("$e2e_cli" profile-show --shell)"
+  "$e2e_cli" profile-show --json | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+value = payload.get(sys.argv[1])
+if not value:
+    raise SystemExit(f"profile-show --json has no {sys.argv[1]}")
+print(value)
+' "$field"
 }
 
 spaces_profile_app_owner_pid() {

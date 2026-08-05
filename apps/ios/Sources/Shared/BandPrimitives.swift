@@ -26,6 +26,19 @@ struct WorkspaceBandLabel: View {
     }
 }
 
+// MARK: - List rows
+
+/// The band design lives inside a `List` so rows can carry swipe actions, but it owns its own spacing
+/// and background: every row is full-bleed on `Theme.bg` with no list insets, separators, or row fill.
+extension View {
+    func bandListRow() -> some View { listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear) }
+
+    /// A header band as a list row, carrying the gap that separates it from the group above and the
+    /// smaller gap to the first row beneath it. Both are drawn on the app background, so the band's own
+    /// `surface2` fill stays full-bleed.
+    func bandListHeaderRow(topGap: CGFloat = 14) -> some View { padding(.top, topGap).padding(.bottom, 4).bandListRow() }
+}
+
 // MARK: - Band row
 
 /// Shared row anatomy: leading status dot, type-icon tile, title + detail, trailing slot.
@@ -50,9 +63,13 @@ struct BandRow<Title: View, Trailing: View>: View {
             tile
             VStack(alignment: .leading, spacing: 1) {
                 title().font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
-                    Theme.mutedSecondary
-                ).lineLimit(1).truncationMode(.middle)
+                // An empty detail takes no line at all, so a shell sitting at its workspace root reads as
+                // a single-line row instead of leaving a blank second line under its name.
+                if !detail.isEmpty {
+                    Text(detail).font(detailIsMonospaced ? .system(size: 11, design: .monospaced) : .system(size: 12)).foregroundStyle(
+                        Theme.mutedSecondary
+                    ).lineLimit(1).truncationMode(.middle)
+                }
             }
             Spacer(minLength: 0)
             trailing()
@@ -116,7 +133,8 @@ extension StatusDot.Kind {
 
     init(attentionKind: SpacesMobileAttentionEvent.Kind) {
         switch attentionKind {
-        case .waitingForInput: self = .waiting
+        // A bell reads the same as "waiting for input": both mean the session wants the user's attention.
+        case .waitingForInput, .bell: self = .waiting
         case .finished: self = .done
         case .exited, .failed: self = .exited
         }

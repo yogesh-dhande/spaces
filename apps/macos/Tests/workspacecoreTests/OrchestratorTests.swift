@@ -62,6 +62,8 @@ func managedProjectStorageDirname(namespace: String, source: String, preferredNa
 
 final class OrchestratorTests: XCTestCase {
 
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     final class TestClock {
         private var current: Date
 
@@ -79,6 +81,7 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
+        bindSpacesProfileForTest(databasePath: dbPath)
         let store = try SQLiteStore(path: dbPath)
         let orchestrator = makeTestOrchestrator(
             store: store,
@@ -87,6 +90,7 @@ final class OrchestratorTests: XCTestCase {
                     let paths = try TerminalSessionPaths.forSession(id: sessionID)
                     try paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,

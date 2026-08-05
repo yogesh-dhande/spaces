@@ -83,9 +83,15 @@ import Foundation
         ///   `relaunch` passes `false`: it is replacing the daemon, so it must tolerate the outgoing
         ///   stale daemon still answering ping during its shutdown grace instead of aborting the wait.
         ///
-        /// A ping answered with `ok == false` and `errorCode == .shuttingDown` means the daemon is alive
+        /// A ping answered with `ok == false` and `errorCode == .handingOff` means the daemon is alive
         /// and mid exec-in-place handoff to an updated image, not dead — see `waitForLivePongThroughTransition`.
-        /// This waits for the replacement image instead of spawning a competing daemon.
+        /// This waits for the replacement image instead of spawning a competing daemon. A ping answered
+        /// with `.shuttingDown` means the opposite: the daemon is on its way out with no successor coming,
+        /// so instead of waiting for a replacement the flock winner waits for that daemon's instance-lock
+        /// ownership to actually end (see `waitForInstanceLockOwnerToExit`) before spawning a fresh one of
+        /// its own. That same gate also covers a daemon whose accept source is already cancelled and
+        /// answers no ping at all while it drains persistence — it reads the lock, the contended resource,
+        /// rather than depending on the daemon still being reachable enough to say `.shuttingDown`.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let startedAt = Date()
             let socketPath = try TerminalServicePaths.socketPath()
@@ -127,8 +133,6 @@ import Foundation
             while flock(lockDescriptor, LOCK_EX) != 0 { guard errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) } }
             defer { flock(lockDescriptor, LOCK_UN) }
 
-            let deadline = Date().addingTimeInterval(timeout)
-
             // The lock winner may be adopting a daemon another launcher finished starting first.
             if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1) {
                 if response.ok {
@@ -148,6 +152,48 @@ import Foundation
                     return false
                 }
             }
+
+            // A live instance-lock owner means a spawn right now is doomed: the child's
+            // `SpacesDaemonController.init` collides with the still-held lock, throws `alreadyRunning`,
+            // and exits immediately, and the spawn-poll loop below never retries the spawn itself (it
+            // only pings), so the caller's operation would fail even though a working daemon was moments
+            // away. Wait for the owner to actually leave — not merely to have announced it is leaving —
+            // before falling through to spawn.
+            //
+            // The gate reads `TerminalServiceInstanceLock` itself, the actual contended resource, instead
+            // of a ping response. That is what lets one check cover both ways an outgoing daemon can look
+            // right now: one still answering pings with a `.shuttingDown` rejection, and one whose accept
+            // source is already cancelled — so a ping gets no response at all — while it drains queued
+            // session persistence. Either way the lock file is the fact that actually distinguishes
+            // "going" from "gone"; a ping response alone cannot in the second case, because there isn't
+            // one.
+            //
+            // This runs only here, after the flock is held, so exactly one caller (the launch winner)
+            // pays the wait; every other concurrent caller is already parked on the flock and simply
+            // adopts whatever the winner ends up starting.
+            //
+            // A handoff never trips this into a harmful wait: the exec'd successor keeps the same pid, so
+            // the lock record it inherits still names that same live pid as owner, and the handoff cases
+            // above already returned earlier via `waitForLivePongThroughTransition`'s `.handingOff` wait
+            // before this point is ever reached.
+            waitForInstanceLockOwnerToExit(socketPath: socketPath, lockPath: try TerminalServicePaths.instanceLockPath())
+
+            // The gate above can end two ways: the owner actually left, or a live daemon answered `ok`
+            // while still wearing the owner's pid (an exec-in-place successor never changes pid). Re-check
+            // for the latter here, before spawning: spawning into an already-live daemon would only create
+            // a doomed competitor that loses the instance lock and exits.
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                TerminalPerformance.logMetric(
+                    "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "launched=0 adopted=1 lockgate=1")
+                return false
+            }
+
+            // Computed after the instance-lock-owner wait above, not before it, so a slow-to-exit outgoing
+            // daemon never eats into the budget the spawn-poll loop below needs to observe a freshly
+            // spawned replacement.
+            let deadline = Date().addingTimeInterval(timeout)
 
             let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
             let process = Process()
@@ -221,27 +267,40 @@ import Foundation
             return try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: timeout)
         }
 
-        /// Bounds how long `ensureRunning` waits for a transitional `.shuttingDown` ping to resolve into a
+        /// Bounds how long `ensureRunning` waits for a transitional `.handingOff` ping to resolve into a
         /// live pong before giving up and falling back to spawning a new daemon. The handoff preflight the
         /// old image runs before exec-ing (`DaemonHandoffPreflight.run`) can alone take up to 10s, and the
         /// replacement image then needs a further moment to exec and rebind the socket, so 15s leaves margin
-        /// without masking a daemon that genuinely vanished mid-handoff.
+        /// without masking a daemon that genuinely vanished mid-handoff. This wait is specific to a handoff:
+        /// a `.shuttingDown` ping never reaches it, because no successor is coming for `ensureRunning` to
+        /// wait for (issue #325's follow-up split — see `DaemonLivenessState.teardownRejection`'s doc).
         private static let handoffTransitionTimeout: TimeInterval = 15
 
         /// True when a ping response means "the daemon is alive but mid exec-handoff", i.e. answered its
-        /// own liveness probe rather than timing out or refusing to connect. Any other failure (a different
-        /// error code, or no response at all) is an ordinary "daemon looks dead" signal and must not pause
-        /// here waiting for a handoff that isn't happening.
-        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .shuttingDown }
+        /// own liveness probe with `.handingOff` rather than timing out, refusing to connect, or reporting
+        /// `.shuttingDown`. A `.shuttingDown` ping is also a live answer, but it promises no successor is
+        /// coming, so `ensureRunning` must not pause here waiting for one — it needs to fall straight
+        /// through to the unified `waitForInstanceLockOwnerToExit` gate's own bounded wait for that
+        /// daemon's exit instead. Any other failure (a different error code, or no response at all) is an
+        /// ordinary "daemon looks dead" signal and gets the same immediate-spawn treatment — that gate
+        /// runs regardless, so it also catches the no-response case.
+        ///
+        /// Peers are lockstep on `SpacesWireProtocol` (exact-version match, no backward compatibility), so
+        /// this predicate only ever interprets a response from a same-version daemon. A foreign-version
+        /// daemon's teardown responses carry no contract here: the worst a misread one costs is one bounded
+        /// wait — `handoffTransitionTimeout` for a code misread as a handoff, `shutdownExitTimeout`'s
+        /// lock-owner gate otherwise — before `ensureRunning` falls through to its normal spawn-and-poll
+        /// path and recovers.
+        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .handingOff }
 
-        /// Polls liveness until the daemon that reported a transitional `.shuttingDown` ping answers a live
+        /// Polls liveness until the daemon that reported a transitional `.handingOff` ping answers a live
         /// pong again, or `handoffTransitionTimeout` elapses. Returns the live response, or `nil` on timeout
         /// so the caller falls back to the normal lock-and-spawn path (safe even if the daemon never comes
         /// back, since spawning is guarded by the launch flock and the daemon instance lock).
         ///
         /// An unreachable socket during the wait is expected, not a failure: the old image stops its socket
         /// server before `execv`, and the new image needs a moment to rebind the same path, so it is treated
-        /// exactly like another `.shuttingDown` reply — keep polling.
+        /// exactly like another `.handingOff` reply — keep polling.
         static func waitForLivePongThroughTransition(socketPath: String) -> TerminalServiceResponse? {
             let deadline = Date().addingTimeInterval(handoffTransitionTimeout)
             while Date() < deadline {
@@ -253,6 +312,52 @@ import Foundation
                 Thread.sleep(forTimeInterval: 0.05)
             }
             return nil
+        }
+
+        /// Bounds how long `ensureRunning`'s flock winner waits for an outgoing daemon that still holds
+        /// `TerminalServiceInstanceLock` to actually release it before spawning a replacement. Unlike
+        /// `handoffTransitionTimeout`, this waits for nothing to *arrive* — there is no successor — only
+        /// for the outgoing process to leave. `shutdown()`'s dominant cost is draining each live session's
+        /// queued persistence writes through a SQLite connection whose busy timeout is 5s
+        /// (`SpacesSQLiteDatabase.busyTimeoutMS`), so a single contended session can legitimately take that
+        /// long; this matches that budget rather than borrowing the handoff constant's extra margin for an
+        /// exec preflight a shutdown never runs.
+        private static let shutdownExitTimeout: TimeInterval = 5
+
+        /// Waits for the process recorded as the profile's live `TerminalServiceInstanceLock` owner (if
+        /// any) to actually leave — either by exiting, or by a live daemon answering the socket — bounded
+        /// by `shutdownExitTimeout`. This is the gate `ensureRunning`'s flock winner runs before spawning:
+        /// a live owner means a spawn right now is doomed (the child's `SpacesDaemonController.init`
+        /// collides with the still-held lock and exits), so the winner waits for the owner to leave rather
+        /// than spawning straight into that collision. See the call site's comment in `ensureRunning` for
+        /// why reading the lock — rather than depending on a ping response — is what lets this cover an
+        /// outgoing daemon whose accept source is already cancelled and answers no ping at all.
+        ///
+        /// An exec-in-place handoff successor keeps the outgoing process's pid, so "pid alive" alone can't
+        /// tell an outgoing daemon from a live successor wearing the same pid. This runs its own poll loop
+        /// (rather than delegating to `waitForServiceExit`, whose other callers genuinely want "gone" and
+        /// for whom a live-pong exit would be wrong) so it can also return the moment a ping answers
+        /// `ok: true`: that is a healthy daemon, not one on its way out, so there is nothing left to wait
+        /// for and the caller's post-gate adoption check picks it up instead. Without this early exit, that
+        /// case would burn the full `shutdownExitTimeout` waiting for a pid that will never die, and
+        /// `ensureRunning` would then spawn a doomed competitor before its own poll loop finally adopted
+        /// the live successor.
+        ///
+        /// Returns immediately, without waiting, when the lock file is absent or names a pid that is
+        /// already dead: only a live owner can block a spawn, so there is nothing to wait for otherwise.
+        static func waitForInstanceLockOwnerToExit(socketPath: String, lockPath: String) {
+            guard let ownerPID = try? TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath) else { return }
+            let deadline = Date().addingTimeInterval(shutdownExitTimeout)
+            while Date() < deadline {
+                // Mirrors `waitForServiceExit`'s own per-iteration checks (its pid-liveness helper and its
+                // short-timeout ping probe on `socketPath`), plus the ok-pong early exit described above.
+                let response =
+                    FileManager.default.fileExists(atPath: socketPath)
+                    ? try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2) : nil
+                if let response, response.ok { return }
+                if !isProcessAlive(pid: Int(ownerPID)) && response == nil { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
 
         private static func stopExistingService(socketPath: String, timeout: TimeInterval) {
@@ -289,7 +394,16 @@ import Foundation
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
                 let livePIDs = candidatePIDs.filter { isProcessAlive(pid: Int($0)) }
-                let canPing = FileManager.default.fileExists(atPath: socketPath) && ((try? pingResponse(timeout: 0.2)) != nil)
+                // Pings the given `socketPath` directly, the same way `waitForLivePongThroughTransition`
+                // does, rather than going through `pingResponse()` (which re-resolves the canonical
+                // profile socket path). Every caller passes its own already-resolved canonical path today,
+                // so this is behavior-preserving, but it keeps this check honoring its own parameter like
+                // the `fileExists` check beside it, instead of silently depending on the two paths always
+                // agreeing.
+                let canPing =
+                    FileManager.default.fileExists(atPath: socketPath)
+                    && ((try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 0.2))
+                        != nil)
                 if livePIDs.isEmpty && !canPing { return true }
                 Thread.sleep(forTimeInterval: 0.05)
             }
@@ -367,7 +481,7 @@ import Foundation
         }
 
         private static func shouldUseXCTestCompatibilityBackend() -> Bool {
-            isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
+            SpacesTestHost.isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
         }
 
         public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
@@ -422,8 +536,7 @@ import Foundation
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(
                     sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil,
-                    state: .running, updatedAt: TerminalSessionTimestamp.string(from: Date()), title: launchConfiguration.title,
-                    workingDirectory: launchConfiguration.workingDirectory)
+                    state: .running, updatedAt: TerminalSessionTimestamp.string(from: Date()), workingDirectory: launchConfiguration.workingDirectory)
             try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             return TerminalServiceSessionSummary(
                 id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
@@ -440,19 +553,20 @@ import Foundation
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil, state: .exited, updatedAt: now,
-                    exitedAt: now, title: launchConfiguration.title, workingDirectory: launchConfiguration.workingDirectory)
+                    exitedAt: now, workingDirectory: launchConfiguration.workingDirectory)
             let exitedState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID, childPID: runtimeState.childPID,
-                state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title ?? launchConfiguration.title,
+                state: .exited, updatedAt: now, exitedAt: now, title: runtimeState.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                rows: runtimeState.rows)
+                rows: runtimeState.rows, bellAt: runtimeState.bellAt)
             try TerminalSessionPersistence.writeRuntimeState(exitedState, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
         }
 
         private static func listXCTestCompatibilitySessions() throws -> [TerminalServiceSessionSummary] {
-            try TerminalSessionPersistence.listKnownSessions().compactMap { launchConfiguration in
-                let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
+            try TerminalSessionPersistence.listKnownSessions().compactMap { knownSession in
+                let launchConfiguration = knownSession.launchConfiguration
+                let paths = knownSession.paths
                 guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return nil }
                 guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return nil }
                 guard runtimeState.state == .starting || runtimeState.state == .running else { return nil }
@@ -520,9 +634,12 @@ import Foundation
             appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            switch profile.source {
-            case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
-            case .developmentWorktree, .explicitDatabasePath:
+            // Split by what the profile IS — the installed profile, or any development one — rather than by
+            // which resolution branch produced it, since the installed profile is reachable through more
+            // than one branch.
+            if profile.isInstalledProfile {
+                for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
+            } else {
                 for relativePath in [
                     "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
                 ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
@@ -532,14 +649,7 @@ import Foundation
                 return URL(fileURLWithPath: candidate, isDirectory: false)
             }
 
-            throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
-        }
-
-        private static func isRunningUnderXCTest() -> Bool {
-            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return true }
-            if NSClassFromString("XCTestCase") != nil { return true }
-            if CommandLine.arguments.contains(where: { $0.hasSuffix(".xctest") }) { return true }
-            return Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
+            throw TerminalServiceError.daemonNotFound(profile: profile, searchedPaths: candidates)
         }
 
         private static func isProcessAlive(pid: Int) -> Bool {
@@ -555,32 +665,31 @@ import Foundation
         /// only decides which half of the excluded candidates has to be explained: an installed profile
         /// never starts a development build from the current directory, and a development profile never
         /// starts the installed daemon.
-        case daemonNotFound(profileSource: SpacesProfileSource, profileRoot: String, searchedPaths: [String])
+        case daemonNotFound(profile: SpacesProfile, searchedPaths: [String])
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
-            case .daemonNotFound(let profileSource, let profileRoot, let searchedPaths):
+            case .daemonNotFound(let profile, let searchedPaths):
                 let described: (kind: String, explanation: String) =
-                    switch profileSource {
-                    case .installedFallback:
-                        (
-                            "installed",
-                            "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
-                                + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
-                        )
-                    case .developmentWorktree, .explicitDatabasePath:
-                        (
-                            "development",
-                            "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
-                                + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
-                                + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
-                        )
-                    }
-                return "No spacesd was found for the \(described.kind) profile at \(profileRoot). \(described.explanation) Searched: "
-                    + searchedPaths.joined(separator: ", ")
+                    profile.isInstalledProfile
+                    ? (
+                        "installed",
+                        "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
+                            + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
+                    )
+                    : (
+                        "development",
+                        "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
+                            + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
+                            + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
+                    )
+                // The discovery route is carried as provenance only: it explains how a surprising profile was
+                // arrived at without being what decided anything above.
+                return "No spacesd was found for the \(described.kind) profile at \(profile.rootDirectory) "
+                    + "(resolved via \(profile.source.rawValue)). \(described.explanation) Searched: " + searchedPaths.joined(separator: ", ")
             case .daemonWireIncompatible(let incompatibility): return incompatibility.message
             case .requestFailed(let message): return message
             case .serviceStartupTimedOut(let path): return "Timed out waiting for spacesd to start from \(path)."
@@ -636,18 +745,106 @@ import Foundation
         ///   an adopted already-running daemon must speak this build's wire protocol or this throws.
         ///   `relaunch` passes `false`: it sends a best-effort `.shutdown` and then waits here, so the
         ///   outgoing stale daemon still answering ping during its shutdown grace must not abort the wait.
+        ///
+        /// A Linux daemon is owned by user systemd, not by this process: every profile on the device has its
+        /// own user unit, so starting one is asking systemd to start that profile's unit rather than spawning
+        /// a daemon here the way macOS does. This still adopts a live daemon without going near systemd, so
+        /// the common case costs one ping.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
-            let socketPath = try TerminalServicePaths.socketPath()
+            // `timeout` is the caller's whole budget for this call, so one deadline computed here bounds
+            // every step: asking systemd to start the unit is work inside the window, not a preamble to
+            // it. Callers that deliberately bound this call (`sendProfileCommand` passes `min(timeout, 5)`)
+            // must not be held past their own deadline by an unresponsive user systemd instance.
             let deadline = Date().addingTimeInterval(timeout)
-            repeat {
-                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
+            let socketPath = try TerminalServicePaths.socketPath()
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                return false
+            }
+
+            // Linux is the only platform that hosts a daemon under user systemd. This half of the file is
+            // everything that is not macOS, which includes iOS — a platform with no daemon of its own, no
+            // systemd, and no `Process` to reach one with — so the start attempt is Linux-only and iOS waits
+            // for a socket exactly as it did before, then reports the same unavailability.
+            #if os(Linux)
+                let startedUnit = startSystemdUnit(for: try SpacesProfile.current(), deadline: deadline)
+            #else
+                let startedUnit: String? = nil
+            #endif
+            // Polling is entered only while budget remains, and each ping is bounded by what is left of it.
+            // Starting the unit can consume the whole window on its own, and a `repeat` would then spend one
+            // more ping and sleep past the deadline the caller asked to be held to. The ping keeps a small
+            // floor because a timeout of a few microseconds is not a request anything can answer — it would
+            // report an unreachable daemon rather than a slow one.
+            while true {
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { break }
+                let pingTimeout = max(0.05, min(remaining, 1))
+                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: pingTimeout), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
-                    return false
+                    return startedUnit != nil
                 }
                 Thread.sleep(forTimeInterval: 0.05)
-            } while Date() < deadline
-            throw TerminalServiceError.serviceUnavailable(socketPath)
+            }
+            throw TerminalServiceError.serviceUnavailable(socketPath: socketPath, startedUnit: startedUnit)
         }
+
+        #if os(Linux)
+            /// The user systemd unit that owns this profile's daemon on a Linux device.
+            ///
+            /// The installed profile is recognised by its root rather than by the branch that resolved it, so a
+            /// daemon that reached `~/.spaces` by any route asks systemd for the one unit that serves it.
+            ///
+            /// `nil` means no unit exists for the profile, so there is nothing to start and a missing daemon stays
+            /// the caller's error. That is the honest answer for a repo-built worktree profile or an ephemeral
+            /// explicit database path: both belong to a developer-driven process on a machine with a Spaces
+            /// checkout, where the daemon is started by whatever launched the build, and inventing a unit name for
+            /// them would only ask systemd to start something that was never installed. A profile that fell
+            /// through to `<home>/.spaces` without that being the installed root — a redirected `HOME` — has no
+            /// unit either, for the same reason.
+            static func systemdUnitName(for profile: SpacesProfile) -> String? {
+                if profile.isInstalledProfile { return "spacesd.service" }
+                switch profile.source {
+                case .deployedDevelopmentProfile:
+                    return "spacesd@\(URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).lastPathComponent).service"
+                case .installedFallback, .developmentWorktree, .explicitDatabasePath: return nil
+                }
+            }
+
+            /// Asks user systemd to start this profile's daemon unit, and returns the unit it asked about — `nil`
+            /// when the profile has no unit or the command could not be run at all.
+            ///
+            /// A failing start is not fatal here: the caller's poll below decides the outcome, because whether a
+            /// daemon ends up answering is the only thing that matters and systemd reports plenty of non-failures
+            /// (an already-active unit, a unit still starting) that say nothing about that.
+            ///
+            /// `deadline` is `ensureRunning`'s single deadline, so waiting on `systemctl` never outlives the
+            /// caller's own window.
+            private static func startSystemdUnit(for profile: SpacesProfile, deadline: Date) -> String? {
+                guard let unitName = systemdUnitName(for: profile) else { return nil }
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["systemctl", "--user", "start", unitName]
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do { try process.run() } catch { return nil }
+                let startDeadline = systemdStartWaitDeadline(overallDeadline: deadline)
+                while process.isRunning, Date() < startDeadline { Thread.sleep(forTimeInterval: 0.05) }
+                if process.isRunning { process.terminate() }
+                return unitName
+            }
+
+            /// How long waiting on `systemctl --user start` may last: never past `overallDeadline`, and never
+            /// longer than `systemdStartTimeout` even when the caller allows more, so a systemd instance that
+            /// never answers cannot consume a generous window and leave nothing for the socket wait that
+            /// decides the outcome.
+            static func systemdStartWaitDeadline(overallDeadline: Date, now: Date = Date()) -> Date {
+                min(overallDeadline, now.addingTimeInterval(systemdStartTimeout))
+            }
+
+            private static let systemdStartTimeout: TimeInterval = 5
+        #endif
 
         @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
@@ -699,13 +896,19 @@ import Foundation
     public enum TerminalServiceError: LocalizedError {
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
-        case serviceUnavailable(String)
+        /// No daemon answered for this profile. `startedUnit` names the user systemd unit that was started
+        /// and still produced no socket, so the report distinguishes "systemd was asked and did not deliver"
+        /// from a profile that has no unit to ask about at all.
+        case serviceUnavailable(socketPath: String, startedUnit: String?)
 
         public var errorDescription: String? {
             switch self {
-            case .daemonWireIncompatible(let incompatibility): incompatibility.message
-            case .requestFailed(let message): message
-            case .serviceUnavailable(let socketPath): "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
+            case .daemonWireIncompatible(let incompatibility): return incompatibility.message
+            case .requestFailed(let message): return message
+            case .serviceUnavailable(let socketPath, let startedUnit):
+                var message = "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
+                if let startedUnit { message += " Started \(startedUnit), which produced no daemon socket." }
+                return message
             }
         }
     }
@@ -737,13 +940,16 @@ extension TerminalService {
         guard !verdict.isCompatible else { return nil }
         var message: String
         switch verdict {
-        case .clientTooOld: message = "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
+        case .clientTooOld:
+            message = "The running spacesd daemon speaks a newer connection protocol than this Spaces build. Update Spaces to match it, then retry."
         case .daemonTooOld, .compatible:
             // Quitting/relaunching the Spaces app does not help: the daemon is managed by the OS service
             // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
             // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
             // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
-            message = "The running spacesd daemon is older than this Spaces build needs. " + "Restart the daemon to load the update, then retry."
+            message =
+                "The running spacesd daemon speaks an older connection protocol than this Spaces build. "
+                + "Restart the daemon to load the update, then retry."
             if let status = response.daemonStatus,
                 status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
             {

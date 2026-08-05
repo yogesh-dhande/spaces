@@ -91,29 +91,16 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces on this or a paired device.",
                 properties: [
-                    "project": stringSchema("Project ID filter."),
-                    "includeArchived": boolSchema("Include archived workspaces. Not supported with device."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                    "project": stringSchema("Project ID filter."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: []
             ) { server, arguments in
                 if let device = try server.resolvedDevice(arguments) {
-                    // The device overview carries only active workspaces, so archived ones are
-                    // unreachable over this path; reject the combination rather than silently ignore it.
-                    guard server.optionalBool(arguments["includeArchived"]) != true else {
-                        throw MCPError.invalidArguments(
-                            "includeArchived is not supported with device: a paired device's overview lists only active workspaces.")
-                    }
                     var workspaces = try SpacesDeviceClient.workspaces(device: device, clientApp: cliDeviceClientApp())
                     if let project = server.optionalString(arguments["project"]) { workspaces = workspaces.filter { $0.projectID == project } }
                     return .profile(
                         TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord)))
                 }
-                return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .workspaceList(
-                            .init(
-                                projectID: server.optionalString(arguments["project"]),
-                                includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false))))
+                return .profile(try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: server.optionalString(arguments["project"])))))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_create",
@@ -203,12 +190,12 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
                 description:
-                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text and a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text as a paste and then a separate Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
                     "text": stringSchema("Text to send. Use an empty string with submit to press Enter alone."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
-                    "submit": boolSchema("Send a spaced Enter keystroke after the payload; with text this submits the line."),
+                    "submit": boolSchema("Send a separate Enter keystroke after the payload; with text this submits the line."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in
@@ -342,23 +329,6 @@ final class SpacesMCPStdioServer {
                         agentSpawn: TerminalServiceAgentSpawnResult(
                             terminalSessionID: result.terminalSessionID, workspaceID: result.workspaceID, detectedAgent: result.detectedAgent,
                             deviceID: result.deviceID, subscribed: result.subscribed, open: result.open)))
-            },
-            MCPToolDescriptor(
-                name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
-                properties: [
-                    "session": stringSchema("Child terminal session ID to interrupt."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ], required: ["session"]
-            ) { server, arguments in
-                let sessionID = try server.requiredString(arguments["session"], field: "session")
-                if let device = try server.resolvedDevice(arguments) {
-                    let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, bytes: Data([27]), appendNewline: false, device: device, clientApp: cliDeviceClientApp())
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
-                }
-                return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalSend(.init(sessionID: sessionID, input: .bytes(Data([27])), appendNewline: false)), timeout: 5))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_kill", description: "Terminate a coding-agent session and its terminal.",
@@ -567,8 +537,7 @@ final class SpacesMCPStdioServer {
     private static func profileWorkspaceRecord(_ summary: SpacesDeviceWorkspaceSummary) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: summary.id, projectID: summary.projectID, dir: summary.dir, dirname: nil, branch: summary.branch, baseBranch: summary.baseBranch,
-            isDefault: summary.isDefault, isArchived: summary.isArchived, isHidden: summary.isHidden, isRunning: summary.isRunning,
-            lastLaunchedAt: nil, notes: summary.notes)
+            isDefault: summary.isDefault, isHidden: summary.isHidden, isRunning: summary.isRunning, lastLaunchedAt: nil, notes: summary.notes)
     }
 
     /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current

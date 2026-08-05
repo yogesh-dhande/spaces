@@ -10,6 +10,7 @@ struct AddWorkspaceFieldRefs: FormGenerationTagged {
     let existingBranchField: NSComboBox?
     let newBranchField: NSTextField?
     let baseBranchField: NSComboBox?
+    let baseBranchRow: NSView?
     let notesField: NSTextField?
     let autoNameState: AddWorkspaceAutoNameState?
     let createButton: NSButton

@@ -23,20 +23,41 @@ public enum GhosttyVtSessionBridge {
 
     /// Converts a libghostty-vt snapshot into the Swift render snapshot the render pipeline consumes.
     /// The raw snapshot's `cells` buffer stays owned by the caller (freed with
-    /// `spaces_ghostty_vt_snapshot_free`); this only reads it.
-    public static func snapshot(from rawSnapshot: SpacesGhosttyVtSnapshot) -> GhosttyTerminalSnapshot {
-        let cells: [GhosttyTerminalSnapshot.Cell]
+    /// `spaces_ghostty_vt_snapshot_free`); this only reads it. Mouse tracking is not part of the raw
+    /// snapshot — it is a terminal mode, queried separately — so the caller supplies it.
+    public static func snapshot(from rawSnapshot: SpacesGhosttyVtSnapshot, mouseReportingActive: Bool) -> GhosttyTerminalSnapshot {
+        var cells: [GhosttyTerminalSnapshot.Cell] = []
+        var clusters: [Int: String] = [:]
         if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
-            cells = UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).map {
-                GhosttyTerminalSnapshot.Cell(
-                    codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
+            cells.reserveCapacity(rawSnapshot.cell_count)
+            for (index, rawCell) in UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).enumerated() {
+                cells.append(
+                    GhosttyTerminalSnapshot.Cell(
+                        codepoint: rawCell.codepoint, foregroundRGB: rawCell.foreground_rgb, backgroundRGB: rawCell.background_rgb,
+                        flags: rawCell.flags))
+                if let cluster = cluster(for: rawCell) { GhosttyTerminalSnapshot.setCluster(cluster, forCell: index, in: &clusters) }
             }
-        } else {
-            cells = []
         }
         return GhosttyTerminalSnapshot(
             columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
             cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
-            defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells)
+            defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells,
+            clusters: clusters, mouseReportingActive: mouseReportingActive)
+    }
+
+    /// Rebuilds a cell's grapheme cluster from the shim's base codepoint plus the extra codepoints it
+    /// exported. Cells with no extras — nearly all of them — carry no cluster and render from the base
+    /// codepoint alone.
+    private static func cluster(for cell: SpacesGhosttyVtSnapshotCell) -> String? {
+        guard let extras = cell.grapheme_extras, cell.grapheme_extra_len > 0, let base = UnicodeScalar(cell.codepoint) else { return nil }
+        var scalars = String.UnicodeScalarView()
+        scalars.append(base)
+        for extra in UnsafeBufferPointer(start: extras, count: Int(cell.grapheme_extra_len)) {
+            // A surrogate or out-of-range value is not something the terminal can hold; the base
+            // codepoint alone still renders the cell.
+            guard let scalar = UnicodeScalar(extra) else { return nil }
+            scalars.append(scalar)
+        }
+        return String(scalars)
     }
 }

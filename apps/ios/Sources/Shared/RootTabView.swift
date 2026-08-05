@@ -48,6 +48,10 @@ struct RootTabView: View {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
+        }.alert("Deleted Workspace", isPresented: deletedWorkspaceNoticeBinding) {
+            Button("OK", role: .cancel) { model.dismissDeletedWorkspaceNotice() }
+        } message: {
+            Text(model.deletedWorkspaceNotice ?? "")
         }.onChange(of: model.isShowingConnectionSettings) { _, isShowing in if isShowing { model.selectedTab = .settings } }.onOpenURL { url in
             switch SpacesIncomingLinkRoute.route(for: url) {
             case .pairing(let url): model.preparePairingLink(url)
@@ -75,9 +79,14 @@ struct RootTabView: View {
                 // leaves any open terminal viewer's own stream alone — see its doc comment.
                 SpacesMobileDeviceStore.clearActiveHosts()
                 model.resetActiveConnectionEndpoint()
+                model.resumeTerminalWatch()
             case .background:
                 model.browserProxyStop()
                 model.noteConnectionMonitoringPaused()
+                // An open terminal detail survives backgrounding, so watching has to be ended here or the
+                // app would go on treating a session the user cannot see as the one they are looking at
+                // and swallow the bells it rings while away.
+                model.suspendTerminalWatch()
             case .inactive: break
             @unknown default: break
             }
@@ -85,6 +94,10 @@ struct RootTabView: View {
     }
 
     private var errorAlertBinding: Binding<Bool> { Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.dismissError() } }) }
+
+    private var deletedWorkspaceNoticeBinding: Binding<Bool> {
+        Binding(get: { model.deletedWorkspaceNotice != nil }, set: { if !$0 { model.dismissDeletedWorkspaceNotice() } })
+    }
 
     /// Slim accent-tinted strip pinned above every tab while Demo Mode is on, so the sample-data context
     /// stays visible on all four tabs and one tap turns it off. Absent (zero height) when Demo Mode is off.

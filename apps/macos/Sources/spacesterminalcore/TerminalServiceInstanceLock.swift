@@ -1,4 +1,5 @@
 import Foundation
+import spacesdatabase
 
 #if canImport(Darwin)
     import Darwin
@@ -19,9 +20,22 @@ public enum TerminalServiceInstanceLockError: Error, Equatable, CustomStringConv
 }
 
 public final class TerminalServiceInstanceLock {
+    /// The live owner of a profile lock.
+    public struct ActiveOwner: Equatable, Sendable {
+        public let processID: Int32
+        /// The database schema version the owner's build maintains, as the owner declared it when it
+        /// took the lock. `nil` when the record names none, which is an acquirer from before the
+        /// declaration existed and therefore older than any build that reads this.
+        public let schemaTarget: Int?
+    }
+
     private struct LockRecord: Codable {
         let pid: Int32
         let token: String
+        /// Declared at acquisition so another process can tell what schema the owner is going to leave
+        /// this profile on without asking that owner anything. `Optional` for decoding only: a record
+        /// missing the field reads as an older acquirer instead of failing to parse.
+        let schemaTarget: Int?
     }
 
     private let path: String
@@ -39,7 +53,7 @@ public final class TerminalServiceInstanceLock {
 
     public static func acquire(path: String, processID: Int32 = getpid(), fileManager: FileManager = .default) throws -> TerminalServiceInstanceLock {
         let token = UUID().uuidString
-        let record = LockRecord(pid: processID, token: token)
+        let record = LockRecord(pid: processID, token: token, schemaTarget: DatabaseSchema.currentVersion)
         let lockURL = URL(fileURLWithPath: path, isDirectory: false)
         try fileManager.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -67,14 +81,19 @@ public final class TerminalServiceInstanceLock {
         try? fileManager.removeItem(atPath: path)
     }
 
-    /// Returns the live daemon pid recorded by the profile lock, or `nil` when the lock is absent,
-    /// stale, or unreadable. The database migration guard uses the existing instance lock so a newer
-    /// helper can recognize an older running daemon without requiring that daemon to implement a new
-    /// handshake first.
-    public static func activeOwnerProcessID(path: String) throws -> Int32? {
+    /// Returns the live owner recorded by the profile lock, or `nil` when the lock is absent, stale, or
+    /// unreadable. The database migration guard uses the existing instance lock so a newer helper can
+    /// recognize an older running daemon without requiring that daemon to implement a new handshake
+    /// first, and reads the owner's declared schema target to tell that older daemon apart from a
+    /// same-build daemon still doing its own schema work.
+    public static func activeOwner(path: String) throws -> ActiveOwner? {
         guard let record = try existingRecord(path: path), processIsAlive(record.pid) else { return nil }
-        return record.pid
+        return ActiveOwner(processID: record.pid, schemaTarget: record.schemaTarget)
     }
+
+    /// The live daemon pid recorded by the profile lock, for callers that only need to know whether
+    /// somebody owns the profile.
+    public static func activeOwnerProcessID(path: String) throws -> Int32? { try activeOwner(path: path)?.processID }
 
     private static func removeStaleLockIfNeeded(path: String, fileManager: FileManager) throws -> Bool {
         guard let record = try existingRecord(path: path) else {

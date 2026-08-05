@@ -150,6 +150,52 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         XCTAssertEqual(relaunchCount, 0)
     }
 
+    /// The local-endpoint recovery's bootstrap: the daemon it needs was down and has just been started, so
+    /// it answers its control socket while its Device API listener is still coming up. That window must be
+    /// waited out, not reported as a failure — the ordinary bootstrap reports it (see the test above,
+    /// where a daemon with live sessions gets the not-running response straight back) because its recovery
+    /// for it is a relaunch it must not aim at live sessions. This never relaunches, so it can simply wait.
+    func testBootstrapAwaitingDeviceAPIWaitsForAJustStartedDaemonsListenerInsteadOfFailing() throws {
+        var ensureCount = 0
+        var sendCount = 0
+
+        let response = try SpacesDeviceAPIControlClient.bootstrapAwaitingDeviceAPI(
+            timeout: 1,
+            ensureRunning: { _ in
+                ensureCount += 1
+                return true
+            },
+            send: { _ in
+                sendCount += 1
+                // The daemon is up and answering, but its Device API supervisor has not bound the listener
+                // for the first two polls.
+                if sendCount < 3 { return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Bootstrapped local Device API client.")
+            }, retryInterval: 0)
+
+        XCTAssertTrue(response.ok)
+        // The daemon is started once, and the bootstrap is the readiness signal it polls.
+        XCTAssertEqual(ensureCount, 1)
+        XCTAssertEqual(sendCount, 3)
+    }
+
+    func testBootstrapAwaitingDeviceAPIStopsAtTheDeadlineWhenTheListenerNeverComesUp() throws {
+        var sendCount = 0
+
+        // Bounded: a listener that never binds ends in the truthful not-running response rather than an
+        // endless wait, and the caller reports the local daemon as unreachable.
+        let response = try SpacesDeviceAPIControlClient.bootstrapAwaitingDeviceAPI(
+            timeout: 0.05, ensureRunning: { _ in true },
+            send: { _ in
+                sendCount += 1
+                return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.")
+            }, retryInterval: 0)
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.message, "Device API is not running.")
+        XCTAssertGreaterThan(sendCount, 1)
+    }
+
     func testControlResponseKeepsPollingAfterRelaunchRefusesBusyDaemonUntilDeviceAPIRecovers() throws {
         var relaunchCount = 0
         var sendCount = 0
@@ -278,8 +324,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "utun4", address: "100.64.12.34", flags: activeFlags | IFF_POINTOPOINT, discoveryIndex: 0)
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: tailnetOnly), ["100.64.12.34"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: tailnetOnly), ["100.64.12.34"])
     }
 
     func testWildcardPairingLinkHostsWithOnlyLANInterfacesYieldsSingleEntry() {
@@ -289,8 +334,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "bridge100", address: "192.168.2.1", flags: activeFlags, discoveryIndex: 1),
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: lanOnly), ["192.168.1.24"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: lanOnly), ["192.168.1.24"])
     }
 
     func testWildcardPairingLinkHostsDoesNotTreatNonTunnelCGNATAddressAsTailnet() {
@@ -310,14 +354,12 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             .init(name: "en0", address: "192.168.1.24", flags: activeFlags, discoveryIndex: 0)
         ]
 
-        XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "203.0.113.5", interfaceAddresses: interfaces), ["203.0.113.5"])
+        XCTAssertEqual(SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "203.0.113.5", interfaceAddresses: interfaces), ["203.0.113.5"])
     }
 
     func testWildcardPairingLinkHostsWithNoInterfacesFallsBackToLoopback() {
         XCTAssertEqual(
-            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: []),
-            [SpacesDeviceAPIDefaults.loopbackHost])
+            SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: "0.0.0.0", interfaceAddresses: []), [SpacesDeviceAPIDefaults.loopbackHost])
     }
 
     func testOwnerGatedTerminalCommandsRequireMobileClientID() async throws {
@@ -520,7 +562,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let project = ProjectRecord(id: "project-dead-service", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
             let workspace = WorkspaceRecord(
                 id: "workspace-dead-service", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: "main", isDefault: false,
-                isArchived: false, isRunning: true, lastLaunchedAt: nil)
+                isRunning: true, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
 

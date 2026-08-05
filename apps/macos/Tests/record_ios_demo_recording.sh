@@ -340,13 +340,41 @@ check_size() {
 }
 
 validate() {
-  log "Validating every ndjson line decodes with the production codecs and renders non-empty text..."
-  local file text
+  # The fixture contract: a recording is only shippable if every session ended the run in the
+  # state the demo depends on. A fixture process dying mid-run (its recording legitimately skips
+  # the resize path and keeps a stale-grid final frame) must fail the run, not ship silently.
+  log "Validating fixture session states..."
+  local slug expected_state actual_state
+  for slug in demo-harbor-agent:running demo-harbor-backend:running demo-harbor-frontend:running demo-lantern-frontend:running demo-lantern-backend:exited; do
+    expected_state="${slug##*:}"
+    slug="${slug%%:*}"
+    actual_state="$(jq -r --arg id "$slug" '.result.overview.sessions[] | select(.id == $id) | .state' "$output_dir/overview.json")"
+    if [[ "$actual_state" != "$expected_state" ]]; then
+      log "Fixture session $slug ended the run '$actual_state'; the demo needs it '$expected_state'."
+      exit 1
+    fi
+  done
+
+  log "Validating every ndjson line decodes with the production codecs, renders non-empty text, and matches its grid..."
+  local file text dims grid_dir expected_dims
   while IFS= read -r file; do
     text="$(demo_env "$spacese2e" render-update-text <"$file" | jq -r 'select(.ok == true) | .text // ""')"
     if [[ -z "${text//[$'\n\r\t ']/}" ]]; then
       log "Empty or undecodable render text in $file"
       exit 1
+    fi
+    # Every decoded frame from a running session must be at the grid its directory names: a
+    # resize that silently failed to land before capture records the whole session at the wrong
+    # size. Ended sessions are exempt — they skip the owner/resize path and keep the persisted
+    # final frame at whatever grid they exited with.
+    if [[ "$(jq -r --arg id "$(basename "$file" .ndjson)" '.result.overview.sessions[] | select(.id == $id) | .state' "$output_dir/overview.json")" == "running" ]]; then
+      grid_dir="$(basename "$(dirname "$file")")"
+      expected_dims="${grid_dir/x/ }"
+      dims="$(demo_env "$spacese2e" render-update-text <"$file" | jq -r 'select(.ok == true and .columns != null) | "\(.columns) \(.rows)"' | sort -u)"
+      if [[ "$dims" != "$expected_dims" ]]; then
+        log "Recorded grid mismatch in $file: expected '$expected_dims', decoded '$dims'"
+        exit 1
+      fi
     fi
   done < <(find "$output_dir/grids" -name '*.ndjson' | sort)
   log "Validation passed."

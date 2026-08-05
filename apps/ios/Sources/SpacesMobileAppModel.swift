@@ -191,12 +191,22 @@ enum SpacesMobileTab: String, Hashable, Sendable {
     case settings
 }
 
+/// A band of terminal sessions that belong to a workspace but are not among its runtime rows, listed
+/// after the projects on the Spaces tab.
 struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
-    let id: String
+    let workspaceID: String
     let projectName: String
     let workspaceTitle: String
     let workspaceDirectory: String
     let sessions: [SpacesDeviceTerminalSessionSummary]
+
+    /// Deliberately not the workspace id. A workspace with loose sessions is listed twice on the Spaces
+    /// tab — once as its own band among the projects, once as this band — and both rows live in the same
+    /// list section, so identifying this one by the workspace id would give two different rows the same
+    /// identity. The list then diffs a state with fewer distinct identities than it has rows, and every
+    /// batch update it performs is one item short of the count its data source reports, which is an
+    /// inconsistent update and crashes the collection view.
+    var id: String { "loose:\(workspaceID)" }
 }
 
 enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
@@ -318,12 +328,23 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
+    /// The row's secondary text, matching the Mac sidebar: a configured row shows what it runs, an ad
+    /// hoc shell shows the title its program reported (nothing until it reports one).
     var detail: String {
+        switch source {
+        case .process, .codingAgent: command
+        case .terminal(let row): row.liveTitle ?? ""
+        case .browserSession(let row): row.detail
+        }
+    }
+
+    /// What launching this row runs. Only configured processes and coding agents are launched from a
+    /// row — an ad hoc shell already exists and a browser session opens a URL — so the rest have none.
+    var command: String {
         switch source {
         case .process(let row): row.command
         case .codingAgent(let row): row.command
-        case .terminal(let row): row.workingDirectory
-        case .browserSession(let row): row.detail
+        case .terminal, .browserSession: ""
         }
     }
 
@@ -460,6 +481,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
     var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
     var errorMessage: String?
+    /// The branch-deletion report a completed workspace delete came back with, shown once and cleared.
+    /// Only a delete that asked for a branch to be deleted produces one, so a plain delete stays silent.
+    var deletedWorkspaceNotice: String?
     var searchText = ""
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
     var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
@@ -468,9 +492,56 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
     /// launch starts fully expanded.
     var collapsedWorkspaceIDs: Set<String> = []
-    /// Attention events the user cleared. In-memory only; identities are stable per source+kind+date
-    /// so a cleared event stays cleared across refreshes until the source changes state again.
+    /// Whether the Spaces tab's "Hidden" recovery section is expanded. In-memory only, like
+    /// `collapsedWorkspaceIDs`; a fresh launch starts collapsed since it exists to be checked
+    /// occasionally, not browsed by default.
+    var isHiddenSectionExpanded = false
+    /// Workspaces whose delete mutation is in flight. The daemon takes seconds to stop the workspace and
+    /// remove its worktree, and every overview published in that window still lists it, so the Spaces tab
+    /// marks the workspace as deleting instead of leaving it looking untouched (see
+    /// `isWorkspacePendingDeletion`). In-memory and per-run, like `collapsedWorkspaceIDs`: the device is
+    /// authoritative about whether a delete landed, and a relaunch reads it fresh.
+    private var workspaceIDsPendingDeletion: Set<String> = []
+    /// Deletes whose outcome no overview has been able to confirm yet: the archive's response was lost and
+    /// every reconciliation refetch failed too, so nothing has proved whether the workspace is gone. The
+    /// row stays marked and the error stays unsurfaced until an overview does get published, which is the
+    /// first thing that can answer. In-memory and per-run like `workspaceIDsPendingDeletion`: a relaunch
+    /// refetches reality rather than restoring a verdict that was never reached.
+    private var workspaceDeletionsAwaitingOverview: [String: DeferredWorkspaceDeletion] = [:]
+    /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
+    /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
+    /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
+    /// device's overview on every refresh; reloaded from the newly active device's bucket whenever
+    /// `activeDeviceID` changes, so this always describes the device whose overview is being published.
     var dismissedAlertIDs: Set<String> = []
+    /// The session whose terminal detail is on screen, or nil when no terminal detail is open. Set by
+    /// the terminal navigation flow as its selected session changes. Having the route open is not the
+    /// same as watching it — see `watchedTerminalSessionID`.
+    private(set) var activeTerminalSessionID: String?
+    /// When the current watch of `activeTerminalSessionID` began, or nil when nothing is being watched.
+    /// A watch runs while the detail route is open *and* the app is in the foreground: the route alone
+    /// says nothing about whether the user can see it.
+    @ObservationIgnored private var activeTerminalWatchStartedAt: Date?
+    /// The session the user is actually looking at, which is what bell suppression keys on.
+    var watchedTerminalSessionID: String? { activeTerminalWatchStartedAt == nil ? nil : activeTerminalSessionID }
+    /// The user's recent watches of each recently watched session's terminal detail, oldest first.
+    /// Overview polling is paused while a detail is open, so a bell rung during a watch is only seen
+    /// after it ends; these windows suppress it then. In-memory only, like `dismissedAlertIDs`.
+    ///
+    /// A list rather than one window per session because a single visit to a terminal produces several:
+    /// backgrounding the app ends one and returning starts the next, and the bell rung before the app
+    /// went away is only seen after the user finally leaves the detail — by which time a
+    /// keep-the-latest-only rule would have dropped the window that covers it. The windows are
+    /// deliberately never merged: the gap between them is the stretch the user could not see, and
+    /// closing it would re-suppress exactly the bells this is meant to surface.
+    private(set) var terminalWatchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]] = [:]
+    /// Upper bound on remembered watch windows per session. Each window only has to survive from its
+    /// watch ending to the next overview refresh, so a handful covers even repeated backgrounding within
+    /// one visit; past the bound the oldest window is dropped.
+    private static let maxRememberedWatchesPerSession = 8
+    /// Upper bound on sessions with remembered watches, dropping the one whose watching ended longest
+    /// ago, so rapid session hopping cannot grow the map without bound.
+    private static let maxRememberedWatchedSessions = 16
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
     /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
@@ -492,6 +563,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// Bumped every time a mutation's result is applied. A poll's overview is a snapshot of the moment its
+    /// fetch was issued, so one that started before a mutation and lands after it carries pre-mutation
+    /// state: publishing it would put a deleted workspace, or a stopped process, back on screen as an
+    /// ordinary actionable row until the next poll two seconds later. A refresh captures this value when
+    /// its fetch begins and discards its result if it moved — the same discard-don't-publish rule
+    /// `overviewIdentity` applies to connection changes, for staleness in time rather than in connection.
+    @ObservationIgnored private var mutationGeneration = 0
     /// When the current run of failed overview fetches began, gating the connection-error alert (see
     /// `refreshFailureAlertDelay`). Tagged with the connection identity it was gathered against, so any
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
@@ -530,11 +608,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
     /// instead of sleeping through the production wait.
     @ObservationIgnored private let refreshFailureAlertDelay: Duration
+    /// Wait between the overview refetches that reconcile an indeterminate workspace delete (production
+    /// default 2s, matching the ordinary poll cadence). Injectable so tests exercise the reconciliation
+    /// loop without sleeping through it.
+    @ObservationIgnored private let workspaceDeletionReconciliationInterval: Duration
     /// Source of "now" for the refresh-failure streak's start time and elapsed-time check. The streak is
     /// pure bookkeeping against a clock — no real waiting happens between reading it twice — so tests
     /// inject a fake that advances on command instead of sleeping past `refreshFailureAlertDelay` in
     /// real time. Production always uses the real clock.
     @ObservationIgnored private let now: @Sendable () -> ContinuousClock.Instant
+    /// Wall-clock source for terminal watch windows, which are compared against daemon-stamped bell
+    /// timestamps and so cannot use the monotonic clock above. Tests inject a fake to place a bell inside
+    /// or outside a watch window exactly, instead of racing the real clock's sub-millisecond gaps against
+    /// the comparison's skew tolerance. Production always uses the real clock.
+    @ObservationIgnored private let wallClock: @Sendable () -> Date
 
     init() {
         #if DEBUG
@@ -550,7 +637,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonUpdatePollInterval = .seconds(3)
         daemonUpdateTimeout = .seconds(30)
         refreshFailureAlertDelay = .seconds(5)
+        workspaceDeletionReconciliationInterval = .seconds(2)
         now = { ContinuousClock.now }
+        wallClock = { Date() }
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -566,6 +655,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             isDemoModeEnabled = true
             self.bridgeClient = bridgeClient
             commandChannel = bridgeClient.makeCommandChannel()
+            loadDismissedAlertIDsForActiveDevice()
             return
         }
 
@@ -576,12 +666,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
     }
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
-        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+        refreshFailureAlertDelay: Duration = .seconds(5), workspaceDeletionReconciliationInterval: Duration = .seconds(2),
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }, wallClock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.settings = settings
         pairedDevices = []
@@ -593,13 +686,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
         self.refreshFailureAlertDelay = refreshFailureAlertDelay
+        self.workspaceDeletionReconciliationInterval = workspaceDeletionReconciliationInterval
         self.now = now
+        self.wallClock = wallClock
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
     /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
     /// from the Mac's Workspace Visibility dialog is hidden here too.
-    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden } }
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isHidden } }
+
+    /// Hidden workspaces, in the overview's own order — the same order `visibleWorkspaces` uses without
+    /// any further sort of its own. Backs the Spaces tab's "Hidden" recovery section.
+    var hiddenWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter(\.isHidden) }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
@@ -622,27 +721,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspaces = visibleWorkspaces
         let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
-        // A hidden workspace's loose sessions are hidden with it; otherwise hiding a workspace would just
-        // move its terminals into a loose group instead of removing them from the list.
-        let hiddenWorkspaceIDs = Set((overview?.workspaces ?? []).filter(\.isHidden).map(\.id))
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A loose group is a band belonging to a workspace this list is showing, so only that workspace's
+        // sessions can form one. That drops a hidden workspace's sessions (otherwise hiding a workspace
+        // would just move its terminals into a loose group instead of removing them from the list) and
+        // sessions whose workspace record the overview no longer carries at all — a deleted workspace's
+        // ended sessions linger for a refresh or two, and they must not raise a band named for a
+        // workspace that no longer exists beside the band being removed.
         let sessions = (overview?.sessions ?? []).filter { session in
-            !hiddenWorkspaceIDs.contains(session.workspaceID) && !representedSessionIDs.contains(session.id)
+            workspaceByID[session.workspaceID] != nil && !representedSessionIDs.contains(session.id)
                 && terminalSessionMatchesFilters(session, query: query)
         }
         let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
-        return grouped.values.compactMap { sessions in
-            guard let firstSession = sessions.first else { return nil }
-            let workspace = workspaceByID[firstSession.workspaceID]
-            let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
-            let workspaceTitle = workspace?.displayName ?? firstSession.workspaceTitle ?? "Unassigned"
-            let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
-            let orderedSessions = sessions.sorted(by: sessionSort)
-
+        return grouped.values.compactMap { sessions -> SpacesMobileTerminalWorkspaceGroup? in
+            // Both lookups hold by construction: the group's key came from a session that passed the
+            // `workspaceByID` filter above.
+            guard let firstSession = sessions.first, let workspace = workspaceByID[firstSession.workspaceID] else { return nil }
             return SpacesMobileTerminalWorkspaceGroup(
-                id: firstSession.workspaceID, projectName: projectName, workspaceTitle: workspaceTitle, workspaceDirectory: workspaceDirectory,
-                sessions: orderedSessions)
+                workspaceID: workspace.id, projectName: workspace.projectName, workspaceTitle: workspace.displayName,
+                workspaceDirectory: workspace.dir, sessions: sessions.sorted(by: sessionSort))
         }.sorted(by: groupSort)
     }
 
@@ -650,7 +748,59 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// with the user's cleared events filtered out.
     var attentionGroups: [SpacesMobileAttentionGroup] {
         guard let overview else { return [] }
-        return SpacesMobileAttention.groups(in: overview, dismissedEventIDs: dismissedAlertIDs)
+        return SpacesMobileAttention.groups(
+            in: overview, dismissedEventIDs: dismissedAlertIDs, focusedSessionID: watchedTerminalSessionID,
+            watchWindowsBySessionID: terminalWatchWindowsBySessionID)
+    }
+
+    /// Points bell suppression at the terminal detail now on screen, or nil once none is. Leaving a
+    /// detail (closing it, or switching straight to another session) closes the outgoing session's watch
+    /// window, so the bell it rang while the user was watching does not alert once polling resumes.
+    func setActiveTerminalSession(_ sessionID: String?) {
+        guard sessionID != activeTerminalSessionID else { return }
+        endActiveTerminalWatch()
+        activeTerminalSessionID = sessionID
+        if sessionID != nil { activeTerminalWatchStartedAt = wallClock() }
+    }
+
+    /// Ends the watch when the app leaves the foreground. The detail route survives backgrounding
+    /// untouched, so without this the app would keep counting a session the user cannot see as watched
+    /// and swallow the bells it rang while away.
+    func suspendTerminalWatch() { endActiveTerminalWatch() }
+
+    /// Ends the watch on `sessionID` because its terminal detail left the screen — including the ways that
+    /// never route through `setActiveTerminalSession`, such as a device switch tearing the whole
+    /// navigation stack down. A no-op unless that session is still the one being watched, so a teardown
+    /// arriving after another session's detail has taken over leaves the new watch alone, and the ordinary
+    /// back-out (which ends the watch through `setActiveTerminalSession(nil)` first) records one window
+    /// rather than two.
+    func endTerminalWatch(forSessionID sessionID: String) {
+        guard activeTerminalSessionID == sessionID else { return }
+        setActiveTerminalSession(nil)
+    }
+
+    /// Resumes watching the still-open detail route on return to the foreground. The new watch starts
+    /// now, so the stretch spent in the background stays outside every recorded window and a bell rung
+    /// in it alerts.
+    func resumeTerminalWatch() {
+        guard activeTerminalSessionID != nil, activeTerminalWatchStartedAt == nil else { return }
+        activeTerminalWatchStartedAt = wallClock()
+    }
+
+    private func endActiveTerminalWatch() {
+        guard let sessionID = activeTerminalSessionID, let startedAt = activeTerminalWatchStartedAt else { return }
+        activeTerminalWatchStartedAt = nil
+        var windows = terminalWatchWindowsBySessionID[sessionID] ?? []
+        windows.append(SpacesMobileTerminalWatchWindow(startedAt: startedAt, endedAt: wallClock()))
+        if windows.count > Self.maxRememberedWatchesPerSession { windows.removeFirst(windows.count - Self.maxRememberedWatchesPerSession) }
+        terminalWatchWindowsBySessionID[sessionID] = windows
+        if terminalWatchWindowsBySessionID.count > Self.maxRememberedWatchedSessions,
+            let stalest = terminalWatchWindowsBySessionID.min(by: {
+                ($0.value.last?.endedAt ?? .distantPast) < ($1.value.last?.endedAt ?? .distantPast)
+            })?.key
+        {
+            terminalWatchWindowsBySessionID.removeValue(forKey: stalest)
+        }
     }
 
     /// Undismissed attention-event count, shown as the Alerts tab badge.
@@ -659,13 +809,78 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Marks every currently derived attention event dismissed.
     func clearAlerts() {
         guard let overview else { return }
-        dismissedAlertIDs.formUnion(SpacesMobileAttention.events(in: overview).map(\.id))
+        dismissedAlertIDs.formUnion(
+            SpacesMobileAttention.events(
+                in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
+            ).map(\.id))
+        saveDismissedAlertIDs()
+    }
+
+    /// Dismisses one attention event, leaving the rest of its band in place.
+    func dismissAlert(_ event: SpacesMobileAttentionEvent) {
+        dismissedAlertIDs.insert(event.id)
+        saveDismissedAlertIDs()
+    }
+
+    /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
+    /// bounded by what the device currently reports rather than growing for the life of the install.
+    private func pruneDismissedAlertIDs(against overview: SpacesDeviceOverviewPayload) {
+        let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview)
+        guard retained != dismissedAlertIDs else { return }
+        dismissedAlertIDs = retained
+        saveDismissedAlertIDs()
+    }
+
+    /// Loads the persisted dismissal bucket for `activeDeviceID` into the in-memory set, discarding
+    /// whatever the previous active device's bucket held. Called at every chokepoint that changes the
+    /// active device — init, a device switch or removal, and Demo Mode enable/disable — so
+    /// `dismissedAlertIDs` always belongs to the device whose overview is about to be published, never a
+    /// leftover from the connection this model just switched away from.
+    private func loadDismissedAlertIDsForActiveDevice() {
+        dismissedAlertIDs = activeDeviceID.map { SpacesMobileDismissedAlertsStore.load(deviceID: $0) } ?? []
+        // Unconfirmed deletes belong to the connection they were issued against: another device's overview
+        // cannot answer whether this one's workspace was deleted, and leaving an entry behind would let the
+        // next published overview resolve it against the wrong device. Dropped with the marking, silently —
+        // the delete may well have landed, and there is no longer anyone to report a verdict to.
+        workspaceDeletionsAwaitingOverview.removeAll()
+        workspaceIDsPendingDeletion.removeAll()
+    }
+
+    /// Persists `dismissedAlertIDs` into the active device's bucket. A `nil` `activeDeviceID` (no device
+    /// selected yet) has nothing to attribute the dismissals to, so it's a no-op rather than a shared
+    /// bucket that would leak across whichever device pairs first.
+    private func saveDismissedAlertIDs() {
+        guard let activeDeviceID else { return }
+        SpacesMobileDismissedAlertsStore.save(dismissedAlertIDs, deviceID: activeDeviceID)
+    }
+
+    /// Drops persisted dismissal buckets for devices no longer known: the paired devices plus the demo
+    /// device, which always keeps its own bucket since Demo Mode is available regardless of pairing
+    /// state. Skipped while Demo Mode is on, because `pairedDevices` is swapped down to just the
+    /// synthetic Demo Mac then — running this against that narrowed list would read as every real device
+    /// having been unpaired and wipe their dismissals. That leaves the real buckets untouched by a Demo
+    /// Mode round trip and prunes only when `pairedDevices` genuinely reflects the paired list.
+    private func pruneDismissedAlertsForUnknownDevices() {
+        guard !isDemoModeEnabled else { return }
+        SpacesMobileDismissedAlertsStore.retainDevices(Set(pairedDevices.map(\.id)).union([SpacesMobileDemoDevice.id]))
     }
 
     /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
     var agentGroups: [SpacesMobileAgentGroup] {
         guard let overview else { return [] }
         return SpacesMobileAgentGrouping.groups(in: overview)
+    }
+
+    /// Whether this workspace's delete is in flight. The Spaces tab dims its band and rows, puts a spinner
+    /// where the band's collapse chevron goes, and stops accepting anything on them — the feedback for a
+    /// delete the daemon takes seconds to complete.
+    ///
+    /// The union of the deletes this app issued (`workspaceIDsPendingDeletion`) and the teardowns the
+    /// daemon reports running (`workspaceIDsWithTeardownInFlight`), so a delete started on the Mac — or a
+    /// project delete taking its workspaces with it — marks the row here too rather than leaving it
+    /// looking ordinary and actionable while its worktree is being removed.
+    func isWorkspacePendingDeletion(_ workspaceID: String) -> Bool {
+        workspaceIDsPendingDeletion.contains(workspaceID) || overview?.workspaceIDsWithTeardownInFlight.contains(workspaceID) == true
     }
 
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
@@ -675,6 +890,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             collapsedWorkspaceIDs.insert(workspaceID)
         }
     }
+
+    func toggleHiddenSectionExpanded() { isHiddenSectionExpanded.toggle() }
 
     /// Resolves a session summary for navigation, including sessions synthesized from
     /// workspace terminal rows that are not in the overview's session list.
@@ -849,6 +1066,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // uninterrupted stretch of watching the connection.
         let attemptStartedAt = now()
         let monitoringGeneration = connectionMonitoringGeneration
+        // Captured before the fetch is issued: this overview describes the daemon as of now, so a mutation
+        // applied while it is in flight makes it stale and it must be dropped rather than published.
+        let mutationGenerationAtFetch = mutationGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -858,7 +1078,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard identity == overviewIdentity else { return }
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             applyCompatibility(overview.daemonStatus)
             // The daemon reports the addresses it is currently reachable at on every connection. This is
             // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
@@ -869,11 +1089,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
             if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
-            guard identity == overviewIdentity else { return }
-            self.overview = acceptedOverview
+            // Re-checked after the await above, not just at fetch return: a mutation applying while the
+            // route update was suspended makes this poll's payload pre-mutation state.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            // Cleared before publishing, not after: the device answered, so any stale connection error is
+            // over — but publishing is also what settles a deferred delete, and that may raise an error of
+            // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
             connectionNotice = nil
             errorMessage = nil
             refreshFailureStreak = nil
+            publishOverview(acceptedOverview)
             // Rebuilds the live client only after the overview above is already published, deliberately:
             // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
             // in this method could drop the very overview the user is waiting for. Publishing first means
@@ -881,14 +1106,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // above already confirmed no device switch happened in between.
             if hostsChanged { rebuildLiveClientAfterHostsBackfill() }
         } catch is CancellationError { return } catch {
-            guard identity == overviewIdentity else { return }
+            // A mutation that landed while this poll was failing has already published the device's real
+            // state and cleared any error; a stale failure must not overwrite that with an outage report.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
             await refreshCompatibility(identity: identity)
-            // The user may have switched or removed the active device while the fallback handshake was
-            // in flight; a stale verdict must not clear the new connection's state.
-            guard identity == overviewIdentity else { return }
+            // The user may have switched or removed the active device — or a mutation may have published
+            // fresher state — while the fallback handshake was in flight; a stale verdict must not
+            // overwrite either.
+            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
             if isActiveDeviceBlocked {
                 overview = nil
                 connectionNotice = nil
@@ -1081,6 +1309,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1155,6 +1385,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
+        loadDismissedAlertIDsForActiveDevice()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1182,6 +1413,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         browserRoutingTable.removeDevice(deviceID: id)
         let table = browserRoutingTable
         Task { await browserProxy.updateRoutes(table) }
@@ -1229,6 +1462,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewIdentity += 1
         DemoModeStore.save(true)
         clearActiveConnectionState()
+        loadDismissedAlertIDsForActiveDevice()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1245,6 +1479,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overviewIdentity += 1
         DemoModeStore.save(false)
         clearActiveConnectionState()
+        loadDismissedAlertIDsForActiveDevice()
+        pruneDismissedAlertsForUnknownDevices()
         Task { await previousCommandChannel.close() }
     }
 
@@ -1444,6 +1680,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving;
+        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`. The
+        // marked predicate, not the local set: a delete started on another client is just as much a row
+        // on its way out.
+        guard !isWorkspacePendingDeletion(workspace.id) else { return }
         await performWorkspaceMutation {
             let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
@@ -1453,6 +1694,215 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
         }
     }
+
+    /// Unhides the workspace. Unlike `hideWorkspace`, this never stops anything — a hidden workspace was
+    /// already stopped on the way in, and unhiding is purely a visibility change back to normal.
+    func unhideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: false, commandChannel: commandChannel)
+        }
+    }
+
+    /// Reconciliation attempts after an indeterminate `archiveWorkspace` failure (see `deleteWorkspace`
+    /// and `isIndeterminateDeleteOutcome`). The daemon
+    /// runs the delete on its own teardown queue and can keep going well past this request's timeout, so
+    /// refetching the overview a few times gives a delete that is still finishing a chance to resolve to
+    /// success instead of a spurious error. Five attempts at `workspaceDeletionReconciliationInterval`
+    /// give the daemon a settle window on the order of the poll cadence rather than an instant verdict.
+    static let workspaceDeletionReconciliationAttempts = 5
+
+    /// Deletes the workspace, optionally deleting the branch it was created on locally and/or on the
+    /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
+    /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
+    func deleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) async {
+        // A workspace already on its way out takes no further action. `isMutating` alone does not cover
+        // this: a delete whose outcome could not be confirmed leaves the mark on with the mutation over,
+        // so without the second guard the row could be deleted a second time while the first is unresolved.
+        // The Spaces tab suppresses the actions too; this is the same rule enforced where it cannot be
+        // bypassed by a view that forgets to ask. The marked predicate, not the local set: a workspace the
+        // daemon reports it is already tearing down (a delete issued from another client) must not be
+        // deleted a second time from here either.
+        guard !isMutating, !isWorkspacePendingDeletion(workspace.id) else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
+        // (which no longer carries the workspace) is published, so the band never flicks back to looking
+        // untouched on its way out; on a definitive failure lifting it restores the ordinary band beside
+        // the error. A timeout is neither of those — see the catch block below — so the mark's removal
+        // is handled explicitly per outcome instead of by an unconditional `defer`.
+        workspaceIDsPendingDeletion.insert(workspace.id)
+
+        // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
+        // The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own queue, so
+        // it can take many seconds — far longer than the 8s the poll allows itself. The transport does
+        // not serialize whole request/response round trips on a connection (issue #248): the poll and
+        // this request can interleave on one connection, and when the poll's own request times out,
+        // `SpacesDeviceNetworkRequestTransport.send` closes the shared connection out from under whatever
+        // else is using it, aborting this request client-side while the daemon keeps deleting regardless.
+        // A private channel, created for this mutation and closed after it — mirroring
+        // `requestDaemonUpdate` above — keeps the delete off the shared connection for its whole life,
+        // including the reconciliation reads below.
+        let deleteChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await deleteChannel.close() } }
+
+        do {
+            let response = try await bridgeClient.archiveWorkspace(
+                workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, commandChannel: deleteChannel
+            )
+            // Lifted only after the refreshed overview (which no longer carries the workspace) is
+            // published, so the band never flicks back to looking untouched on its way out.
+            defer { workspaceIDsPendingDeletion.remove(workspace.id) }
+            await applyMutationResponse(response, identity: identity)
+            guard identity == overviewIdentity else { return }
+            if let notice = response.mutationNotice, !notice.isEmpty { deletedWorkspaceNotice = notice }
+        } catch {
+            guard identity == overviewIdentity else {
+                // The connection changed under the delete. The mark is keyed by workspace id rather than
+                // by connection, so clearing it is always safe — and leaving it behind would dim that row
+                // for the rest of the run if the user ever switched back to this device.
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                return
+            }
+            guard isIndeterminateDeleteOutcome(error) else {
+                // The daemon answered and refused: the workspace was never touched, so un-mark it
+                // immediately and surface the error like any other failed mutation.
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                handleBridgeError(error)
+                return
+            }
+            // The delete's fate is unknown — the daemon may still be tearing the workspace down (see the
+            // channel comment above). Un-marking and reporting failure here would let the user retry-delete
+            // a workspace that is already doomed. Reconcile against fresh overviews instead: if the
+            // workspace stops appearing, treat the delete as successful and surface no error; only report
+            // the failure once the reconciliation budget is spent and the workspace is still listed.
+            let outcome = await reconcileWorkspaceDeletionOutcome(workspaceID: workspace.id, identity: identity, commandChannel: deleteChannel)
+            guard identity == overviewIdentity else {
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                return
+            }
+            let requestedBranchDeletion = deleteLocalBranch || deleteRemoteBranch
+            switch outcome {
+            case .present:
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                handleBridgeError(error)
+            case .gone:
+                workspaceIDsPendingDeletion.remove(workspace.id)
+                // The delete landed, but the branch-deletion report existed only in the response that was
+                // lost — reconciliation can prove the workspace is gone, not what happened to branches the
+                // user explicitly asked to delete. Say so rather than silently succeeding.
+                if requestedBranchDeletion { deletedWorkspaceNotice = Self.unknownBranchOutcomeNotice }
+            case .unknown:
+                // No genuine verdict was reached: either every refetch failed, or every refetch that
+                // succeeded found the workspace listed with its teardown still reported in flight — the
+                // daemon still working, not a failure. Clearing the marking and reporting failure here
+                // would be a verdict the client never reached — the row would go back to looking ordinary
+                // and offering Delete again, for a workspace the daemon may still finish deleting. The
+                // marking stays and the error is held until an overview can answer (see
+                // `resolveDeferredWorkspaceDeletions`). `isMutating` still clears on return, so only this
+                // row stays inert, not the whole UI.
+                workspaceDeletionsAwaitingOverview[workspace.id] = DeferredWorkspaceDeletion(
+                    error: error, requestedBranchDeletion: requestedBranchDeletion)
+            }
+        }
+    }
+
+    /// Whether a failed delete leaves the workspace's fate unknown, so it has to be reconciled against
+    /// fresh overviews instead of being reported as a failure.
+    ///
+    /// Only a refusal from the daemon is definitive, and it takes two things to prove one. First a Device
+    /// API error code, which `SpacesDeviceAPIClient` attaches exactly where it turns an `ok: false`
+    /// response into an error: every other failure the request can throw carries none — a client-side
+    /// timeout, an unreachable host, or the socket being closed under it when the app was backgrounded,
+    /// which arrives as an ordinary `requestFailed` — and none of those says anything about whether the
+    /// daemon accepted the delete. The transport cannot even report whether a failure happened before or
+    /// after the request went out, so every codeless failure reconciles; that costs nothing when it was
+    /// pre-send, since the first refetch finds the workspace still listed and the error surfaces then.
+    ///
+    /// Second, the code has to be a verdict on the request (`SpacesDeviceErrorCode.isRequestVerdict`)
+    /// rather than a report of something going wrong. A delete that succeeded and then failed while
+    /// building its refreshed overview answers with a coded `internalError`, and reading that as a refusal
+    /// would put the deleted workspace back as an ordinary actionable row.
+    private func isIndeterminateDeleteOutcome(_ error: Error) -> Bool {
+        guard let code = (error as? any SpacesDeviceErrorCodeProviding)?.spacesDeviceErrorCode else { return true }
+        return !code.isRequestVerdict
+    }
+
+    /// What reconciliation was able to establish about a delete whose response was lost.
+    ///
+    /// `unknown` is not a synonym for `present`: it means no overview ever resolved with a genuine verdict
+    /// either way. That covers both a fetch that never resolved and one that resolved but found the
+    /// workspace still listed with its teardown reported in flight (`workspaceIDsWithTeardownInFlight`) on
+    /// every attempt — the daemon saying it is still working, not that the delete failed. Reporting either
+    /// as `present` would be a fabricated verdict — the client would put the cached pre-delete row back and
+    /// call the delete failed while the daemon may well complete it moments later — so both defer instead,
+    /// to the first overview that can actually answer.
+    private enum WorkspaceDeletionReconciliation {
+        case gone
+        case present
+        case unknown
+    }
+
+    /// A delete parked in `workspaceDeletionsAwaitingOverview`, holding what the client owes the user once
+    /// an overview finally settles the question.
+    private struct DeferredWorkspaceDeletion {
+        /// Surfaced only if the workspace turns out to still be there.
+        let error: any Error
+        /// Whether the user asked for branches to be deleted, which decides if the unknown-branch-outcome
+        /// notice is owed when the workspace turns out to be gone.
+        let requestedBranchDeletion: Bool
+    }
+
+    /// Shown when a delete is confirmed complete but its response — the only thing that carried the
+    /// branch-deletion report — never arrived.
+    static let unknownBranchOutcomeNotice =
+        "Deleted the workspace, but the connection dropped before the branch-deletion result arrived. Check the branch in the repository."
+
+    /// Refetches the overview a bounded number of times after an indeterminate delete, looking for
+    /// the workspace to stop being listed. Returns whether the workspace is still present once the
+    /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
+    /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
+    /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
+    ///
+    /// A refetch that still lists the workspace is not automatically evidence of failure: the daemon runs
+    /// the delete's teardown on its own queue and reports which workspaces are still on it via
+    /// `workspaceIDsWithTeardownInFlight`. While the workspace's id is in that set, its continued presence
+    /// only means the daemon has not finished landing the delete yet, so those attempts do not count toward
+    /// `.present` — only a listing with no teardown queued behind it is a genuine sign the delete never
+    /// happened. If every attempt in the budget is spent this way the outcome is `.unknown`, deferring to
+    /// `resolveDeferredWorkspaceDeletions` instead of reporting a guessed failure.
+    private func reconcileWorkspaceDeletionOutcome(workspaceID: String, identity: Int, commandChannel: SpacesDeviceAPICommandChannel) async
+        -> WorkspaceDeletionReconciliation
+    {
+        // These fetches are issued after the delete was sent, so each one is newer than any poll already in
+        // flight; publishing one retires those polls the same way applying a mutation's own overview does.
+        mutationGeneration &+= 1
+        var resolvedAtLeastOnce = false
+        for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
+            guard identity == overviewIdentity else { return .unknown }
+            guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
+                if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
+                continue
+            }
+            guard identity == overviewIdentity else { return .unknown }
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            guard identity == overviewIdentity else { return .unknown }
+            publishOverview(refreshedOverview)
+            guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
+                errorMessage = nil
+                connectionNotice = nil
+                refreshFailureStreak = nil
+                return .gone
+            }
+            // Still listed, but that alone is not proof the delete failed — see the doc comment above.
+            // Only count this attempt toward `.present` when the daemon is not still working on it.
+            if !refreshedOverview.workspaceIDsWithTeardownInFlight.contains(workspaceID) { resolvedAtLeastOnce = true }
+            if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
+        }
+        return resolvedAtLeastOnce ? .present : .unknown
+    }
+
+    func dismissDeletedWorkspaceNotice() { deletedWorkspaceNotice = nil }
 
     private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async {
         guard !isMutating else { return }
@@ -1494,9 +1944,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
     /// rule the Mac sidebar's rename follows.
+    ///
+    /// Submitting an empty name clears an ad hoc terminal's rename, restoring the generated name it was
+    /// launched under. A config entry must keep a name, so an empty submission there is discarded.
     func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title != row.title, let target = renameTarget(for: row) else { return }
+        guard title != row.title, let target = renameTarget(for: row) else { return }
+        if title.isEmpty, case .workspaceConfig = target { return }
         await performWorkspaceMutation {
             switch target {
             case .terminalSession(let sessionID):
@@ -1620,7 +2074,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard session.rowKind == .liveSession else { return false }
         guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
         guard !query.isEmpty else { return true }
-        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title].compactMap(\.self).contains {
+        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title, session.liveTitle].compactMap(\.self).contains {
             $0.localizedStandardContains(query)
         }
     }
@@ -1652,7 +2106,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
-            id: sessionID, title: row.title, workingDirectory: row.workingDirectory, shell: "", command: nil,
+            id: sessionID, title: row.title, liveTitle: row.liveTitle, workingDirectory: row.workingDirectory, shell: "", command: nil,
             state: terminalSessionState(for: row.runState), backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
             workspaceID: row.workspaceID, workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
             projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: row.runState == .running,
@@ -1703,17 +2157,69 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
     /// must not overwrite the new connection's state with the previous backend's overview.
     private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
-        guard let overview = response.overview, identity == overviewIdentity else { return }
+        // The identity check comes first: a mutation that outlived its connection describes a backend this
+        // model no longer shows, and letting it bump the generation would make the NEW device's in-flight
+        // refresh discard a perfectly current overview.
+        guard identity == overviewIdentity else { return }
+        // Bumped for every applied mutation, including one that carried no overview: the daemon's state
+        // changed either way, so any poll already in flight is describing the world before it.
+        mutationGeneration &+= 1
+        guard let overview = response.overview else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
-        self.overview = overview
+        // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil
+        publishOverview(overview)
         // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
         // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
         // mutation keeps its original start time, and the next isolated failure alerts on the strength
         // of an outage that demonstrably ended.
         refreshFailureStreak = nil
+    }
+
+    /// Publishes an accepted overview and trims stale alert dismissals against it. Every path that
+    /// publishes a fetched overview goes through here, so the persisted dismissal set is pruned exactly
+    /// once per refresh. Clearing the overview (a device switch, a block) deliberately does not prune:
+    /// there is nothing to prune against, and pruning against nothing would discard every dismissal.
+    /// Settles deletes whose outcome nothing could confirm when they finished (see the `.unknown` case in
+    /// `deleteWorkspace`). Every published overview is a chance to answer, whichever path produced it —
+    /// the ordinary poll, a later mutation, or a reconciliation — so the resolution lives here, at the one
+    /// place an overview becomes the app's state.
+    ///
+    /// Absent means the delete landed: the marking is dropped silently, and the unknown-branch-outcome
+    /// notice is owed if the user had asked for branches to go too. Listed with no teardown queued behind
+    /// it means the delete did not land: the marking is dropped and the error the client held back is
+    /// surfaced now, against a row the user can act on again. Listed WITH its id in
+    /// `workspaceIDsWithTeardownInFlight` is not a verdict at all — the daemon is still tearing it down —
+    /// so that entry is left in place for a later overview to answer instead of being consumed here.
+    /// Otherwise the entry is consumed, so an overview only ever answers it once.
+    private func resolveDeferredWorkspaceDeletions(against payload: SpacesDeviceOverviewPayload) {
+        guard !workspaceDeletionsAwaitingOverview.isEmpty else { return }
+        let listedWorkspaceIDs = Set(payload.workspaces.map(\.id))
+        let teardownInFlightWorkspaceIDs = Set(payload.workspaceIDsWithTeardownInFlight)
+        for (workspaceID, deferred) in workspaceDeletionsAwaitingOverview {
+            if listedWorkspaceIDs.contains(workspaceID), teardownInFlightWorkspaceIDs.contains(workspaceID) {
+                // Still listed, but the daemon reports its teardown still running — not a verdict. Leave
+                // the deferral in place for a later overview to settle.
+                continue
+            }
+            workspaceDeletionsAwaitingOverview.removeValue(forKey: workspaceID)
+            workspaceIDsPendingDeletion.remove(workspaceID)
+            if listedWorkspaceIDs.contains(workspaceID) {
+                handleBridgeError(deferred.error)
+            } else if deferred.requestedBranchDeletion {
+                deletedWorkspaceNotice = Self.unknownBranchOutcomeNotice
+            }
+        }
+    }
+
+    private func publishOverview(_ payload: SpacesDeviceOverviewPayload?) {
+        overview = payload
+        if let payload {
+            pruneDismissedAlertIDs(against: payload)
+            resolveDeferredWorkspaceDeletions(against: payload)
+        }
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1734,16 +2240,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
+            // Fetched after the mutation was sent, so it supersedes any poll already in flight.
+            mutationGeneration &+= 1
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.
             guard identity == overviewIdentity else { return nil }
             await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
             guard identity == overviewIdentity else { return nil }
-            overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil
             refreshFailureStreak = nil
+            publishOverview(refreshedOverview)
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

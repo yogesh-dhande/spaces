@@ -17,6 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+source "$SCRIPT_DIR/pairing_link_endpoint.sh"
 spaces_e2e_require_remote_host_env "$ROOT_DIR"
 
 SPACES_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
@@ -24,9 +25,15 @@ SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 REMOTE_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
 REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_HOST}"
-REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
-REMOTE_E2E_ROOT="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+# A configured daemon address is authoritative; otherwise it is derived from the SSH destination below,
+# once the SSH helpers exist, because the destination as typed may be an ssh_config alias.
+REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-}"
+# The isolated remote E2E daemon is a development profile, so this lane never touches the remote
+# account's installed profile. Its Device API port is assigned by the daemon and read back after
+# install; nothing here chooses one.
+REMOTE_E2E_PROFILE_NAME="remote-device-e2e"
+REMOTE_E2E_ROOT="~/.spaces-dev/profiles/spaces/$REMOTE_E2E_PROFILE_NAME"
+REMOTE_DAEMON_PORT=""
 REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 RUN_ID="${SPACES_E2E_REMOTE_DEVICE_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
 TMP_ROOT="${TMPDIR:-/tmp}/spaces-remote-terminal-send-e2e.$$"
@@ -82,14 +89,15 @@ export SPACES_CLIENT_SECRET_DIR="$TMP_ROOT/client-secrets"
 
 DEVICE_ID=""
 REMOTE_SESSION_ID=""
-REMOTE_INSTALL=""
-REMOTE_ENV_PREFIX=""
+# The remote profile's own CLI. It resolves that profile from its own path, so every remote command
+# below runs without a scrap of profile environment.
+REMOTE_CLI="$REMOTE_E2E_ROOT/daemon/current/bin/spaces"
 REMOTE_PROJECT_DIR=""
 CERTIFICATE_FINGERPRINT=""
 
 cleanup() {
-  if [[ -n "$REMOTE_SESSION_ID" && -n "$REMOTE_ENV_PREFIX" ]]; then
-    remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal send text $REMOTE_SESSION_ID exit --submit" >/dev/null 2>&1 || true
+  if [[ -n "$REMOTE_SESSION_ID" ]]; then
+    remote_ssh "$REMOTE_CLI terminal send text $REMOTE_SESSION_ID exit --submit" >/dev/null 2>&1 || true
   fi
   if [[ -n "$REMOTE_PROJECT_DIR" ]]; then
     remote_ssh "rm -rf $(shell_quote "$REMOTE_PROJECT_DIR")" >/dev/null 2>&1 || true
@@ -98,32 +106,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Opens a fresh one-time pairing window on the remote E2E daemon and prints its code, nonce, and the
-# daemon's certificate fingerprint (stable across windows — it is the daemon's TLS identity).
+# Opens a fresh one-time pairing window on the remote E2E daemon and prints its link, code, nonce, and
+# the daemon's certificate fingerprint (stable across windows — it is the daemon's TLS identity). The
+# code and nonce are redeemed directly through the Device API below; the link is what the CLI redeems.
 open_remote_pairing_window() {
   local pair_json parsed
-  pair_json="$(remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces device pair --json")"
+  pair_json="$(remote_ssh "$REMOTE_CLI device pair --json")"
   parsed="$(
     SPACES_E2E_PAIR_JSON="$pair_json" python3 <<'PY'
 import json
 import os
 import shlex
 payload = json.loads(os.environ["SPACES_E2E_PAIR_JSON"])
-for key in ("pairingCode", "pairingNonce", "certificateFingerprint"):
+for key in ("pairingLink", "pairingCode", "pairingNonce", "certificateFingerprint"):
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"remote pairing JSON missing {key}")
 if not isinstance(payload.get("protocolVersion"), int):
     raise SystemExit("remote pairing JSON missing protocolVersion")
+print(f"PAIRING_LINK={shlex.quote(payload['pairingLink'])}")
 print(f"PAIRING_CODE={shlex.quote(payload['pairingCode'])}")
 print(f"PAIRING_NONCE={shlex.quote(payload['pairingNonce'])}")
 print(f"CERTIFICATE_FINGERPRINT={shlex.quote(payload['certificateFingerprint'])}")
 print(f"PAIRING_PROTOCOL_VERSION={payload['protocolVersion']}")
-print(f"PAIRING_APP_VERSION={shlex.quote(str(payload.get('appVersion') or '1.0'))}")
-print(f"PAIRING_NAME={shlex.quote(str(payload.get('name') or 'remote-e2e'))}")
 PY
   )"
   eval "$parsed"
+  [[ -n "$PAIRING_LINK" ]] || fail "remote pairing JSON missing pairingLink"
   [[ -n "$PAIRING_CODE" ]] || fail "remote pairing JSON missing pairingCode"
   [[ -n "$PAIRING_NONCE" ]] || fail "remote pairing JSON missing pairingNonce"
   [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
@@ -149,17 +158,32 @@ print(json.dumps(payload, sort_keys=True))
 PY
 }
 
+if [[ -z "$REMOTE_DAEMON_HOST" ]]; then
+  ssh_option_args=()
+  while IFS= read -r arg; do ssh_option_args+=("$arg"); done < <(ssh_args)
+  REMOTE_DAEMON_HOST="$(resolve_ssh_hostname "$(remote_destination)" "${ssh_option_args[@]}")"
+fi
+
 echo "== deploying the isolated remote E2E daemon =="
-artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$REMOTE_E2E_PROFILE_NAME")"
 eval "$artifact_assignments"
 [[ "${artifact_url:-}" == file://* ]] || fail "Remote artifact URL must be file://, got: ${artifact_url:-<unset>}"
 archive_path="${artifact_url#file://}"
 
 REMOTE_INSTALL="$(remote_expand_path "$REMOTE_E2E_ROOT/install")"
-remote_db_path="$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")"
-remote_runtime_dir="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")"
-REMOTE_ENV_PREFIX="SPACES_DB_PATH=$(shell_quote "$remote_db_path") SPACES_RUNTIME_DIR=$(shell_quote "$remote_runtime_dir")"
-remote_ssh "rm -rf $(shell_quote "$REMOTE_INSTALL") && mkdir -p $(shell_quote "$REMOTE_INSTALL") && tar -xzf $(shell_quote "$archive_path") -C $(shell_quote "$REMOTE_INSTALL") --strip-components=1 && $REMOTE_ENV_PREFIX SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT $(shell_quote "$REMOTE_INSTALL/install.sh")" >/dev/null
+remote_ssh "rm -rf $(shell_quote "$REMOTE_INSTALL") && mkdir -p $(shell_quote "$REMOTE_INSTALL") && tar -xzf $(shell_quote "$archive_path") -C $(shell_quote "$REMOTE_INSTALL") --strip-components=1 && $(shell_quote "$REMOTE_INSTALL/install.sh") --profile $(shell_quote "$REMOTE_E2E_PROFILE_NAME")" >/dev/null
+
+# The port the daemon assigned itself for this profile and persisted at first start; the Device API
+# requests below are the only reason this lane needs to know it.
+REMOTE_DAEMON_PORT="$(remote_ssh "python3 - $(shell_quote "$(remote_expand_path "$REMOTE_E2E_ROOT/runtime/terminal/device-api.json")")" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    print(json.load(handle)["port"])
+PY
+)"
+[[ "$REMOTE_DAEMON_PORT" =~ ^[0-9]+$ ]] || fail "remote profile $REMOTE_E2E_PROFILE_NAME reported no numeric Device API port"
 
 echo "== creating a git fixture project on the remote host =="
 REMOTE_PROJECT_DIR="$(remote_expand_path "$REMOTE_WORKSPACE_ROOT/remote-terminal-send-$RUN_ID")"
@@ -231,21 +255,11 @@ echo "remote workspace: $REMOTE_WORKSPACE_ID"
 
 echo "== pairing this client's CLI with the remote E2E daemon (link redemption) =="
 open_remote_pairing_window
-PAIR_LINK="$(
-  python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$PAIRING_NONCE" "$PAIRING_CODE" "$CERTIFICATE_FINGERPRINT" "$PAIRING_NAME" "$PAIRING_PROTOCOL_VERSION" "$PAIRING_APP_VERSION" <<'PY'
-import sys
-import urllib.parse
-host, port, nonce, code, fingerprint, name, pv, av = sys.argv[1:9]
-# The daemon advertises its own interface address, which may not be reachable from this machine;
-# rebuild the v3 link against the configured daemon host/port from .env, carrying the daemon
-# wire-protocol (pv) and app version (av) so the pairing-time compatibility gate passes.
-query = urllib.parse.urlencode({
-    "v": "3", "host": host, "port": port, "nonce": nonce, "code": code,
-    "fp": fingerprint, "name": name, "pv": pv, "av": av,
-})
-print(f"spaces://pair?{query}")
-PY
-)"
+# The daemon writes its link with the interface address it sees itself on, which may not be reachable
+# from this machine, so only that endpoint is moved to the configured daemon host/port from .env. The
+# link is otherwise the daemon's own, carrying its wire-protocol and app version for the pairing-time
+# compatibility gate.
+PAIR_LINK="$(rewrite_pairing_link_endpoint "$PAIRING_LINK" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT")"
 PAIR_OUTPUT="$("$SPACES_BIN" device pair --link "$PAIR_LINK")"
 echo "$PAIR_OUTPUT"
 DEVICE_ID="$(printf '%s' "$PAIR_OUTPUT" | tr '\t' '\n' | sed -n 's/^id=//p' | head -n 1)"
@@ -253,7 +267,7 @@ DEVICE_ID="$(printf '%s' "$PAIR_OUTPUT" | tr '\t' '\n' | sed -n 's/^id=//p' | he
 "$SPACES_BIN" device list
 
 echo "== creating a remote terminal session in the workspace =="
-REMOTE_SESSION_LINE="$(remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal command --workspace $(shell_quote "$REMOTE_WORKSPACE_ID") --command 'bash -i'")"
+REMOTE_SESSION_LINE="$(remote_ssh "$REMOTE_CLI terminal command --workspace $(shell_quote "$REMOTE_WORKSPACE_ID") --command 'bash -i'")"
 echo "$REMOTE_SESSION_LINE"
 REMOTE_SESSION_ID="$(printf '%s' "$REMOTE_SESSION_LINE" | sed -n 's/^Started terminal session //p' | cut -f1 | head -n 1)"
 [[ -n "$REMOTE_SESSION_ID" ]] || fail "remote terminal command did not print a session id"

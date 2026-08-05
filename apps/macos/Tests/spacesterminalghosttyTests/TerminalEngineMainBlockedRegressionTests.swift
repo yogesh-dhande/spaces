@@ -15,6 +15,9 @@ import XCTest
 /// runs on a cooperative-pool thread — neither the main actor (which it deliberately blocks) nor the
 /// engine actor (which would deadlock a background `runSynchronously` if the test occupied it).
 final class TerminalEngineMainBlockedRegressionTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     /// Carries the engine-isolated core reference to the engine bridge from a background thread — the same
     /// shape the daemon uses (engine-isolated `sessionCores` reached inside `runSynchronously`). The core
     /// is only ever *used* on the engine actor; this box merely moves the reference, never touching it

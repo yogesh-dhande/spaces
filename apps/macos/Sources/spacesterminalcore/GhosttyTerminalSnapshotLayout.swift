@@ -59,7 +59,7 @@ public enum GhosttyTerminalSnapshotLayout {
             for column in 0...lastColumn {
                 let cell = rowCells[column]
                 let isCursor = snapshot.cursorVisible && row == snapshot.cursorRow && column == snapshot.cursorColumn
-                let resolved = resolveRun(cell: cell, snapshot: snapshot, invertForCursor: isCursor)
+                let resolved = resolveRun(cell: cell, at: rowStart + column, snapshot: snapshot, invertForCursor: isCursor)
                 if let last = runs.last, last.foregroundRGB == resolved.foregroundRGB, last.backgroundRGB == resolved.backgroundRGB,
                     last.isBold == resolved.isBold, last.isItalic == resolved.isItalic, last.isFaint == resolved.isFaint,
                     last.isUnderline == resolved.isUnderline, last.isStrikethrough == resolved.isStrikethrough
@@ -96,22 +96,15 @@ public enum GhosttyTerminalSnapshotLayout {
         return cell.flags & styleMask != 0
     }
 
-    private static func resolveRun(cell: GhosttyTerminalSnapshot.Cell, snapshot: GhosttyTerminalSnapshot, invertForCursor: Bool)
+    private static func resolveRun(cell: GhosttyTerminalSnapshot.Cell, at index: Int, snapshot: GhosttyTerminalSnapshot, invertForCursor: Bool)
         -> GhosttyTerminalSnapshotDisplayRun
     {
         var foreground = cell.codepoint == 0 ? snapshot.defaultForegroundRGB : cell.foregroundRGB
         var background = cell.backgroundRGB
         if cell.flags & inverseFlag != 0 || invertForCursor { swap(&foreground, &background) }
         return GhosttyTerminalSnapshotDisplayRun(
-            text: displayCharacter(for: cell), foregroundRGB: foreground, backgroundRGB: background, isBold: cell.flags & boldFlag != 0,
-            isItalic: cell.flags & italicFlag != 0, isFaint: cell.flags & faintFlag != 0, isUnderline: cell.flags & underlineFlag != 0,
-            isStrikethrough: cell.flags & strikeFlag != 0)
-    }
-
-    private static func displayCharacter(for cell: GhosttyTerminalSnapshot.Cell) -> String {
-        if cell.flags & spacerFlag != 0 || cell.flags & invisibleFlag != 0 { return " " }
-        guard cell.codepoint != 0 else { return " " }
-        guard let scalar = UnicodeScalar(cell.codepoint) else { return "\u{FFFD}" }
-        return String(scalar)
+            text: GhosttyTerminalSnapshotCellText.displayText(for: cell, cluster: snapshot.clusters[index]), foregroundRGB: foreground,
+            backgroundRGB: background, isBold: cell.flags & boldFlag != 0, isItalic: cell.flags & italicFlag != 0,
+            isFaint: cell.flags & faintFlag != 0, isUnderline: cell.flags & underlineFlag != 0, isStrikethrough: cell.flags & strikeFlag != 0)
     }
 }

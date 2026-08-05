@@ -185,6 +185,19 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Deletes a workspace: the daemon stops it, removes its git worktree, and drops the workspace and its
+    /// settings. Branch deletion is opt-in and is the one part that can partly fail (a protected branch, a
+    /// remote that refused), so its report comes back as the response's `mutationNotice`.
+    func archiveWorkspace(
+        workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .archiveWorkspace(
+                    .init(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     /// Hides or unhides a workspace. `isHidden` is daemon-owned workspace state, so this is the same flag
     /// the Mac sidebar's Hide action and Workspace Visibility dialog toggle — hiding here hides it there.
     func setWorkspaceHidden(workspaceID: String, isHidden: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
@@ -362,7 +375,7 @@ struct SpacesDeviceAPIClient: Sendable {
     /// longer to transmit than ordinary text/key input, so this uses a 30 s default timeout instead
     /// of the 6 s timeout used elsewhere for interactive input.
     func pasteImage(
-        sessionID: String, clientID: String, ownerEpoch: UInt64, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
+        sessionID: String, clientID: String, ownerEpoch: UInt64?, fileExtension: String, imageData: Data, timeout: Duration = .seconds(30),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
@@ -408,6 +421,22 @@ struct SpacesDeviceAPIClient: Sendable {
                     action: .scroll, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal,
                     scrollVertical: vertical, scrollMods: scrollMods, scrollPointerX: pointerPosition?.x, scrollPointerY: pointerPosition?.y,
                     scrollPointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
+    /// Sends one mouse button press or release, forwarded to the session's terminal when a mouse-aware
+    /// application there is tracking the mouse. The pointer is normalized the same way `scroll`'s is.
+    func mouseButton(
+        sessionID: String, clientID: String, button: UInt8, pressed: Bool, ownerEpoch: UInt64?, pointerPosition: TerminalScrollPointerPosition? = nil,
+        timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(
+                .init(
+                    action: .mouseButton, sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, mouseButton: button,
+                    mousePressed: pressed, mousePointerX: pointerPosition?.x, mousePointerY: pointerPosition?.y,
+                    mousePointerMods: pointerPosition?.mods)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
@@ -597,8 +626,9 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             if error != nil { Task { await resolver.noteStreamFailed(host: host) } }
             onDisconnect(error)
         }
-        StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect)
-            .start(on: queue)
+        StreamSubscription(
+            connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
+        ).start(on: queue)
         return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
 
@@ -651,9 +681,7 @@ private final class BackgroundNotificationObserver: @unchecked Sendable {
         }
     }
 
-    deinit {
-        if let token { NotificationCenter.default.removeObserver(token) }
-    }
+    deinit { if let token { NotificationCenter.default.removeObserver(token) } }
 }
 
 /// Network request transport: owns one pinned-TLS command connection. This is the request/response

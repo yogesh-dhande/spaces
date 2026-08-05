@@ -20,6 +20,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollPointerX: Double?
     public let scrollPointerY: Double?
     public let scrollPointerMods: UInt32?
+    public let mouseButton: UInt8?
+    public let mousePressed: Bool?
+    public let mousePointerX: Double?
+    public let mousePointerY: Double?
+    public let mousePointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark). Carried on `attach` so a remote daemon can
@@ -31,7 +36,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
         scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
-        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        mouseButton: UInt8? = nil, mousePressed: Bool? = nil, mousePointerX: Double? = nil, mousePointerY: Double? = nil,
+        mousePointerMods: UInt32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -52,6 +58,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollPointerX = scrollPointerX
         self.scrollPointerY = scrollPointerY
         self.scrollPointerMods = scrollPointerMods
+        self.mouseButton = mouseButton
+        self.mousePressed = mousePressed
+        self.mousePointerX = mousePointerX
+        self.mousePointerY = mousePointerY
+        self.mousePointerMods = mousePointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
@@ -82,6 +93,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
                 command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
                 scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods,
                 scrollPointerX: payload.scrollPointerX, scrollPointerY: payload.scrollPointerY, scrollPointerMods: payload.scrollPointerMods)
+        case .mouseButton(let payload):
+            self.init(
+                command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch, mouseButton: payload.button,
+                mousePressed: payload.pressed, mousePointerX: payload.pointerX, mousePointerY: payload.pointerY, mousePointerMods: payload.pointerMods
+            )
         case .setAppearance(let payload):
             self.init(command: command.name, authToken: authToken, clientID: payload.clientID, appearance: payload.appearance)
         case .unsupported(let name): self.init(command: name, authToken: authToken)
@@ -108,6 +124,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case scrollPointerX
         case scrollPointerY
         case scrollPointerMods
+        case mouseButton
+        case mousePressed
+        case mousePointerX
+        case mousePointerY
+        case mousePointerMods
         case appendNewline
         case asPaste
         case appearance
@@ -134,6 +155,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollPointerX = try container.decodeIfPresent(Double.self, forKey: .scrollPointerX)
         scrollPointerY = try container.decodeIfPresent(Double.self, forKey: .scrollPointerY)
         scrollPointerMods = try container.decodeIfPresent(UInt32.self, forKey: .scrollPointerMods)
+        mouseButton = try container.decodeIfPresent(UInt8.self, forKey: .mouseButton)
+        mousePressed = try container.decodeIfPresent(Bool.self, forKey: .mousePressed)
+        mousePointerX = try container.decodeIfPresent(Double.self, forKey: .mousePointerX)
+        mousePointerY = try container.decodeIfPresent(Double.self, forKey: .mousePointerY)
+        mousePointerMods = try container.decodeIfPresent(UInt32.self, forKey: .mousePointerMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
         asPaste = try container.decodeIfPresent(Bool.self, forKey: .asPaste) ?? false
         appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
@@ -160,6 +186,11 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(scrollPointerX, forKey: .scrollPointerX)
         try container.encodeIfPresent(scrollPointerY, forKey: .scrollPointerY)
         try container.encodeIfPresent(scrollPointerMods, forKey: .scrollPointerMods)
+        try container.encodeIfPresent(mouseButton, forKey: .mouseButton)
+        try container.encodeIfPresent(mousePressed, forKey: .mousePressed)
+        try container.encodeIfPresent(mousePointerX, forKey: .mousePointerX)
+        try container.encodeIfPresent(mousePointerY, forKey: .mousePointerY)
+        try container.encodeIfPresent(mousePointerMods, forKey: .mousePointerMods)
         try container.encode(appendNewline, forKey: .appendNewline)
         try container.encode(asPaste, forKey: .asPaste)
         try container.encodeIfPresent(appearance, forKey: .appearance)
@@ -283,6 +314,35 @@ public struct TerminalControlScrollPayload: Sendable, Equatable {
     }
 }
 
+/// A single mouse button press or release forwarded to the session's terminal so a mouse-aware
+/// application can receive it. The pointer is normalized (0...1 across the grid) exactly like the
+/// scroll payload's pointer, so the daemon can resolve it against its own surface size.
+public struct TerminalControlMouseButtonPayload: Sendable, Equatable {
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+    /// Ghostty's mouse button index (`ghostty_input_mouse_button_e`): 1 = left, 2 = right, 3 = middle.
+    public let button: UInt8?
+    public let pressed: Bool?
+    public let pointerX: Double?
+    public let pointerY: Double?
+    public let pointerMods: UInt32?
+
+    /// Accepted `button` range: Ghostty's mouse buttons run 1 (left) through 11, with 0 reserved for
+    /// "unknown", which is never a real click.
+    public static let minimumButton: UInt8 = 1
+    public static let maximumButton: UInt8 = 11
+
+    public init(clientID: String?, ownerEpoch: UInt64?, button: UInt8?, pressed: Bool?, pointerX: Double?, pointerY: Double?, pointerMods: UInt32?) {
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.button = button
+        self.pressed = pressed
+        self.pointerX = pointerX
+        self.pointerY = pointerY
+        self.pointerMods = pointerMods
+    }
+}
+
 public enum TerminalControlCommand: Sendable, Equatable {
     case attach(TerminalControlAttachPayload)
     case detach(TerminalControlClientPayload)
@@ -293,6 +353,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     case clearScreen(TerminalControlOwnerPayload)
     case resize(TerminalControlResizePayload)
     case scroll(TerminalControlScrollPayload)
+    case mouseButton(TerminalControlMouseButtonPayload)
     case setAppearance(TerminalControlSetAppearancePayload)
     case unsupported(String)
 
@@ -322,6 +383,11 @@ public enum TerminalControlCommand: Sendable, Equatable {
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
                     scrollVertical: request.scrollVertical, scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX,
                     scrollPointerY: request.scrollPointerY, scrollPointerMods: request.scrollPointerMods))
+        case "mouseButton":
+            self = .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: request.clientID, ownerEpoch: request.ownerEpoch, button: request.mouseButton, pressed: request.mousePressed,
+                    pointerX: request.mousePointerX, pointerY: request.mousePointerY, pointerMods: request.mousePointerMods))
         case "setAppearance": self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
         default: self = .unsupported(request.command)
         }
@@ -338,6 +404,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .clearScreen: "clearScreen"
         case .resize: "resize"
         case .scroll: "scroll"
+        case .mouseButton: "mouseButton"
         case .setAppearance: "setAppearance"
         case .unsupported(let name): name
         }
@@ -345,16 +412,21 @@ public enum TerminalControlCommand: Sendable, Equatable {
 
     public var requiresOwnerClientID: Bool {
         switch self {
-        case .send, .key, .clearScreen, .resize, .scroll: true
+        case .send, .key, .clearScreen, .resize, .scroll, .mouseButton: true
         // setAppearance is a per-client view preference, not an ownership-gated mutation.
         case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
         }
     }
 
+    /// The controls that change who is attached echo the resulting session state on the response. A client
+    /// applies that state directly instead of following the control with a separate `.state` request, which
+    /// costs a second round trip and a second full-frame export for a fact the daemon just computed. The
+    /// input and view controls do not echo state: their effect reaches clients on the subscription's next
+    /// broadcast.
     public var includesSessionStateOnSuccess: Bool {
         switch self {
-        case .takeover: true
-        case .attach, .detach, .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .setAppearance, .unsupported: false
+        case .attach, .detach, .takeover: true
+        case .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .mouseButton, .setAppearance, .unsupported: false
         }
     }
 
@@ -367,13 +439,21 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .resize(let payload):
             if let columns = payload.columns, let rows = payload.rows, columns > 0, rows > 0 { nil } else { "Missing terminal size." }
         case .setAppearance(let payload): payload.appearance == nil ? "Missing appearance." : nil
+        case .mouseButton(let payload):
+            if payload.button == nil || payload.pressed == nil {
+                "Missing mouse button."
+            } else if payload.pointerX == nil || payload.pointerY == nil {
+                "Missing mouse pointer position."
+            } else {
+                nil
+            }
         case .clearScreen, .scroll, .unsupported: nil
         }
     }
 
     public static func isMobileTerminalControlName(_ name: String) -> Bool {
         switch name {
-        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "setAppearance": true
+        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "mouseButton", "setAppearance": true
         default: false
         }
     }

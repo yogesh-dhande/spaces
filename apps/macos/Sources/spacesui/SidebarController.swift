@@ -116,6 +116,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Set when a database-change signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
     private var pendingDatabaseReload = false
+    /// The signed outline rows the next applied change is diffed against, and the baseline every
+    /// wholesale rebuild refreshes. `nil` until the first apply, which therefore rebuilds everything.
+    ///
+    /// Stored rather than recomputed lazily at diff time because a device's section is mutated before
+    /// the outline work runs — `applyRemoteDeviceSection` installs the new overview and only then
+    /// rebuilds — so a "previous" snapshot taken at that point would already describe the new state and
+    /// every diff would come back unchanged.
+    private var lastOutlineRowSnapshot: [SidebarOutlineRow]?
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -153,7 +161,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     self.toggleProjectExpanded(projectID: project.id)
                     return true
                 }
-                // A non-git project row stands in for its single workspace, so it stays selectable.
+                // A non-git project row stands in for its single workspace, so it stays selectable — and
+                // swallows the click while that workspace is marked as deleting, exactly as a workspace
+                // row does: neither selecting nor expanding a project on its way out.
+                guard self.projectRowState(project).isInteractive else { return true }
                 // Also toggle its runtime-target list on click, matching how git project and workspace
                 // rows respond to a row click; returning false lets normal row selection proceed.
                 self.toggleProjectExpanded(projectID: project.id)
@@ -169,6 +180,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 return true
             }
             if case .workspace(_, let workspace) = ref.item {
+                // A row marked as deleting swallows the click: it neither selects nor expands, so the
+                // click cannot pin open a workspace that is being removed.
+                guard self.workspaceRowState(workspace.id).isInteractive else { return true }
                 // A mouse click on a workspace row is an explicit expand: pin it open so it stays
                 // expanded after the selection moves away. Arrow-key navigation routes through
                 // selectWorkspace without this handler and so expands the workspace only transiently.
@@ -301,9 +315,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             device: snapshot.localPairedDevice, projects: retainedContent?.projects ?? snapshot.projects,
             workspacesByProject: retainedContent?.workspacesByProject ?? snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: retainedContent?.workspaceRuntimeStatusByID ?? snapshot.workspaceRuntimeStatusByID,
-            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups,
-            overview: retainedContent?.overview ?? snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus,
-            compatibility: snapshot.localCompatibility)
+            alertsGroups: retainedContent?.alertsGroups ?? snapshot.alertsGroups, overview: retainedContent?.overview ?? snapshot.localDeviceOverview,
+            daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
         // Compare against the section actually being installed, not the raw snapshot: an outage installs
         // the retained rows, so comparing with the placeholder would reload the outline on every poll of
         // a daemon that stays down and collapse the user's expanded projects each time.
@@ -311,7 +324,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             previousLocalSection?.overview == localSection.overview && previousLocalSection?.compatibility == localSection.compatibility
             && previousLocalSection?.daemonStatus == localSection.daemonStatus && previousLocalSection?.loadState == localSection.loadState
         if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
-            host.deviceSections[localIndex] = localSection
+            // Whole-struct assignment bypasses `overview`'s `didSet`, so the install generation is carried
+            // over explicitly — otherwise it would reset to zero here on every local refresh and a deferred
+            // workspace delete would never observe fresh evidence for the local device. `retainedContent`
+            // is exactly the offline case where this re-renders the cached overview without the daemon
+            // having answered; every other rebuild is carrying a freshly read one, identical payload or not.
+            host.deviceSections[localIndex] = localSection.adoptingOverviewInstallGeneration(
+                from: previousLocalSection, carriesFreshInstall: retainedContent == nil)
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }
@@ -345,13 +364,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: localSection.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)
-        rebuildFlatSidebarData()
+        // Load the stored dismissals BEFORE installing the groups: installing them consumes the focused
+        // session's bell into that same set and writes it back, so a consume that ran against a not-yet
+        // loaded (empty) set would persist itself over everything the user had dismissed.
         host.loadAlertsDismissedAttentionItemIDs()
-        host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
-        if !localOutlineUnchanged {
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
+        if localOutlineUnchanged {
+            // The merge still has to run for its side effects — the focused pane's bell is consumed here,
+            // and global panel titles are refreshed here — but an unchanged local overview cannot have
+            // changed a row, so nothing is signed or repainted.
+            rebuildFlatSidebarData()
+        } else {
+            applySidebarDataChange()
         }
+        host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         host.logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             host.refreshSelection()
@@ -391,10 +416,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
     /// longer running, comparing the previous local-section runtime state against the just-fetched
-    /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
+    /// snapshot. This reload is the only channel through which the GUI learns about stop/delete
     /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
     /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
-    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
+    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/delete handlers
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
     private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
@@ -409,7 +434,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// Workspace ids that were running in `previous` but are no longer running in `current` — either
-    /// reported stopped or absent entirely (deleted/archived out of the runtime map). Pure so the
+    /// reported stopped or absent entirely (deleted out of the runtime map). Pure so the
     /// transition contract can be unit-tested without Chrome or the client store.
     nonisolated static func workspaceIDsTransitionedToNotRunning(
         previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
@@ -440,10 +465,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
             addedSection = true
         }
-        if addedSection {
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
-        }
+        if addedSection { applySidebarDataChange() }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
@@ -490,9 +512,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: bypassesBackoff)
         }
         if updatedReconnectSection {
-            rebuildFlatSidebarData()
-            host.outlineView.reloadData()
-            applySidebarProjectExpansionState()
+            applySidebarDataChange()
             updateAlertsSidebarBadge()
             if rebuildWorkspaceDetail { host.refreshSelection() }
         }
@@ -578,6 +598,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         deviceReachabilityWatchdogTimer = timer
     }
 
+    /// Whether a pull that reports a device as reachable-but-blocked has to rebuild the outline. The
+    /// watchdog re-pulls a blocked device on every tick, so the steady case — the same verdict on an
+    /// already-blocked section that has already had its rows cleared — must touch nothing, or the user
+    /// would lose scroll position and project expansion every 15s while they read the block. Pure so the
+    /// rule is directly testable.
+    nonisolated static func blockedSectionRebuildsOutline(wasLoaded: Bool, statusUnchanged: Bool, hadOverview: Bool) -> Bool {
+        !wasLoaded || !statusUnchanged || hadOverview
+    }
+
+    /// Whether a remote section is re-pulled on a watchdog tick.
+    ///
+    /// Any section that is not loaded is re-probed: offline, and equally a section left at "loading…" by
+    /// an attempt whose result never arrived. A section only returns to loaded when an overview arrives,
+    /// so this pull is the only way back for a device whose stream is healthy but silent.
+    ///
+    /// A blocked device is pulled as well, even though its section is loaded. It is deliberately loaded —
+    /// reachable, just unusable — and its subscription is parked, so nothing else would ever touch it: it
+    /// would keep offering Resolve long after the machine was powered off, and a daemon updated on that
+    /// machine would stay blocked in the app until the user reloaded. The pull answers both, since it is
+    /// what reads the verdict in the first place: it fails once the device stops answering (offline, with
+    /// a Reconnect action), and it reports a compatible daemon once one is running, which clears the block
+    /// and puts the device back in the subscription's desired set.
+    ///
+    /// A healthy loaded device is left alone — its stream is what keeps it current, and dialing every
+    /// paired remote every 15s to learn nothing is exactly the cost this rule exists to avoid.
+    /// Pure so the rule is directly testable.
+    nonisolated static func watchdogShouldPullSection(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
+        loadState != .loaded || compatibility?.isCompatible == false
+    }
+
     /// One reconciliation pass over device reachability. Everything that brings a device back —
     /// a disconnect callback firing, an overview arriving on a stream, the local snapshot succeeding —
     /// is a single event that can simply not happen: a stream can be reconnected yet never deliver
@@ -589,12 +639,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         refreshRemoteOverviewSubscriptions()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
-            // Any section that is not loaded is re-probed: offline, and equally a section left at
-            // "loading…" by an attempt whose result never arrived. Deliberately bypasses the freshness
-            // gate — such a section holds no data worth protecting, and a section only returns to loaded
-            // when an overview arrives, so this pull is the only way back for a device whose stream is
-            // healthy but silent.
-            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }), section.loadState != .loaded else { continue }
+            // Pulling here deliberately skips the freshness gate `loadRemoteDeviceSections` applies: an
+            // eligible section either holds no data worth protecting or holds a verdict that is exactly
+            // what this tick exists to re-check. The pull's own failure backoff still paces a device that
+            // has stopped answering.
+            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }),
+                Self.watchdogShouldPullSection(loadState: section.loadState, compatibility: section.compatibility)
+            else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: false)
         }
@@ -635,12 +686,31 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
+    /// The remote devices that should hold a live overview subscription, out of the credentialed paired
+    /// remotes.
+    ///
+    /// A device the sidebar knows is wire-incompatible is parked: its daemon speaks a different protocol,
+    /// so the overview it pushes cannot decode and the stream dies as soon as it delivers one. Reopening
+    /// it on the retry backoff buys nothing but another disconnect every few seconds. Its pull is what
+    /// describes such a device — the pull falls back to the frozen-core handshake and reads the verdict
+    /// from there — and a pull reporting a compatible daemon puts the device back in this set, so the
+    /// next reconcile reopens its subscription with no separate recovery path.
+    ///
+    /// Only a verdict parks a device. One with no section yet, and one that is merely offline (the
+    /// offline transition drops the verdict), both stay wanted: the subscription is how they recover.
+    /// Pure so the rule is directly testable.
+    nonisolated static func overviewSubscriptionDesiredIDs(credentialedRemoteIDs: [String], sections: [DeviceSection]) -> Set<String> {
+        let incompatibleIDs = Set(sections.filter { $0.compatibility?.isCompatible == false }.map(\.deviceID))
+        return Set(credentialedRemoteIDs).subtracting(incompatibleIDs)
+    }
+
     /// Reconciles open subscriptions to the set of credentialed paired remotes:
     /// drops gone devices and opens one per newly present device.
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptions.isEnabled else { return }
         let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(device: $0) }
-        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: Set(remotes.map(\.id)))
+        let desiredIDs = Self.overviewSubscriptionDesiredIDs(credentialedRemoteIDs: remotes.map(\.id), sections: host.deviceSections)
+        let outcome = remoteOverviewSubscriptions.reconcile(desiredIDs: desiredIDs)
         for removal in outcome.removed {
             removal.client.stop()
             host.stopRemoteBrowserForwards(deviceID: removal.deviceID)
@@ -738,11 +808,29 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
     }
 
+    /// Whether a dropped overview stream is evidence that the device it belonged to went away.
+    ///
+    /// A stream to a wire-incompatible daemon dies by design — the overview it pushes cannot decode —
+    /// so its disconnect only restates the protocol gap the pull already reported. Letting it run the
+    /// offline transition would wipe that verdict, and the two paths then alternate: the header flips
+    /// between "Resolve" and "Reconnect" and the compatibility block is pulled out of the detail pane
+    /// every time the verdict goes away. The pull, not the disconnect, describes such a device, and a
+    /// pull that fails is never filtered here, so a genuine outage still reports one.
+    /// Pure so the rule is directly testable.
+    nonisolated static func streamDisconnectReportsAnOutage(compatibility: SpacesWireCompatibility?) -> Bool { compatibility?.isCompatible != false }
+
     /// A stream that dropped means the remote daemon or network went away. With no periodic remote
     /// refresh to fall back on, transition the section to offline now — the same way a failed pull
     /// does — so the sidebar shows the offline caption instead of stale projects/alerts. A graceful
     /// stream close carries no error, so fall back to a descriptive reason for the offline tooltip.
+    ///
+    /// The single chokepoint for both disconnect paths: a live stream dropping, and a stream that died
+    /// before the connect that opened it handed its client back.
     private func markRemoteOverviewSectionOffline(deviceID: String, error: (any Error)?) {
+        guard Self.streamDisconnectReportsAnOutage(compatibility: host.deviceCompatibility(forDeviceID: deviceID)) else {
+            DeviceLinkTrace.log(deviceID: deviceID, event: "stream_disconnect_ignored_incompatible")
+            return
+        }
         applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
     }
 
@@ -802,18 +890,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     host.selectedWorkspaceID.map { wsID in
                         host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
                     } ?? false
-                let changed = !wasLoaded || !statusUnchanged || host.deviceSections[index].overview != nil
+                let changed = Self.blockedSectionRebuildsOutline(
+                    wasLoaded: wasLoaded, statusUnchanged: statusUnchanged, hadOverview: host.deviceSections[index].overview != nil)
                 host.deviceSections[index].projects = []
                 host.deviceSections[index].workspacesByProject = [:]
                 host.deviceSections[index].workspaceRuntimeStatusByID = [:]
                 host.deviceSections[index].alertsGroups = []
                 host.deviceSections[index].overview = nil
                 host.deviceSections[index].loadState = .loaded
-                if changed {
-                    rebuildFlatSidebarData()
-                    host.outlineView.reloadData()
-                    applySidebarProjectExpansionState()
-                }
+                if changed { applySidebarDataChange() }
                 if selectedWorkspaceUnderThisDevice, let verdict = load.compatibility {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
                 }
@@ -872,16 +957,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // and asks for a sidebar reload, which against a dead device is a reload loop. It is also
             // what keeps an open pane's session resolving to its workspace while the device is away.
             // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
-            // button / restart block from when it was last reachable-but-incompatible.
+            // button / restart block from when it was last reachable-but-incompatible. Only a failed
+            // pull reaches this for an incompatible device — its stream's disconnects are filtered out
+            // by `streamDisconnectReportsAnOutage` — so the verdict is dropped on evidence the device
+            // stopped answering at all, never on the stream dying the way an old daemon's always does.
             host.deviceSections[index].compatibility = nil
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(reason)
             host.reconcileCompatibilityBlock(deviceID: deviceID)
             host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
-        rebuildFlatSidebarData()
-        host.outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        applySidebarDataChange()
         updateAlertsSidebarBadge()
         host.reopenPersistedPanelWindowsIfPossible()
         // The Alerts pane's cards and `alertsFocusRequestMap` were built from the pre-rebuild groups, so
@@ -905,12 +991,175 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// including the ones that are not loaded: an unreachable device keeps its rows listed for the whole
     /// outage, and id-based lookups resolve through this merged data, so excluding it would both erase
     /// its subtree and make every workspace under it unresolvable.
+    ///
+    /// Every path that installs a device overview funnels through here — the local snapshot, the remote
+    /// pull/subscription, and a mutation response — so this is also where surfaces that read those
+    /// overviews but are re-derived by nothing else get refreshed. Global panel windows are the one such
+    /// surface: a rename reaches this client only in an overview, and no overview update re-renders a
+    /// global panel window (see `PanelCoordinator.refreshGlobalPanelTitles`).
     func rebuildFlatSidebarData() {
         let merged = AppKitController.mergedSidebarData(sections: host.deviceSections)
         host.projects = merged.projects
         host.workspacesByProject = merged.workspacesByProject
         host.workspaceRuntimeStatusByID = merged.workspaceRuntimeStatusByID
         host.alertsGroups = merged.alertsGroups
+        // Every path that installs alerts groups lands here, so this is where a bell in the pane the user
+        // is typing in gets consumed — before anything reads the groups for the badge or the list.
+        host.consumeFocusedSessionBellAlerts()
+        host.panelCoordinator.refreshGlobalPanelTitles()
+    }
+
+    /// The single entry point for "the sidebar's data changed": re-merges the device sections and then
+    /// repaints only what the change actually altered.
+    ///
+    /// A paired device with live terminal sessions pushes a changed overview several times a second, and
+    /// nearly every one of those changes touches a single row. `NSOutlineView.reloadData()` rebuilds
+    /// every row view from scratch — tens of milliseconds of main-thread layout on a populated sidebar —
+    /// so the outline is reloaded wholesale only when the rows themselves changed (added, removed, or
+    /// reordered); otherwise each row whose rendered content changed is reloaded on its own.
+    func applySidebarDataChange() {
+        rebuildFlatSidebarData()
+        let snapshot = outlineRowSnapshot()
+        let verdict = SidebarOutlineDiff.compute(previous: lastOutlineRowSnapshot, current: snapshot.rows)
+        lastOutlineRowSnapshot = snapshot.rows
+        switch verdict {
+        case .unchanged: break
+        case .rowsChanged(let cacheKeys):
+            // No height notification is owed: `heightOfRowByItem` reads only the selection and whether a
+            // runtime target is last in its workspace's list, and neither can change while the row keys
+            // stay identical — a selection move has its own reload path, which does note the heights.
+            for cacheKey in cacheKeys {
+                guard let item = snapshot.itemsByCacheKey[cacheKey] else { continue }
+                // Refreshing the cached ref's item is what makes this atomic: the row's model and its view
+                // are updated together, under the identity NSOutlineView already tracks.
+                host.outlineView.reloadItem(outlineItemRef(for: item))
+            }
+        case .structureChanged:
+            host.outlineView.reloadData()
+            applySidebarProjectExpansionState()
+        }
+    }
+
+    /// Rebuilds the whole outline and re-applies expansion, for the paths that repaint wholesale for
+    /// reasons the row diff does not model — a mutation response that also moves the selection, the local
+    /// compatibility block, the pending-deletion marking.
+    ///
+    /// Refreshing the stored snapshot is the point of routing them here: without it the next diff would
+    /// run against a baseline older than what is painted, and a change that happens to restore that
+    /// baseline would be called unchanged, leaving the stale rows on screen.
+    func fullReloadSidebarOutline() {
+        host.outlineView.reloadData()
+        applySidebarProjectExpansionState()
+        lastOutlineRowSnapshot = outlineRowSnapshot().rows
+    }
+
+    /// Walks the outline's logical tree — the same enumeration the `NSOutlineViewDataSource` methods
+    /// serve — signing each node, and returns the rows in order plus the item behind each cache key so a
+    /// changed row can be reloaded.
+    ///
+    /// The children of a collapsed project are deliberately left out. A project's collapse state arrives
+    /// in the applied data (it is a `ProjectSummary` field, read back from the client database on every
+    /// overview install), and the only code that materializes or hides those rows is
+    /// `applySidebarProjectExpansionState`, which runs on the wholesale path — so omitting them makes a
+    /// collapse flip a structural change, which is exactly what it is. Workspace expansion is the
+    /// opposite: client-only view state that never rides in the applied data and is materialized by the
+    /// click and selection handlers themselves, so a collapsed workspace's target rows stay listed here
+    /// and a change to one costs a reload of a row that is not currently on screen.
+    private func outlineRowSnapshot() -> (rows: [SidebarOutlineRow], itemsByCacheKey: [String: OutlineItem]) {
+        var rows: [SidebarOutlineRow] = []
+        var itemsByCacheKey: [String: OutlineItem] = [:]
+        func append(_ item: OutlineItem, _ signature: SidebarRowSignature) {
+            let cacheKey = item.cacheKey
+            rows.append(SidebarOutlineRow(cacheKey: cacheKey, signature: signature))
+            itemsByCacheKey[cacheKey] = item
+        }
+
+        let treatments = host.deviceSections.reduce(into: [String: SidebarRowDeviceTreatment]()) { treatments, section in
+            treatments[section.deviceID] = SidebarRowDeviceTreatment(loadState: section.loadState, displayName: section.displayName)
+        }
+        func treatment(deviceID: String) -> SidebarRowDeviceTreatment {
+            treatments[deviceID] ?? SidebarRowDeviceTreatment(loadState: nil, displayName: nil)
+        }
+
+        func appendProjects(deviceID: String) {
+            let device = treatment(deviceID: deviceID)
+            for project in deviceProjects(deviceID: deviceID) {
+                append(.project(project), projectRowSignature(project: project, device: device))
+                guard !project.isCollapsed else { continue }
+                guard project.isGitRepo else {
+                    guard let workspace = nonGitProjectTargetWorkspace(project) else { continue }
+                    for item in nonGitProjectRuntimeTargetChildren(project) {
+                        append(
+                            .runtimeTarget(project, workspace, item),
+                            runtimeTargetRowSignature(workspace: workspace, item: item, nestedUnderWorkspace: false, device: device))
+                    }
+                    continue
+                }
+                let workspaces = visibleWorkspaces(projectID: project.id)
+                guard !workspaces.isEmpty else {
+                    append(.emptyProject(project), .emptyProject(SidebarEmptyProjectRowSignature(device: device)))
+                    continue
+                }
+                for workspace in workspaces {
+                    append(.workspace(project, workspace), workspaceRowSignature(workspace: workspace, device: device))
+                    for item in workspaceRuntimeTargetChildren(workspace) {
+                        append(
+                            .runtimeTarget(project, workspace, item),
+                            runtimeTargetRowSignature(workspace: workspace, item: item, nestedUnderWorkspace: true, device: device))
+                    }
+                }
+            }
+        }
+
+        if showsDeviceHeaders {
+            for section in host.deviceSections {
+                append(.device(section.deviceID), deviceRowSignature(section: section))
+                appendProjects(deviceID: section.deviceID)
+            }
+        } else {
+            appendProjects(deviceID: singleDeviceID)
+        }
+        return (rows, itemsByCacheKey)
+    }
+
+    private func deviceRowSignature(section: DeviceSection) -> SidebarRowSignature {
+        // The compatibility branch the cell takes ahead of the caption, collapsed to what it renders.
+        let compatibilityActionTitle: String? = {
+            guard let compatibility = section.compatibility, !compatibility.isCompatible else { return nil }
+            return compatibility == .clientTooOld ? "Update app" : "Resolve"
+        }()
+        return .device(
+            SidebarDeviceRowSignature(
+                displayName: section.displayName, loadState: section.loadState, compatibilityActionTitle: compatibilityActionTitle,
+                isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: section.deviceID),
+                isUpdatePending: section.daemonStatus?.isUpdatePending == true))
+    }
+
+    private func projectRowSignature(project: ProjectSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
+        let standInWorkspace = nonGitProjectTargetWorkspace(project)
+        return .project(
+            SidebarProjectRowSignature(
+                device: device, project: project, standInWorkspace: standInWorkspace,
+                standInRuntimeStatus: standInWorkspace.flatMap { host.workspaceRuntimeStatusByID[$0.id] },
+                standInIsPendingDeletion: standInWorkspace.map { host.isWorkspaceMarkedDeleting($0.id) } ?? false,
+                isExpandable: project.isGitRepo || !nonGitProjectRuntimeTargetChildren(project).isEmpty))
+    }
+
+    private func workspaceRowSignature(workspace: WorkspaceSummary, device: SidebarRowDeviceTreatment) -> SidebarRowSignature {
+        .workspace(
+            SidebarWorkspaceRowSignature(
+                device: device, workspace: workspace, runtimeStatus: host.workspaceRuntimeStatusByID[workspace.id],
+                isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id), isExpanded: isWorkspaceExpanded(workspace.id),
+                hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
+    }
+
+    private func runtimeTargetRowSignature(
+        workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool, device: SidebarRowDeviceTreatment
+    ) -> SidebarRowSignature {
+        .runtimeTarget(
+            SidebarRuntimeTargetRowSignature(
+                device: device, item: item, nestedUnderWorkspace: nestedUnderWorkspace,
+                isRenaming: renamingRuntimeTarget.map { $0.workspaceID == workspace.id && $0.item.key == item.key } ?? false))
     }
 
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
@@ -927,7 +1176,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return (project, entry.workspace)
     }
 
-    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }
+    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isHidden }
 
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
@@ -971,7 +1220,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 showingAlerts: host.showingAlerts, direction: direction)
         else { return false }
         switch target {
-        case .alerts: host.showAlertsDetail()
+        case .alerts: host.showAlertsDetail(presentation: .userNavigation)
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -1011,6 +1260,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return outlineItemRef(for: .project(project))
     }
 
+    /// How a workspace's sidebar row renders and responds: normal, or marked while its delete runs.
+    /// Every surface that treats a deleting row differently — the row cell, its children, selection, the
+    /// context menu, the row click — reads this one state.
+    private func workspaceRowState(_ workspaceID: String) -> AppKitController.SidebarWorkspaceRowState {
+        AppKitController.sidebarWorkspaceRowState(isPendingDeletion: host.isWorkspaceMarkedDeleting(workspaceID))
+    }
+
     /// The runtime-target rows shown under a workspace, memoized per workspace id.
     func runtimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
         if let cached = runtimeTargetItemsCache[workspaceID] { return cached }
@@ -1026,32 +1282,49 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return visibleWorkspaces(projectID: project.id).first
     }
 
+    /// How a project's sidebar row renders and responds. A non-git project row is its single workspace's
+    /// row, so it reads that workspace's state and is marked while its delete runs — a project delete
+    /// reported by another client marks the row here just as a workspace delete marks a `.workspace` row.
+    private func projectRowState(_ project: ProjectSummary) -> AppKitController.SidebarWorkspaceRowState {
+        AppKitController.sidebarProjectRowState(
+            standInWorkspaceIsPendingDeletion: nonGitProjectTargetWorkspace(project).map { host.isWorkspaceMarkedDeleting($0.id) })
+    }
+
+    /// The runtime targets listed under a non-git project's stand-in row. A row marked as deleting lists
+    /// none, matching `workspaceRuntimeTargetChildren`, so the subtree of a workspace on its way out is
+    /// hidden whatever the user's expansion state.
+    private func nonGitProjectRuntimeTargetChildren(_ project: ProjectSummary) -> [SidebarRuntimeTargetItem] {
+        guard let workspace = nonGitProjectTargetWorkspace(project), projectRowState(project).listsRuntimeTargetChildren else { return [] }
+        return runtimeTargetItems(workspaceID: workspace.id)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return showsDeviceHeaders ? host.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             // Non-git projects own exactly one workspace (the project directory) and render
             // as a single flat row; their children are that workspace's runtime targets.
-            guard project.isGitRepo else {
-                guard let workspace = nonGitProjectTargetWorkspace(project) else { return 0 }
-                return runtimeTargetItems(workspaceID: workspace.id).count
-            }
+            guard project.isGitRepo else { return nonGitProjectRuntimeTargetChildren(project).count }
             return max(visibleWorkspaces(projectID: project.id).count, 1)
         }
-        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return runtimeTargetItems(workspaceID: workspace.id).count }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return workspaceRuntimeTargetChildren(workspace).count }
         return 0
+    }
+
+    /// The runtime targets listed as a workspace row's children. A row marked as deleting lists none, so
+    /// its children are hidden whatever the user's expansion state.
+    private func workspaceRuntimeTargetChildren(_ workspace: WorkspaceSummary) -> [SidebarRuntimeTargetItem] {
+        guard workspaceRowState(workspace.id).listsRuntimeTargetChildren else { return [] }
+        return runtimeTargetItems(workspaceID: workspace.id)
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if case .device = (item as? OutlineItemRef)?.item { return true }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
-            guard project.isGitRepo else {
-                guard let workspace = nonGitProjectTargetWorkspace(project) else { return false }
-                return !runtimeTargetItems(workspaceID: workspace.id).isEmpty
-            }
+            guard project.isGitRepo else { return !nonGitProjectRuntimeTargetChildren(project).isEmpty }
             return true
         }
-        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !runtimeTargetItems(workspaceID: workspace.id).isEmpty }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !workspaceRuntimeTargetChildren(workspace).isEmpty }
         return false
     }
 
@@ -1060,6 +1333,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         switch (item as? OutlineItemRef)?.item {
         case .device, .emptyProject, .runtimeTarget: return false
+        // A row marked as deleting is inert: it refuses selection here, which also covers arrow-key
+        // navigation and window cycling, since both select through the outline view. A non-git project's
+        // row is its workspace's row, so it refuses selection on the same terms.
+        case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive
+        case .project(let project) where !project.isGitRepo: return projectRowState(project).isInteractive
         default: return true
         }
     }
@@ -1073,19 +1351,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             if let workspace = nonGitProjectTargetWorkspace(project) {
-                let items = runtimeTargetItems(workspaceID: workspace.id)
+                let items = nonGitProjectRuntimeTargetChildren(project)
                 if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
             }
             let visible = visibleWorkspaces(projectID: project.id)
             guard !visible.isEmpty else { return outlineItemRef(for: .emptyProject(project)) }
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
-                ?? WorkspaceSummary(
-                    id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
+                ?? WorkspaceSummary(id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         if case .workspace(let project, let workspace) = (item as? OutlineItemRef)?.item {
-            let items = runtimeTargetItems(workspaceID: workspace.id)
+            let items = workspaceRuntimeTargetChildren(workspace)
             if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
         }
         return outlineItemRef(for: .project(host.projects.first ?? Self.placeholderProject))
@@ -1235,6 +1512,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-project-\(project.id)")
         let usesGroupedWorkspaceSelection = isSelected && !project.isGitRepo && host.selectedWorkspaceID != nil
+        // A non-git project row is its single workspace's row, so it carries that workspace's delete.
+        let rowState = projectRowState(project)
+        cell.alphaValue = rowState.alpha
 
         let rowBackground = NSView()
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
@@ -1250,7 +1530,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
 
@@ -1266,28 +1546,34 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // shows a muted connected-nodes glyph; a non-git project is a plain directory, so it shows a
         // folder tinted by its single workspace's run state — green when running, muted when stopped —
         // which is a prominent status without mimicking a workspace's leading dot.
-        let leadingIcon = NSImageView()
-        leadingIcon.translatesAutoresizingMaskIntoConstraints = false
-        leadingIcon.widthAnchor.constraint(equalToConstant: 13).isActive = true
-        leadingIcon.heightAnchor.constraint(equalToConstant: 13).isActive = true
-        if project.isGitRepo {
-            // The marketing site's project glyph (connected nodes) marks a git project without reading
-            // as the ubiquitous branch icon.
-            let glyph = RowPrimitives.projectGlyphImage()
-            glyph.accessibilityDescription = "Git project"
-            leadingIcon.image = glyph
-            leadingIcon.contentTintColor = .tertiaryLabelColor
-            leadingIcon.toolTip = "Git repository"
+        // While the stand-in row's delete runs, that slot carries a spinner instead of the folder, the way
+        // a workspace row trades its status dot for one: the run state it would report is on its way out.
+        let leadingIndicator: NSView
+        if rowState.showsDeletingProgress, let workspace = nonGitProjectTargetWorkspace(project) {
+            leadingIndicator = deletingProgressIndicator(workspaceID: workspace.id)
         } else {
-            let workspace = visibleWorkspaces(projectID: project.id).first
-            let lifecycleRunning =
-                (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
-                    ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
-            leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
-            leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-            leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+            let leadingIcon = NSImageView()
+            if project.isGitRepo {
+                // The marketing site's project glyph (connected nodes) marks a git project without reading
+                // as the ubiquitous branch icon.
+                leadingIcon.image = RowPrimitives.projectGlyphImage
+                leadingIcon.contentTintColor = .tertiaryLabelColor
+                leadingIcon.toolTip = "Git repository"
+            } else {
+                let workspace = nonGitProjectTargetWorkspace(project)
+                let lifecycleRunning =
+                    (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
+                        ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
+                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
+                leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+                leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+            }
+            leadingIndicator = leadingIcon
         }
-        leadingStack.addArrangedSubview(leadingIcon)
+        leadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        leadingIndicator.widthAnchor.constraint(equalToConstant: 13).isActive = true
+        leadingIndicator.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        leadingStack.addArrangedSubview(leadingIndicator)
         leadingStack.addArrangedSubview(titleLabel)
 
         let accessoryStack = NSStackView()
@@ -1307,7 +1593,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
         let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo)
-        if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
+        // A marked row carries no controls, like the workspace row it stands in for: opening settings for
+        // a project whose sole workspace is being removed is an interaction the row refuses. (Add
+        // Workspace belongs to git projects only, whose rows stand in for nothing and are never marked.)
+        if projectActions.showsSettings, rowState.isInteractive { accessoryStack.addArrangedSubview(settingsButton) }
 
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
@@ -1381,6 +1670,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func workspaceRowCell(project: ProjectSummary, workspace: WorkspaceSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-workspace-\(workspace.id)")
+        let rowState = workspaceRowState(workspace.id)
+        cell.alphaValue = rowState.alpha
 
         let cardView = NSView()
         cardView.translatesAutoresizingMaskIntoConstraints = false
@@ -1405,30 +1696,28 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         titleRow.spacing = 6
         titleRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let statusIcon = NSImageView()
-        statusIcon.translatesAutoresizingMaskIntoConstraints = false
         let runtimeStatus =
             host.workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
                 workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
-        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
-        statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
+        // its way out and says nothing the user can act on, so the row reports the delete instead.
+        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
+        statusIndicator.translatesAutoresizingMaskIntoConstraints = false
+        statusIndicator.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)
+        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        titleRow.addArrangedSubview(statusIcon)
+        titleRow.addArrangedSubview(statusIndicator)
         titleRow.addArrangedSubview(nameLabel)
         if let warningSummary = runtimeStatus.warningSummary {
             let warningIcon = NSImageView()
@@ -1443,21 +1732,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let gearSpacer = NSView()
         gearSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleRow.addArrangedSubview(gearSpacer)
-        let settingsButton = host.sidebarRowIconButton(
-            symbol: "gearshape", tooltip: "Workspace settings for \(workspace.displayName)",
-            action: #selector(AppKitController.showWorkspaceSettings(_:)))
-        settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
-        titleRow.addArrangedSubview(settingsButton)
-        // A workspace with no runtime targets has nothing to expand, so it carries no chevron.
-        if !runtimeTargetItems(workspaceID: workspace.id).isEmpty {
-            let isExpanded = isWorkspaceExpanded(workspace.id)
-            let chevron = host.sidebarRowChevronButton(
-                expanded: isExpanded, tooltip: isExpanded ? "Collapse \(workspace.displayName)" : "Expand \(workspace.displayName)",
-                action: #selector(AppKitController.toggleSidebarWorkspaceDisclosure(_:)))
-            chevron.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-            chevron.setAccessibilityIdentifier("sidebar-workspace-disclosure-\(workspace.id)")
-            titleRow.addArrangedSubview(chevron)
+        // A marked row carries no controls: opening settings for, or expanding, a workspace that is being
+        // deleted are interactions the row refuses.
+        if rowState.isInteractive {
+            let settingsButton = host.sidebarRowIconButton(
+                symbol: "gearshape", tooltip: "Workspace settings for \(workspace.displayName)",
+                action: #selector(AppKitController.showWorkspaceSettings(_:)))
+            settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
+            titleRow.addArrangedSubview(settingsButton)
+            // A workspace with no runtime targets has nothing to expand, so it carries no chevron.
+            if !runtimeTargetItems(workspaceID: workspace.id).isEmpty {
+                let isExpanded = isWorkspaceExpanded(workspace.id)
+                let chevron = host.sidebarRowChevronButton(
+                    expanded: isExpanded, tooltip: isExpanded ? "Collapse \(workspace.displayName)" : "Expand \(workspace.displayName)",
+                    action: #selector(AppKitController.toggleSidebarWorkspaceDisclosure(_:)))
+                chevron.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+                chevron.setAccessibilityIdentifier("sidebar-workspace-disclosure-\(workspace.id)")
+                titleRow.addArrangedSubview(chevron)
+            }
         }
         contentStack.addArrangedSubview(titleRow)
         titleRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
@@ -1478,6 +1771,28 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         ])
 
         return cell
+    }
+
+    /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
+    private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
+        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+        let statusIcon = NSImageView()
+        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
+        return statusIcon
+    }
+
+    /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
+    /// mini spinning indicator the agent rows use for in-flight work.
+    private func deletingProgressIndicator(workspaceID: String) -> NSView {
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .mini
+        spinner.toolTip = "Deleting…"
+        spinner.setAccessibilityIdentifier("sidebar-workspace-deleting-\(workspaceID)")
+        spinner.startAnimation(nil)
+        return spinner
     }
 
     /// The SF Symbol conveying a runtime target's kind in the sidebar list, matching the
@@ -1504,7 +1819,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .running: return sidebarRunningIndicatorColor()
         case .exited: return sidebarFailedIndicatorColor()
         case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
-        case nil: return sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        case nil: return sidebarPrimaryTextColor(isSelected: isSelected)
         }
     }
 
@@ -1576,12 +1891,27 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
-            titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            // Name then secondary text, the two-part shape a process row already uses (see
+            // `AppKitController.windowRow`): the name goes semibold once something trails it, so the
+            // two halves stay tellable apart at the sidebar's one type size.
+            titleLabel.font = .systemFont(ofSize: 11, weight: item.detail == nil ? .regular : .semibold)
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
+
+            // Ad hoc shells trail the title their program reported as dimmed secondary text. It
+            // compresses before the name does, so a long title never squeezes out what the row is.
+            if let detail = item.detail {
+                let detailLabel = NSTextField(labelWithString: detail)
+                detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                detailLabel.textColor = sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
+                detailLabel.lineBreakMode = .byTruncatingTail
+                detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+                detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                row.addArrangedSubview(detailLabel)
+            }
         }
 
         row.addArrangedSubview(NSView())
@@ -1616,11 +1946,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { return nil }
         switch ref.item {
         case .runtimeTarget(_, let workspace, let item): return runtimeTargetMenu(workspace: workspace, item: item)
-        case .workspace(_, let workspace): return workspaceContextMenu(workspace: workspace)
+        // A row marked as deleting offers no actions: everything in the menu targets a workspace that is
+        // being removed, and the delete already running is the one thing happening to it.
+        case .workspace(_, let workspace): return workspaceRowState(workspace.id).isInteractive ? workspaceContextMenu(workspace: workspace) : nil
         // A non-git project's row stands in for its single workspace, so its right-click menu offers
-        // the same workspace actions, resolved to that lone visible workspace.
+        // the same workspace actions, resolved to that lone visible workspace — and offers none at all
+        // once that workspace is marked as deleting, on the same terms as a `.workspace` row.
         case .project(let project) where !project.isGitRepo:
-            guard let workspace = visibleWorkspaces(projectID: project.id).first else { return nil }
+            guard let workspace = nonGitProjectTargetWorkspace(project), projectRowState(project).isInteractive else { return nil }
             return workspaceContextMenu(workspace: workspace)
         default: return nil
         }
@@ -1633,7 +1966,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
         let menu = NSMenu()
         // The menu keeps its shape while the owning device is unreachable — the same items in the same
-        // order — and disables only the ones that need its daemon, so lifecycle, Hide and Archive read
+        // order — and disables only the ones that need its daemon, so lifecycle, Hide and Delete read
         // as temporarily unavailable rather than silently disappearing mid-outage. Auto-enabling is off
         // so those decisions are the menu's own rather than AppKit's responder-chain guess.
         menu.autoenablesItems = false
@@ -1676,10 +2009,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         addItem(
             "Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
-        // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
+        // Delete is destructive (it removes the git worktree and the workspace), so it sits last, below the separator, and
         // routes through the same confirmation the detail ⋯ overflow menu uses.
         addItem(
-            "Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id,
+            "Delete…", symbol: "trash", target: self, action: #selector(deleteWorkspaceMenuItem(_:)), identifier: workspace.id,
             isEnabled: daemonActionsEnabled)
         return menu
     }
@@ -1704,9 +2037,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.hideWorkspace(id: id)
     }
 
-    @objc private func archiveWorkspaceMenuItem(_ sender: NSMenuItem) {
+    @objc private func deleteWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
-        host.archiveWorkspace(id: id)
+        host.deleteWorkspace(id: id)
     }
 
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
@@ -1863,8 +2196,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func sidebarPanelBackgroundColor() -> NSColor { sidebarThemeColor(light: (248, 247, 241), dark: (15, 21, 23)) }
 
-    func sidebarCardBackgroundColor(isArchived: Bool) -> NSColor {
-        let alpha: CGFloat = isArchived ? 0.42 : 0.55
+    func sidebarCardBackgroundColor() -> NSColor {
+        let alpha: CGFloat = 0.55
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
@@ -1881,8 +2214,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.72)
     }
 
-    func sidebarPrimaryTextColor(isSelected: Bool, isArchived: Bool) -> NSColor {
-        let alpha: CGFloat = if isArchived { 0.70 } else if isSelected { 0.96 } else { 0.92 }
+    func sidebarPrimaryTextColor(isSelected: Bool) -> NSColor {
+        let alpha: CGFloat = isSelected ? 0.96 : 0.92
         return sidebarThemeColor(light: (16, 32, 40), dark: (234, 240, 239), alpha: alpha)
     }
 
@@ -1970,15 +2303,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // section genuinely is loading, and a failure arriving from `.loading` re-runs the full offline
         // transition, so the caption picks up the new reason instead of being dropped as a repeat.
         host.deviceSections[index].loadState = .loading
-        host.outlineView.reloadData()
-        applySidebarProjectExpansionState()
+        applySidebarDataChange()
     }
 
     @objc private func compatibilityActionClicked(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, raw.hasPrefix("compat:") else { return }
         let deviceID = String(raw.dropFirst("compat:".count))
         guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
-        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict, presentation: .userNavigation)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -1990,7 +2322,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedProjectID = nil
             host.selectedWorkspaceID = nil
             host.showingSettings = false
-            if !host.showingAlerts { host.showPlaceholder() }
+            if !host.showingAlerts { host.showPlaceholder(presentation: .userNavigation) }
             updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
@@ -2029,14 +2361,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // A non-git project has no workspace row to expand, but a git workspace that was only
             // transiently expanded still needs to collapse now that the selection moved to this project.
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             host.selectedWorkspaceID = workspace.id
             AppKitController.setClientActiveWorkspaceID(workspace.id)
             host.showingSettings = false
             updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
-            host.showWorkspaceDetail(project: project, workspace: workspace)
+            host.showWorkspaceDetail(project: project, workspace: workspace, presentation: .userNavigation)
         }
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
@@ -2191,9 +2523,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// Whether a workspace's runtime-target list should be shown: pinned open by an explicit
-    /// mouse interaction, or expanded transiently because it is the current arrow-key selection.
+    /// mouse interaction, or expanded transiently because it is the current arrow-key selection. A row
+    /// marked as deleting shows none, without clearing either piece of state, so a failed delete restores
+    /// exactly what the user had open.
     private func isWorkspaceExpanded(_ workspaceID: String) -> Bool {
-        pinnedWorkspaceIDs.contains(workspaceID) || transientlyExpandedWorkspaceID == workspaceID
+        guard workspaceRowState(workspaceID).listsRuntimeTargetChildren else { return false }
+        return pinnedWorkspaceIDs.contains(workspaceID) || transientlyExpandedWorkspaceID == workspaceID
     }
 
     /// Marks a workspace as explicitly pinned open in response to a mouse interaction (clicking

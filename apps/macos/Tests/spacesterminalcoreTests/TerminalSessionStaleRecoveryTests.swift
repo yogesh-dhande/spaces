@@ -43,15 +43,18 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState) throws -> TerminalSessionPaths {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+    private func seedSession(sessionID: String, servicePID: Int32, state: TerminalSessionState, rootDirectory: String? = nil, bellAt: String? = nil)
+        throws -> TerminalSessionPaths
+    {
+        let paths = try rootDirectory.map { TerminalSessionPaths(rootDirectory: $0) } ?? TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
                 createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
-                sessionID: sessionID, servicePID: servicePID, childPID: 4242, state: state, updatedAt: "2026-05-08T00:00:00Z"), paths: paths)
+                sessionID: sessionID, servicePID: servicePID, childPID: 4242, state: state, updatedAt: "2026-05-08T00:00:00Z", bellAt: bellAt),
+            paths: paths)
         return paths
     }
 
@@ -109,6 +112,43 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
         XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
+    }
+
+    /// A phantom `running` row must be repaired on the pid matrix alone. Sessions are read through the
+    /// root their row stores, so a row whose root this profile does not derive — a runtime directory that
+    /// moved, or rows a predecessor daemon left behind — is repaired like any other instead of being
+    /// skipped on every restart while claiming to be running. The repair is rows-only: it must not create
+    /// the vanished directory outside the profile.
+    func testDeadPidRowStoredOutsideTheProfileIsRepaired() throws {
+        let sessionID = "session-foreign-root"
+        let foreignRoot = try XCTUnwrap(databaseRoot).appendingPathComponent("foreign-runtime", isDirectory: true).appendingPathComponent(
+            sessionID, isDirectory: true)
+        let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, rootDirectory: foreignRoot.path)
+        try FileManager.default.removeItem(at: foreignRoot)
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in false })
+
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: foreignRoot.path), "The repair writes rows only and must not recreate a directory it does not own."
+        )
+    }
+
+    /// The repair records how a run ended; it does not answer the bell that run rang. The timestamp is the
+    /// identity of an alert the user may still be looking at, so dropping it while rewriting the row would
+    /// make a daemon crash recovery retract the alert.
+    func testRepairCarriesAnUnansweredBellOntoTheFinalizedRow() throws {
+        let sessionID = "session-with-bell"
+        let bellAt = "2026-05-08T00:00:30Z"
+        let paths = try seedSession(sessionID: sessionID, servicePID: 999_999, state: .running, bellAt: bellAt)
+
+        let result = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in false })
+
+        XCTAssertEqual(result.finalized, [TerminalSessionStaleRecovery.FinalizedSession(sessionID: sessionID, state: .failed)])
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(runtimeState.state, .failed)
+        XCTAssertEqual(runtimeState.bellAt, bellAt)
     }
 
     func testLiveForeignPidRowIsLeftRunning() throws {
@@ -169,6 +209,9 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         let fileManager = FileManager.default
         let originalPermissions = try fileManager.attributesOfItem(atPath: databasePath)[.posixPermissions] as? NSNumber
         try fileManager.setAttributes([.posixPermissions: 0o444], ofItemAtPath: databasePath)
+        // A mode change binds at open, so the process's existing connections would keep their write access
+        // straight through the fault. Release them on both sides so the injected mode is the one in force.
+        TerminalSessionPersistence.closeDatabaseConnection()
         defer { if let originalPermissions { try? fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) } }
 
         // Pre-fix behavior: the suppressed write (`try?`) would still append this session to `finalized`.
@@ -191,6 +234,7 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
 
         // Restore write access and run the sweep again: the repair now commits and the row is finalized.
         if let originalPermissions { try fileManager.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: databasePath) }
+        TerminalSessionPersistence.closeDatabaseConnection()
 
         let healedResult = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in true })
 

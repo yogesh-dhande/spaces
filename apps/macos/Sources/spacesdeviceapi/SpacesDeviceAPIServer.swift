@@ -64,11 +64,28 @@ extension SpacesDeviceAPICommand {
         default: false
         }
     }
+
+    /// Commands whose work is measured in seconds rather than in database reads: they stop every process
+    /// and terminal in scope, remove git worktrees, and delete branches. Run inline on the serial state
+    /// queue they hold up every other connection's requests — an overview poll issued while a delete is
+    /// running waits for the whole delete and times out as a connection error. Both transports divert
+    /// them to `workspaceTeardownQueue` instead. The client still gets one synchronous response carrying
+    /// the full outcome (including the branch-deletion notice and the refreshed overview), so the
+    /// request/response contract is unchanged.
+    fileprivate var runsOnWorkspaceTeardownQueue: Bool {
+        switch self {
+        case .archiveWorkspace, .deleteProject: true
+        default: false
+        }
+    }
 }
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
     typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
+    /// Exports the current state of a session this daemon hosts live, or nil when it hosts no live core for
+    /// that session id (the reader then falls through to the persisted/socket read).
+    public typealias LiveTerminalSessionStateProvider = @Sendable (String) -> GhosttyRemoteSessionStatePayload?
 
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
@@ -336,6 +353,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     }
                     if request.command.isAgentHookCommand {
                         server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else if request.command.runsOnWorkspaceTeardownQueue {
+                        server.handleWorkspaceTeardownRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
                     } else {
                         finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
                     }
@@ -393,7 +412,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             private let identity: TerminalServiceTLSIdentity
             private let server: SpacesDeviceAPIServer
             private let queue: DispatchQueue
-            private var listenSocketFD: Int32 = -1
             private var acceptSource: DispatchSourceRead?
             private var sslContext: OpaquePointer?
             private let activeConnectionLock = NSLock()
@@ -416,18 +434,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try Self.setCloseOnExec(socketFD)
                 try Self.setNonBlocking(socketFD)
                 sslContext = context
-                listenSocketFD = socketFD
                 listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
 
                 let startup = DispatchSemaphore(value: 0)
                 let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-                source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
+                source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+                // Both the descriptor and the TLS context belong to the dispatch source, not to this
+                // object: a cancel handler that reached back through `self` would find it deallocated on a
+                // dropped owner and release neither, leaking the descriptor and the `SSL_CTX` heap
+                // allocation for the process's lifetime. `context` is captured by value so `SSL_CTX_free`
+                // runs unconditionally; `self?.sslContext = nil` afterward is best-effort hygiene for a
+                // caller that is still alive.
+                //
+                // This listener binds a TCP host:port, not a filesystem path, so there is no socket file to
+                // remove here.
                 source.setCancelHandler { [weak self] in
-                    guard let self else { return }
-                    if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-                    if let sslContext = self.sslContext { SSL_CTX_free(sslContext) }
-                    self.listenSocketFD = -1
-                    self.sslContext = nil
+                    close(socketFD)
+                    SSL_CTX_free(context)
+                    self?.sslContext = nil
                 }
                 acceptSource = source
                 source.resume()
@@ -443,7 +467,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             func closeConnections(forInstallationID installationID: String) { closeActiveConnections { $0 == installationID } }
 
-            private func acceptReadyConnections() {
+            private func acceptReadyConnections(listenSocketFD: Int32) {
                 while true {
                     let clientFD = accept(listenSocketFD, nil, nil)
                     if clientFD < 0 {
@@ -549,6 +573,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         if request.command.isAgentHookCommand {
                             try server.syncOnQueue { try server.authorize(request) }
                             response = try server.handleAgentHookRequestOnWorkerQueue(request)
+                        } else if request.command.runsOnWorkspaceTeardownQueue {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleWorkspaceTeardownRequestOnWorkerQueue(request)
                         } else {
                             response = try server.syncOnQueue {
                                 try server.authorize(request)
@@ -778,12 +805,27 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
+    /// Exports a session's current state straight from the live in-process core, or nil when this daemon
+    /// hosts no live core for that id. Injected because the cores belong to the daemon, not to this server.
+    /// Without it every state read — including the one behind each pane attach — makes the daemon connect to
+    /// its own session's subscription socket and export a full frame back over that unix round trip.
+    private let liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let agentHookStatusLoader: AgentHookStatusLoader
     private let agentHookInstallHandler: AgentHookInstallHandler
     /// Login-shell probing and config writes can take seconds. Serialize them independently so they
     /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
     private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
+    /// Tearing a workspace or project down stops its processes and terminals, removes git worktrees, and
+    /// deletes branches — seconds of work. Serialize that independently of the state queue so a delete
+    /// cannot stall every other client's overview polls behind it. Serial rather than concurrent because
+    /// two teardowns in the same repository would otherwise race on the same git index lock.
+    private let workspaceTeardownQueue = DispatchQueue(label: "spaces.device.api.workspace-teardown", qos: .userInitiated)
+    /// Workspaces whose teardown is running or queued on `workspaceTeardownQueue`, reported on every
+    /// overview as `workspaceIDsWithTeardownInFlight`. Guarded by its own lock rather than a queue: it is
+    /// written from the teardown queue and read from whichever queue is building an overview, and both
+    /// operations are a single set mutation.
+    private let workspaceTeardownRegistry = WorkspaceTeardownRegistry()
     /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
     /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
     let queue: DispatchQueue
@@ -847,6 +889,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
+        liveTerminalSessionStateProvider = nil
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
         agentHookInstallHandler = { try AgentHookInstaller.install($0) }
@@ -867,6 +910,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        liveTerminalSessionStateProvider: LiveTerminalSessionStateProvider? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -882,6 +926,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
+        self.liveTerminalSessionStateProvider = liveTerminalSessionStateProvider
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
         self.agentHookInstallHandler = agentHookInstallHandler
@@ -1126,11 +1171,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// (ping, pairing, terminal control, directory listing, terminal-link chunk reads,
     /// and the conditional non-file `resolveTerminalLink` path) pay no open.
     ///
-    /// Confinement: a context is created inside `handleRequest`, which runs only on the
-    /// serial `spaces.device.api` queue, and it never escapes that request's stack frame.
-    /// It must not be stored on the server or captured into an escaping closure — the
-    /// off-request paths (overview-stream `lineProvider`, `loadDaemonStatus`, and the two
-    /// background launch/setup paths) each open their own store on their own queue.
+    /// Confinement: a context is created inside `handleRequest` (serial `spaces.device.api`
+    /// queue) or inside `handleWorkspaceTeardownRequest` (serial `workspaceTeardownQueue`),
+    /// and it never escapes that request's stack frame. It must not be stored on the server or
+    /// captured into an escaping closure — the off-request paths (overview-stream
+    /// `lineProvider`, `loadDaemonStatus`, and the two background launch/setup paths) each open
+    /// their own store on their own queue.
     private final class RequestContext {
         private let orchestratorFactory: (SQLiteStore) -> WorkspaceOrchestrator
         private var openedStore: SQLiteStore?
@@ -1186,7 +1232,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 result: .overview(try loadOverview(store: context.store(), clientApp: request.clientApp)))
         case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
         case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
-        case .deleteProject(let payload): return try handleDeleteProjectRequest(payload, context: context)
+        // Both transports divert workspace-teardown commands to `workspaceTeardownQueue` before they reach
+        // here (see `runsOnWorkspaceTeardownQueue`), so these cases only keep the switch exhaustive.
+        case .deleteProject, .archiveWorkspace: return try handleWorkspaceTeardownRequest(request)
         case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
         case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
         case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
@@ -1196,7 +1244,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload, context: context)
         case .stopWorkspace(let payload): return try handleStopWorkspaceRequest(payload, context: context)
         case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload, context: context)
-        case .archiveWorkspace(let payload): return try handleArchiveWorkspaceRequest(payload, context: context)
         case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
         case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload, context: context)
         case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload, context: context)
@@ -1260,6 +1307,56 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     #endif
 
+    /// Runs one workspace-teardown command (see `runsOnWorkspaceTeardownQueue`).
+    ///
+    /// The `RequestContext` is created here rather than passed in from `handleRequest` so its store and
+    /// orchestrator are opened and used only on `workspaceTeardownQueue`, per the confinement rule: a
+    /// `SQLiteStore` belongs to the queue that opened it. The workspace lifecycle lock inside the
+    /// orchestrator still serializes this teardown against any other action on the same workspace.
+    private func handleWorkspaceTeardownRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
+        switch request.command {
+        case .deleteProject(let payload): return try handleDeleteProjectRequest(payload, context: context)
+        case .archiveWorkspace(let payload): return try handleArchiveWorkspaceRequest(payload, context: context)
+        default: preconditionFailure("Only workspace-teardown commands run on the workspace-teardown queue.")
+        }
+    }
+
+    /// Publishes `workspaceIDs` as being torn down for the duration of `teardown`, so an overview built
+    /// while it runs reports them (see `SpacesDeviceOverviewPayload.workspaceIDsWithTeardownInFlight`).
+    /// Registered before any teardown work starts and released in a `defer`, so a teardown that throws
+    /// cannot leave a workspace reported as forever deleting.
+    ///
+    /// Registration happens inside the handler, after `workspaceTeardownQueue` dequeues the request, so a
+    /// teardown queued behind an in-flight one waits without its ids registered and is absent from
+    /// overviews until it starts. Accepted: the client that issued it marks the row locally for the whole
+    /// mutation regardless, and the only misread is another client's timed-out request reconciling the
+    /// still-listed workspace as a failed delete. That un-marks a row which disappears from the very next
+    /// overview once the queued teardown runs, so it self-heals.
+    private func withTeardownRegistered<T>(workspaceIDs: [String], teardown: () throws -> T) rethrows -> T {
+        workspaceTeardownRegistry.register(workspaceIDs: workspaceIDs)
+        defer { workspaceTeardownRegistry.release(workspaceIDs: workspaceIDs) }
+        return try teardown()
+    }
+
+    #if canImport(Network) && canImport(Security)
+        private func handleWorkspaceTeardownRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            workspaceTeardownQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleWorkspaceTeardownRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
+        private func handleWorkspaceTeardownRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try workspaceTeardownQueue.sync { try handleWorkspaceTeardownRequest(request) }
+        }
+    #endif
+
     /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
     /// directory, then returns fresh status for every supported agent. Rejects an empty request.
     ///
@@ -1305,7 +1402,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            case .daemonHandoffInProgress: return .shuttingDown
+            // Only ever thrown by the handoff-only admission guard, never by a shutdown, so it always
+            // carries the handoff code. This mapping predates issue #334's broader gap (this transport's
+            // `.ping` and its agent-session killer are not teardown-aware at all); it is corrected here
+            // only because the code it referenced changed meaning, not as a #334 fix.
+            case .daemonHandoffInProgress: return .handingOff
             }
         }
         // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
@@ -1389,6 +1490,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
                     scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods, scrollPointerX: payload.scrollPointerX,
                     scrollPointerY: payload.scrollPointerY, scrollPointerMods: payload.scrollPointerMods))
+        case .mouseButton:
+            .mouseButton(
+                TerminalControlMouseButtonPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, button: payload.mouseButton, pressed: payload.mousePressed,
+                    pointerX: payload.mousePointerX, pointerY: payload.mousePointerY, pointerMods: payload.mousePointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
         }
     }
@@ -1505,10 +1611,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Only the active owner can paste images into the terminal.", errorCode: .ownershipRejected)
         }
-        if let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch, ownerEpoch != payload.ownerEpoch
+        // Epoch-gate only when the client sent an epoch: a request without one is not stale, it was
+        // composed by a client whose cached session payload carries no render owner epoch (the same
+        // contract the other input paths follow).
+        if let requestedOwnerEpoch = payload.ownerEpoch,
+            let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch,
+            ownerEpoch != requestedOwnerEpoch
         {
             return SpacesDeviceAPIResponse(
-                ok: false, message: "Ignoring stale owner epoch \(payload.ownerEpoch); current owner epoch is \(ownerEpoch).",
+                ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).",
                 errorCode: .ownershipRejected)
         }
 
@@ -1570,7 +1681,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         var impact = RestartImpactCounts()
         for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+            for workspace in try store.workspaces(projectID: project.id) {
                 impact.accumulate(
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id))
@@ -1647,7 +1758,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
         let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
         let workspaces = try projects.flatMap { project in
-            try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
+            try store.workspaces(projectID: project.id).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(
                     branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
                 // `resolvedWorkspaceBrowserSessions` and `workspaceSettings` stay per-workspace on
@@ -1674,14 +1785,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
-        let workspaceRows = loadWorkspaceTerminalRows(workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
+        // One query for the whole build: the alternative asked per row, and each answer opened its own
+        // connection and JSON-decoded a ~36 KB payload to test a single field.
+        let sessionIDsWithFinalRender = try TerminalSessionPersistence.sessionIDsWithFinalRender()
+        let workspaceRows = loadWorkspaceTerminalRows(
+            workspaces: workspaces, sessions: sessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender)
         // Reuse the records the overview already scanned to tally restart impact, so the inline
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
         for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
         let daemonStatus = makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
         return SpacesDeviceOverviewBuilder.build(
-            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus)
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
+            workspaceIDsWithTeardownInFlight: workspaceTeardownRegistry.snapshot(), daemonStatus: daemonStatus)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -1699,8 +1815,74 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// `loadOverview` from the same store queries — so this reuses them instead of re-querying per
     /// workspace, which otherwise doubled the process/agent reads on the refresh hot path.
     private func loadWorkspaceTerminalRows(
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry], sessionIDsWithFinalRender: Set<String>
+    ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
+        Self.workspaceTerminalRows(
+            workspaces: workspaces, sessions: sessions, sessionIDsWithFinalRender: sessionIDsWithFinalRender,
+            catalogEntry: { terminalCatalogEntry(sessionID: $0) },
+            endedWindowSessions: Self.endedTerminalWindowSessions(workspaces: workspaces, liveSessions: sessions))
+    }
+
+    /// The ended sessions still held by a terminal-window record, read in one query for the whole build.
+    ///
+    /// The window walk in `workspaceTerminalRows` needs each such session's persisted launch configuration
+    /// and runtime state, and there is one candidate per terminal window whose session has exited. Reading
+    /// them per row would put two connection round-trips per candidate on a build that runs several times a
+    /// second, on the profile database's serialized lane — the lane every mutation also waits behind. One
+    /// batched read keeps the cost flat, and a device whose held sessions are all still running issues no
+    /// query at all.
+    ///
+    /// An ended session's attachment snapshot is empty by construction: exiting detaches every client, and
+    /// the ended pane a client shows is client-local and holds no attachment. So the entry is built with an
+    /// empty snapshot and no live control/subscription rather than paying a query to read that back — the
+    /// builder forces both availability flags false for a non-interactive session anyway.
+    private static func endedTerminalWindowSessions(
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], liveSessions: [TerminalSessionCatalogEntry]
+    ) -> [String: TerminalSessionCatalogEntry] {
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        var candidates = Set<String>()
+        for descriptor in workspaces {
+            for window in descriptor.windows where window.roleValue == .terminal {
+                guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), !liveSessionIDs.contains(sessionID) else { continue }
+                candidates.insert(sessionID)
+            }
+        }
+        guard let runtimes = try? TerminalSessionPersistence.endedSessionRuntimes(sessionIDs: candidates) else { return [:] }
+        return Dictionary(
+            runtimes.compactMap { runtime -> (String, TerminalSessionCatalogEntry)? in
+                guard let paths = try? TerminalSessionPaths.forStoredSession(id: runtime.sessionID, rootDirectory: runtime.rootDirectory) else {
+                    return nil
+                }
+                return (
+                    runtime.sessionID,
+                    TerminalSessionCatalogEntry(
+                        launchConfiguration: runtime.launchConfiguration, runtimeState: runtime.runtimeState, attachmentSnapshot: .init(),
+                        paths: paths, isControlAvailable: false, isSubscriptionAvailable: false)
+                )
+            }, uniquingKeysWith: { existing, _ in existing })
+    }
+
+    /// One row per product record that holds a terminal session — a `running_processes`, `agent_sessions`,
+    /// or terminal `runtime_targets` row — carrying that session's full catalog entry.
+    ///
+    /// `catalogEntry` is the persisted lookup (`terminalCatalogEntry`) used whenever `sessions`, the live
+    /// interactive catalog, does not carry the session. That is what keeps a session describable after it
+    /// exits: its entry is what `sessions` publishes, and a pane cannot be opened for a session whose
+    /// launch configuration nothing reports. All three record kinds resolve through it, so all three keep
+    /// their ended sessions openable for exactly as long as the retention rule
+    /// (`SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`) holds them — the behavior `docs/spec.md`
+    /// describes for an exited target, whichever kind of row backs it.
+    ///
+    /// `endedWindowSessions` is the batched counterpart for the terminal-window walk below
+    /// (`endedTerminalWindowSessions`): every candidate it needs is known before the walk starts, so they
+    /// are read together instead of one row at a time.
+    ///
+    /// Static and taking both lookups as parameters so the whole rule is exercisable without a running
+    /// daemon or on-disk sessions.
+    static func workspaceTerminalRows(
         workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
-        hasFinalRenderBySessionID: [String: Bool]
+        sessionIDsWithFinalRender: Set<String>, catalogEntry: (String) -> TerminalSessionCatalogEntry?,
+        endedWindowSessions: [String: TerminalSessionCatalogEntry]
     ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
@@ -1713,11 +1895,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 guard process.terminalApp == TerminalHost.spaces.appName, let sessionID = normalizedTerminalSessionID(process.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
                         entry: entry, workspace: descriptor, title: process.templateName, rowKind: .process, rowSourceID: process.id,
-                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
 
             let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
@@ -1726,17 +1908,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }) {
                 guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID) else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
-                guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
+                guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
-                        entry: entry, workspace: descriptor, title: agent.label ?? entry.effectiveTitle, rowKind: .agent, rowSourceID: agent.id,
-                        hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
+                        entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
+            }
+
+            // A terminal window's own row. Only sessions the live catalog does not already carry: a live
+            // one is published as an ad hoc summary, which is the only summary that carries a `liveTitle`,
+            // so claiming it here would drop what the program prints. What is left is the ended-but-held
+            // session — the case the process and agent loops above already cover through the same lookup.
+            for window in descriptor.windows where window.roleValue == .terminal {
+                guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), sessionsByID[sessionID] == nil else { continue }
+                guard representedSessionIDs.insert(sessionID).inserted else { continue }
+                guard let entry = endedWindowSessions[sessionID] else { continue }
+                rows.append(
+                    SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
+                        entry: entry, workspace: descriptor, title: entry.name, rowKind: .liveSession, rowSourceID: window.id,
+                        hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
         }
         return rows
     }
 
-    private func preferredProcessRecord(_ records: [RunningProcessRecord]) -> RunningProcessRecord? {
+    private static func preferredProcessRecord(_ records: [RunningProcessRecord]) -> RunningProcessRecord? {
         records.max { lhs, rhs in
             let lhsRank = processRecordRank(lhs)
             let rhsRank = processRecordRank(rhs)
@@ -1745,7 +1941,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func processRecordRank(_ record: RunningProcessRecord) -> Int {
+    private static func processRecordRank(_ record: RunningProcessRecord) -> Int {
         switch record.status {
         case .running: return 3
         case .idle: return 2
@@ -1753,7 +1949,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func preferredAgentRecord(_ records: [AgentWindowRecord]) -> AgentWindowRecord? {
+    private static func preferredAgentRecord(_ records: [AgentWindowRecord]) -> AgentWindowRecord? {
         records.max { lhs, rhs in
             let lhsRank = agentRecordRank(lhs)
             let rhsRank = agentRecordRank(rhs)
@@ -1762,7 +1958,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func agentRecordRank(_ record: AgentWindowRecord) -> Int {
+    private static func agentRecordRank(_ record: AgentWindowRecord) -> Int {
         if record.provider == .spaces, let sessionID = normalizedTerminalSessionID(record.terminalTrackingID),
             let paths = try? TerminalSessionPaths.forSession(id: sessionID),
             (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state.isInteractive == true
@@ -1778,14 +1974,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func processSlotKey(_ record: RunningProcessRecord) -> String {
+    private static func processSlotKey(_ record: RunningProcessRecord) -> String {
         if let templateID = record.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
             return "process-id:\(templateID)"
         }
         return "process:\(normalizedSlotName(record.templateName))"
     }
 
-    private func agentSlotKey(_ record: AgentWindowRecord) -> String {
+    private static func agentSlotKey(_ record: AgentWindowRecord) -> String {
         if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
             return "agent-id:\(claimedLauncherID)"
         }
@@ -1793,7 +1989,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return "agent:\(normalizedSlotName(slotName))"
     }
 
-    private func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    private static func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 
     private func terminalCatalogEntry(sessionID: String, fileManager: FileManager = .default) -> TerminalSessionCatalogEntry? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
@@ -1808,12 +2004,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             isSubscriptionAvailable: fileManager.fileExists(atPath: paths.subscriptionSocketPath))
     }
 
-    private func terminalFinalRenderAvailable(sessionID: String) -> Bool {
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        return (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderSnapshot != nil
-    }
-
-    private func normalizedTerminalSessionID(_ value: String?) -> String? {
+    private static func normalizedTerminalSessionID(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
     }
@@ -1952,7 +2143,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         } else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.", errorCode: .invalidArgument)
         }
-        let defaultWorkspaceID = try store.workspaces(projectID: project.id, includeArchived: false).first(where: \.isDefault)?.id
+        let defaultWorkspaceID = try store.workspaces(projectID: project.id).first(where: \.isDefault)?.id
         return try refreshedMutationResponse(
             context: context, message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
     }
@@ -1980,7 +2171,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let project = try store.project(id: request.projectID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Project not found.", errorCode: .notFound)
         }
-        try orchestrator.removeProject(id: project.id)
+        // Every workspace of the project is torn down by this, so every one of them is reported as
+        // deleting — a client watching any of them sees the same fact an archive publishes.
+        //
+        // Accepted risk: this snapshot is read before `removeProject` claims the project gate, so a
+        // workspace created in the gap is deleted by the gated re-read inside `removeProject` without
+        // ever being registered here. Registering the gated set instead would mean registering after
+        // teardown work has begun, giving every overview built in that window an unreported teardown —
+        // a worse trade than a race that needs a same-moment create-vs-delete of one project across
+        // clients and costs only a row that stays ordinary until the next overview drops it.
+        let workspaceIDs = try store.workspaces(projectID: project.id).map(\.id)
+        try withTeardownRegistered(workspaceIDs: workspaceIDs) { try orchestrator.removeProject(id: project.id) }
         return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
     }
 
@@ -2067,9 +2268,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleArchiveWorkspaceRequest(_ request: SpacesDeviceWorkspaceArchiveRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
-        _ = try context.orchestrator().archiveWorkspace(
-            workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
-        return try refreshedMutationResponse(context: context, message: "Archived workspace.", workspaceID: request.workspaceID)
+        // The outcome carries what happened to each branch the request asked to delete, which the user is
+        // owed whether it succeeded, found nothing, skipped a protected branch, or failed.
+        //
+        // Registered as torn down for the whole archive: a client whose delete response was lost probes the
+        // overview to find out what happened, and while this runs it must read "still being deleted" rather
+        // than mistaking a slow stop script for a failed delete.
+        let outcome = try withTeardownRegistered(workspaceIDs: [request.workspaceID]) {
+            try context.orchestrator().archiveWorkspace(
+                workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
+        }
+        return try refreshedMutationResponse(
+            context: context, message: "Deleted workspace.", workspaceID: request.workspaceID, notice: outcome.notice)
     }
 
     private func handleRunWorkspaceSetupRequest(_ request: SpacesDeviceWorkspaceReference, context: RequestContext) throws -> SpacesDeviceAPIResponse
@@ -2159,14 +2369,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
-        guard let title = normalizedString(request.title) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Provide a terminal session title.", errorCode: .invalidArgument)
-        }
-        guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title) else {
+        // An empty title clears the rename, restoring the generated name (see
+        // `SpacesDeviceTerminalSessionRenameRequest.title`).
+        let title = normalizedString(request.title)
+        guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title ?? "") else {
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.", errorCode: .invalidArgument)
         }
-        return try refreshedMutationResponse(context: context, message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
+        return try refreshedMutationResponse(
+            context: context, message: title == nil ? "Cleared terminal session name." : "Renamed terminal session.", workspaceID: workspaceID,
+            sessionID: sessionID)
     }
 
     private func handleRunWorkspaceProcessRequest(_ request: SpacesDeviceRunWorkspaceProcessRequest, context: RequestContext) throws
@@ -2325,13 +2537,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func refreshedMutationResponse(
-        context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil
+        context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
+        notice: String? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
-                    overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID)))
+                    overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
+                    notice: notice)))
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {
@@ -2501,7 +2715,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let projects = try store.projects()
         var roots = Set(projects.map(\.dir))
         for project in projects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+            let workspaces = try store.workspaces(projectID: project.id)
             roots.formUnion(workspaces.map(\.dir))
         }
         return Array(roots)
@@ -3008,6 +3222,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func loadCurrentState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+        // A session this daemon hosts is in this process, so read its state from the live core instead of
+        // connecting to that core's own subscription socket and having it export the same frame back.
+        if let livePayload = liveTerminalSessionStateProvider?(sessionID) { return livePayload }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
             if let finalState = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) { return finalState }

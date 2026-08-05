@@ -20,9 +20,7 @@ struct E2ECommand: ParsableCommand {
 
     @Flag(name: .long, help: "Preserve the runner root and scenario roots where supported.") var keepRoot = false
 
-    @Flag(
-        name: .long,
-        help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
+    @Flag(name: .long, help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
     var local = false
 
     func run() throws {
@@ -135,6 +133,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "daemon-exec-handoff",
             kind: .script(scriptName: "e2e_daemon_exec_handoff.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
+            name: "daemon-signal-shutdown",
+            kind: .script(scriptName: "e2e_daemon_signal_shutdown.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
             name: "edit-shortcuts",
             kind: .script(scriptName: "e2e_terminal_edit_shortcuts.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
@@ -187,6 +188,10 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(name: "ctrl-c-final-frame", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ctrl-c-final-frame-codex-survivor", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ownership-guard", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-delete-scroll", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-hide-scroll", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "workspace-delete-tab-lists", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "session-end-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "ios-input-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(name: "ios-scrollback-latency", kind: .mobileLatency),
         E2EScenarioDescriptor(
@@ -267,11 +272,16 @@ private struct E2ERunner {
         }
     }
 
+    /// Syncs the local GhosttyKit/libghostty-vt artifacts to the pinned submodule *before* building,
+    /// matching `verify-prep.sh`. The order matters: `spacesterminalghostty` compiles against the
+    /// `.local` Ghostty headers, so a `.local` tree left skewed by another worktree or an iOS/Linux
+    /// artifact swap fails the build outright. Building first makes every lane die in the shared
+    /// bootstrap step with a Ghostty compile error and never reach the sync that would have repaired it.
     private mutating func prepareSharedProducts() throws {
-        let buildScript = rootDirectory.appendingPathComponent("scripts/swiftpm.sh").path
-        try runProcess(executable: buildScript, arguments: ["build"], environment: ["SPACES_E2E_BOOTSTRAP_BUILD": "1"])
         let ghosttySetup = macOSDirectory.appendingPathComponent("scripts/setup_ghosttykit.sh").path
         try runProcess(executable: ghosttySetup, arguments: [], environment: [:])
+        let buildScript = rootDirectory.appendingPathComponent("scripts/swiftpm.sh").path
+        try runProcess(executable: buildScript, arguments: ["build"], environment: ["SPACES_E2E_BOOTSTRAP_BUILD": "1"])
     }
 
     /// Runs a scenario whose descriptor kind is `.script`; the terminal-latency and mobile

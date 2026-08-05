@@ -103,6 +103,85 @@
             }
         }
 
+        /// A client sends the owner epoch its cached session payload carries, and that cache is
+        /// legitimately empty during normal operation: an owner change drops `renderOwnerEpoch` when
+        /// payloads merge, and input-reason payloads carry no render state at all. Every other input path
+        /// sends no epoch in that state and is accepted; an image paste must be accepted the same way
+        /// rather than rejected as stale.
+        func testTerminalPasteImageAcceptedWhenClientHasNoCachedOwnerEpoch() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-image-paste-no-epoch-\(UUID().uuidString)"
+                let clientID = "client-image-paste"
+                let paths = try seedOwnedRunningSession(sessionID: sessionID, clientID: clientID, ownerEpoch: 9)
+                let cachedOwnerEpoch: UInt64? = nil
+
+                try withPasteImageStack(paths: paths, queueLabel: "spaces.device.api.paste-image.no-epoch.test") { send, recorder in
+                    let response = try send(cachedOwnerEpoch, sessionID, clientID)
+
+                    XCTAssertTrue(response.ok, response.message)
+                    let terminalRequest = try XCTUnwrap(recorder.waitForRequest(timeout: 5))
+                    let remotePath = try XCTUnwrap(terminalRequest.text)
+                    defer { try? FileManager.default.removeItem(atPath: remotePath) }
+                    XCTAssertNil(terminalRequest.ownerEpoch)
+                }
+            }
+        }
+
+        /// The epoch check still has to reject a paste a client composed against an owner generation that
+        /// has since been superseded, so a stale non-nil epoch never reaches the session.
+        func testTerminalPasteImageRejectsStaleOwnerEpoch() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-image-paste-stale-epoch-\(UUID().uuidString)"
+                let clientID = "client-image-paste"
+                let paths = try seedOwnedRunningSession(sessionID: sessionID, clientID: clientID, ownerEpoch: 9)
+
+                try withPasteImageStack(paths: paths, queueLabel: "spaces.device.api.paste-image.stale-epoch.test") { send, recorder in
+                    let response = try send(8, sessionID, clientID)
+
+                    XCTAssertFalse(response.ok)
+                    XCTAssertEqual(response.errorCode, .ownershipRejected)
+                    XCTAssertNil(recorder.waitForRequest(timeout: 1), "A stale-epoch paste must never reach the session.")
+                }
+            }
+        }
+
+        /// Runs `body` against a live control server plus a live device API server for `paths`, handing it a
+        /// `send` that issues one authenticated image paste and the recorder of what reached the session.
+        private func withPasteImageStack(
+            paths: TerminalSessionPaths, queueLabel: String,
+            body: (_ send: (UInt64?, String, String) throws -> SpacesDeviceAPIResponse, _ recorder: TerminalPasteImageControlRecorder) throws -> Void
+        ) throws {
+            let recorder = TerminalPasteImageControlRecorder()
+            let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: DispatchQueue(label: queueLabel)) { request in
+                recorder.record(request)
+                return TerminalControlResponse(ok: true, message: "Sent input.")
+            }
+            try controlServer.start()
+            defer { controlServer.stop() }
+
+            let identity = try pasteImageTestTLSIdentity()
+            let pairingStore = AlwaysAuthorizedPasteImagePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let requestClient = try SpacesDeviceAPIRequestSessionClient(
+                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            defer { requestClient.cancel() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                appVersion: "1.0")
+
+            try body(
+                { ownerEpoch, sessionID, clientID in
+                    try requestClient.send(
+                        SpacesDeviceAPIRequest(
+                            command: .terminalPasteImage(
+                                SpacesDeviceTerminalPasteImageRequest(
+                                    sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: "png",
+                                    imageData: Data([0x89, 0x50, 0x4E, 0x47]))), authToken: pairingStore.authToken, clientApp: clientApp))
+                }, recorder)
+        }
+
         private func seedOwnedRunningSession(sessionID: String, clientID: String, ownerEpoch: UInt64) throws -> TerminalSessionPaths {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()

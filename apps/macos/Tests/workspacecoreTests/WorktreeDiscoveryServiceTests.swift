@@ -3,6 +3,11 @@ import Testing
 
 @testable import workspacecore
 
+// Every test here hands the store and the service an explicit database path, and
+// `WorktreeDiscoveryService` never resolves a profile, so this suite binds no profile environment. That
+// is deliberate: `.serialized` orders tests only within a suite, and Swift Testing runs distinct suites
+// concurrently in one process, so a suite that mutated the process-global `SPACES_*` here could be
+// clobbered by — and could clobber — a sibling suite.
 @Suite struct WorktreeDiscoveryServiceTests {
     /// Stand-in for a real watcher whose FSEvents/inotify setup is stalled by a busy
     /// system: `start()` blocks a background thread for `delay` (never the main actor)

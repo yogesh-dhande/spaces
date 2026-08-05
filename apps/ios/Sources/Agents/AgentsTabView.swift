@@ -19,27 +19,22 @@ struct AgentsTabView: View {
     @ViewBuilder private var content: some View {
         if model.agentGroups.isEmpty {
             ContentUnavailableView {
-                Label("No Coding Agents", systemImage: "cpu")
+                Label("No Active Agents", systemImage: "cpu")
             } description: {
-                Text("Coding agents configured in your workspaces show up here.")
+                Text("Blocked, finished, and working coding agents show up here. Launch one from its workspace on the Spaces tab.")
             }
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) { ForEach(model.agentGroups) { group in agentGroupSection(group).padding(.bottom, 14) } }.padding(
-                    .vertical, 12)
-            }.scrollContentBackground(.hidden)
+            List { ForEach(model.agentGroups) { group in agentGroupSection(group) } }.listStyle(.plain).scrollContentBackground(.hidden)
         }
     }
 
-    private func agentGroupSection(_ group: SpacesMobileAgentGroup) -> some View {
-        VStack(spacing: 0) {
-            HeaderBand {
-                Text(group.kind.label).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                Spacer(minLength: 0)
-                Text("\(group.entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
-            }.accessibilityIdentifier("agents.band.\(group.kind.rawValue)")
-            VStack(spacing: 0) { ForEach(group.entries) { entry in agentRow(entry) } }.padding(.top, 4)
-        }
+    @ViewBuilder private func agentGroupSection(_ group: SpacesMobileAgentGroup) -> some View {
+        HeaderBand {
+            Text(group.kind.label).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+            Spacer(minLength: 0)
+            Text("\(group.entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+        }.accessibilityIdentifier("agents.band.\(group.kind.rawValue)").bandListHeaderRow()
+        ForEach(group.entries) { entry in agentRow(entry).bandListRow() }
     }
 
     private func agentRow(_ entry: SpacesMobileAgentEntry) -> some View {

@@ -7,8 +7,15 @@ source "$repo_root/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$repo_root"
 source "$script_dir/terminal_harness_lock.sh"
 source "$script_dir/e2e_fixture_repos.sh"
+source "$script_dir/pairing_link_endpoint.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 source "$repo_root/scripts/ios-simulator-lifecycle.sh"
+# Drop any binding this shell was started with, before anything resolves a profile or runs a demo child.
+# A `user` run must stay unbound so every repo-local binary resolves the worktree profile it belongs to; an
+# `isolated` run names its own ephemeral root afterwards through `demo_profile_env`, which is the one thing
+# that mode exists to do. Neither wants whatever the invoking shell happened to carry. See
+# spaces_profile_clear_inherited_binding.
+spaces_profile_clear_inherited_binding
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
@@ -27,8 +34,16 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-remote_demo_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
-remote_demo_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+# The demo's remote daemon is a development profile of its own, so this lane never touches the remote
+# account's installed profile -- the one real paired clients talk to. The profile name fixes the
+# profile root, the systemd instance, and the CLI this lane opens pairing windows through; the daemon
+# assigns its own Device API port and persists it, so the port is read back after install rather than
+# chosen here. Only the extraction scratch root is E2E-scoped.
+remote_demo_profile_name="remote-mobile-demo"
+remote_demo_profile_root="~/.spaces-dev/profiles/spaces/$remote_demo_profile_name"
+remote_demo_cli="$remote_demo_profile_root/daemon/current/bin/spaces"
+remote_demo_daemon_port=""
+remote_demo_install_root="~/.spaces/remote-demo-e2e"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
   spaces_e2e_require_remote_host_env "$repo_root"
@@ -36,8 +51,6 @@ if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
   remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
   remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 fi
-remote_pairing_json=""
-remote_pairing_window_json=""
 pairing_link=""
 pairing_code=""
 pairing_nonce=""
@@ -63,6 +76,11 @@ device_api_pid=""
 temp_root=""
 spaces_db_path=""
 spaces_runtime_dir=""
+demo_worktree_root=""
+# Profile environment assignments for demo child processes; empty for a `user`-mode run. See build_demo_env_command.
+demo_profile_env=()
+# The `env` invocation build_demo_env_command last assembled.
+demo_env_command=()
 spaces_client_db_path=""
 spaces_client_secret_dir=""
 project_dir=""
@@ -96,7 +114,20 @@ performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
 
-run_demo_env() {
+# Builds the `env` invocation for a demo child process into `demo_env_command`.
+#
+# The profile environment is decided HERE and nowhere else, because the two profile modes need opposite
+# answers. An isolated run's profile is an ephemeral root under the demo temp directory, which nothing
+# can derive from a binary's location, so it has to be named. A `user` run's profile is the developer's
+# own worktree profile, which every repo-local binary resolves from where it sits -- and naming it would
+# be refused outright, since SPACES_DB_PATH may not point inside a live profile root.
+#
+# Callers that background a child must expand this array themselves rather than backgrounding
+# `run_demo_env`: a backgrounded shell function runs in a forked subshell that stays alive as the
+# child's parent, so `$!` names the subshell and killing it orphans the child. Expanding the array
+# backgrounds a simple command, which bash replaces with the child itself, so `$!` is the pid the
+# caller must later reap.
+build_demo_env_command() {
   local -a env_args=(
     -u NO_COLOR \
     -u CLICOLOR \
@@ -107,6 +138,9 @@ run_demo_env() {
     -u CODEX_MANAGED_PACKAGE_ROOT \
     -u CODEX_THREAD_ID
   )
+  if (( ${#demo_profile_env[@]} > 0 )); then
+    env_args+=("${demo_profile_env[@]}")
+  fi
   if [[ -n "$ghostty_demo_xdg_config_home" ]]; then
     env_args+=(XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home")
   fi
@@ -116,7 +150,13 @@ run_demo_env() {
   if [[ -n "$spaces_client_secret_dir" ]]; then
     env_args+=(SPACES_CLIENT_SECRET_DIR="$spaces_client_secret_dir")
   fi
-  env "${env_args[@]}" "$@"
+  demo_env_command=(env "${env_args[@]}" "$@")
+}
+
+# Runs a demo child process in the foreground with the demo's environment.
+run_demo_env() {
+  build_demo_env_command "$@"
+  "${demo_env_command[@]}"
 }
 
 json_get() {
@@ -151,8 +191,6 @@ stop_demo_workspace_dir() {
 
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -281,19 +319,59 @@ create_demo_root() {
   temp_root="$(mktemp -d "$demo_root_parent/run.XXXXXX")"
 }
 
+# Looks up the paths of the worktree profile the repo-local binaries already resolve for themselves. The
+# demo needs them as facts -- it opens the database directly and derives socket paths from the runtime
+# root -- not as a binding to hand to child processes.
 resolve_user_profile_paths() {
-  local profile_exports
-  if ! profile_exports="$(run_demo_env "$spacese2e" profile-show --shell)"; then
-    echo "Failed to resolve Spaces profile paths with $spacese2e profile-show --shell." >&2
+  local profile_json
+  if ! profile_json="$(run_demo_env "$spacese2e" profile-show --json)"; then
+    echo "Failed to resolve Spaces profile paths with $spacese2e profile-show --json." >&2
     exit 1
   fi
-  eval "$profile_exports"
-  spaces_db_path="${SPACES_DB_PATH:-}"
-  spaces_runtime_dir="${SPACES_RUNTIME_DIR:-}"
+  spaces_db_path="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["databasePath"])')"
+  spaces_runtime_dir="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["runtimeDirectory"])')"
+  demo_worktree_root="$(printf '%s' "$profile_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("worktreeRoot") or "")')"
   if [[ -z "$spaces_db_path" || -z "$spaces_runtime_dir" ]]; then
-    echo "Failed to resolve SPACES_DB_PATH and SPACES_RUNTIME_DIR for the demo profile." >&2
+    echo "Failed to resolve the database and runtime paths for the demo profile." >&2
     exit 1
   fi
+}
+
+# A `user`-mode run drives the developer's live worktree profile, and each binary it runs resolves its own
+# profile from where that binary sits -- nothing is exported to point them anywhere. So every binary has to
+# BE a binary of this worktree, or the run silently splits across profiles: an installed `spaces` would act
+# on ~/.spaces, and `stop_existing_demo_profile_services` below would stop the user's installed daemon
+# instead of this worktree's. That is the exact harm this profile model exists to prevent, so a mismatch
+# fails the run rather than being retargeted -- retargeting would mean handing the binary a SPACES_DB_PATH
+# naming a live profile root, which resolution refuses outright.
+#
+# The four binaries are overridable (SPACES_APP, SPACES_CLI, SPACES_E2E, SPACESD_EXECUTABLE) and default to
+# this checkout's debug build, so the check only ever fires on a deliberate override. Containment in the
+# worktree root is the whole test: a repo-built binary derives its profile from the checkout above it, so
+# one inside this worktree resolves this worktree's profile and one outside it cannot.
+#
+# An isolated run needs none of this -- it names its ephemeral profile explicitly, so any binary acts on it.
+require_worktree_local_binaries() {
+  if [[ -z "$demo_worktree_root" ]]; then
+    echo "SPACES_MOBILE_DEMO_PROFILE_MODE=user needs a worktree profile, but $spacese2e resolved a profile with no worktree." >&2
+    echo "Run the demo from a Spaces checkout, or use SPACES_MOBILE_DEMO_PROFILE_MODE=isolated." >&2
+    exit 1
+  fi
+  local worktree_root
+  worktree_root="$(canonical_path "$demo_worktree_root")"
+
+  local entry label binary_path
+  for entry in "SPACES_APP:$spaces_app" "SPACES_CLI:$spaces_cli" "SPACES_E2E:$spacese2e" "SPACESD_EXECUTABLE:$terminal_service"; do
+    label="${entry%%:*}"
+    binary_path="$(canonical_path "${entry#*:}")"
+    if [[ "$binary_path" != "$worktree_root"/* ]]; then
+      echo "$label points at $binary_path, which is outside the worktree at $worktree_root." >&2
+      echo "A user-mode demo drives the worktree profile, and that binary would resolve a different profile" >&2
+      echo "of its own -- stopping or writing to a daemon this run does not own. Point $label inside this" >&2
+      echo "worktree, or use SPACES_MOBILE_DEMO_PROFILE_MODE=isolated." >&2
+      exit 1
+    fi
+  done
 }
 
 prepare_demo_profile() {
@@ -307,9 +385,17 @@ prepare_demo_profile() {
     mkdir -p "$spaces_runtime_dir" "$project_dir"
   else
     resolve_user_profile_paths
+    require_worktree_local_binaries
     mkdir -p "$spaces_runtime_dir" "$(dirname "$spaces_db_path")" "$project_dir"
   fi
   spaces_runtime_dir="$(canonical_path "$spaces_runtime_dir")"
+  # Set after canonicalization so children are told the same runtime root the socket paths below are
+  # derived from. An isolated run's profile is an ephemeral root no binary can derive from its own
+  # location, so it has to be named; a `user` run's is the worktree profile every repo-local binary
+  # already resolves, and naming it would be refused.
+  if [[ "$profile_mode" == "isolated" ]]; then
+    demo_profile_env=(SPACES_DB_PATH="$spaces_db_path" SPACES_RUNTIME_DIR="$spaces_runtime_dir")
+  fi
 
   prepare_ghostty_demo_config
 }
@@ -320,10 +406,9 @@ stop_existing_demo_profile_services() {
     return
   fi
 
+  # The repo-local CLI resolves the worktree profile itself, which is the profile being stopped.
   (
     export HOME="$demo_home"
-    export SPACES_DB_PATH="$spaces_db_path"
-    export SPACES_RUNTIME_DIR="$spaces_runtime_dir"
     spaces_profile_stop_terminal_service "$spaces_cli"
   )
 }
@@ -400,8 +485,6 @@ stop_existing_profile_app_owner() {
   local owner_json owner_pid command
   if ! owner_json="$(run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     "$spacese2e" profile-app-owner --json 2>/dev/null)"; then
     return 0
   fi
@@ -573,20 +656,28 @@ wait_for_pid() {
   exit 1
 }
 
+# Waits until SpacesApp can service the demo's terminal open requests.
+#
+# The gate is the applied first sidebar snapshot, not the registered IPC observers: the app resolves a
+# terminal open request's panel from the snapshot's workspace-to-device map, so an
+# `openTerminalSessionWindow` IPC posted between "observers ready" (~60ms) and "snapshot applied"
+# (~800ms) is refused for want of a panel scope and never retried. Gating on the observers left the
+# demo's `spaces terminal show` racing that ~700ms window, and losing it meant no owner attachment
+# ever appeared for the session.
 wait_for_spaces_app_ready() {
   local deadline=$((SECONDS + 30))
   while [[ $SECONDS -lt $deadline ]]; do
     if ! ps -p "$app_pid" >/dev/null 2>&1; then
-      echo "SpacesApp exited before Device UI IPC observers were ready." >&2
+      echo "SpacesApp exited before its first sidebar snapshot was applied." >&2
       tail -n 120 "$app_log" >&2 || true
       exit 1
     fi
-    if grep -q 'spaces: startup stage=ipc_observers_ready' "$app_log" 2>/dev/null; then
+    if grep -q 'spaces: startup stage=sidebar_snapshot_applied' "$app_log" 2>/dev/null; then
       return
     fi
     sleep 0.2
   done
-  echo "Timed out waiting for SpacesApp Device UI IPC observers." >&2
+  echo "Timed out waiting for SpacesApp to apply its first sidebar snapshot." >&2
   tail -n 160 "$app_log" >&2 || true
   exit 1
 }
@@ -624,8 +715,6 @@ open_device_pairing_window() {
   if ! window_json="$(
     run_demo_env \
       HOME="$demo_home" \
-      SPACES_DB_PATH="$spaces_db_path" \
-      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
       SPACESD_EXECUTABLE="$terminal_service" \
       SPACES_DEVICE_API_HOST="$device_api_bind_host" \
       SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -660,8 +749,6 @@ PY
 start_device_api() {
   if ! run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -681,43 +768,25 @@ pair_remote_demo_device() {
     return
   fi
 
-  local -a args=(pair-remote-device --ssh-host "$remote_ssh_host")
-  if [[ -n "$remote_ssh_user" ]]; then
-    args+=(--ssh-user "$remote_ssh_user")
-  fi
-  if [[ -n "$remote_ssh_port" ]]; then
-    args+=(--ssh-port "$remote_ssh_port")
-  fi
-
-  remote_pairing_json="$temp_root/remote-device-pairing.json"
   prepare_remote_demo_daemon
-  echo "Pairing Mac client with remote spacesd at $remote_ssh_host..."
-  if ! run_demo_env \
-    HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-    "$spacese2e" "${args[@]}" >"$remote_pairing_json"; then
-    echo "Failed to pair remote demo device over SSH." >&2
-    cat "$remote_pairing_json" >&2 || true
+  # The forward is established before anything pairs, and every endpoint the demo hands a client is
+  # the forward's. The demo must work from a network where the remote's Device API port is not
+  # reachable at all, so nothing here -- not even this Mac's own pairing -- dials that port directly;
+  # SSH is the only route to the daemon.
+  start_remote_device_forward
+  echo "Pairing Mac client with the remote demo profile at $remote_ssh_host..."
+  open_remote_demo_pairing_window
+  local pair_output
+  if ! pair_output="$(run_demo_env HOME="$demo_home" "$spaces_cli" device pair --link "$remote_pairing_link")"; then
+    echo "Failed to pair the Mac client with the remote demo daemon." >&2
     exit 1
   fi
-
-  local parsed
-  parsed="$(
-    python3 - "$remote_pairing_json" <<'PY'
-import json
-import shlex
-import sys
-payload = json.load(open(sys.argv[1]))
-print(f"remote_device_id={shlex.quote(payload['deviceID'])}")
-print(f"remote_device_name={shlex.quote(payload['name'])}")
-print(f"remote_device_host={shlex.quote(payload['host'])}")
-print(f"remote_device_port={shlex.quote(str(payload['port']))}")
-PY
-  )"
-  eval "$parsed"
-  start_remote_device_forward
-  update_remote_demo_device_endpoint
+  echo "$pair_output"
+  remote_device_id="$(printf '%s' "$pair_output" | tr '\t' '\n' | sed -n 's/^id=//p' | head -n 1)"
+  [[ -n "$remote_device_id" ]] || {
+    echo "spaces device pair did not print a device id: $pair_output" >&2
+    exit 1
+  }
 }
 
 remote_ssh_destination() {
@@ -769,25 +838,42 @@ raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
 }
 
-prepare_remote_demo_daemon() {
+# The Device API port the daemon assigned itself for this profile and persisted at first start. The
+# lane never picks a port, so every remote endpoint it builds comes from here.
+resolve_remote_demo_daemon_port() {
+  local settings_path
+  settings_path="$(remote_expand_path "$remote_demo_profile_root/runtime/terminal/device-api.json")"
+  remote_demo_daemon_port="$(remote_ssh "python3 - $(shell_quote "$settings_path")" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    print(json.load(handle)["port"])
+PY
+  )"
   [[ "$remote_demo_daemon_port" =~ ^[0-9]+$ ]] || {
-    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_demo_daemon_port" >&2
+    echo "Remote demo profile $remote_demo_profile_name reported no numeric Device API port." >&2
     exit 1
   }
+}
+
+prepare_remote_demo_daemon() {
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to prepare the remote demo daemon." >&2
     exit 1
   }
 
-  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install quoted_profile_name
   echo "Preparing remote demo spacesd at $remote_ssh_host..."
-  SPACES_E2E_REMOTE_DAEMON_PORT="$remote_demo_daemon_port" \
-    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
-    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_device_root" \
-    SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_demo_device_root" \
+  # Clears the demo's remote workspace tree and the scratch directory the archive is extracted into.
+  # The demo profile's own root is deliberately not a cleanup root: install.sh upgrades that profile
+  # in place and restarts its unit, and removing a live profile's root under its own restarting
+  # systemd instance is exactly what cleanup avoids.
+  SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
+    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_install_root" \
     "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
 
-  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh" --profile "$remote_demo_profile_name")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
   [[ "$artifact_url" == file://* ]] || {
@@ -796,15 +882,21 @@ prepare_remote_demo_daemon() {
   }
 
   archive_path="${artifact_url#file://}"
-  install_root="$(remote_expand_path "$remote_demo_device_root/install")"
+  install_root="$(remote_expand_path "$remote_demo_install_root/install")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_demo_daemon_port $quoted_install/install.sh" >/dev/null
+  quoted_profile_name="$(shell_quote "$remote_demo_profile_name")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
+  resolve_remote_demo_daemon_port
   wait_for_remote_demo_daemon
 }
 
+# Forwards the remote demo daemon's Device API to a local port and makes that loopback endpoint the
+# one every demo client addresses the daemon by -- this Mac's CLI, the paired-device record it writes,
+# the iOS simulator seeds, and every pairing link. The forward is the demo's only route to the daemon,
+# so the lane works from a network where the remote's Device API port is unreachable and only SSH gets
+# through. The remote side of the tunnel is the port the profile assigned itself.
 start_remote_device_forward() {
-  [[ -n "$remote_device_host" && -n "$remote_device_port" ]] || return 0
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to forward the remote demo Device API." >&2
     exit 1
@@ -818,13 +910,13 @@ start_remote_device_forward() {
     -o BatchMode=yes
     -o ExitOnForwardFailure=yes
     -o StrictHostKeyChecking=yes
-    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_device_port"
+    -L "$remote_forward_host:$remote_forward_port:127.0.0.1:$remote_demo_daemon_port"
   )
   if [[ -n "$remote_ssh_port" ]]; then
     ssh_args+=(-p "$remote_ssh_port")
   fi
 
-  echo "Forwarding remote Device API $remote_device_host:$remote_device_port through $remote_forward_host:$remote_forward_port..."
+  echo "Forwarding remote Device API port $remote_demo_daemon_port through $remote_forward_host:$remote_forward_port..."
   ssh "${ssh_args[@]}" "$destination" &
   remote_forward_pid=$!
   if ! wait_for_tcp_connect "$remote_forward_host" "$remote_forward_port" "remote Device API SSH forward"; then
@@ -832,83 +924,45 @@ start_remote_device_forward() {
     remote_forward_pid=""
     exit 1
   fi
-}
-
-rewrite_pairing_link_endpoint() {
-  local link="$1"
-  python3 - "$link" "$remote_forward_host" "$remote_forward_port" <<'PY'
-import sys
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-link, host, port = sys.argv[1:4]
-parts = urlsplit(link)
-query = dict(parse_qsl(parts.query, keep_blank_values=True))
-query["host"] = host
-query["port"] = port
-print(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
-PY
-}
-
-update_remote_demo_device_endpoint() {
-  [[ -n "$remote_forward_port" ]] || return 0
   remote_device_host="$remote_forward_host"
   remote_device_port="$remote_forward_port"
-  if [[ -n "$remote_pairing_link" ]]; then
-    remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link")"
-  fi
-  python3 - "$spaces_client_db_path" "$remote_device_id" "$remote_device_host" "$remote_device_port" <<'PY'
-import sqlite3
-import sys
-from datetime import datetime, timezone
-
-db_path, device_id, host, port = sys.argv[1:5]
-updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-with sqlite3.connect(db_path) as db:
-    db.execute(
-        "UPDATE paired_devices SET host = ?, port = ?, updated_at = ? WHERE id = ?",
-        (host, int(port), updated_at, device_id),
-    )
-PY
 }
 
-open_remote_device_pairing_window() {
-  [[ -n "$remote_device_id" ]] || return 1
-
-  local -a args=(open-remote-device-pairing-window --ssh-host "$remote_ssh_host")
-  if [[ -n "$remote_ssh_user" ]]; then
-    args+=(--ssh-user "$remote_ssh_user")
-  fi
-  if [[ -n "$remote_ssh_port" ]]; then
-    args+=(--ssh-port "$remote_ssh_port")
-  fi
-
-  remote_pairing_window_json="$temp_root/remote-device-pairing-window.json"
-  if ! run_demo_env \
-    HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-    "$spacese2e" "${args[@]}" >"$remote_pairing_window_json"; then
-    echo "Failed to open remote demo device pairing window over SSH." >&2
-    cat "$remote_pairing_window_json" >&2 || true
+# Opens a one-time pairing window on the remote demo daemon through that profile's own CLI, which
+# resolves the profile from where it lives -- so no profile environment is passed and the installed
+# profile's CLI is never involved. The daemon writes its link with the interface address it sees
+# itself on, which the demo never dials, so the link is pointed at the SSH forward; it is otherwise
+# the daemon's own. Pinned TLS authenticates the daemon by the certificate fingerprint the link
+# carries and never by hostname, so redeeming through the forward's loopback endpoint is equivalent.
+open_remote_demo_pairing_window() {
+  local pair_json parsed
+  if ! pair_json="$(remote_ssh "$remote_demo_cli device pair --json")"; then
+    echo "Failed to open a pairing window on the remote demo daemon." >&2
     exit 1
   fi
 
-  local parsed
   parsed="$(
-    python3 - "$remote_pairing_window_json" <<'PY'
+    SPACES_DEMO_REMOTE_PAIR_JSON="$pair_json" python3 - "$remote_demo_daemon_port" <<'PY'
 import json
+import os
 import shlex
 import sys
 
-payload = json.load(open(sys.argv[1]))
+port = sys.argv[1]
+payload = json.loads(os.environ["SPACES_DEMO_REMOTE_PAIR_JSON"])
+for key in ("pairingLink", "certificateFingerprint", "name"):
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"remote demo pairing JSON missing {key}")
+if payload.get("port") != int(port):
+    raise SystemExit(f"remote demo pairing window reports port {payload.get('port')}, not the profile's {port}")
 print(f"remote_pairing_link={shlex.quote(payload['pairingLink'])}")
 print(f"remote_certificate_fingerprint={shlex.quote(payload['certificateFingerprint'])}")
-print(f"remote_device_host={shlex.quote(payload['host'])}")
-print(f"remote_device_port={shlex.quote(str(payload['port']))}")
+print(f"remote_device_name={shlex.quote(payload['name'])}")
 PY
   )"
   eval "$parsed"
-  update_remote_demo_device_endpoint
+  remote_pairing_link="$(rewrite_pairing_link_endpoint "$remote_pairing_link" "$remote_device_host" "$remote_device_port")"
 }
 
 # Creates a project (and its default workspace) on the paired remote demo daemon so the remote
@@ -948,8 +1002,6 @@ PY
   remote_workspace_id="$(
     run_demo_env \
       HOME="$demo_home" \
-      SPACES_DB_PATH="$spaces_db_path" \
-      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
       python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
 import json
 import subprocess
@@ -1021,8 +1073,6 @@ show_session_on_mac() {
   local owner_session_id="$1"
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1033,8 +1083,6 @@ open_demo_workspace_terminal() {
   local workspace_dir="$1"
   run_demo_env \
     HOME="$demo_home" \
-    SPACES_DB_PATH="$spaces_db_path" \
-    SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
     SPACESD_EXECUTABLE="$terminal_service" \
     SPACES_DEVICE_API_HOST="$device_api_bind_host" \
     SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1372,13 +1420,19 @@ PY
 
 write_manual_shell_helper() {
   manual_shell_path="$temp_root/manual-demo-env.sh"
+  # The profile exports appear only for an isolated run. A `user` run's commands are the repo-local
+  # binaries acting on the profile they already belong to, and exporting a live profile root would make
+  # every one of them refuse to resolve.
+  local profile_exports=""
+  if (( ${#demo_profile_env[@]} > 0 )); then
+    printf -v profile_exports 'export SPACES_DB_PATH=%q\nexport SPACES_RUNTIME_DIR=%q\n' \
+      "$spaces_db_path" "$spaces_runtime_dir"
+  fi
   cat >"$manual_shell_path" <<EOF
 #!/usr/bin/env bash
 export HOME=$(printf '%q' "$demo_home")
 export XDG_CONFIG_HOME=$(printf '%q' "$ghostty_demo_xdg_config_home")
-export SPACES_DB_PATH=$(printf '%q' "$spaces_db_path")
-export SPACES_RUNTIME_DIR=$(printf '%q' "$spaces_runtime_dir")
-export SPACES_CLIENT_DB_PATH=$(printf '%q' "$spaces_client_db_path")
+${profile_exports}export SPACES_CLIENT_DB_PATH=$(printf '%q' "$spaces_client_db_path")
 export SPACES_CLIENT_SECRET_DIR=$(printf '%q' "$spaces_client_secret_dir")
 export SPACESD_EXECUTABLE=$(printf '%q' "$terminal_service")
 export SPACES_DEVICE_API_HOST=$(printf '%q' "$device_api_bind_host")
@@ -1502,8 +1556,6 @@ spaces_e2e_create_lantern_fixture_repo "$fixture_template_dir" "$secondary_proje
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1516,8 +1568,6 @@ run_demo_env \
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1530,8 +1580,6 @@ run_demo_env \
 
 run_demo_env \
   HOME="$demo_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   "$spacese2e" hide-workspace --workspace-dir "$temp_root/lantern-api" >/dev/null
 
@@ -1554,21 +1602,8 @@ spaces_ios_simulator_boot_if_needed "$ipad_udid"
 spaces_ios_simulator_boot_if_needed "$iphone_udid"
 open_simulator_app
 
-env \
-  -u NO_COLOR \
-  -u CLICOLOR \
-  -u CLICOLOR_FORCE \
-  -u CI \
-  -u CODEX_CI \
-  -u CODEX_MANAGED_BY_NPM \
-  -u CODEX_MANAGED_PACKAGE_ROOT \
-  -u CODEX_THREAD_ID \
+build_demo_env_command \
   HOME="$demo_home" \
-  XDG_CONFIG_HOME="$ghostty_demo_xdg_config_home" \
-  SPACES_DB_PATH="$spaces_db_path" \
-  SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-  SPACES_CLIENT_DB_PATH="$spaces_client_db_path" \
-  SPACES_CLIENT_SECRET_DIR="$spaces_client_secret_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
   SPACES_DEVICE_API_HOST="$device_api_bind_host" \
   SPACES_DEVICE_API_PORT="$device_api_port" \
@@ -1577,7 +1612,11 @@ env \
   SPACES_GHOSTTY_RESOURCES_DIR="$ghostty_resources" \
   SPACES_MOBILE_TERMINAL_TRACE="$demo_trace" \
   SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$performance_log_path" \
-  "$spaces_app" >"$app_log" 2>&1 &
+  "$spaces_app"
+# Backgrounded as an expanded command rather than through run_demo_env so `app_pid` is SpacesApp
+# itself; see build_demo_env_command. Killing a wrapper subshell instead left the app running with
+# the desktop-global control lease every time a run ended.
+"${demo_env_command[@]}" >"$app_log" 2>&1 &
 app_pid=$!
 wait_for_pid "$app_pid" "SpacesApp"
 wait_for_spaces_app_ready
@@ -1619,9 +1658,9 @@ iphone_token="$(pair_device "$iphone_pairing_link" "$iphone_installation_id" "$i
 ipad_remote_token=""
 iphone_remote_token=""
 if [[ -n "$remote_device_id" ]]; then
-  open_remote_device_pairing_window
+  open_remote_demo_pairing_window
   ipad_remote_token="$(pair_device "$remote_pairing_link" "$ipad_installation_id" "$ipad_name")"
-  open_remote_device_pairing_window
+  open_remote_demo_pairing_window
   iphone_remote_token="$(pair_device "$remote_pairing_link" "$iphone_installation_id" "$iphone_name")"
   create_remote_demo_project
 fi
@@ -1648,8 +1687,14 @@ if [[ -n "$remote_device_id" ]]; then
 fi
 echo "iPad simulator: $ipad_name"
 echo "iPhone simulator: $iphone_name"
-printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
-  "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_db_path" "$spaces_runtime_dir" "$spaces_client_db_path" "$spaces_client_secret_dir"
+# Same rule as the helper shell: an isolated run names its ephemeral profile, a `user` run must not.
+if (( ${#demo_profile_env[@]} > 0 )); then
+  printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_DB_PATH=%q SPACES_RUNTIME_DIR=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
+    "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_db_path" "$spaces_runtime_dir" "$spaces_client_db_path" "$spaces_client_secret_dir"
+else
+  printf -v demo_env_prefix 'HOME=%q XDG_CONFIG_HOME=%q SPACES_CLIENT_DB_PATH=%q SPACES_CLIENT_SECRET_DIR=%q' \
+    "$demo_home" "$ghostty_demo_xdg_config_home" "$spaces_client_db_path" "$spaces_client_secret_dir"
+fi
 echo "Manual demo env: $demo_env_prefix"
 echo "Helper shell: source $manual_shell_path"
 printf 'List sessions: %s %q terminal list\n' "$demo_env_prefix" "$spaces_cli"

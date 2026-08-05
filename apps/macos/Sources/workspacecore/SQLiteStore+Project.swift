@@ -111,7 +111,6 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM ignored_worktrees WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
         }
     }

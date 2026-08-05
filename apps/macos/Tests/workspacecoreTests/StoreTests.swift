@@ -45,6 +45,9 @@ private final class StoreOpenErrors: @unchecked Sendable {
 }
 
 final class StoreTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     // Tests a fresh store bootstraps the current schema and version by arranging an empty DB path and asserting the resulting shape.
     func testFreshStoreBootstrapsCurrentSchema() throws {
         let root = try makeTempDirectory()
@@ -175,6 +178,200 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // Upgrading a profile that already holds ended sessions must not cost them their replayable final
+    // frame: a session whose stored payload carries a frame still reports one afterwards, a session whose
+    // payload carries none still reports none, and both payloads survive byte-for-byte.
+    func testUpgradeKeepsEndedSessionsFinalRenderAvailability() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let withFramePayload =
+            #"{"sessionID":"with-frame","reason":"terminated","emittedAt":"2026-07-19T00:00:00Z","title":"t","workingDirectory":"/tmp","renderUpdate":"AAECAw=="}"#
+        let withoutFramePayload =
+            #"{"sessionID":"without-frame","reason":"terminated","emittedAt":"2026-07-19T00:00:00Z","title":"t","workingDirectory":"/tmp"}"#
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (7);
+                CREATE TABLE terminal_remote_session_states (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  payload_json TEXT NOT NULL
+                );
+                INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json)
+                VALUES ('with-frame', '/tmp/sessions/with-frame', '\(withFramePayload)'),
+                       ('without-frame', '/tmp/sessions/without-frame', '\(withoutFramePayload)');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(try TerminalSessionPersistence.sessionIDsWithFinalRender(), ["with-frame"])
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT payload_json FROM terminal_remote_session_states WHERE session_id = 'with-frame'"),
+                withFramePayload)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT payload_json FROM terminal_remote_session_states WHERE session_id = 'without-frame'"),
+                withoutFramePayload)
+        }
+    }
+
+    // Upgrading a profile that already holds live terminal sessions must carry each session forward
+    // whole, and a session that predates bell tracking must report no bell: the bell timestamp is what
+    // raises an alert, so a synthesized one would greet the user with an alert they never earned.
+    /// A v10 profile carrying archived workspaces — including one with notes and its own settings, ports,
+    /// and agent rows — upgrades by dropping exactly those workspaces and nothing else. Everything live has
+    /// to survive intact, since archiving is the only thing that removes a workspace.
+    func testUpgradeDeletesArchivedWorkspacesAndKeepsLiveOnes() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let liveDir = root.appendingPathComponent("live", isDirectory: true).path
+        let archivedDir = root.appendingPathComponent("archived", isDirectory: true).path
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (10);
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git_repo INTEGER NOT NULL,
+                  default_branch TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  base_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_archived INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX workspaces_project_branch_active_unique
+                ON workspaces(project_id, branch)
+                WHERE length(branch) > 0 AND is_archived = 0;
+                CREATE TABLE workspace_settings (
+                  workspace_id TEXT PRIMARY KEY,
+                  stop_script TEXT,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+                );
+                CREATE TABLE ignored_worktrees (
+                  worktree_dir TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                INSERT INTO projects(id, name, dir, is_git_repo, default_branch)
+                  VALUES ('project', 'Project', '\(root.path)', 1, 'main');
+                INSERT INTO workspaces(id, project_id, dir, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, notes)
+                  VALUES ('live', 'project', '\(liveDir)', 'live', 'feature', 'main', 0, 0, 0, 0, 'live notes');
+                INSERT INTO workspaces(id, project_id, dir, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, notes)
+                  VALUES ('archived', 'project', '\(archivedDir)', 'archived', 'retired', 'main', 0, 1, 0, 0, 'archived notes');
+                INSERT INTO workspace_settings(workspace_id, stop_script, updated_at)
+                  VALUES ('live', 'echo live', '2026-07-31T00:00:00Z');
+                INSERT INTO workspace_settings(workspace_id, stop_script, updated_at)
+                  VALUES ('archived', 'echo archived', '2026-07-31T00:00:00Z');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            let store = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertNil(try store.workspace(id: "archived"), "an archived workspace is dropped by the upgrade")
+            let live = try XCTUnwrap(store.workspace(id: "live"), "a live workspace must survive the upgrade untouched")
+            XCTAssertEqual(live.branch, "feature")
+            XCTAssertEqual(live.baseBranch, "main")
+            XCTAssertEqual(live.dirname, "live")
+            XCTAssertEqual(live.notes, "live notes")
+            XCTAssertEqual(try store.workspaces(projectID: "project").map(\.id), ["live"])
+            XCTAssertEqual(try store.workspaceStopScript(workspaceID: "live"), "echo live")
+            XCTAssertEqual(
+                try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ignored_worktrees'"), 0,
+                "the upgrade drops the ignored-worktree table with the archived model")
+            XCTAssertEqual(
+                try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM workspace_settings WHERE workspace_id = 'archived'"), 0,
+                "the dropped workspace takes its settings with it")
+
+            // The freed branch name is immediately usable again by a new workspace.
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "reuse", projectID: "project", dir: archivedDir, dirname: "reuse", branch: "retired", baseBranch: "main", isDefault: false,
+                    isRunning: false, lastLaunchedAt: nil))
+            XCTAssertEqual(try store.workspace(id: "reuse")?.branch, "retired")
+        }
+    }
+
+    func testUpgradeKeepsRuntimeSessionsAndReportsNoBell() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let sessionRoot = URL(fileURLWithPath: root.appendingPathComponent("sessions/legacy", isDirectory: true).path, isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (8);
+                CREATE TABLE terminal_runtime_states (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  backend TEXT NOT NULL,
+                  service_pid INTEGER NOT NULL,
+                  child_pid INTEGER,
+                  title TEXT,
+                  working_directory TEXT,
+                  columns INTEGER,
+                  rows INTEGER,
+                  state TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  exited_at TEXT,
+                  foreground_pid INTEGER,
+                  foreground_executable_path TEXT,
+                  foreground_executable_name TEXT,
+                  foreground_argv_json TEXT,
+                  foreground_detected_agent_kind TEXT,
+                  foreground_display_label TEXT,
+                  foreground_display_command TEXT
+                );
+                INSERT INTO terminal_runtime_states(
+                  session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at
+                ) VALUES (
+                  'legacy-session', '\(sessionRoot.path)', 'ghostty-embedded', 4242, 99, 'legacy title', '/tmp/legacy', 100, 40, 'running',
+                  '2026-07-19T00:00:00Z'
+                );
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: TerminalSessionPaths(rootDirectory: sessionRoot.path))
+            XCTAssertEqual(runtimeState.sessionID, "legacy-session")
+            XCTAssertEqual(runtimeState.title, "legacy title")
+            XCTAssertEqual(runtimeState.workingDirectory, "/tmp/legacy")
+            XCTAssertEqual(runtimeState.childPID, 99)
+            XCTAssertEqual(runtimeState.state, .running)
+            XCTAssertNil(runtimeState.bellAt)
+        }
+    }
+
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
     func testOpeningCurrentVersionDoesNotCreateMigrationBackup() throws {
         let root = try makeTempDirectory()
@@ -187,41 +384,59 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
+    /// A profile database several schema versions behind this build, carrying one row the upgrade must
+    /// preserve.
+    private static let legacyProfileSchemaSQL = """
+        CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+        INSERT INTO migration_state(current_version) VALUES (4);
+        CREATE TABLE agent_pending_notifications (
+          id TEXT PRIMARY KEY,
+          subscriber_terminal_session_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO agent_pending_notifications(
+          id, subscriber_terminal_session_id, agent_session_id, message, created_at
+        ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
+        CREATE TABLE agent_sessions (
+          id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+          status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+          claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE agent_subscriptions (
+          subscriber_terminal_session_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+          FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+        );
+        """
+
+    /// An instance-lock record naming a schema target other than this build's. Produced directly
+    /// because `TerminalServiceInstanceLock.acquire` declares this build's target by construction,
+    /// while an older daemon declares its own — or, from before the declaration existed, none.
+    private struct ForeignSchemaInstanceLockRecord: Codable {
+        let pid: Int32
+        let token: String
+        let schemaTarget: Int?
+    }
+
+    private func writeInstanceLock(pid: Int32, schemaTarget: Int?, path: String) throws {
+        let record = ForeignSchemaInstanceLockRecord(pid: pid, token: UUID().uuidString, schemaTarget: schemaTarget)
+        try JSONEncoder().encode(record).write(to: URL(fileURLWithPath: path))
+    }
+
     // A newer direct helper must not move the profile schema out from under the daemon that owns the
-    // live terminal sessions. Once that daemon hands off in place, the owning process may migrate and
-    // the existing data must carry forward.
+    // live terminal sessions: an owner whose lock record declares no schema this build can open is that
+    // older daemon, and the helper refuses immediately rather than waiting for work that is not coming.
+    // Once that daemon hands off in place, the owning process may migrate and the existing data must
+    // carry forward.
     func testRunningDaemonExclusivelyOwnsProfileMigration() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
         let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (4);
-                CREATE TABLE agent_pending_notifications (
-                  id TEXT PRIMARY KEY,
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-                INSERT INTO agent_pending_notifications(
-                  id, subscriber_terminal_session_id, agent_session_id, message, created_at
-                ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
-                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_subscriptions (
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
-                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
-                );
-                """)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
 
         try withEnvironmentValues([
             SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
@@ -255,16 +470,31 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(link(competingLockCandidate.path, lockPath), 0, "The migration lock must be released after the schema work finishes.")
             try FileManager.default.removeItem(atPath: lockPath)
 
-            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: DatabaseSchema.currentVersion - 1, path: lockPath)
+            let refusalStarted = Date()
             XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
                 XCTAssertTrue(error.localizedDescription.contains("while spacesd (pid \(externalDaemon.processIdentifier)) owns this profile"))
+                XCTAssertTrue(error.localizedDescription.contains("maintains schema version \(DatabaseSchema.currentVersion - 1)"))
+                XCTAssertTrue(error.localizedDescription.contains("this build needs schema version \(DatabaseSchema.currentVersion)"))
+                XCTAssertTrue(error.localizedDescription.contains("spaces daemon apply-update"))
+            }
+            XCTAssertLessThan(
+                Date().timeIntervalSince(refusalStarted), 1,
+                "The owner's lock record already names the boundary, so the refusal must not wait on schema work that is not coming.")
+
+            // A daemon from before the declaration existed names no schema at all, which is the same
+            // refusal: it is older than any build that reads the declaration.
+            try FileManager.default.removeItem(atPath: lockPath)
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: nil, path: lockPath)
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("maintains an earlier schema"))
                 XCTAssertTrue(error.localizedDescription.contains("spaces daemon apply-update"))
             }
             XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
             XCTAssertEqual(
                 try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
 
-            externalLock.release()
+            try FileManager.default.removeItem(atPath: lockPath)
             let daemonLock = try TerminalServiceInstanceLock.acquire(path: lockPath)
             _ = try SQLiteStore(path: dbURL.path)
             withExtendedLifetime(daemonLock) {}
@@ -275,35 +505,220 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // A daemon that has just taken the instance lock is doing the schema work it took that lock to do,
+    // and its lock record declares the schema version it will record. A helper opening the profile
+    // database in that window sees the same behind-schema database an older daemon would present, so
+    // that declaration is what tells it to wait for the owner's result rather than report a version
+    // boundary that does not exist.
+    func testHelperWaitsForBootingDaemonToRecordProfileSchema() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            // Stands in for the owning daemon's own schema work: it holds the instance lock, so it
+            // migrates directly rather than through the guard.
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let ownerMigrationError = LockedBox<Error?>(nil)
+            let ownerFinished = DispatchSemaphore(value: 0)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.2)
+                do { _ = try SpacesSQLiteDatabase(path: dbURL.path) } catch { ownerMigrationError.set(error) }
+                ownerFinished.signal()
+            }
+            owner.start()
+
+            let started = Date()
+            helperEnteredGuard.signal()
+            _ = try SQLiteStore(path: dbURL.path)
+            let waited = Date().timeIntervalSince(started)
+
+            XCTAssertEqual(ownerFinished.wait(timeout: .now() + 5), .success)
+            XCTAssertNil(ownerMigrationError.get())
+            XCTAssertGreaterThanOrEqual(waited, 0.15, "The helper must wait for the owner's schema work instead of refusing it.")
+            XCTAssertEqual(
+                try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath), externalDaemon.processIdentifier,
+                "The waiting helper must leave profile ownership with the daemon.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+        }
+    }
+
+    // The wait is bounded by the owner staying alive, not by a duration: an owner that exits before
+    // recording its schema version leaves the profile to whoever takes the lock next, and the waiting
+    // helper is exactly that process.
+    func testHelperTakesOverProfileMigrationWhenOwningDaemonExitsBeforeRecordingSchema() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.2)
+                externalDaemon.terminate()
+                externalDaemon.waitUntilExit()
+            }
+            owner.start()
+
+            helperEnteredGuard.signal()
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertNil(
+                try TerminalServiceInstanceLock.activeOwnerProcessID(path: lockPath),
+                "The helper must take the abandoned profile, do the schema work, and release the lock again.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+        }
+    }
+
+    // A live owner that declares this build's schema but never records it is wedged, not a version
+    // boundary. The ceiling exists so that helper stops eventually, and what it reports must send the
+    // caller back to the daemon already doing the work rather than to the update remedy.
+    func testHelperReportsOwningDaemonStillPreparingSchemaWhenWaitCeilingExpires() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            defer { externalLock.release() }
+
+            var migrationRan = false
+            XCTAssertThrowsError(
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: dbURL.path, ownerWaitCeiling: 0.2) { migrationRan = true }
+            ) { error in
+                XCTAssertTrue(
+                    error.localizedDescription.contains("still being prepared by spacesd (pid \(externalDaemon.processIdentifier))"),
+                    error.localizedDescription)
+                XCTAssertTrue(error.localizedDescription.contains("retry once it finishes"), error.localizedDescription)
+                XCTAssertFalse(
+                    error.localizedDescription.contains("apply-update"),
+                    "The daemon being waited on is already the one that should do this work, so the update remedy would be wrong.")
+            }
+            XCTAssertFalse(migrationRan)
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
+        }
+    }
+
+    // A newer owner commits each step of its upgrade in its own transaction, so this build's schema
+    // version appears in the profile while that daemon is still rewriting past it. The helper must wait
+    // for the version the owner declared rather than the first version it could open, or it reads a
+    // database mid-migration and never reaches the rejection a newer schema is owed.
+    func testHelperWaitsPastItsOwnSchemaVersionForNewerOwnersDeclaredTarget() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
+        let ownerTarget = DatabaseSchema.currentVersion + 1
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            try writeInstanceLock(pid: externalDaemon.processIdentifier, schemaTarget: ownerTarget, path: lockPath)
+            defer { try? FileManager.default.removeItem(atPath: lockPath) }
+
+            let helperEnteredGuard = DispatchSemaphore(value: 0)
+            let ownerError = LockedBox<Error?>(nil)
+            let owner = Thread {
+                helperEnteredGuard.wait()
+                Thread.sleep(forTimeInterval: 0.15)
+                do {
+                    // The step of the owner's upgrade that lands on this build's version, committed on
+                    // the way to the owner's own.
+                    try self.runSQLiteExec(dbURL: dbURL, sql: "UPDATE migration_state SET current_version = \(DatabaseSchema.currentVersion);")
+                    Thread.sleep(forTimeInterval: 0.25)
+                    try self.runSQLiteExec(dbURL: dbURL, sql: "UPDATE migration_state SET current_version = \(ownerTarget);")
+                } catch { ownerError.set(error) }
+            }
+            owner.start()
+
+            let started = Date()
+            helperEnteredGuard.signal()
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Unsupported database schema version \(ownerTarget)"), error.localizedDescription)
+            }
+            let waited = Date().timeIntervalSince(started)
+
+            XCTAssertNil(ownerError.get())
+            XCTAssertGreaterThanOrEqual(
+                waited, 0.3, "The helper must not stop at its own version while the owner is still upgrading the database past it.")
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), ownerTarget)
+        }
+    }
+
     func testConcurrentHelperThreadsShareOneProfileMigration() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces.db")
         let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (4);
-                CREATE TABLE agent_pending_notifications (
-                  id TEXT PRIMARY KEY,
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
-                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_subscriptions (
-                  subscriber_terminal_session_id TEXT NOT NULL,
-                  agent_session_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
-                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
-                );
-                """)
+        try runSQLiteExec(dbURL: dbURL, sql: Self.legacyProfileSchemaSQL)
 
         try withEnvironmentValues([
             SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
@@ -327,8 +742,8 @@ final class StoreTests: XCTestCase {
             dbURL: dbURL,
             sql: """
                 INSERT INTO projects(id, name, dir, is_git) VALUES ('project-1', 'Project', '/tmp/project', 0);
-                INSERT INTO workspaces(id, project_id, dir, is_default, is_archived, is_hidden, is_running)
-                VALUES ('workspace-1', 'project-1', '/tmp/project/feature', 0, 0, 0, 0);
+                INSERT INTO workspaces(id, project_id, dir, is_default, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', '/tmp/project/feature', 0, 0, 0);
                 """)
 
         XCTAssertThrowsError(
@@ -962,20 +1377,6 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
-    }
-
-    // Tests upsert workspace clears ignored worktree path by arranging representative inputs and asserting the expected result.
-    func testUpsertWorkspaceClearsIgnoredWorktreePath() throws {
-        let store = try makeTemporaryStore()
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
-        try store.upsert(project: project)
-        try store.markIgnoredWorktree(path: workspace.dir, projectID: project.id)
-        XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
-
-        try store.upsert(workspace: workspace)
-        XCTAssertFalse(try store.isIgnoredWorktree(path: workspace.dir))
     }
 
     // Tests delete project removes project workspaces and dependents by arranging representative inputs and asserting the expected result.
@@ -994,7 +1395,7 @@ final class StoreTests: XCTestCase {
         try store.deleteProject(id: project.id)
 
         XCTAssertNil(try store.project(id: project.id))
-        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+        XCTAssertTrue(try store.workspaces(projectID: project.id).isEmpty)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
@@ -1008,10 +1409,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(workspace: workspace)
 
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-01-01T00:00:00Z")
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
         let updated = try store.workspace(id: workspace.id)
         XCTAssertEqual(updated?.isRunning, true)
-        XCTAssertEqual(updated?.isArchived, true)
         XCTAssertEqual(updated?.lastLaunchedAt, "2026-01-01T00:00:00Z")
 
         XCTAssertNil(try store.setting(key: "key"))
@@ -1052,18 +1451,16 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false,
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isRunning: false, lastLaunchedAt: nil)
+        let secondWorkspace = WorkspaceRecord(
+            id: "second", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isRunning: false,
             lastLaunchedAt: nil)
-        let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isArchived: true,
-            isRunning: false, lastLaunchedAt: nil)
-        try store.upsert(workspace: archivedWorkspace)
+        try store.upsert(workspace: secondWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
-        XCTAssertEqual(try store.workspace(id: "archived")?.id, "archived")
-        XCTAssertEqual(try store.workspace(id: "archived")?.baseBranch, "develop")
-        XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
-        XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
+        XCTAssertEqual(try store.workspace(id: "second")?.id, "second")
+        XCTAssertEqual(try store.workspace(id: "second")?.baseBranch, "develop")
+        XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id).map(\.id)), Set(["default", "second"]))
     }
 
     // Tests delete running process and delete running processes by arranging representative inputs and asserting the expected result.
@@ -1431,11 +1828,11 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
@@ -1450,25 +1847,6 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(notFound)
     }
 
-    func testWorkspaceLookupByDirectoryPrefersActiveWorkspaceOverArchivedDuplicate() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let workspaceDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let archived = WorkspaceRecord(
-            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: true, isRunning: false,
-            lastLaunchedAt: nil)
-        let active = WorkspaceRecord(
-            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil)
-        try store.upsert(project: project)
-        try store.upsert(workspace: archived)
-        try store.upsert(workspace: active)
-
-        let found = try store.workspace(dir: workspaceDir)
-        XCTAssertEqual(found?.id, "active")
-    }
-
     func testStoreRejectsDuplicateWorkspaceBranchWithinProject() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
@@ -1476,10 +1854,10 @@ final class StoreTests: XCTestCase {
         let branch = "feature-branch"
         let first = WorkspaceRecord(
             id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
             id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
         XCTAssertThrowsError(try store.upsert(workspace: second))

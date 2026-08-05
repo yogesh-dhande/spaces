@@ -175,28 +175,13 @@ import workspacecore
         #expect(browserCleanupWorkspaceIDs.isEmpty)
     }
 
-    @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        // `TerminalSessionPersistence` resolves its database through the active profile, not the passed
-        // `paths`. Bind the task-local override to an isolated database so this test never touches the
-        // developer profile and stays deterministic under parallel execution without mutating the process
-        // environment.
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.$databasePathOverrideForTesting.withValue(root.appendingPathComponent("spaces.db").path) {
-            try TerminalSessionPersistence.writeLaunchConfiguration(
-                TerminalSessionLaunchConfiguration(
-                    sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                    createdAt: "2026-06-04T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
-
-            #expect(
-                AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                    hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
-            #expect(
-                !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                    hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
-        }
+    @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() {
+        #expect(
+            AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
+        #expect(
+            !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {
@@ -225,10 +210,10 @@ import workspacecore
             servicePID: 123, childPID: 456, controlSocketPath: "/tmp/\(id).sock", outputPath: "/tmp/\(id).log")
     }
 
-    private static func workspaceRecord(id: String, isArchived: Bool = false, isRunning: Bool) -> WorkspaceRecord {
+    private static func workspaceRecord(id: String, isRunning: Bool) -> WorkspaceRecord {
         WorkspaceRecord(
-            id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isArchived: isArchived,
-            isRunning: isRunning, lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
+            id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isRunning: isRunning,
+            lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
     }
 
     private static func cleanupResult(workspaceIDs: [String], remainingSessionIDs: [String]) -> AppKitController.StopAllQuitCleanupResult {

@@ -40,9 +40,10 @@ those children to a verified finish. You work through the Spaces MCP tools.
   agent (claude, codex, or opencode) in a workspace. Returns when the child is
   detected running. It does not send a prompt.
 - spaces_terminal_send(session, text[, submit]) — send the child its
-  prompt, answers to its questions, and follow-up instructions. submit sends a
-  separate, spaced Enter keystroke so every supported agent TUI (Claude Code,
-  Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste.
+  prompt, answers to its questions, and follow-up instructions. submit sends the
+  text as a paste followed by a separate Enter keystroke so every supported agent
+  TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an
+  unsubmitted paste.
 - spaces_agent_subscribe(session) — subscribe YOUR terminal to a child. When the
   child goes blocked, done, or exits, a [spaces] ... event line is delivered to
   you. Subscribe, annotate, and status work only after the child has signaled
@@ -52,7 +53,7 @@ those children to a verified finish. You work through the Spaces MCP tools.
   current state / its recent terminal output.
 - spaces_agent_annotate(session, note) — label a child with its chunk.
 - spaces_agent_list — every child and its status at a glance.
-- spaces_agent_interrupt(session) / spaces_agent_kill(session) — stop a child.
+- spaces_agent_kill(session) — end a child and its terminal.
 - All tools accept an optional device to act on a paired machine.
 
 ## Workflow
@@ -144,7 +145,6 @@ export default function OrchestrationDocsPage() {
           <Tool name="spaces_terminal_tail" description="Read a child's recent terminal output by session id." />
           <Tool name="spaces_agent_annotate" description="Label a child with the chunk it is working on." />
           <Tool name="spaces_agent_list" description="See every child and its status at a glance." />
-          <Tool name="spaces_agent_interrupt" description="Nudge a child that has gone off track." />
           <Tool name="spaces_agent_kill" description="End a child and its terminal when it is finished." />
         </ul>
       </article>

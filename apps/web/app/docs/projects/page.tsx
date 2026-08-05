@@ -25,7 +25,7 @@ export default function ProjectsDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Directory</strong> &mdash; the project folder. Spaces uses the folder name as the display name.</li>
           <li>• <strong>Setup script</strong> &mdash; runs once when a new workspace is created. A good place for <code>npm install</code> or copying a shared <code>.env</code> file into the workspace.</li>
-          <li>• <strong>Stop script</strong> &mdash; runs whenever a workspace is stopped (including on restart and archive), after Spaces shuts its processes down. Use it to tear down any extra services the workspace left behind.</li>
+          <li>• <strong>Stop script</strong> &mdash; runs whenever a workspace is stopped (including on restart and delete), after Spaces shuts its processes down. Use it to tear down any extra services the workspace left behind.</li>
         </ul>
       </article>
 
@@ -56,7 +56,7 @@ export default function ProjectsDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Git projects</strong> &mdash; the default workspace tracks <code>main</code> or <code>master</code>.</li>
           <li>• <strong>Non-Git projects</strong> &mdash; the default workspace points at the project directory.</li>
-          <li>• The default workspace can&apos;t be archived but you can delete a project entirely.</li>
+          <li>• The default workspace can&apos;t be deleted on its own but you can delete a project entirely.</li>
         </ul>
       </article>
 

@@ -97,6 +97,8 @@ build_linux_remote_artifact() {
   local arch="$1"
   local platform="$2"
   local docker_args=(run --rm --platform "$platform")
+  local builder_image
+  builder_image="$("$REPO_ROOT/apps/macos/scripts/ensure_linux_builder_image.sh" --arch "$arch")"
 
   if [[ "$GIT_COMMON_DIR" != "$REPO_ROOT/.git" ]]; then
     docker_args+=(-v "$GIT_COMMON_DIR:$GIT_COMMON_DIR")
@@ -105,8 +107,8 @@ build_linux_remote_artifact() {
   docker "${docker_args[@]}" \
     -v "$REPO_ROOT":/workspace \
     -w /workspace \
-    swift:6.2-noble \
-    bash -lc "apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/apps/macos/vendor/ghostty && apps/macos/scripts/build_linux_spacesd_artifact.sh --output-dir dist/remote --arch $arch"
+    "$builder_image" \
+    bash -lc "git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/apps/macos/vendor/ghostty && apps/macos/scripts/build_linux_spacesd_artifact.sh --output-dir dist/remote --arch $arch"
 }
 
 verify_remote_artifact() {

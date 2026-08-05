@@ -1,9 +1,11 @@
 import AppKit
 
-/// Renders one tab's `PaneNode` tree as nested `NSSplitView`s. Structural changes
-/// (split, close) rebuild the split-view skeleton, but leaf `PaneView`s are cached by
-/// pane id and re-parented rather than recreated — the hosted Ghostty surface must
-/// survive splits and closes elsewhere in the tree. Divider drags report back as
+/// Renders one tab's `PaneNode` tree as nested `NSSplitView`s. Leaf `PaneView`s are
+/// cached by pane id, and the split skeleton is rebuilt only when the tree structure
+/// (which panes exist, how they're split) actually changes — rebuilding tears down and
+/// re-parents the view hierarchy, which detaches the window's first responder if a pane
+/// inside it currently holds keyboard focus. A focus-only, title-only, or weight-only
+/// re-render must not cost the user their focused pane. Divider drags report back as
 /// weight changes for persistence.
 @MainActor final class PaneTreeView: NSView {
     /// Configures a (new or re-parented) pane view for its pane: attach content and
@@ -12,6 +14,9 @@ import AppKit
     var onSplitWeightsChanged: ((_ splitID: String, _ weights: [Double]) -> Void)?
 
     private var paneViewsByID: [String: PaneView] = [:]
+    /// Structural signature of the tree currently materialized in the view hierarchy;
+    /// nil when nothing is built. See `structureSignature(of:)`.
+    private var renderedStructure: String?
 
     init() {
         super.init(frame: .zero)
@@ -20,14 +25,25 @@ import AppKit
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    /// Rebuilds the tree for `root` (nil clears). Cached pane views for ids no longer
-    /// present are dropped; their content lifecycle is the coordinator's concern.
+    /// Renders `root` (nil clears). If the tree's structure is unchanged from what's
+    /// already materialized, the view hierarchy is left completely untouched — only
+    /// `onConfigurePane` is re-invoked per leaf — so an in-place focus/title/weight
+    /// update never detaches a first responder living inside the tree. Otherwise the
+    /// skeleton is rebuilt: cached pane views for ids no longer present are dropped;
+    /// their content lifecycle is the coordinator's concern.
     func render(root: PaneNode?) {
-        for view in subviews { view.removeFromSuperview() }
         guard let root else {
+            for view in subviews { view.removeFromSuperview() }
             paneViewsByID.removeAll()
+            renderedStructure = nil
             return
         }
+        let signature = Self.structureSignature(of: root)
+        if signature == renderedStructure, !subviews.isEmpty {
+            reconfigure(node: root)
+            return
+        }
+        for view in subviews { view.removeFromSuperview() }
         let built = build(node: root)
         addSubview(built)
         NSLayoutConstraint.activate([
@@ -36,6 +52,38 @@ import AppKit
         ])
         let liveIDs = Set(paneIDs(in: root))
         for staleID in paneViewsByID.keys where !liveIDs.contains(staleID) { paneViewsByID.removeValue(forKey: staleID) }
+        renderedStructure = signature
+    }
+
+    /// A signature of the tree's shape: leaf pane ids and their order, split ids,
+    /// orientations, and nesting. Deliberately excludes:
+    /// - `split.weights`: only a user divider drag changes weights, and it reports the
+    ///   result back through `onSplitWeightsChanged`; the split view already shows the
+    ///   dragged position, so rebuilding to re-apply the weight the user just produced
+    ///   is pure churn.
+    /// - each pane's `content`: a pane whose id survives keeps its `PaneView`, and
+    ///   `onConfigurePane` swaps the hosted content view in place via
+    ///   `PaneView.attachContent`, so a content change needs no structural rebuild.
+    private static func structureSignature(of node: PaneNode) -> String {
+        switch node {
+        case .leaf(let pane): return "leaf(\(pane.id))"
+        case .split(let split):
+            let children = split.children.map(structureSignature).joined(separator: ",")
+            return "split(\(split.id),\(split.orientation.rawValue),[\(children)])"
+        }
+    }
+
+    /// Reconfigures each leaf's cached pane view without touching the hierarchy. Called
+    /// only when the structure signature matched, so by construction `paneViewsByID`
+    /// holds a view for every pane id in `node` — the cache is written in the rebuild
+    /// path and pruned to exactly the live ids.
+    private func reconfigure(node: PaneNode) {
+        switch node {
+        case .leaf(let pane):
+            guard let view = paneViewsByID[pane.id] else { return }
+            onConfigurePane?(view, pane)
+        case .split(let split): for child in split.children { reconfigure(node: child) }
+        }
     }
 
     private func paneIDs(in node: PaneNode) -> [String] {

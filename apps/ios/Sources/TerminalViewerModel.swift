@@ -101,6 +101,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
 
     var latestState: GhosttyRemoteSessionStatePayload?
+    /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
+    /// touches the device's real clipboard. Nil in the app, where the write goes to
+    /// `UIPasteboard.general`.
+    var pasteboardOverrideForTesting: UIPasteboard?
     var isConnecting = false
     var isBusy = false
     var isSessionUnavailable = false
@@ -626,6 +630,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         composerErrorMessage = nil
     }
 
+    /// Stages a clipboard image in the composer: a valid image becomes an attachment, a rejected one
+    /// surfaces its reason. Returns whether the clipboard actually held an image, so a caller that pastes
+    /// text otherwise (the composer's own paste, the terminal's paste routes) can fall through.
+    func pasteClipboardImageIntoComposer(from pasteboard: UIPasteboard = .general) -> Bool {
+        switch TerminalUIPasteboardImageReader.readImage(from: pasteboard) {
+        case .image(let attachment):
+            attachComposerImage(attachment)
+            return true
+        case .rejected(let message):
+            composerErrorMessage = message
+            return true
+        case .noImage: return false
+        }
+    }
+
     func removeComposerAttachment(id: UUID) {
         guard !isSendingComposedMessage else { return }
         composerAttachments.removeAll { $0.id == id }
@@ -744,9 +763,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
-        guard let ownerEpoch = currentOwnerEpoch else {
-            throw SpacesDeviceAPIClientError.requestFailed("The terminal is not ready to receive an image.")
-        }
+        // Carries the current owner epoch when there is one and none when there is not, like every other
+        // input this viewer sends: an absent epoch means the paste is not epoch-gated, not that the
+        // terminal is unready.
+        let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
             try await bridgeClient.pasteImage(
@@ -777,6 +797,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     func flushPendingScroll() { scrollCoalescer.flush() }
+
+    /// Sends one button press or release. Deliberately not coalesced the way scroll is: a click is a
+    /// discrete event whose press/release ordering the application depends on, so it flushes any
+    /// pending scroll batch first and rides the same input queue as a key send.
+    // Synchronous (no async hop) so a tap's press and release enqueue in call order: the serial
+    // input queue preserves enqueue order, but two Tasks racing to enqueue would not.
+    func sendMouseButton(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) {
+        guard isOwner else { return }
+        guard keepsTerminalInputSurfaceActive else { return }
+        flushPendingScroll()
+        flushBufferedInputText()
+        enqueueInputSend(kind: "send_mouse_button", detail: "\(button),\(pressed)") { [weak self, button, pressed, pointerPosition] in
+            guard let self else { return }
+            try await self.performSendMouseButtonRequest(button: button, pressed: pressed, pointerPosition: pointerPosition)
+        }
+    }
 
     func dismissLinkPreview() {
         invalidateLinkPreviewRequests()
@@ -916,6 +952,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 sessionID: sessionID, clientID: clientID, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
                 scrollMods: scrollMods == 0 ? nil : scrollMods, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel)
+        }
+    }
+
+    private func performSendMouseButtonRequest(button: UInt8, pressed: Bool, pointerPosition: TerminalScrollPointerPosition?) async throws {
+        let ownerEpoch = currentOwnerEpoch
+        try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+            try await bridgeClient.mouseButton(
+                sessionID: sessionID, clientID: clientID, button: button, pressed: pressed, ownerEpoch: ownerEpoch, pointerPosition: pointerPosition,
+                timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 
@@ -1801,6 +1846,26 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return !activeAttachmentExists(in: latestState.attachmentSnapshot)
     }
 
+    /// Applies a program's OSC 52 copy to this device's pasteboard when this client owns the session
+    /// and the write is addressed to it.
+    ///
+    /// The payload fans out to every subscriber, so the target check is what makes it the owner's
+    /// clipboard and nobody else's. Read from the incoming payload rather than `latestState`: the merge
+    /// deliberately drops the field, so the write is applied exactly once, on arrival. Empty text is an
+    /// OSC 52 clear, which empties the pasteboard.
+    ///
+    /// Ownership is read from the state this model already holds, never from the payload's own snapshot:
+    /// the write can arrive out of order with the state around it, and the question being answered is
+    /// whether this device owns the session NOW — an event's stale snapshot is not evidence of that.
+    func applyClipboardWrite(from payload: GhosttyRemoteSessionStatePayload) {
+        guard let clipboardWrite = payload.clipboardWrite else { return }
+        guard clipboardWrite.targetClientID == remoteClient.id, activeOwnerClientID == remoteClient.id else { return }
+        let pasteboard = pasteboardOverrideForTesting ?? .general
+        pasteboard.items = []
+        guard !clipboardWrite.text.isEmpty else { return }
+        pasteboard.string = clipboardWrite.text
+    }
+
     private var activeOwnerClientID: String? {
         guard !isEndedState else { return nil }
         return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
@@ -1819,7 +1884,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             outputByteCount: payload.outputByteCount, outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: nil)
     }
 
-    private func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+    func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+        // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and the
+        // direct `.state` refresh runs alongside the live subscription, so a refresh can install newer
+        // state before an older stream event carrying the copy arrives.
+        applyClipboardWrite(from: incomingPayload)
+        // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen state,
+        // and its runtime/attachment snapshot is a repeat of the output turn that carried the escape
+        // sequence — so it is never reduced or installed. Reducing an out-of-order one would rewind
+        // `latestState` to the event's timestamp and could hand ownership back to whoever held it then.
+        guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
         let applyStartedAt = Date()
         let decodeStartedAt = Date()
         let reduction = stateReducer.reduce(incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)

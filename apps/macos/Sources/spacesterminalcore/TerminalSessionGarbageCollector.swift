@@ -23,7 +23,8 @@ import Foundation
 ///     the session is purged. The 7-day clock is the session's own end time (`exitedAt`), not any
 ///     per-row timestamp. If the release does not clear every reference, the session is left for the
 ///     next sweep (fail closed, no error).
-///  3. Over budget. If the aggregate on-disk size of all ended sessions still exceeds
+///  3. Over budget. If the aggregate retained size of all ended sessions — each session's directory bytes
+///     plus the bytes its persisted final-render row holds in the profile database — still exceeds
 ///     `endedTranscriptByteBudget` after the age pass, the collector evicts oldest-ended-first — via the
 ///     same release→recheck→purge path — even for sessions younger than the age limit, until the total
 ///     is back under budget or no evictable session remains. Every ended session is a candidate: an ended
@@ -45,11 +46,11 @@ public enum TerminalSessionGarbageCollector {
     /// retires it. `onBudgetExceeded` reports the residual ended-session byte total when it cannot be brought
     /// under `endedTranscriptByteBudget`. Returns the IDs of the sessions purged.
     ///
-    /// A single session's purge failure (an undeletable directory — e.g. a permissions error or a busy
-    /// file handle — a `TerminalSessionPaths.forSession` failure, or a throwing `releaseExpiredReferences`)
-    /// is contained to that session: it is reported through `onPurgeFailure` and left for the next sweep to
-    /// retry, and the loop continues to the remaining sessions. Sessions are collected in a stable order
-    /// (`listKnownSessions` orders by `created_at`, then `session_id`) and this sweep reruns on a fixed
+    /// A single session's purge failure (an undeletable directory — e.g. a permissions error or a busy file
+    /// handle — or a throwing `releaseExpiredReferences`) is contained to that session: it is reported through
+    /// `onPurgeFailure` and left for the next sweep to retry, and the loop continues to the remaining
+    /// sessions. Sessions are collected in a stable order
+    /// (`listKnownSessions` orders by `created_at`, then `session_id`), and this sweep reruns on a fixed
     /// cadence, so without containment one permanently-undeletable session would block every session ordered
     /// after it forever. This collector stays pure (no I/O beyond the persistence and filesystem calls it
     /// exists to make): it reports failures and the over-budget residual through callbacks rather than
@@ -58,12 +59,10 @@ public enum TerminalSessionGarbageCollector {
     ///
     /// A `listKnownSessions` failure still aborts the whole call: with no session list, there is nothing
     /// to iterate or retry.
-    @discardableResult
-    public static func collectRemovedSessions(
-        activeSessionIDs: Set<String>, isReferencedByProduct: (String) throws -> Bool,
-        releaseExpiredReferences: (String) throws -> Void, retentionPolicy: TerminalSessionRetentionPolicy = .standard,
-        fileManager: FileManager = .default, now: Date = Date(), onPurgeFailure: (String, any Error) -> Void = { _, _ in },
-        onBudgetExceeded: (Int64) -> Void = { _ in }
+    @discardableResult public static func collectRemovedSessions(
+        activeSessionIDs: Set<String>, isReferencedByProduct: (String) throws -> Bool, releaseExpiredReferences: (String) throws -> Void,
+        retentionPolicy: TerminalSessionRetentionPolicy = .standard, fileManager: FileManager = .default, now: Date = Date(),
+        onPurgeFailure: (String, any Error) -> Void = { _, _ in }, onBudgetExceeded: (Int64) -> Void = { _ in }
     ) throws -> [String] {
         var purged: [String] = []
         // Ended sessions that survive the age pass and remain on disk, so the byte-budget backstop can weigh
@@ -72,11 +71,11 @@ public enum TerminalSessionGarbageCollector {
         var endedOnDisk: [EndedSession] = []
         let expiryCutoff = now.addingTimeInterval(-retentionPolicy.endedSessionMaxAge)
 
-        for launchConfiguration in try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager) {
-            let sessionID = launchConfiguration.sessionID
+        for knownSession in try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager) {
+            let sessionID = knownSession.sessionID
             guard !activeSessionIDs.contains(sessionID) else { continue }
             do {
-                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                let paths = knownSession.paths
                 // No runtime state yet means the session is mid-creation (config written, runtime not); leave it.
                 guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
                 let isShown = isSessionShown(runtimeState: runtimeState, paths: paths, now: now)
@@ -112,15 +111,18 @@ public enum TerminalSessionGarbageCollector {
 
                 // Survived the age pass and remains on disk; if ended it is weighed by the budget backstop.
                 if isEnded { endedOnDisk.append(EndedSession(sessionID: sessionID, paths: paths, runtimeState: runtimeState)) }
-            } catch {
-                onPurgeFailure(sessionID, error)
-            }
+            } catch { onPurgeFailure(sessionID, error) }
         }
 
+        // Read once for the whole sweep: the budget weighs each ended session's persisted final-render
+        // payload alongside its directory, and a per-session read would open a connection per session.
+        // Like `listKnownSessions`, a failure here aborts the call — there is no budget to enforce
+        // without it — and the next sweep retries; tiers 1 and 2 have already committed durably.
+        let payloadBytesByRoot = endedOnDisk.isEmpty ? [:] : try TerminalSessionPersistence.finalRenderPayloadByteCountsByRootDirectory()
         evictOverBudget(
-            endedOnDisk: endedOnDisk, purged: &purged, retentionPolicy: retentionPolicy, isReferencedByProduct: isReferencedByProduct,
-            releaseExpiredReferences: releaseExpiredReferences, fileManager: fileManager, onPurgeFailure: onPurgeFailure,
-            onBudgetExceeded: onBudgetExceeded)
+            endedOnDisk: endedOnDisk, payloadBytesByRoot: payloadBytesByRoot, purged: &purged, retentionPolicy: retentionPolicy,
+            isReferencedByProduct: isReferencedByProduct, releaseExpiredReferences: releaseExpiredReferences, fileManager: fileManager,
+            onPurgeFailure: onPurgeFailure, onBudgetExceeded: onBudgetExceeded)
 
         return purged
     }
@@ -148,7 +150,7 @@ public enum TerminalSessionGarbageCollector {
         return true
     }
 
-    /// The byte-budget backstop (tier 3). Sums the on-disk size of every ended session still present after
+    /// The byte-budget backstop (tier 3). Sums the retained size of every ended session still present after
     /// the age pass and, if that exceeds `endedTranscriptByteBudget`, evicts oldest-ended-first via the
     /// shared release→recheck→purge path until the total is back under budget or no evictable session
     /// remains. A session is eligible only if its end time is resolvable (an unresolvable end time cannot be
@@ -158,14 +160,16 @@ public enum TerminalSessionGarbageCollector {
     /// contained eviction failure kept their bytes counted — the residual is reported through
     /// `onBudgetExceeded`.
     private static func evictOverBudget(
-        endedOnDisk: [EndedSession], purged: inout [String], retentionPolicy: TerminalSessionRetentionPolicy,
+        endedOnDisk: [EndedSession], payloadBytesByRoot: [String: Int64], purged: inout [String], retentionPolicy: TerminalSessionRetentionPolicy,
         isReferencedByProduct: (String) throws -> Bool, releaseExpiredReferences: (String) throws -> Void, fileManager: FileManager,
         onPurgeFailure: (String, any Error) -> Void, onBudgetExceeded: (Int64) -> Void
     ) {
         guard !endedOnDisk.isEmpty else { return }
         let sized = endedOnDisk.map { session -> (session: EndedSession, size: Int64, endedAt: Date?) in
-            (session, directorySizeInBytes(session.paths.rootDirectory, fileManager: fileManager),
-             endedAt(runtimeState: session.runtimeState, paths: session.paths, fileManager: fileManager))
+            (
+                session, retainedSizeInBytes(session.paths, payloadBytesByRoot: payloadBytesByRoot, fileManager: fileManager),
+                endedAt(runtimeState: session.runtimeState, paths: session.paths, fileManager: fileManager)
+            )
         }
         var total = sized.reduce(Int64(0)) { $0 + $1.size }
         guard total > retentionPolicy.endedTranscriptByteBudget else { return }
@@ -181,9 +185,7 @@ public enum TerminalSessionGarbageCollector {
                     purged.append(candidate.session.sessionID)
                     total -= candidate.size
                 }
-            } catch {
-                onPurgeFailure(candidate.session.sessionID, error)
-            }
+            } catch { onPurgeFailure(candidate.session.sessionID, error) }
         }
 
         if total > retentionPolicy.endedTranscriptByteBudget { onBudgetExceeded(total) }
@@ -201,11 +203,23 @@ public enum TerminalSessionGarbageCollector {
         let directoryModifiedAt = modificationDate(ofPath: paths.rootDirectory, fileManager: fileManager)
         let outputModifiedAt = modificationDate(ofPath: paths.outputPath, fileManager: fileManager)
         switch (directoryModifiedAt, outputModifiedAt) {
-        case let (directory?, output?): return max(directory, output)
-        case let (directory?, nil): return directory
-        case let (nil, output?): return output
+        case (let directory?, let output?): return max(directory, output)
+        case (let directory?, nil): return directory
+        case (nil, let output?): return output
         case (nil, nil): return nil
         }
+    }
+
+    /// What one ended session still costs the device: its directory bytes plus the bytes its persisted
+    /// final-render row holds in the profile database.
+    ///
+    /// The database half is not an accounting detail — for a typical ended session it is the larger one. A
+    /// short-lived session's retained transcript is a few kilobytes at most, while its `payload_json` is a
+    /// full base64 grid snapshot in the tens of kilobytes, so weighing the directory alone left the bytes
+    /// an ended-session burst actually accumulates uncounted and the budget could not fire.
+    private static func retainedSizeInBytes(_ paths: TerminalSessionPaths, payloadBytesByRoot: [String: Int64], fileManager: FileManager) -> Int64 {
+        let root = URL(fileURLWithPath: paths.rootDirectory, isDirectory: true).standardizedFileURL.path
+        return directorySizeInBytes(paths.rootDirectory, fileManager: fileManager) + (payloadBytesByRoot[root] ?? 0)
     }
 
     /// Total bytes of the regular files under a session directory (`output.log`, `service.log`, per-session

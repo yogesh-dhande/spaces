@@ -35,10 +35,14 @@ final class DatabaseLocatorTests: XCTestCase {
         XCTAssertEqual(first, second)
     }
 
-    // Tests the public defaultPath() overload succeeds and returns a path ending in spaces.db.
+    // Tests the public defaultPath() overload succeeds and returns a path ending in spaces.db. `HOME` is
+    // redirected along with the cleared override because resolution refuses the installed profile under a
+    // test host; a redirected home is the isolated profile this exercises.
     func testPublicDefaultPathReturnsValidPath() throws {
-        let path = try withEnvironmentValues([DatabaseLocator.databasePathEnvironmentVariable: nil]) { try DatabaseLocator.defaultPath() }
-        XCTAssertTrue(path.hasSuffix("spaces.db"), "Expected path to end with spaces.db, got \(path)")
+        let path = try withEnvironmentValues([DatabaseLocator.databasePathEnvironmentVariable: nil, "HOME": tempHomeURL.path]) {
+            try DatabaseLocator.defaultPath()
+        }
+        XCTAssertEqual(path, tempHomeURL.appendingPathComponent(".spaces/spaces.db").path)
     }
 
     // Tests the public defaultPath() overload honors the explicit DB-path override used by manual E2E runs.

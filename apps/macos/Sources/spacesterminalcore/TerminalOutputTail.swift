@@ -8,27 +8,30 @@ public enum TerminalOutputTail {
         let returnedBytes: Int
     }
 
-    private struct VTTailResult {
-        let result: String
-        let scannedBytes: UInt64
-        let renderedByteCount: Int
-        let boundaryOffset: Int
-    }
-
     private static let plainTextReadBlockSize = 16 * 1024
-    private static let renderedSuffixScanWindows: [UInt64] = [64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024]
     private static let defaultColumns = 120
     private static let defaultRows = 40
     fileprivate static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
-    // A transcript boundary is a full-screen repaint after which earlier output is no longer part of
-    // the current screen: erase-entire-display (CSI 2J) and erase-scrollback (CSI 3J). A bare
-    // erase-below (CSI J / CSI 0J) is deliberately NOT here — shells emit it on every prompt redraw
-    // to clear anything under the prompt, without wiping the lines above, so treating it as a
-    // boundary would drop all output that scrolled above the current prompt. A genuine clear that
-    // pairs cursor-home with erase-below is still caught by the home-cursor path in
-    // `latestRenderedTranscriptBoundaryOffset` (`immediateClearBoundaryOffset`).
-    private static let clearScreenBoundaryPatterns: [Data] = [Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A])]
 
+    /// Renders the last `lineCount` lines of a session's screen and scrollback from its persisted
+    /// `output.log`.
+    ///
+    /// A transcript that holds no escape sequences is answered by scanning back for `lineCount` newlines
+    /// — plain text carries no terminal state, so there is nothing to reconstruct and nothing to gain
+    /// from a render. Everything else is REPLAYED FROM BYTE 0 through a `libghostty-vt` session: a
+    /// terminal's screen is the accumulation of every byte before it, so any starting point other than
+    /// the file's beginning has to reconstruct the state it skipped, and a transcript carries no marker
+    /// that is reliably both a valid state root and a truthful history boundary. Starting anywhere else
+    /// is how a full-screen TUI — one that paints its frame once and afterwards only addresses the cursor
+    /// — comes back blank: its last real repaint is arbitrarily far behind the end of the file.
+    ///
+    /// The cost is O(transcript), bounded by the trim trigger
+    /// (`TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes`, 30&nbsp;MB) — measured at ~155&nbsp;ms
+    /// for a 30&nbsp;MB agent-TUI transcript and ~45&nbsp;ms for a 30&nbsp;MB shell one. That is
+    /// affordable because this function has exactly three callers and all three are `spaces terminal
+    /// tail` (CLI, daemon profile command, Device API): an orchestration surface, not a render path.
+    /// Nothing interactive depends on it — the live mirror is fed by the session core, and the ended-pane
+    /// and Device API scrollback replays read `output.log` directly, without coming through here.
     public static func tail(path: String, lineCount: Int) throws -> String {
         let startedAt = Date()
         guard lineCount > 0 else { return "" }
@@ -45,23 +48,8 @@ public enum TerminalOutputTail {
             detail =
                 "bytes=\(fileSize) lines=\(lineCount) mode=plain scanned_bytes=\(plainTextResult.scannedBytes) "
                 + "returned_bytes=\(plainTextResult.returnedBytes)"
-        } else if let vtTailResult = try tailRenderedSuffixWithGhosttyVTIfPossible(
-            fileHandle: fileHandle, fileSize: fileSize, outputPath: path, lineCount: lineCount)
-        {
-            result = vtTailResult.result
-            detail =
-                "bytes=\(fileSize) lines=\(lineCount) mode=ghostty_vt_partial scanned_bytes=\(vtTailResult.scannedBytes) "
-                + "rendered_bytes=\(vtTailResult.renderedByteCount) boundary_offset=\(vtTailResult.boundaryOffset)"
         } else {
-            // No transcript boundary anywhere in the scanned windows — a plain scrolling session whose
-            // prompt redraws erase-below rather than clearing the screen. Render only the most recent
-            // window instead of the whole file: `output.log` is append-only and unbounded, so a
-            // whole-file render would grow the tail cost without limit over a session's lifetime.
-            // Taking the last `lineCount` rendered lines discards any partial first line left by
-            // starting mid-transcript.
-            let window = renderedSuffixScanWindows.last ?? (512 * 1024)
-            let startOffset = fileSize > window ? fileSize - window : 0
-            try fileHandle.seek(toOffset: startOffset)
+            try fileHandle.seek(toOffset: 0)
             let data = try fileHandle.readToEnd() ?? Data()
             guard !data.isEmpty else { return "" }
             let terminalSize = resolvedTerminalSize(forOutputPath: path)
@@ -70,8 +58,8 @@ public enum TerminalOutputTail {
                 suppressInlineAgentSuggestion: isIdentifiedAgentSession(forOutputPath: path))
             result = tailRenderedText(rendered, lineCount: lineCount)
             detail =
-                "bytes=\(data.count) lines=\(lineCount) mode=ghostty_vt_window scanned_bytes=\(data.count) "
-                + "window_start=\(startOffset) columns=\(terminalSize.columns) rows=\(terminalSize.rows) rendered_chars=\(rendered.count)"
+                "bytes=\(data.count) lines=\(lineCount) mode=ghostty_vt scanned_bytes=\(data.count) "
+                + "columns=\(terminalSize.columns) rows=\(terminalSize.rows) rendered_chars=\(rendered.count)"
         }
 
         TerminalPerformance.logMetric(
@@ -129,28 +117,6 @@ public enum TerminalOutputTail {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         let result = plainTextTail(from: text, lineCount: lineCount)
         return PlainTailResult(result: result, scannedBytes: scannedBytes, returnedBytes: data.count)
-    }
-
-    private static func tailRenderedSuffixWithGhosttyVTIfPossible(fileHandle: FileHandle, fileSize: UInt64, outputPath: String, lineCount: Int) throws
-        -> VTTailResult?
-    {
-        for scanWindow in renderedSuffixScanWindows {
-            let startOffset = fileSize > scanWindow ? fileSize - scanWindow : 0
-            try fileHandle.seek(toOffset: startOffset)
-            let data = try fileHandle.readToEnd() ?? Data()
-            guard !data.isEmpty else { return nil }
-            guard let boundaryOffset = latestRenderedTranscriptBoundaryOffset(in: data) else { continue }
-
-            let suffix = data.suffix(from: boundaryOffset)
-            let terminalSize = resolvedTerminalSize(forOutputPath: outputPath)
-            let rendered = try TerminalOutputVTRenderer.renderTailPlain(
-                suffix, columns: terminalSize.columns, rows: terminalSize.rows,
-                suppressInlineAgentSuggestion: isIdentifiedAgentSession(forOutputPath: outputPath))
-            let result = tailRenderedText(rendered, lineCount: lineCount)
-            return VTTailResult(result: result, scannedBytes: UInt64(data.count), renderedByteCount: suffix.count, boundaryOffset: boundaryOffset)
-        }
-
-        return nil
     }
 
     private static func plainTextTail(from text: String, lineCount: Int) -> String {
@@ -256,72 +222,6 @@ public enum TerminalOutputTail {
         try fileHandle.seek(toOffset: offset)
         let data = try fileHandle.read(upToCount: 1) ?? Data()
         return data.first ?? 0
-    }
-
-    static func latestRenderedTranscriptBoundaryOffset(in data: Data) -> Int? {
-        var bestOffset: Int?
-        for pattern in clearScreenBoundaryPatterns {
-            var searchRange = data.startIndex..<data.endIndex
-            while let range = data.range(of: pattern, options: [], in: searchRange) {
-                bestOffset = max(bestOffset ?? range.lowerBound, range.lowerBound)
-                searchRange = (range.lowerBound + 1)..<data.endIndex
-            }
-        }
-
-        var index = data.startIndex
-        while index < data.endIndex {
-            guard data[index] == 0x1B, index + 1 < data.endIndex, data[index + 1] == 0x5B else {
-                index += 1
-                continue
-            }
-            guard let sequenceEnd = csiSequenceEnd(in: data, startingAt: index + 2) else {
-                index += 1
-                continue
-            }
-            let finalByte = data[sequenceEnd]
-            if finalByte == 0x48 || finalByte == 0x66 {
-                let params = csiParameters(in: data[(index + 2)..<sequenceEnd])
-                if isHomeLikeCursorMove(params) { bestOffset = max(bestOffset ?? index, index) }
-                if let clearOffset = immediateClearBoundaryOffset(afterCSIAt: sequenceEnd + 1, in: data) {
-                    bestOffset = max(bestOffset ?? index, index)
-                    index = clearOffset
-                    continue
-                }
-            }
-            index = sequenceEnd + 1
-        }
-
-        return bestOffset
-    }
-
-    private static func csiSequenceEnd(in data: Data, startingAt index: Int) -> Int? {
-        var current = index
-        while current < data.endIndex {
-            let value = data[current]
-            if value >= 0x40, value <= 0x7E { return current }
-            current += 1
-        }
-        return nil
-    }
-
-    private static func csiParameters(in data: Data.SubSequence) -> [Int] {
-        let parameterString = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "?", with: "")
-        if parameterString.isEmpty { return [] }
-        return parameterString.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
-    }
-
-    private static func isHomeLikeCursorMove(_ params: [Int]) -> Bool {
-        if params.isEmpty { return true }
-        let row = params.first ?? 1
-        let column = params.count > 1 ? params[1] : 1
-        return row == 1 && column == 1
-    }
-
-    private static func immediateClearBoundaryOffset(afterCSIAt index: Int, in data: Data) -> Int? {
-        guard index + 1 < data.endIndex, data[index] == 0x1B, data[index + 1] == 0x5B else { return nil }
-        guard let sequenceEnd = csiSequenceEnd(in: data, startingAt: index + 2) else { return nil }
-        guard data[sequenceEnd] == 0x4A else { return nil }
-        return sequenceEnd + 1
     }
 }
 

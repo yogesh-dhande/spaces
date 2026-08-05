@@ -10,18 +10,22 @@ import XCTest
 /// non-directory strays, untouched.
 final class TerminalSessionOrphanSweepTests: XCTestCase {
     private var originalRuntimeDirectory: String?
+    private var originalDatabasePath: String?
     private var root: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db", isDirectory: false).path, 1)
     }
 
     override func tearDownWithError() throws {
         if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
         try? FileManager.default.removeItem(at: root)
         try super.tearDownWithError()
     }
@@ -33,8 +37,7 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
 
     /// Creates a directory `name` directly under the sessions root and stamps its modification date to
     /// `age` seconds before `now`, so its position relative to the grace period is deterministic.
-    @discardableResult
-    private func makeSessionDirectory(_ name: String, age: TimeInterval) throws -> String {
+    @discardableResult private func makeSessionDirectory(_ name: String, age: TimeInterval) throws -> String {
         let path = URL(fileURLWithPath: try TerminalSessionPaths.sessionsRootDirectory()).appendingPathComponent(name).path
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: path)
@@ -47,12 +50,10 @@ final class TerminalSessionOrphanSweepTests: XCTestCase {
     }
 
     private func sweep(
-        known: Set<String> = [], active: Set<String> = [], fileManager: FileManager = .default,
-        onFailure: (String, any Error) -> Void = { _, _ in }
+        known: Set<String> = [], active: Set<String> = [], fileManager: FileManager = .default, onFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         try TerminalSessionOrphanSweep.sweep(
-            knownSessionIDs: known, activeSessionIDs: active, gracePeriod: gracePeriod, fileManager: fileManager, now: now,
-            onFailure: onFailure)
+            knownSessionIDs: known, activeSessionIDs: active, gracePeriod: gracePeriod, fileManager: fileManager, now: now, onFailure: onFailure)
     }
 
     /// Fails `removeItem` for the one entry whose path contains `failingName`, delegating every other call

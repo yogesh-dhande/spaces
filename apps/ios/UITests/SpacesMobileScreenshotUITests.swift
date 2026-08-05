@@ -57,13 +57,14 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     }
 
     /// Shadows the persistence keys through the argument domain so a demo-mode screenshot launch
-    /// starts not-paired and Demo-off regardless of prior simulator state, matching
-    /// `SpacesMobileDemoModeUITests`. The non-Data string "unset" makes `UserDefaults.data(forKey:)`
-    /// return nil; the value must not start with "-" or `NSArgumentDomain` parses it as the next
-    /// option key and the shadow silently never registers.
+    /// starts not-paired, Demo-off, and with no alert dismissed regardless of prior simulator state,
+    /// matching `SpacesMobileDemoModeUITests`. The non-Data, non-array string "unset" makes
+    /// `UserDefaults.data(forKey:)` and `stringArray(forKey:)` return nil; the value must not start with
+    /// "-" or `NSArgumentDomain` parses it as the next option key and the shadow silently never registers.
     private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
         app.launchArguments += [
             "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "unset", "-spaces.mobile.connection-settings", "unset",
+            "-spaces.mobile.dismissed-alert-ids-by-device", "unset",
         ]
     }
 

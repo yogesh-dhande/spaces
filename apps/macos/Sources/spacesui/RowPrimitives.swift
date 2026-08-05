@@ -180,9 +180,12 @@ enum RowPrimitives {
     /// Template image of the marketing site's project glyph: two nodes on the left
     /// merging into one on the right (the `apps/web` `ProjectIcon`). Paths are laid
     /// out in a 20×20 space and scaled to `side`. Marked as a template so callers can
-    /// tint it via `contentTintColor` like an SF Symbol. Drawn through a handler so it
-    /// re-rasterizes crisply at any backing scale.
-    static func projectGlyphImage(side: CGFloat = 13) -> NSImage {
+    /// tint it via `contentTintColor` like an SF Symbol. `NSImage(size:flipped:drawingHandler:)`
+    /// retains the drawing handler and re-invokes it per backing store rather than caching a
+    /// single rasterization, so this one shared instance still redraws crisply on any display —
+    /// there's no need to construct a fresh `NSImage` per row.
+    static let projectGlyphImage: NSImage = {
+        let side: CGFloat = 13
         let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.scaleBy(x: side / 20, y: side / 20)
@@ -212,8 +215,9 @@ enum RowPrimitives {
             return true
         }
         image.isTemplate = true
+        image.accessibilityDescription = "Git project"
         return image
-    }
+    }()
 }
 
 // MARK: - Row click helper

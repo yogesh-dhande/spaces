@@ -8,10 +8,14 @@ import Foundation
 /// `spaces agent signal`, which reads Spaces session env vars and no-ops in other terminals.
 ///
 /// Signal mapping: plugin startup → `init`, `chat.message` and `tool.execute.before` hooks →
-/// `working`, event-bus `permission.asked` → `blocked`, event-bus `session.idle` → `done`. opencode
-/// has no session-end event, so there is no `exit` signal. `tool.execute.before` (verified against
-/// opencode 1.16) exists because answering a permission prompt resumes execution without a
-/// `chat.message`: the first tool call after the approval is what re-marks the agent working.
+/// `working`, event-bus `permission.asked` → `blocked`, event-bus `permission.replied` → `working`,
+/// event-bus `session.idle` → `done`. opencode has no session-end event, so there is no `exit` signal.
+///
+/// opencode is the only supported agent that reports the *answer* to a permission prompt:
+/// `permission.replied` fires the moment the human allows or rejects, which is exactly when the block
+/// ends. Claude Code and Codex have no such event and can only infer the resume from the approved tool
+/// having run. `tool.execute.before` (verified against opencode 1.16) still carries `working` for every
+/// other tool call, since an approval fires no `chat.message`.
 enum AgentHookOpencodePluginWriter {
     static let pluginFileName = "spaces-agent-signal.js"
     private static let ownershipHeaderPrefix = "// spaces-agent-signal — managed by Spaces ("
@@ -63,6 +67,7 @@ enum AgentHookOpencodePluginWriter {
                 },
                 event: async ({ event }) => {
                   if (event.type === "permission.asked") await signal("blocked")
+                  else if (event.type === "permission.replied") await signal("working")
                   else if (event.type === "session.idle") await signal("done")
                 },
               }
