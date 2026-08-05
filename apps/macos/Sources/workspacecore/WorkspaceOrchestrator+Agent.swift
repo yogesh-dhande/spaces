@@ -123,11 +123,17 @@ extension WorkspaceOrchestrator {
         // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
         // the snapshot forward here — closing the read-modify-upsert race. On first insert (no conflict)
         // these initial values are the ones written.
+        // `user_label` is the one column no upsert writes, so it is not part of the race the paragraph
+        // above describes and the record can carry the stored rename: the validation snapshot below has to
+        // judge this row by the name it displays, which for a renamed row is the rename, not the label
+        // detection just resolved.
+        let workspaceAgentWindows = try store.agentWindows(workspaceID: workspace.id)
         let record = AgentWindowRecord(
-            id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
+            id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
+            userLabel: workspaceAgentWindows.first { $0.id == agentID }?.userLabel, runtimeTargetID: terminalWindow?.id,
             terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
             detectedAgentKind: detectedAgent.kind, createdAt: now, updatedAt: now)
-        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
+        let nextAgentWindows = workspaceAgentWindows.filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)
@@ -652,7 +658,7 @@ extension WorkspaceOrchestrator {
                 claimedLauncherName: resolvedClaimedLauncherName)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
@@ -711,7 +717,7 @@ extension WorkspaceOrchestrator {
                 claimedLauncherName: resolvedClaimedLauncherName)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+                userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
@@ -786,7 +792,8 @@ extension WorkspaceOrchestrator {
             } else { nil }
         return AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
-            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
+            userLabel: existing.userLabel, runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget,
+            sessionKey: existing.sessionKey,
             claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
             detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
     }
@@ -1238,7 +1245,12 @@ extension WorkspaceOrchestrator {
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
         }
-        try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title)
+        // The update names the row by id, so a stop or exit that deleted it between the lookup above and
+        // this write matches nothing. That is the same "no such agent" the lookup reports, and reporting it
+        // rather than success is what stops a client from believing a name it will never see took hold.
+        guard try store.setAgentSessionUserLabel(id: existing.id, userLabel: title.isEmpty ? nil : title) else {
+            throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
+        }
     }
 
     /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)

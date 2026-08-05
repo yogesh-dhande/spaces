@@ -2398,6 +2398,59 @@ extension OrchestratorTests {
         XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel)
     }
 
+    /// A rename lives in its own column that no lifecycle write touches, so the row keeps it. The record a
+    /// status update hands back has to keep it too: the daemon renders the watcher's notice straight off
+    /// that returned record, so one rebuilt without the rename announces the agent under the label the user
+    /// replaced.
+    func testStatusUpdateAfterARenameKeepsTheRenameOnTheReturnedRecordAndItsNotice() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "agent-session", status: .spinning)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: child.id, title: "Reviewer")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+
+        // The signal path's own call: it reports the label the agent still calls itself, which is exactly
+        // what must not win over the rename.
+        let updated = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", label: "Claude", status: .waiting)
+
+        XCTAssertEqual(updated.userLabel, "Reviewer")
+        XCTAssertEqual(updated.effectiveLabel, "Reviewer")
+        try orchestrator.makeAgentNotificationEngine().childDidTransition(agent: updated, transition: .blocked)
+        let line = try XCTUnwrap(recorder.delivered.first?.line)
+        XCTAssertTrue(line.contains("Reviewer"), "the notice must name the row's visible name, got: \(line)")
+        XCTAssertFalse(line.contains("Claude"), "the notice must not name the label the rename replaced, got: \(line)")
+    }
+
+    /// The exit disposition rebuilds the row from the caller's snapshot too, and its record is what the
+    /// caller reads on from, so the rename rides along there as well.
+    func testExitStatusRecordKeepsTheRename() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "agent-session", status: .spinning)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: child.id, title: "Reviewer")
+
+        let stored = try XCTUnwrap(store.agentWindow(id: child.id))
+        let exited = try XCTUnwrap(orchestrator.recordAgentExitStatus(stored, status: .exited))
+
+        XCTAssertEqual(exited.effectiveLabel, "Reviewer")
+    }
+
+    /// The rename's write names the row by id, so it reports whether a row was actually there. A rename
+    /// racing the stop that deletes the row rides on that answer instead of reporting a success the user
+    /// will never see.
+    func testSetAgentSessionUserLabelReportsWhetherARowMatched() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "agent-session", status: .spinning)
+
+        XCTAssertTrue(try store.setAgentSessionUserLabel(id: child.id, userLabel: "Reviewer"))
+        XCTAssertFalse(try store.setAgentSessionUserLabel(id: "ghost-agent", userLabel: "Reviewer"))
+    }
+
     private func makeAgentRenameFixture() throws -> (SQLiteStore, WorkspaceOrchestrator, WorkspaceRecord) {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
