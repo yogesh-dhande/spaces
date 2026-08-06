@@ -913,12 +913,23 @@ struct DevicePairCommand: ParsableCommand {
         let result: SpacesRemoteDevicePairingResult
         if let ssh {
             let (sshUser, sshHost) = Self.parsedSSHDestination(ssh)
-            result = try SpacesDevicePairingClient.pairRemoteDevice(
-                SpacesRemoteDevicePairingRequest(
-                    sshHost: sshHost, sshUser: sshUser, sshPort: sshPort,
-                    clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
-                    clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
-            )
+            let request = SpacesRemoteDevicePairingRequest(
+                sshHost: sshHost, sshUser: sshUser, sshPort: sshPort, clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
+                clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
+            do {
+                result = try SpacesDevicePairingClient.pairRemoteDevice(request)
+            } catch {
+                // A Linux device without Spaces installed carries the pinned install one-liner: run the
+                // installer over SSH and pair in one go rather than printing a command to run by hand.
+                guard let installCommand = Self.automaticInstallCommand(forPairingFailure: error) else { throw error }
+                let destination = sshUser.map { "\($0)@\(sshHost)" } ?? sshHost
+                print("Spaces is not installed on \(destination). Installing it over SSH (up to 10 minutes)...")
+                do {
+                    result = try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request)
+                } catch {
+                    throw RemoteDeviceInstallFailure(underlyingMessage: error.localizedDescription, installCommand: installCommand)
+                }
+            }
         } else {
             let parsedLink = try SpacesDevicePairingLink.parse(link ?? "")
             result = try SpacesDevicePairingClient.pairDevice(
@@ -933,6 +944,27 @@ struct DevicePairCommand: ParsableCommand {
         guard let atIndex = trimmed.firstIndex(of: "@"), atIndex != trimmed.startIndex else { return (nil, trimmed) }
         return (String(trimmed[trimmed.startIndex..<atIndex]), String(trimmed[trimmed.index(after: atIndex)...]))
     }
+
+    /// The install command to run over SSH for a failed pairing attempt, or nil when the failure is not an
+    /// installable device. Only a Linux device carries a command; a remote Mac reports Spaces missing with no
+    /// command (its app cannot be installed over SSH), so that failure and every other one is rethrown.
+    static func automaticInstallCommand(forPairingFailure error: any Error) -> String? {
+        guard case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error else { return nil }
+        return linuxInstallCommand
+    }
+}
+
+/// Raised when the SSH install that pairing started for a bare Linux device fails. It reports the underlying
+/// failure and then the exact command to run on the device by hand, so the manual path stays spelled out.
+struct RemoteDeviceInstallFailure: LocalizedError {
+    let underlyingMessage: String
+    let installCommand: String
+
+    static func message(underlyingMessage: String, installCommand: String) -> String {
+        "\(underlyingMessage)\nRun the installer on the device, then pair again:\n  \(installCommand)"
+    }
+
+    var errorDescription: String? { Self.message(underlyingMessage: underlyingMessage, installCommand: installCommand) }
 }
 
 struct DeviceRemoveCommand: ParsableCommand {
