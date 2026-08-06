@@ -9,10 +9,9 @@ import spacesterminalcore
 @testable import workspacecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
-    /// Deleting a workspace can be asked to delete its branches, and each branch's outcome — deleted, not
-    /// found, skipped as protected, or failed — is something the user is owed. The daemon computes that
-    /// report, so it has to reach the client on the response rather than being dropped for a fixed
-    /// "Deleted workspace." message.
+    /// Deleting a workspace can be asked to delete its branches, and the notice the daemon computes for that
+    /// is failure-only: a branch deleted cleanly, as asked here, carries no notice on the response at all,
+    /// rather than a fixed "Deleted workspace." report the client would have to show regardless.
     func testDeleteWorkspaceCarriesBranchDeletionOutcomeToTheClient() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()
@@ -52,8 +51,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
-            let notice = try XCTUnwrap(response.mutationNotice, "the branch-deletion report must reach the client")
-            XCTAssertTrue(notice.contains("Deleted local branch 'feature-report'."), notice)
+            XCTAssertNil(response.mutationNotice, "branch deletion going as asked carries no notice")
             XCTAssertNil(try store.workspace(id: workspace.id), "the workspace record is gone")
             XCTAssertFalse(GitClient().branchExists(path: projectDir.path, branch: "feature-report"))
         }
@@ -179,11 +177,10 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(deleteFinished.wait(timeout: .now() + 30), .success)
             if let error = deleteResult.error() { throw error }
             // Moving the work off the request queue must not change what the client gets back: one
-            // synchronous response carrying the branch-deletion report and the refreshed overview.
+            // synchronous response, with the branch deleted as asked and so no notice attached.
             let deleteResponse = try SpacesDeviceAPICodec.decodeResponse(deleteResult.responseData())
             XCTAssertTrue(deleteResponse.ok, deleteResponse.message)
-            let notice = try XCTUnwrap(deleteResponse.mutationNotice, "the branch-deletion report must still reach the client")
-            XCTAssertTrue(notice.contains("Deleted local branch 'feature-busy'."), notice)
+            XCTAssertNil(deleteResponse.mutationNotice, "branch deletion going as asked carries no notice")
             XCTAssertNil(try store.workspace(id: "workspace-busy"))
         }
     }

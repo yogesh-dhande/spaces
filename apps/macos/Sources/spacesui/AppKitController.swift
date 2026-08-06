@@ -9013,9 +9013,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     // path like the iOS model's — is disproportionate to a self-healing flicker.
                     applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
                     self.endPendingWorkspaceDeletion(workspaceID: id)
-                    // Branch deletion is the one part of a delete that can partly fail (a protected branch, a
-                    // remote that refused), so its report is shown; a delete with no branch boxes ticked
-                    // carries no notice and stays silent.
+                    // The daemon only sends a notice when branch deletion did not go as asked (a protected
+                    // branch, no recorded branch, or a git failure), so any dialog here is reporting a
+                    // problem; a clean delete, including branch boxes ticked with clean outcomes, stays silent.
                     if let notice = response.mutationNotice, !notice.isEmpty { self.showInfoMessage(title: "Deleted workspace", message: notice) }
                 case .failure(let error):
                     guard Self.isIndeterminateDeleteOutcome(error) else {

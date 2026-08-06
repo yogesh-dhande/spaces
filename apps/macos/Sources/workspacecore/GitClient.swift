@@ -245,9 +245,40 @@ public final class GitClient {
     }
 
     @discardableResult public func deleteBranch(path repoPath: String, branch: String) throws -> Bool {
-        guard branchExists(path: repoPath, branch: branch) else { return false }
+        guard try localBranchLookupStatus(path: repoPath, branch: branch) == .exists else { return false }
         try runGitOrThrow(["-C", repoPath, "branch", "-D", branch])
         return true
+    }
+
+    /// Strict local-branch existence check for `deleteBranch`, distinct from the lenient `branchExists`.
+    /// `branchExists` folds every probe failure (a corrupt ref, an unreadable `.git`, a timeout) into
+    /// `false` so callers that only ever want to know "is it safe to read from this branch" can stay
+    /// synchronous. `deleteBranch` cannot reuse that: reading `false` back from a failed probe as
+    /// "already deleted" would silently skip the deletion the user asked for, and the failure-only
+    /// branch-deletion notice built on top of this has nothing else to catch that mistake with. So a
+    /// probe failure here throws and surfaces as a "Failed to delete local branch" notice instead of
+    /// disappearing as a false negative. Mirrors `remoteBranchLookupStatus`'s exists/missing/throw shape.
+    private func localBranchLookupStatus(path: String, branch: String) throws -> RemoteBranchLookupStatus {
+        let arguments = ["-C", path, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)"]
+        let process = makeGitProcess(arguments)
+        let err = Pipe()
+        process.standardError = err
+        try process.run()
+        try waitForProcess(process, timeout: metadataCommandTimeout, arguments: arguments)
+        switch process.terminationStatus {
+        case 0: return .exists
+        // Accepted risk: exit 1 also covers a ref file git can reach but not resolve (malformed contents,
+        // an unreadable single ref) — `show-ref --verify --quiet` reports those identically to a genuinely
+        // absent branch, and without `--quiet` both collapse to exit 128, so the only way to tell them
+        // apart is parsing git's stderr text, which is fragile across git versions. That corruption is
+        // rare and its cost is a branch lingering after a workspace delete, recoverable manually, so it is
+        // deliberately read as "missing" rather than guarded with message sniffing.
+        case 1: return .missing
+        default:
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            throw WorkspaceError.gitCommandFailed(message: message)
+        }
     }
 
     @discardableResult public func deleteRemoteBranch(path repoPath: String, branch: String) throws -> Bool {

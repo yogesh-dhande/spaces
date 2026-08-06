@@ -1846,10 +1846,11 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     public let projectID: String?
     public let workspaceID: String?
     public let sessionID: String?
-    /// What the mutation did beyond succeeding, when that is something the user asked for and has to be
-    /// told about — deleting a workspace's branches reports each branch it deleted, could not find, skipped
-    /// as protected, or failed to delete. `nil` when the mutation has nothing extra to report, which is what
-    /// lets a client show it only when there is something to show.
+    /// A failure-only report on something the user asked for beyond the mutation itself: deleting a
+    /// workspace's branches reports a branch skipped as protected, no branch name recorded, or a git error
+    /// deleting the branch. `nil` when there is nothing to report, including when the requested branches
+    /// were deleted cleanly or were already gone, which is what lets a client show it only when something
+    /// went wrong.
     public let notice: String?
 
     public init(
