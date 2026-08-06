@@ -257,6 +257,13 @@ import Foundation
         /// The Device API variables are mirrored as literals rather than referenced: `SpacesDeviceAPIConfiguration`
         /// owns them and its module depends on this one, so they cannot be imported here. Those declarations
         /// carry a note pointing back at this list so a rename cannot silently drift.
+        ///
+        /// The check is deliberately value-blind: a binding set to its own default (say
+        /// `SPACES_DEVICE_API_PORT=47847`) forbids kickstart even though launchd would behave identically.
+        /// Deciding otherwise means re-implementing each variable's parse-and-default semantics here, across
+        /// the module boundary that already forces the literals above, and a drifted copy would misroute real
+        /// overrides. The cost of the blind rule is only that a hand-exported no-op value keeps the old
+        /// direct-spawn behavior for that daemon's lifetime; no product path exports these variables at all.
         static let kickstartForbiddingEnvironmentVariables = [
             pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, CaddyService.executableEnvironmentVariable,
             "SPACES_DEVICE_API_DISABLED", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
