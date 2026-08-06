@@ -86,7 +86,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .missingSSHHost: "SSH host is required to connect a remote device."
+        case .missingSSHHost: "An SSH host is required for this action. Enter one to connect, or pair the device over SSH to enable remote updates."
         case .invalidSSHPort(let port): "SSH port \(port) is invalid. Enter a port between 1 and 65535."
         case .sshUnavailable(let message): message
         case .sshValidationTimedOut(let destination):
@@ -194,9 +194,41 @@ public enum SpacesDevicePairingClient {
         openSSHControlMaster(destination: destination, port: request.sshPort)
         defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
 
-        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: normalized(request.clientAppVersion))
-        let result = try runSSH(
-            destination: destination, port: request.sshPort, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
+        try runRemoteInstaller(destination: destination, port: request.sshPort, version: normalized(request.clientAppVersion))
+        // Pairing nests inside this flow's already-open ControlMaster: openSSHControlMaster returns early
+        // when the master is live, so pairRemoteDevice reuses it, and its own defer closes it. The outer
+        // defer's `-O exit` then no-ops harmlessly (runDetachedSSHProcess swallows failures and the socket
+        // removal is `try?`). This nesting is intentional and safe.
+        return try pairRemoteDevice(request)
+    }
+
+    /// Updates Spaces on an already-paired Linux device by running the installer over SSH, pinned to
+    /// `appVersion` so the device lands on the version this client speaks. The device keeps its pairing:
+    /// there is no re-pair and no install probe, only the installer run.
+    ///
+    /// The Linux installer lands the new release beside the running one and pokes the live daemon
+    /// (`spaces daemon apply-update`), which execs the staged binary at the same pid instead of exiting
+    /// for systemd to respawn it, so the running terminals, workspace processes, and coding agents on
+    /// that device survive the update.
+    ///
+    /// Accepted consequence: once the daemon moves forward, clients on older app builds are wire-blocked
+    /// on this device until those apps update. Their sessions keep running underneath the block, so
+    /// updating the client restores the connection with nothing lost.
+    public static func updateSpacesOnRemoteDevice(device: SpacesPairedDeviceRecord, appVersion: String?) throws {
+        guard let sshHost = normalized(device.sshHost) else { throw SpacesRemoteDevicePairingError.missingSSHHost }
+        let sshUser = normalized(device.sshUser)
+        try validateSSHPort(device.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: device.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
+        try runRemoteInstaller(destination: destination, port: device.sshPort, version: normalized(appVersion))
+    }
+
+    /// Runs the Linux installer over SSH and maps its outcome. Expects the caller to have opened (and to
+    /// close) the ControlMaster for `destination`, since both callers run other SSH commands around it.
+    private static func runRemoteInstaller(destination: String, port: Int?, version: String?) throws {
+        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: version)
+        let result = try runSSH(destination: destination, port: port, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
         if result.timedOut { throw SpacesRemoteDevicePairingError.remoteInstallTimedOut(destination) }
         guard result.exitStatus == 0 else {
             throw SpacesRemoteDevicePairingError.remoteInstallFailed(
@@ -204,11 +236,6 @@ public enum SpacesDevicePairingClient {
                     destination: destination, standardOutput: result.standardOutput, standardError: result.standardError,
                     exitStatus: result.exitStatus))
         }
-        // Pairing nests inside this flow's already-open ControlMaster: openSSHControlMaster returns early
-        // when the master is live, so pairRemoteDevice reuses it, and its own defer closes it. The outer
-        // defer's `-O exit` then no-ops harmlessly (runDetachedSSHProcess swallows failures and the socket
-        // removal is `try?`). This nesting is intentional and safe.
-        return try pairRemoteDevice(request)
     }
 
     /// Pairs this client with a daemon from a `spaces://pair` link — code and nonce redeemed over
@@ -525,7 +552,9 @@ public enum SpacesDevicePairingClient {
         // not-installed.
         if result.exitStatus != 0 {
             // A missing `spaces` binary (exit 127 / "not found") means the CLI this command named is not on
-            // the device. We never auto-install; surface actionable instructions instead.
+            // the device. The structured error carries the install command, so a caller can run the
+            // installer over SSH itself (the Mac panel and the CLI do) and render the copyable command as
+            // the fallback.
             if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
                 throw remotePairCommandBinaryMissingError(destination: destination, pairCommand: pairCommand, probe: probe, appVersion: appVersion)
             }
@@ -582,8 +611,9 @@ public enum SpacesDevicePairingClient {
     /// Builds the actionable install/setup guidance shown when SSH reaches the remote but Spaces there
     /// cannot hand back a pairing window. `lead` states what went wrong; this appends platform-specific
     /// guidance without embedding any install command (the command travels separately on the structured
-    /// `remoteSpacesNotInstalled` error). Spaces never auto-installs remote daemons: Linux users run the
-    /// installer one-liner on the device, and Mac users install and open the Spaces app there.
+    /// `remoteSpacesNotInstalled` error). Linux guidance backs the client-initiated installer run over SSH
+    /// and the copyable one-liner beside it; a remote Mac has no such path, so its guidance asks the user
+    /// to install and open the Spaces app on the device.
     static func installGuidanceMessage(lead: String, probe: RemoteInstallProbe) -> String {
         if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again." }
         return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
