@@ -13,9 +13,10 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// (e.g. `process:<id>`, `terminal:<sessionID>`, `browser:<url>`).
     let key: String
     let title: String
-    /// Dimmed secondary text trailing the title. Only ad hoc shells carry one — the title the program
-    /// inside them last reported — because only they are named generically; a configured process or
-    /// agent is identified by the name its config entry gives it.
+    /// Dimmed secondary text trailing the title: the title the row's terminal last reported. Ad hoc
+    /// shells and coding agents carry one, since both run whatever the user is working on and their names
+    /// say nothing about it. A process row is described by the command its config entry names, and a
+    /// launcher row has no session behind it yet, so neither carries one.
     let detail: String?
     let kind: AppKitController.WorkspaceRunShortcutTarget.Kind
     /// `nil` for browser targets: whether a browser session is "open" is a Chrome-side
@@ -100,10 +101,10 @@ extension AppKitController {
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? row.name, detail: nil, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
+                key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: agentWindow.id, launcherName: row.name, launcherID: row.launcherID,
-                isConfigured: row.isConfigured, browserTargetURL: nil)
+                processTemplateID: nil, agentID: agentWindow.id, launcherName: row.name, launcherID: row.launcherID, isConfigured: row.isConfigured,
+                browserTargetURL: nil)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id

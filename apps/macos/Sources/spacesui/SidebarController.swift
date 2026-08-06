@@ -1901,8 +1901,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
 
-            // Ad hoc shells trail the title their program reported as dimmed secondary text. It
-            // compresses before the name does, so a long title never squeezes out what the row is.
+            // A row whose terminal reported a title trails it as dimmed secondary text. It compresses
+            // before the name does, so a long title never squeezes out what the row is.
             if let detail = item.detail {
                 let detailLabel = NSTextField(labelWithString: detail)
                 detailLabel.font = .systemFont(ofSize: 11, weight: .regular)

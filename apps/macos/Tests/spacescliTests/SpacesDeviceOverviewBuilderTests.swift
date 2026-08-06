@@ -327,6 +327,45 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.canRestart, false)
     }
 
+    /// A coding-agent row is named by its configured entry or its agent record, and describes itself with
+    /// the title its terminal reports, the same pairing an ad hoc shell row shows. A row whose session has
+    /// reported no title, and a launcher row with no agent behind it, have nothing to add.
+    func testCodingAgentRowCarriesItsSessionsLiveTitleBesideItsName() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
+        let agent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", sessionKey: nil,
+            status: .spinning, createdAt: "now", updatedAt: "now")
+
+        func rows(runtimeTitle: String?) -> [SpacesDeviceWorkspaceCodingAgentRow] {
+            let session = makeSessionCatalogEntry(
+                sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+                runtimeTitle: runtimeTitle)
+            let overview = SpacesDeviceOverviewBuilder.build(
+                projects: [project],
+                workspaces: [
+                    .init(
+                        project: project, workspace: workspace,
+                        settings: WorkspaceSettings(agentLaunchers: [
+                            AgentLauncher(name: "codex", command: "codex"), AgentLauncher(name: "idle", command: "idle"),
+                        ]), agentWindows: [agent])
+                ], sessions: [session])
+            return overview.workspaces.first?.codingAgentRows ?? []
+        }
+
+        let reported = rows(runtimeTitle: "refactoring SidebarController.swift")
+        XCTAssertEqual(reported.first(where: { $0.name == "codex" })?.name, "codex")
+        XCTAssertEqual(reported.first(where: { $0.name == "codex" })?.liveTitle, "refactoring SidebarController.swift")
+        // The unstarted launcher row has no session, so it has no live title to carry.
+        XCTAssertNil(reported.first(where: { $0.name == "idle" })?.liveTitle)
+        XCTAssertNil(rows(runtimeTitle: nil).first(where: { $0.name == "codex" })?.liveTitle)
+        // A program that clears its title hands the row back to its name alone, per the catalog entry's
+        // blank-title normalization.
+        XCTAssertNil(rows(runtimeTitle: "   ").first(where: { $0.name == "codex" })?.liveTitle)
+    }
+
     func testMatchesRenamedConfiguredAgentByLauncherID() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
@@ -825,8 +864,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             project: project, workspace: workspace, agentWindows: [renamedAgent, secondAgent])
         let sessions = ["session-renamed", "session-second"].map { sessionID in
             makeSessionCatalogEntry(
-                sessionID: sessionID, title: "codex", workingDirectory: "/repo/feature", workspaceID: workspace.id,
-                attachmentSnapshot: .init())
+                sessionID: sessionID, title: "codex", workingDirectory: "/repo/feature", workspaceID: workspace.id, attachmentSnapshot: .init())
         }
 
         let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(projects: [project], workspaces: [descriptor], liveSessions: sessions)

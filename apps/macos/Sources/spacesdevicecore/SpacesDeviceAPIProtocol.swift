@@ -310,6 +310,10 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     public let id: String
     public let workspaceID: String
     public let name: String
+    /// The title the agent's terminal last reported (OSC 0/2), nil when its session has reported none or
+    /// the row has no session behind it. Read exactly as the terminal row's `liveTitle` is: the name says
+    /// which agent this is, the live title says what it is doing.
+    public let liveTitle: String?
     public let command: String
     public let launcherID: String?
     public let agentID: String?
@@ -327,11 +331,12 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     public init(
         id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
         isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil,
-        canRun: Bool, canStop: Bool, canRestart: Bool
+        canRun: Bool, canStop: Bool, canRestart: Bool, liveTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.name = name
+        self.liveTitle = liveTitle
         self.command = command
         self.launcherID = launcherID
         self.agentID = agentID

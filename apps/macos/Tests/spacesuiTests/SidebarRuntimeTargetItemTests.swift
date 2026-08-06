@@ -120,29 +120,40 @@ import workspacecore
         #expect(AppKitController.configuredBrowserSessionIndex(named: "Unknown", in: sessions) == nil)
     }
 
-    /// Only ad hoc shells carry secondary text, and only once their program reports a title: a
-    /// configured process or agent is named by its config entry, and nothing the program prints
-    /// describes it further in the sidebar.
-    @Test func onlyShellsWithAReportedTitleCarrySecondaryText() {
+    /// Ad hoc shells and coding agents carry secondary text once their terminal reports a title, and
+    /// nothing else does: a configured process is described by the command its config entry names, and a
+    /// launcher row has no session behind it to report anything.
+    @Test func shellAndAgentRowsWithAReportedTitleCarrySecondaryText() {
         let byKey = Dictionary(uniqueKeysWithValues: fixtureItems().map { ($0.key, $0) })
-        // The fixture's shell has reported no title, so it has nothing to add.
+        // The fixture's shell and agent have reported no title, so they have nothing to add.
         #expect(byKey["terminal:sess-term"]?.detail == nil)
-        #expect(byKey["process:proc-web"]?.detail == nil)
         #expect(byKey["agent:agent-1"]?.detail == nil)
+        #expect(byKey["process:proc-web"]?.detail == nil)
+        #expect(byKey["launcher:codex"]?.detail == nil)
         #expect(byKey["browser:http://localhost:3000"]?.detail == nil)
 
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: 1,
+            isHidden: false, isDefault: false, sessionCount: 2,
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
+                    isConfigured: false, runState: .running, activityState: .idle, canRun: false, canStop: true, canRestart: true,
+                    liveTitle: "reviewing PR 420")
+            ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "term-1", workspaceID: "workspace", title: "shell-1", workingDirectory: "/tmp/workspace", sessionID: "sess-term",
                     runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift")
             ])
-        let busy = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
-            .first
-        #expect(busy?.title == "shell-1", "what the program prints never renames the row")
-        #expect(busy?.detail == "vim main.swift")
+        let busy = Dictionary(
+            uniqueKeysWithValues: AppKitController.sidebarRuntimeTargetItems(
+                detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: []
+            ).map { ($0.key, $0) })
+        #expect(busy["terminal:sess-term"]?.title == "shell-1", "what the program prints never renames the row")
+        #expect(busy["terminal:sess-term"]?.detail == "vim main.swift")
+        #expect(busy["agent:agent-1"]?.title == "claude", "the agent keeps the name it answers to")
+        #expect(busy["agent:agent-1"]?.detail == "reviewing PR 420")
     }
 
     /// An agent the daemon reports as unconfigured is named on its session, even when it still carries a
@@ -152,7 +163,8 @@ import workspacecore
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
             isHidden: false, isDefault: false, sessionCount: 1,
-            config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex-new", name: "codex", command: "codex")]),
+            config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex-new", name: "codex", command: "codex")]
+            ),
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: "agent:agent-1", workspaceID: "workspace", name: "codex", command: "codex", launcherID: "launcher-codex-deleted",
@@ -168,7 +180,8 @@ import workspacecore
             AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer")
                 == .agentSession(agentID: "agent-1"))
         // An empty submission clears the session rename rather than being discarded.
-        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "  ") == .agentSession(agentID: "agent-1"))
+        #expect(
+            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "  ") == .agentSession(agentID: "agent-1"))
     }
 
     /// A configured agent row is named by its launcher config entry, so its rename edits that entry.
@@ -181,7 +194,8 @@ import workspacecore
         #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer") == .configuredAgentLauncher)
         // A config entry must keep a name, so an empty submission on one is discarded.
         #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: " ") == .discard)
-        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(launcher), newTitle: "Reviewer") == .configuredAgentLauncher)
+        #expect(
+            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(launcher), newTitle: "Reviewer") == .configuredAgentLauncher)
     }
 
     @Test func shortcutIndexStopsAfterTen() {

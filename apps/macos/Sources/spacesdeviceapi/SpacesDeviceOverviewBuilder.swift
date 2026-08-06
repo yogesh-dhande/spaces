@@ -363,7 +363,7 @@ struct SpacesDeviceOverviewBuilder {
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
             isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), updatedAt: agent?.updatedAt, canRun: canRun,
-            canStop: canStop, canRestart: canRestart)
+            canStop: canStop, canRestart: canRestart, liveTitle: session?.liveTitle)
     }
 
     private static func workspaceTerminalRows(
