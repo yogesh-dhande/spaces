@@ -195,21 +195,41 @@ import Foundation
             // spawned replacement.
             let deadline = Date().addingTimeInterval(timeout)
 
-            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
-            let process = Process()
-            process.executableURL = executableURL
-            process.environment = ProcessInfo.processInfo.environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
+            let profile = try SpacesProfile.current()
+            // What actually started the daemon, for the metric detail and for the timeout error: launchd
+            // resolves the installed job's binary itself, so naming the label rather than a path is the
+            // honest report of what was asked to start.
+            let startedBy: String
+            let startDetail: String
+            if case .launchAgentKickstart(let label) = resolveStartPlan(profile: profile), kickstartLaunchAgent(label: label, deadline: deadline) {
+                startedBy = label
+                startDetail = "launchagent=\(label)"
+            } else {
+                // Reached either because this profile is started directly (a development profile, a pinned
+                // SPACESD_EXECUTABLE, or an installed profile whose agent plist the installer never wrote), or
+                // because the kickstart failed. The second case is a deliberate fallback: an installed profile
+                // whose LaunchAgent is unloaded or broken would otherwise leave the user with no daemon at all
+                // and no client-side way back, so a client-owned daemon in that already-degraded install beats
+                // none. It reintroduces the launchd-versus-client ownership fight only there, and only until
+                // the next install repair rewrites the agent.
+                let executableURL = try resolveExecutableURL(profile: profile)
+                let process = Process()
+                process.executableURL = executableURL
+                process.environment = ProcessInfo.processInfo.environment
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                startedBy = executableURL.path
+                startDetail = "pid=\(process.processIdentifier)"
+            }
 
             while Date() < deadline {
                 if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
                         "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                        success: true, detail: "launched=1 pid=\(process.processIdentifier)")
+                        success: true, detail: "launched=1 \(startDetail)")
                     return true
                 }
                 Thread.sleep(forTimeInterval: 0.05)
@@ -217,9 +237,72 @@ import Foundation
 
             TerminalPerformance.logMetric(
                 "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                success: false, detail: "launched=1 pid=\(process.processIdentifier)")
-            throw TerminalServiceError.serviceStartupTimedOut(executableURL.path)
+                success: false, detail: "launched=1 \(startDetail)")
+            throw TerminalServiceError.serviceStartupTimedOut(startedBy)
         }
+
+        /// How `ensureRunning` starts a daemon once it has decided one has to be started.
+        enum DaemonStartPlan: Equatable {
+            /// Spawn the `spacesd` this client resolves, as a child of this process.
+            case directSpawn
+            /// Ask launchd to start the installed profile's LaunchAgent job with this label.
+            case launchAgentKickstart(label: String)
+        }
+
+        /// Decides how this profile's daemon should be started, so that the installed profile has exactly one
+        /// spawner on the machine.
+        ///
+        /// The installer writes a per-user LaunchAgent (`SpacesBinaryLayout.launchAgentURL`) with `KeepAlive`,
+        /// making launchd the supervisor that keeps an installed daemon available with no app running. A client
+        /// that spawned that daemon itself would take the profile's instance lock, launchd's own spawn would
+        /// lose the lock and exit non-zero, and `KeepAlive` would retry it every few seconds for as long as the
+        /// client-owned daemon lives. Routing the start through launchd keeps ownership where the supervision
+        /// is.
+        ///
+        /// `SPACESD_EXECUTABLE` wins for every profile, including the installed one: it is how the E2E scripts
+        /// pin which daemon build runs, and launchd would start whatever the plist names instead, silently
+        /// ignoring the pin.
+        ///
+        /// A development profile has no agent, and an installed profile can be missing its plist when the
+        /// install is partial. Both are started directly.
+        static func resolveStartPlan(
+            environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
+            launchAgentURL: URL = SpacesBinaryLayout.launchAgentURL()
+        ) -> DaemonStartPlan {
+            let pinnedExecutable = environment["SPACESD_EXECUTABLE"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard pinnedExecutable.isEmpty else { return .directSpawn }
+            guard profile.isInstalledProfile, fileManager.fileExists(atPath: launchAgentURL.path) else { return .directSpawn }
+            return .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel)
+        }
+
+        /// Asks launchd to start the installed profile's daemon job now, and reports whether launchctl said it
+        /// worked. The caller's socket poll, not this, decides whether a daemon is actually reachable.
+        ///
+        /// `kickstart` rather than `load` or `start`: the job is already bootstrapped by the installer, and
+        /// `kickstart` both starts it immediately when launchd is holding it in respawn-throttle backoff and is
+        /// a no-op when the job's process is already running.
+        ///
+        /// `deadline` is `ensureRunning`'s deadline, so waiting on launchctl never outlives the caller's window;
+        /// `launchAgentKickstartTimeout` caps it further so an unresponsive launchd cannot consume a generous
+        /// budget and leave nothing for the socket poll that decides the outcome.
+        private static func kickstartLaunchAgent(label: String, deadline: Date) -> Bool {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["kickstart", "gui/\(getuid())/\(label)"]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return false }
+            let waitDeadline = min(deadline, Date().addingTimeInterval(launchAgentKickstartTimeout))
+            while process.isRunning, Date() < waitDeadline { Thread.sleep(forTimeInterval: 0.05) }
+            guard !process.isRunning else {
+                process.terminate()
+                return false
+            }
+            return process.terminationStatus == 0
+        }
+
+        private static let launchAgentKickstartTimeout: TimeInterval = 5
 
         @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
