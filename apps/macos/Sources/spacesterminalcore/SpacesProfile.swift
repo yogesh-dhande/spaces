@@ -431,7 +431,12 @@ public struct SpacesProfile: Sendable, Equatable {
         return environment
     }
 
-    private static func currentHomeDirectoryURL(environment: [String: String]) -> URL {
+    /// The home this profile resolution reads from: an overridden `HOME` when it names one, otherwise the
+    /// account's own home. Internal rather than private because the daemon start-plan decision has to find the
+    /// LaunchAgent plist under this same home, and `NSHomeDirectory()` (which `SpacesBinaryLayout` defaults to)
+    /// ignores `HOME`, so resolving the two independently would let an isolated-home process act on the real
+    /// user's agent.
+    static func currentHomeDirectoryURL(environment: [String: String]) -> URL {
         if let home = trimmed(environment[homeEnvironmentVariable]), !home.isEmpty { return URL(fileURLWithPath: home, isDirectory: true) }
         #if os(macOS)
             return FileManager.default.homeDirectoryForCurrentUser

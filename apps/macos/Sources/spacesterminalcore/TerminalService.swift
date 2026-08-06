@@ -195,21 +195,41 @@ import Foundation
             // spawned replacement.
             let deadline = Date().addingTimeInterval(timeout)
 
-            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
-            let process = Process()
-            process.executableURL = executableURL
-            process.environment = ProcessInfo.processInfo.environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
+            let profile = try SpacesProfile.current()
+            // What actually started the daemon, for the metric detail and for the timeout error: launchd
+            // resolves the installed job's binary itself, so naming the label rather than a path is the
+            // honest report of what was asked to start.
+            let startedBy: String
+            let startDetail: String
+            if case .launchAgentKickstart(let label) = resolveStartPlan(profile: profile), kickstartLaunchAgent(label: label, deadline: deadline) {
+                startedBy = label
+                startDetail = "launchagent=\(label)"
+            } else {
+                // Reached either because this profile is started directly (a development profile, a pinned
+                // SPACESD_EXECUTABLE, or an installed profile whose agent plist the installer never wrote), or
+                // because the kickstart failed. The second case is a deliberate fallback: an installed profile
+                // whose LaunchAgent is unloaded or broken would otherwise leave the user with no daemon at all
+                // and no client-side way back, so a client-owned daemon in that already-degraded install beats
+                // none. It reintroduces the launchd-versus-client ownership fight only there, and only until
+                // the next install repair rewrites the agent.
+                let executableURL = try resolveExecutableURL(profile: profile)
+                let process = Process()
+                process.executableURL = executableURL
+                process.environment = ProcessInfo.processInfo.environment
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                startedBy = executableURL.path
+                startDetail = "pid=\(process.processIdentifier)"
+            }
 
             while Date() < deadline {
                 if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
                         "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                        success: true, detail: "launched=1 pid=\(process.processIdentifier)")
+                        success: true, detail: "launched=1 \(startDetail)")
                     return true
                 }
                 Thread.sleep(forTimeInterval: 0.05)
@@ -217,9 +237,127 @@ import Foundation
 
             TerminalPerformance.logMetric(
                 "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                success: false, detail: "launched=1 pid=\(process.processIdentifier)")
-            throw TerminalServiceError.serviceStartupTimedOut(executableURL.path)
+                success: false, detail: "launched=1 \(startDetail)")
+            throw TerminalServiceError.serviceStartupTimedOut(startedBy)
         }
+
+        /// Pins which `spacesd` binary starts. Shared by daemon resolution and the start-plan decision so the
+        /// two cannot disagree about whether a pin is in force.
+        static let pinnedExecutableEnvironmentVariable = "SPACESD_EXECUTABLE"
+
+        /// Environment bindings that forbid starting a daemon through launchd, whatever the profile.
+        ///
+        /// One criterion covers the whole list: launchd starts the job with its own environment, so any Spaces
+        /// binding that changes WHICH daemon runs or HOW it serves this client is dropped on the way to a
+        /// kickstarted daemon. What comes up is then the wrong build, or a daemon serving a socket or an
+        /// endpoint this caller is not talking to, and the caller's poll times out against a daemon that is
+        /// running perfectly well. Spawning directly is what carries the binding to the daemon that has to
+        /// honor it.
+        ///
+        /// The Device API variables are mirrored as literals rather than referenced: `SpacesDeviceAPIConfiguration`
+        /// owns them and its module depends on this one, so they cannot be imported here. Those declarations
+        /// carry a note pointing back at this list so a rename cannot silently drift.
+        ///
+        /// The check is deliberately value-blind: a binding set to its own default (say
+        /// `SPACES_DEVICE_API_PORT=47847`) forbids kickstart even though launchd would behave identically.
+        /// Deciding otherwise means re-implementing each variable's parse-and-default semantics here, across
+        /// the module boundary that already forces the literals above, and a drifted copy would misroute real
+        /// overrides. The cost of the blind rule is only that a hand-exported no-op value keeps the old
+        /// direct-spawn behavior for that daemon's lifetime; no product path exports these variables at all.
+        static let kickstartForbiddingEnvironmentVariables = [
+            pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, CaddyService.executableEnvironmentVariable,
+            "SPACES_DEVICE_API_DISABLED", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
+        ]
+
+        /// How `ensureRunning` starts a daemon once it has decided one has to be started.
+        enum DaemonStartPlan: Equatable {
+            /// Spawn the `spacesd` this client resolves, as a child of this process.
+            case directSpawn
+            /// Ask launchd to start the installed profile's LaunchAgent job with this label.
+            case launchAgentKickstart(label: String)
+        }
+
+        /// Decides how this profile's daemon should be started, so that the installed profile has exactly one
+        /// spawner on the machine.
+        ///
+        /// The installer writes a per-user LaunchAgent (`SpacesBinaryLayout.launchAgentURL`) with `KeepAlive`,
+        /// making launchd the supervisor that keeps an installed daemon available with no app running. A client
+        /// that spawned that daemon itself would take the profile's instance lock, launchd's own spawn would
+        /// lose the lock and exit non-zero, and `KeepAlive` would retry it every few seconds for as long as the
+        /// client-owned daemon lives. Routing the start through launchd keeps ownership where the supervision
+        /// is.
+        ///
+        /// Any binding in `kickstartForbiddingEnvironmentVariables` forces a direct spawn, for every profile
+        /// including the installed one, because launchd would drop it.
+        ///
+        /// A kickstart is also only correct when this process's home IS the account home. `launchctl kickstart`
+        /// addresses a job REGISTERED in the user's GUI domain by label; it does not load or even read the plist
+        /// path checked here. A process running with an isolated `HOME` therefore still reaches the real
+        /// account's registered job, whatever its own home contains, so it would start the production daemon
+        /// against a profile resolved somewhere else entirely and then poll a socket that job will never bind.
+        /// The plist check cannot see that, because a same-named plist under an isolated home (exactly what a
+        /// test fixture writes) looks identical to the installed one. Comparing the home the profile resolved
+        /// from against the account home from the password database is what establishes that the registered job
+        /// and this caller's profile belong to the same user. An unknown account home means that identity cannot
+        /// be established at all, so it spawns directly.
+        ///
+        /// A development profile has no agent, and an installed profile can be missing its plist when the
+        /// install is partial. Both are started directly.
+        ///
+        /// - Parameter accountHomeDirectoryPath: The account's real home, from the password database rather
+        ///   than `HOME`, which is what makes it evidence of identity rather than of what the environment
+        ///   claims. `nil` means it could not be read.
+        /// - Parameter launchAgentURL: Where to look for the agent plist. `nil` resolves it under the same home
+        ///   `environment` resolves a profile from (`SpacesProfile.currentHomeDirectoryURL`), rather than
+        ///   `SpacesBinaryLayout.launchAgentURL()`'s `NSHomeDirectory()`, which ignores an overridden `HOME`.
+        ///   Past the home-identity gate above the two homes are the same path, so this is the same lookup
+        ///   stated in terms of the home actually in play.
+        static func resolveStartPlan(
+            environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
+            accountHomeDirectoryPath: String? = SpacesProfile.accountHomeDirectoryPath(), launchAgentURL: URL? = nil
+        ) -> DaemonStartPlan {
+            for variable in kickstartForbiddingEnvironmentVariables {
+                let value = environment[variable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard value.isEmpty else { return .directSpawn }
+            }
+            guard profile.isInstalledProfile, let accountHomeDirectoryPath else { return .directSpawn }
+            let environmentHomeURL = SpacesProfile.currentHomeDirectoryURL(environment: environment)
+            guard SpacesProfile.canonicalPath(environmentHomeURL.path) == SpacesProfile.canonicalPath(accountHomeDirectoryPath) else {
+                return .directSpawn
+            }
+            let plistURL = launchAgentURL ?? SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: environmentHomeURL)
+            guard fileManager.fileExists(atPath: plistURL.path) else { return .directSpawn }
+            return .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel)
+        }
+
+        /// Asks launchd to start the installed profile's daemon job now, and reports whether launchctl said it
+        /// worked. The caller's socket poll, not this, decides whether a daemon is actually reachable.
+        ///
+        /// `kickstart` rather than `load` or `start`: the job is already bootstrapped by the installer, and
+        /// `kickstart` both starts it immediately when launchd is holding it in respawn-throttle backoff and is
+        /// a no-op when the job's process is already running.
+        ///
+        /// `deadline` is `ensureRunning`'s deadline, so waiting on launchctl never outlives the caller's window;
+        /// `launchAgentKickstartTimeout` caps it further so an unresponsive launchd cannot consume a generous
+        /// budget and leave nothing for the socket poll that decides the outcome.
+        private static func kickstartLaunchAgent(label: String, deadline: Date) -> Bool {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["kickstart", "gui/\(getuid())/\(label)"]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return false }
+            let waitDeadline = min(deadline, Date().addingTimeInterval(launchAgentKickstartTimeout))
+            while process.isRunning, Date() < waitDeadline { Thread.sleep(forTimeInterval: 0.05) }
+            guard !process.isRunning else {
+                process.terminate()
+                return false
+            }
+            return process.terminationStatus == 0
+        }
+
+        private static let launchAgentKickstartTimeout: TimeInterval = 5
 
         @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
@@ -629,7 +767,7 @@ import Foundation
                 candidates.append(trimmed)
             }
 
-            appendCandidate(environment["SPACESD_EXECUTABLE"])
+            appendCandidate(environment[pinnedExecutableEnvironmentVariable])
             appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
