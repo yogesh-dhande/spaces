@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 extension SQLiteStore {
     // MARK: - Epoch helpers
@@ -262,6 +263,25 @@ extension SQLiteStore {
         try queryRows(
             sql: "SELECT session_id FROM terminal_sessions WHERE automation_run_id = ? ORDER BY created_at, session_id", bindings: [automationRunID]
         ).compactMap { $0.first }
+    }
+
+    /// The persisted identity of every automation-attributed terminal session, keyed by session id. Read once
+    /// for a whole runs listing (the listing's runs share one fetch) rather than per attributed session.
+    public func automationAttributedSessions() throws -> [String: AutomationAttributedSession] {
+        let rows = try queryRows(
+            sql: """
+                SELECT session_id, kind, title, user_title, workspace_id
+                FROM terminal_sessions
+                WHERE automation_run_id IS NOT NULL
+                """)
+        var sessionsByID: [String: AutomationAttributedSession] = [:]
+        for row in rows where row.count >= 5 {
+            guard let kind = TerminalSessionKind(rawValue: row[1]) else { continue }
+            sessionsByID[row[0]] = AutomationAttributedSession(
+                sessionID: row[0], kind: kind, name: TerminalSessionTitle.name(userTitle: row[3].isEmpty ? nil : row[3], launchTitle: row[2]),
+                workspaceID: row[4].isEmpty ? nil : row[4])
+        }
+        return sessionsByID
     }
 
     /// Every terminal session attributed to a run row that still exists: the automation half of the daemon's

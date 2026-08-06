@@ -828,6 +828,70 @@ import spacesterminalcore
         XCTAssertEqual(byRunID[run.id], [], "the .automation wrapper session is not a coding agent")
     }
 
+    /// An ended agent session with no agent row still lists as an agent, derived from its persisted session
+    /// row, so the run's retained replay stays reachable from a chip. The run's own ended `.automation`
+    /// wrapper is still not an agent.
+    func testAttributedAgentSummariesKeepEndedRowlessAgentSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let agentSessionID = UUID().uuidString
+        let wrapperSessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(
+            workspaceID: workspace.id, runID: run.id, sessionID: agentSessionID, kind: .agent, live: false, title: "Codex CLI")
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: wrapperSessionID, kind: .automation, live: false)
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        let agents = try XCTUnwrap(byRunID[run.id])
+        XCTAssertNil(agents.first { $0.terminalSessionID == wrapperSessionID }, "the ended .automation wrapper session is still not a coding agent")
+        let agent = try XCTUnwrap(agents.first { $0.terminalSessionID == agentSessionID })
+        XCTAssertEqual(agent.status, "exited")
+        XCTAssertFalse(agent.live)
+        XCTAssertEqual(agent.title, "Codex CLI")
+        XCTAssertEqual(agent.workspaceID, workspace.id)
+    }
+
+    /// The next run's sweep finalizes an ended attributed agent's row away, but the run keeps listing that
+    /// agent: the session it replays is retained until the run is pruned, so the chip that opens it has to
+    /// outlive the row.
+    func testAttributedAgentSummariesSurviveTheSweepFinalizingTheAgentRow() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let priorRun = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let endedSessionID = UUID().uuidString
+        let endedAgent = try harness.writeAttributedAgentSession(
+            workspaceID: workspace.id, runID: priorRun.id, sessionID: endedSessionID, live: false, status: .done)
+
+        // Starting a new run of the same automation triggers the prior-run sweep.
+        _ = harness.service.triggerManually(automationID: automation.id)
+        XCTAssertNil(try harness.store.agentWindow(id: endedAgent.id), "the ended attributed agent row is finalized away")
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [priorRun], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        let agent = try XCTUnwrap(byRunID[priorRun.id]?.first { $0.terminalSessionID == endedSessionID })
+        XCTAssertEqual(agent.status, "exited")
+        XCTAssertFalse(agent.live)
+    }
+
+    /// Once the session collector releases a long-ended attributed session (the age / byte-budget bound), the
+    /// run has nothing left to replay, so its agent stops being listed.
+    func testAttributedAgentSummariesOmitReleasedSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: workspace.id, runID: run.id, sessionID: sessionID, kind: .agent, live: false)
+        try harness.store.clearTerminalSessionAutomationAttribution(sessionID: sessionID)
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        XCTAssertEqual(byRunID[run.id], [], "a released session leaves no agent behind")
+    }
+
     // MARK: - Timeout + cancel
 
     func testTimeoutKillsCommandAndRecordsTimedOut() throws {

@@ -70,15 +70,18 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
 /// prompt-delivery phase of a running `agent`-kind run — is reported as `idle` (the row-less "no agent has
 /// started in this terminal yet" value) with `live == true`, rather than inventing a separate
 /// detection-pending status; the `live` flag distinguishes it from a settled idle agent for a client that
-/// needs to. `title` is the agent row's visible label (or the session's launch title before a row exists).
+/// needs to. An ended agent session whose row has been finalized away is reported as `exited` with
+/// `live == false`, so a retained run keeps listing the agents whose transcripts it still replays. `title` is
+/// the agent row's visible label (or the session's own name when no row exists).
 public struct TerminalServiceAutomationAgentSummary: Codable, Sendable, Equatable {
     /// The attributed terminal session id the coding agent runs in.
     public let terminalSessionID: String
-    /// The agent's raw `AgentWindowStatus`, or `idle` for a live agent-launched session with no row yet.
+    /// The agent's raw `AgentWindowStatus`: the row's status, or the row-less `idle`/`exited` value matching
+    /// the session's liveness.
     public let status: String
     /// Whether the agent's terminal session is currently live.
     public let live: Bool
-    /// The agent's visible label (row label, or the session's launch title before a row exists).
+    /// The agent's visible label (row label, or the session's own name when no row exists).
     public let title: String?
     /// The workspace the agent runs in.
     public let workspaceID: String?

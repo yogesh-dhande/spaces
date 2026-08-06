@@ -38,15 +38,18 @@ extension TerminalServiceAutomationRunSummary {
 /// device overview all call it, so a run's attributed agents read the same everywhere.
 public enum AutomationAttributedAgents {
     /// The attributed-agent summaries for each of `runs`, keyed by run id. An attributed terminal session is
-    /// surfaced as a coding agent when EITHER it has an orchestration agent row (the agent has signalled or
-    /// been foreground-detected), OR it is a still-live agent-launch-kind session that has not produced a row
-    /// yet (an `agent`-kind run mid detection / prompt delivery). A session with no row that is not a live
-    /// agent-launch — the run's own `.automation` wrapper session, or an already-ended agent session pending
-    /// the sweep — is not an agent and is omitted.
+    /// surfaced as a coding agent when it has an orchestration agent row (the agent has signalled or been
+    /// foreground-detected); with no row, the session's own agent-launch kind decides, so a live one reads as
+    /// a row-less `idle` (an `agent`-kind run mid detection / prompt delivery) and an ended one as `exited`.
+    /// The ended case is what keeps a run's retained replay reachable after the sweep or End-agents finalizes
+    /// its row away: the run stays listed, so its agents stay listed with it, until retention prunes the run
+    /// or the session collector reclaims the session row. A session that is not agent-launch kind — the run's
+    /// own `.automation` wrapper — is not an agent and is omitted, as is one whose session row is gone.
     ///
-    /// The agent rows are batch-fetched once (across every workspace, keyed by the terminal tracking id each
-    /// attributed agent binds to) rather than queried per attributed session in a loop; liveness and the
-    /// row-less launch kind/title/workspace come from the caller's already-loaded live-session catalog.
+    /// The agent rows and the persisted attributed-session rows are each batch-fetched once (the agent rows
+    /// across every workspace, keyed by the terminal tracking id each attributed agent binds to) rather than
+    /// queried per attributed session in a loop; liveness comes from the caller's already-loaded live-session
+    /// catalog.
     public static func summariesByRunID(runs: [AutomationRun], store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws -> [String:
         [TerminalServiceAutomationAgentSummary]]
     {
@@ -58,6 +61,7 @@ public enum AutomationAttributedAgents {
                 if let trackingID = agent.terminalTrackingID { agentRowsByTrackingID[trackingID] = agent }
             }
         }
+        let attributedSessionsByID = try store.automationAttributedSessions()
 
         var summariesByRunID: [String: [TerminalServiceAutomationAgentSummary]] = [:]
         for run in runs {
@@ -77,6 +81,13 @@ public enum AutomationAttributedAgents {
                         TerminalServiceAutomationAgentSummary(
                             terminalSessionID: sessionID, status: AgentWindowStatus.idle.rawValue, live: true, title: entry.name,
                             workspaceID: entry.workspaceID))
+                } else if !live, let session = attributedSessionsByID[sessionID], session.kind == .agent {
+                    // Ended agent whose row is finalized away: the persisted session row is all that still
+                    // describes it. `exited` is the status the client renders as the ended dot.
+                    agents.append(
+                        TerminalServiceAutomationAgentSummary(
+                            terminalSessionID: sessionID, status: AgentWindowStatus.exited.rawValue, live: false, title: session.name,
+                            workspaceID: session.workspaceID))
                 }
             }
             summariesByRunID[run.id] = agents
