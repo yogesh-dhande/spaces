@@ -274,6 +274,63 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-b")
     }
 
+    // Regression for #425: `defaultDatabase()` used to call `defaultPath()` on every read, and
+    // `defaultPath()` reruns full profile resolution unconditionally — including, for a repo-local dev
+    // build, `SpacesProfile.resolveDevelopmentContext`'s two synchronous `git` spawns. A UI loop that
+    // rereads client settings in a tight loop (e.g. `loadShortcutSpecs()`) beachballed the app by
+    // spawning git dozens of times per reload. `DefaultDatabaseStorage` now checks a cheap
+    // environment/executable-path fingerprint before ever calling `defaultPath()`, so the probe should
+    // run once per process for an unchanged environment and again only when that fingerprint changes.
+    //
+    // A fake repo root (an `apps/macos/Package.swift` marker under a scratch directory, matching
+    // `SpacesProfileTests.makeFakeRepoRoot()`) plus an injected executable path under it stand in for a
+    // real repo-local dev build: `swift test` runs under the system `xctest` agent, whose real executable
+    // path never lands inside a checkout, so driving `resolveDevelopmentContext` reliably needs this
+    // override rather than the process's real executable path. A stub probe stands in for the two real
+    // `git` spawns and counts its own invocations.
+    func testDefaultDatabaseProbesGitOnceForAnUnchangedEnvironmentAndAgainAfterAChange() throws {
+        let scratchRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let firstHome = scratchRoot.appendingPathComponent("home-a", isDirectory: true)
+        let secondHome = scratchRoot.appendingPathComponent("home-b", isDirectory: true)
+        let fakeRepoRoot = scratchRoot.appendingPathComponent("repo", isDirectory: true)
+        let packageMarker = fakeRepoRoot.appendingPathComponent("apps/macos/Package.swift")
+        try FileManager.default.createDirectory(at: firstHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: packageMarker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("".utf8).write(to: packageMarker)
+        let fakeExecutablePath = fakeRepoRoot.appendingPathComponent("apps/macos/.build/debug/spaces").path
+        let originalHome = currentEnvironmentValue("HOME")
+        let originalDatabasePath = currentEnvironmentValue("SPACES_DB_PATH")
+        let originalRuntimePath = currentEnvironmentValue("SPACES_RUNTIME_DIR")
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        setenv("HOME", firstHome.path, 1)
+        unsetenv("SPACES_DB_PATH")
+        unsetenv("SPACES_RUNTIME_DIR")
+        unsetenv(SpacesClientDatabase.databasePathEnvironmentVariable)
+        let probe = CountingGitProfileProbe()
+        SpacesClientDatabase.resetDefaultDatabaseStorageForTesting(gitProbe: probe, executablePath: fakeExecutablePath)
+        defer {
+            restoreEnvironmentValue(originalHome, name: "HOME")
+            restoreEnvironmentValue(originalDatabasePath, name: "SPACES_DB_PATH")
+            restoreEnvironmentValue(originalRuntimePath, name: "SPACES_RUNTIME_DIR")
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            SpacesClientDatabase.resetDefaultDatabaseStorageForTesting()
+            try? FileManager.default.removeItem(at: scratchRoot)
+        }
+
+        _ = try SpacesClientDatabase.defaultDatabase()
+        _ = try SpacesClientDatabase.defaultDatabase()
+        _ = try SpacesClientDatabase.defaultDatabase()
+        XCTAssertEqual(probe.count, 1, "Repeated defaultDatabase() calls under an unchanged environment must probe git exactly once.")
+
+        setenv("HOME", secondHome.path, 1)
+        _ = try SpacesClientDatabase.defaultDatabase()
+        XCTAssertEqual(probe.count, 2, "Changing the profile environment between calls must trigger exactly one re-resolution.")
+
+        _ = try SpacesClientDatabase.defaultDatabase()
+        XCTAssertEqual(probe.count, 2, "A further call under the now-unchanged (new) environment must not re-probe.")
+    }
+
     func testDefaultDatabaseSerializesConcurrentSharedConnectionOperations() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let databasePath = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false).path
@@ -472,6 +529,26 @@ final class SpacesClientDatabaseTests: XCTestCase {
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+}
+
+/// Stands in for `LiveSpacesGitProfileProbe` so a test can count profile-resolution git spawns without
+/// touching real git. Returns a fixed development context for any repo root it's asked about.
+private final class CountingGitProfileProbe: SpacesGitProfileProbe, @unchecked Sendable {
+    private let lock = NSLock()
+    private var invocationCount = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return invocationCount
+    }
+
+    func resolveDevelopmentContext(repoRootPath: String) throws -> SpacesDevelopmentContext? {
+        lock.lock()
+        invocationCount += 1
+        lock.unlock()
+        return SpacesDevelopmentContext(worktreeRoot: repoRootPath, branchName: "dev-profile-path-memoize-test")
+    }
 }
 
 private final class ErrorCollector: @unchecked Sendable {

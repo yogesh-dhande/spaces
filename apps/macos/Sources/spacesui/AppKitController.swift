@@ -10163,43 +10163,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.activeWorkspaceID, value: workspaceID)
     }
 
+    // Reads every shortcut setting (up to twice each for leader-backed ones) against a single
+    // resolver built once for the whole pass, instead of resolving the client database fresh per
+    // setting: `shortcutSettingResolver()` resolves it once and every `value(key)` call below reuses
+    // that same handle.
     func loadShortcutSpecs() {
-        if let modifiers = try? shortcutSettingResolver().leaderModifiers() {
+        let resolver = shortcutSettingResolver()
+        if let modifiers = try? resolver.leaderModifiers() {
             shortcutLeaderModifiers = modifiers
         } else {
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(ClientSettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
-        toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
-        commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)
-        alerts.alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
-        addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
-        reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
-        nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
-        previousShortcutSpec = loadShortcutSpec(setting: .guiPreviousShortcut)
-        sidebarNextShortcutSpec = loadShortcutSpec(setting: .guiSidebarNextShortcut)
-        sidebarPreviousShortcutSpec = loadShortcutSpec(setting: .guiSidebarPreviousShortcut)
-        openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
-        openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
-        newTabShortcutSpec = loadShortcutSpec(setting: .guiNewTabShortcut)
-        openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
-        openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
-        windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
+        toggleShortcutSpec = loadShortcutSpec(resolver, setting: .guiHotkey)
+        commandPaletteShortcutSpec = loadShortcutSpec(resolver, setting: .guiCommandPaletteHotkey)
+        alerts.alertsShortcutSpec = loadShortcutSpec(resolver, setting: .guiAlertsShortcut)
+        addWorkspaceShortcutSpec = loadShortcutSpec(resolver, setting: .guiAddWorkspaceShortcut)
+        reloadShortcutSpec = loadShortcutSpec(resolver, setting: .guiReloadShortcut)
+        nextShortcutSpec = loadShortcutSpec(resolver, setting: .guiNextShortcut)
+        previousShortcutSpec = loadShortcutSpec(resolver, setting: .guiPreviousShortcut)
+        sidebarNextShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarNextShortcut)
+        sidebarPreviousShortcutSpec = loadShortcutSpec(resolver, setting: .guiSidebarPreviousShortcut)
+        openEditorShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenEditorShortcut)
+        openTerminalShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenTerminalShortcut)
+        newTabShortcutSpec = loadShortcutSpec(resolver, setting: .guiNewTabShortcut)
+        openFinderShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenFinderShortcut)
+        openSettingsShortcutSpec = loadShortcutSpec(resolver, setting: .guiOpenSettingsShortcut)
+        windowShortcutSpec = loadShortcutSpec(resolver, setting: .guiWindowShortcut)
     }
 
-    private func loadShortcutSpec(setting: ShortcutSetting) -> HotkeySpec? {
-        if let stored = try? HotkeySpec.parse(shortcutRawValue(for: setting)) { return stored }
+    private func loadShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting) -> HotkeySpec? {
+        if let stored = try? HotkeySpec.parse(resolver.rawValue(for: setting)) { return stored }
         return try? HotkeySpec.parse(setting.defaultSpec)
     }
-
-    private func shortcutRawValue(for setting: ShortcutSetting) throws -> String { try shortcutSettingResolver().rawValue(for: setting) }
 
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
         let normalized = try shortcutSettingResolver().normalizedValue(for: setting, rawValue: value)
         try clientDatabase().setSetting(key: setting.settingKey, value: normalized)
     }
 
+    // The client database is resolved once, eagerly, when the resolver is built rather than lazily
+    // inside `value` — so every setting this resolver reads (an entire `loadShortcutSpecs()` pass, or
+    // a single `setShortcutSetting()` write) shares one handle instead of calling `clientDatabase()`
+    // per read.
     private func shortcutSettingResolver() -> ShortcutSettingResolver {
-        ShortcutSettingResolver(value: { key in try self.clientDatabase().setting(key: key) })
+        let database = Result { try self.clientDatabase() }
+        return ShortcutSettingResolver(value: { key in try database.get().setting(key: key) })
     }
 
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
