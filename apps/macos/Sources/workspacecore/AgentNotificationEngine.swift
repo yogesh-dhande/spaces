@@ -229,9 +229,9 @@ public struct AgentNotificationEngine {
         let project = try workspace.flatMap { try store.project(id: $0.projectID) }
         let kind = resolveAgentKind(agent) ?? "coding agent"
         return renderBlock(
-            label: agent.label ?? kind, kind: kind, transition: transition, project: project?.name ?? workspace?.projectID ?? agent.workspaceID,
-            workspace: workspace?.dir ?? agent.workspaceID, branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id,
-            note: agent.note, deviceID: nil)
+            label: agent.effectiveLabel ?? kind, kind: kind, transition: transition,
+            project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.dir ?? agent.workspaceID,
+            branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
     }
 
     /// The single injected block for a watched agent on a paired device. Reuses the shared format; the

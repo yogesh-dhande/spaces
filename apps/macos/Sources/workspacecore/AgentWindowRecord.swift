@@ -5,6 +5,17 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let workspaceID: String
     public let provider: AgentProvider
     public let label: String?
+    /// The name the user typed for this agent's row, or nil when it was never renamed. Kept apart from
+    /// `label`, which the hook and foreground-detection writers rewrite from what the agent reports, so a
+    /// rename survives every later signal. Two paths write it (both through
+    /// `SQLiteStore.setAgentSessionUserLabel`): the rename command, and claim formation, which clears it
+    /// when a configured launcher takes over naming the row. It is read-only on every other path.
+    ///
+    /// Read-only does not mean droppable. A lifecycle path that rebuilds a record from an existing one
+    /// must copy this field across: the upsert leaves the stored column alone either way, but the record it
+    /// returns is what the caller goes on to read, and one built without it reports the agent under a name
+    /// nothing displays until someone reads the row back.
+    public let userLabel: String?
     public let runtimeTargetID: String?
     public let terminalTarget: TerminalTargetRecord?
     public let sessionKey: String?
@@ -25,7 +36,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let updatedAt: String
 
     public init(
-        id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil,
+        id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
         terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
         status: AgentWindowStatus, note: String? = nil, detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
     ) {
@@ -33,6 +44,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.workspaceID = workspaceID
         self.provider = provider
         self.label = label
+        self.userLabel = userLabel
         self.runtimeTargetID = runtimeTargetID
         self.terminalTarget = terminalTarget
         self.sessionKey = sessionKey
@@ -66,4 +78,26 @@ public struct AgentWindowRecord: Codable, Sendable {
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }
+
+    /// The name this agent answers to: the user's rename when it has one, else the label the agent
+    /// reports for itself, and nil when it has neither. This is the name every surface shows and the only
+    /// name a name-based lookup or a uniqueness check may read. Reading `label` directly for either
+    /// purpose leaves a renamed agent answering to a name nothing displays.
+    ///
+    /// Claim matching (`AgentLauncherClaim`) is the exception and stays on `label`: it asks which launcher
+    /// the agent reported itself as, which a rename does not change.
+    public var effectiveLabel: String? {
+        if let userLabel = userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !userLabel.isEmpty { return userLabel }
+        guard let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
+        return label
+    }
+
+    /// A copy of this record named `userLabel`, so a candidate rename can be run through the workspace's
+    /// name-uniqueness check before it is stored.
+    public func withUserLabel(_ userLabel: String?) -> AgentWindowRecord {
+        AgentWindowRecord(
+            id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
+            terminalTarget: terminalTarget, sessionKey: sessionKey, claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName,
+            status: status, note: note, detectedAgentKind: detectedAgentKind, createdAt: createdAt, updatedAt: updatedAt)
+    }
 }

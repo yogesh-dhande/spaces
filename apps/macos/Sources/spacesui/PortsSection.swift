@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 import workspacecore
 
 @MainActor final class PortsSection {
@@ -222,17 +223,17 @@ import workspacecore
     func rebindCollapsedContent(from port: ServiceDefinition, portText: String? = nil, displayURL: String? = nil) {
         currentPort = port
         nameLabel.stringValue = port.name.isEmpty ? "(unnamed)" : port.name
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
         nameLabel.textColor = Theme.text
         nameLabel.isSelectable = true
         let trimmedPortText = portText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         portLabel.stringValue = trimmedPortText
         portLabel.isHidden = trimmedPortText.isEmpty
-        portLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        portLabel.font = Typography.monoBody
         portLabel.textColor = Theme.muted
         portLabel.isSelectable = true
         detailLabel.stringValue = displayURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        detailLabel.font = Typography.rowDetail
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
     }
@@ -337,7 +338,7 @@ import workspacecore
     ) {
         let nameField = NSTextField(string: port.name)
         nameField.placeholderString = "Service name (e.g. web)"
-        nameField.font = .systemFont(ofSize: 13, weight: .medium)
+        nameField.font = Typography.rowLabel
         nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameField.setAccessibilityIdentifier("service-row-edit-name")
 

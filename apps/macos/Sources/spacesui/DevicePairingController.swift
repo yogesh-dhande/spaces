@@ -267,14 +267,14 @@ import workspacecore
 
     private func connectedDeviceRow(_ device: ClientConnectedDevice) -> NSView {
         let detail = NSTextField(labelWithString: clientDeviceDetailText(device))
-        detail.font = .systemFont(ofSize: 10.5)
+        detail.font = Typography.caption
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingMiddle
 
         let nameView: NSView
         if !device.isLocal, renamingClientDeviceID == device.id {
             let editor = NSTextField(string: device.name)
-            editor.font = .systemFont(ofSize: 12, weight: .medium)
+            editor.font = Typography.controlLabel
             editor.delegate = host
             editor.identifier = NSUserInterfaceItemIdentifier(device.id)
             editor.toolTip = "Press Return to save, Esc to cancel."
@@ -288,7 +288,7 @@ import workspacecore
             nameView = editor
         } else {
             let title = NSTextField(labelWithString: device.displayName)
-            title.font = .systemFont(ofSize: 12, weight: .medium)
+            title.font = Typography.controlLabel
             title.textColor = .labelColor
             title.lineBreakMode = .byTruncatingTail
             nameView = title
@@ -333,7 +333,7 @@ import workspacecore
 
     private func devicePairingInstructionLabel(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 12)
+        label.font = Typography.rowDetail
         label.textColor = .secondaryLabelColor
         label.maximumNumberOfLines = 0
         return label
@@ -393,7 +393,7 @@ import workspacecore
         advancedToggle.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Advanced")
         advancedToggle.imagePosition = .imageLeading
         advancedToggle.imageHugsTitle = true
-        advancedToggle.font = .systemFont(ofSize: 12, weight: .medium)
+        advancedToggle.font = Typography.controlLabel
         advancedToggle.contentTintColor = .secondaryLabelColor
         advancedToggle.toolTip = "Optional SSH username and port"
         advancedToggle.setAccessibilityIdentifier("remote-device-advanced-toggle")
@@ -446,7 +446,7 @@ import workspacecore
         let commandField = NSTextField(labelWithString: remoteDeviceLinuxInstallCommand ?? "")
         commandField.isSelectable = true
         commandField.isEditable = false
-        commandField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        commandField.font = Typography.monoBody
         commandField.lineBreakMode = .byCharWrapping
         commandField.maximumNumberOfLines = 0
         commandField.setAccessibilityIdentifier("remote-device-install-command")
@@ -515,7 +515,7 @@ import workspacecore
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = Theme.text
 
         let header = NSStackView()

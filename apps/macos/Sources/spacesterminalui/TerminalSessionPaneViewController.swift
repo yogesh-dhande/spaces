@@ -135,6 +135,13 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let defersInitialOwnerClientAttach: Bool
     let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
+    /// Asks the host to move the app-wide terminal text size by one step. The pane does not own the
+    /// size: it is one value shared by every pane and persisted per profile, so a zoom key press is
+    /// reported upwards and comes back to every pane through `applyTerminalTextSize`.
+    public var terminalTextZoomAction: (@MainActor (TerminalTextZoomCommand) -> Void)?
+    /// The size this pane renders terminal content at, both in the Ghostty mirror and in the
+    /// plain-text fallback renderer. Set by the host at creation and on every change.
+    private(set) var terminalTextSize: TerminalTextSize = .default
     /// Unit tests inject a uniquely-named pasteboard here so copy/paste tests never touch the user's
     /// real clipboard. Nil in the app, where copy/paste keep using `NSPasteboard.general`.
     public var pasteboardOverrideForTesting: NSPasteboard?
@@ -299,6 +306,15 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     deinit { MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 }) }
+
+    /// Renders this pane's terminal content at `size`. Covers both renderers a pane can present: the
+    /// Ghostty mirror (which keeps the size across its own surface rebuilds) and the plain-text
+    /// fallback the pane shows when no surface exists, such as an ended session's final render.
+    public func applyTerminalTextSize(_ size: TerminalTextSize) {
+        terminalTextSize = size
+        outputView.font = .monospacedSystemFont(ofSize: CGFloat(size.points), weight: .regular)
+        ghosttyRendererHost?.applyTerminalTextSize(size)
+    }
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }
@@ -852,8 +868,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         button.layer?.masksToBounds = true
         let ink = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonText)
         button.contentTintColor = ink
-        button.attributedTitle = NSAttributedString(
-            string: title, attributes: [.foregroundColor: ink, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        button.attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: ink, .font: Typography.primaryButtonLabel])
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             button.heightAnchor.constraint(equalToConstant: 30), button.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
@@ -952,6 +967,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
         ghosttyRendererHost = resolvedHostComponents.rendererHost
         ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
+        // A host is resolved lazily, long after the pane was told what size to render at, so the
+        // current size is pushed here rather than only when it changes.
+        ghosttyRendererHost?.applyTerminalTextSize(terminalTextSize)
     }
 
     private static func resolveGhosttyHostComponents(_ host: any TerminalGhosttySessionHosting) -> (

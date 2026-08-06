@@ -145,6 +145,48 @@ import workspacecore
         #expect(busy?.detail == "vim main.swift")
     }
 
+    /// An agent the daemon reports as unconfigured is named on its session, even when it still carries a
+    /// launcher claim: the launcher it names can have been deleted or recreated while the agent kept
+    /// running, and routing such a rename into the config would edit nothing and silently drop the name.
+    @Test func unconfiguredAgentWithAStaleLauncherClaimRenamesItsSession() throws {
+        let summary = SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
+            isHidden: false, isDefault: false, sessionCount: 1,
+            config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex-new", name: "codex", command: "codex")]
+            ),
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:agent-1", workspaceID: "workspace", name: "codex", command: "codex", launcherID: "launcher-codex-deleted",
+                    agentID: "agent-1", sessionID: "sess-agent", isConfigured: false, runState: .running, activityState: .idle, canRun: false,
+                    canStop: true, canRestart: true)
+            ])
+        let items = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
+
+        let agent = items.first { $0.kind == .agent }
+        #expect(agent?.isConfigured == false)
+        #expect(agent?.launcherID == "launcher-codex-deleted", "the stale claim still rides on the row")
+        #expect(
+            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer")
+                == .agentSession(agentID: "agent-1"))
+        // An empty submission clears the session rename rather than being discarded.
+        #expect(
+            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "  ") == .agentSession(agentID: "agent-1"))
+    }
+
+    /// A configured agent row is named by its launcher config entry, so its rename edits that entry.
+    @Test func configuredAgentRenamesItsLauncherConfigEntry() throws {
+        let items = fixtureItems()
+        let agent = items.first { $0.kind == .agent }
+        let launcher = items.first { $0.kind == .agentLauncher }
+        #expect(agent?.isConfigured == true)
+        #expect(launcher?.isConfigured == true)
+        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer") == .configuredAgentLauncher)
+        // A config entry must keep a name, so an empty submission on one is discarded.
+        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: " ") == .discard)
+        #expect(
+            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(launcher), newTitle: "Reviewer") == .configuredAgentLauncher)
+    }
+
     @Test func shortcutIndexStopsAfterTen() {
         let terminalRows = (0..<12).map { index in
             SpacesDeviceWorkspaceTerminalRow(

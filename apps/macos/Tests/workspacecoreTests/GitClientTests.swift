@@ -367,6 +367,35 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(client.branchExists(path: destination.path, branch: "delete-me"))
     }
 
+    /// `deleteBranch` must not read a failed existence probe as "already deleted": `git show-ref --verify
+    /// --quiet` cannot itself distinguish a genuinely missing branch (exit 1) from most read failures on the
+    /// ref path (exit 1 too, verified against this platform's git), but a repository git cannot even open
+    /// (`.git` unreadable) surfaces as its own fatal error with a distinct exit code, and `deleteBranch` must
+    /// throw rather than silently return `false` for it.
+    func testDeleteBranchThrowsWhenExistenceProbeFailsInsteadOfReadingAsAlreadyDeleted() throws {
+        let repo = try makeTempDirectory()
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        try runGit(["checkout", "-b", "feature-corrupt"], cwd: repo.path)
+        try runGit(["checkout", "main"], cwd: repo.path)
+
+        let gitDir = repo.appendingPathComponent(".git")
+        let originalPermissions = try FileManager.default.attributesOfItem(atPath: gitDir.path)[.posixPermissions] as? Int
+        // Denying all access to `.git` itself (rather than just the branch's ref file) is what reliably
+        // produces an exit code `show-ref --verify --quiet` never uses for "missing": git fails to open the
+        // repository at all ("fatal: not a git repository") instead of resolving the ref. A permission
+        // failure scoped to just `refs/heads` or the one ref file was tried and collapses to the same exit 1
+        // as a genuinely missing branch under `--quiet`, so it cannot stand in for a probe failure here.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: gitDir.path)
+        defer {
+            if let originalPermissions { try? FileManager.default.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: gitDir.path) }
+        }
+
+        let client = GitClient()
+        XCTAssertThrowsError(try client.deleteBranch(path: repo.path, branch: "feature-corrupt")) { error in
+            guard case WorkspaceError.gitCommandFailed = error else { return XCTFail("Expected gitCommandFailed, got \(error)") }
+        }
+    }
+
     func testDeleteRemoteBranchRemovesRemoteHead() throws {
         let fixture = try makeRemoteFixture()
         let client = GitClient()

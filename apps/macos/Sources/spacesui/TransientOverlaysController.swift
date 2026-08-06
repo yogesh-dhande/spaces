@@ -86,13 +86,13 @@ import workspacecore
             labelStack.translatesAutoresizingMaskIntoConstraints = false
 
             titleLabel = NSTextField(labelWithString: "")
-            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+            titleLabel.font = Typography.compactTitle
             titleLabel.textColor = .labelColor
             titleLabel.maximumNumberOfLines = 1
             labelStack.addArrangedSubview(titleLabel)
 
             detailLabel = NSTextField(labelWithString: "")
-            detailLabel.font = .systemFont(ofSize: 11)
+            detailLabel.font = Typography.metadata
             detailLabel.textColor = .secondaryLabelColor
             detailLabel.maximumNumberOfLines = 2
             labelStack.addArrangedSubview(detailLabel)
@@ -168,13 +168,13 @@ import workspacecore
             stack.translatesAutoresizingMaskIntoConstraints = false
 
             titleLabel = NSTextField(labelWithString: "")
-            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+            titleLabel.font = Typography.compactTitle
             titleLabel.textColor = .labelColor
             titleLabel.maximumNumberOfLines = 1
             stack.addArrangedSubview(titleLabel)
 
             detailLabel = NSTextField(labelWithString: "")
-            detailLabel.font = .systemFont(ofSize: 11)
+            detailLabel.font = Typography.metadata
             detailLabel.textColor = .secondaryLabelColor
             detailLabel.maximumNumberOfLines = 2
             stack.addArrangedSubview(detailLabel)

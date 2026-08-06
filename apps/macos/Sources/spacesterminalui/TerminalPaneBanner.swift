@@ -56,9 +56,7 @@ import spacesterminalghostty
         applyBorderColor()
     }
 
-    func applyBorderColor() {
-        effectiveAppearance.performAsCurrentDrawingAppearance { [self] in layer?.borderColor = borderColor.cgColor }
-    }
+    func applyBorderColor() { effectiveAppearance.performAsCurrentDrawingAppearance { [self] in layer?.borderColor = borderColor.cgColor } }
 }
 
 @MainActor public final class TerminalPaneBanner: TerminalPaneBannerPresenting {
@@ -283,7 +281,7 @@ import spacesterminalghostty
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 12)
+        label.font = Typography.rowDetail
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -325,9 +323,9 @@ import spacesterminalghostty
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            iconView.widthAnchor.constraint(equalToConstant: 15), iconView.heightAnchor.constraint(equalToConstant: 15),
-            cancelButton.widthAnchor.constraint(equalToConstant: 20), cancelButton.heightAnchor.constraint(equalToConstant: 20),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8), iconView.widthAnchor.constraint(equalToConstant: 15),
+            iconView.heightAnchor.constraint(equalToConstant: 15), cancelButton.widthAnchor.constraint(equalToConstant: 20),
+            cancelButton.heightAnchor.constraint(equalToConstant: 20),
         ])
     }
 

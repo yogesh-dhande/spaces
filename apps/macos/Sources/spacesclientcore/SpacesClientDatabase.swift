@@ -104,7 +104,10 @@ public final class SpacesClientDatabase {
 
     deinit { sqlite3_close(db) }
 
-    public static func defaultPath(homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> String {
+    public static func defaultPath(
+        homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser, executablePath: String? = nil,
+        gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe()
+    ) throws -> String {
         if let override = ProcessInfo.processInfo.environment[databasePathEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines),
             !override.isEmpty
         {
@@ -117,12 +120,45 @@ public final class SpacesClientDatabase {
         let profile = try SpacesProfile.resolve(
             environment: environment, homeDirectoryURL: profileHomeDirectoryURL(environment: environment, fallback: homeDirectoryURL),
             currentDirectoryPath: currentDirectoryPath,
-            executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath))
+            executablePath: executablePath ?? SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath), gitProbe: gitProbe)
         return URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).appendingPathComponent("Client", isDirectory: true)
             .appendingPathComponent("spaces-client.db", isDirectory: false).path
     }
 
+    /// Cheap fingerprint of everything that decides what `defaultPath()` resolves to, read directly via
+    /// `getenv`/`getcwd` instead of by calling `defaultPath()` itself, so `DefaultDatabaseStorage` can tell
+    /// whether a previously resolved path is still valid WITHOUT re-running resolution — in particular,
+    /// without re-spawning the git probe a repo-local dev build's `SpacesProfile.resolveDevelopmentContext`
+    /// runs on every resolution (see `LiveSpacesGitProfileProbe`). Mirrors the inputs `SpacesProfile.resolve`
+    /// itself consults (its two profile environment overrides, `HOME`, the working directory, and the
+    /// resolved executable path), plus this type's own `SPACES_CLIENT_DB_PATH` override that `defaultPath()`
+    /// checks first. `executablePathOverride` mirrors `defaultPath(executablePath:)`'s test-only override so
+    /// the key and the resolution it guards never disagree about which executable path they used.
+    fileprivate static func defaultPathCacheKey(executablePathOverride: String? = nil) -> String {
+        let currentDirectoryPath = FileManager.default.currentDirectoryPath
+        let executablePath = executablePathOverride ?? SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath)
+        let environmentValues = [
+            databasePathEnvironmentVariable, SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, "HOME",
+        ].map { currentEnvironmentValue(for: $0) ?? "" }
+        return (environmentValues + [currentDirectoryPath, executablePath ?? ""]).joined(separator: "\u{1f}")
+    }
+
+    private static func currentEnvironmentValue(for key: String) -> String? {
+        guard let rawValue = getenv(key) else { return nil }
+        return String(cString: rawValue)
+    }
+
     public static func defaultDatabase() throws -> SpacesClientDatabase { try defaultDatabaseStorage.database() }
+
+    /// Test-only seam: rewires the process-wide default-database cache to a stub git probe (and,
+    /// optionally, a fixed executable path — `swift test` runs under the system `xctest` agent rather
+    /// than this repo's own test binary, so `SpacesProfile.currentExecutablePath()`'s real answer never
+    /// lands inside a checkout and can't exercise the repo-local dev-build path a test wants to drive) and
+    /// drops its cached path/database. Lets a test count profile-resolution git spawns via
+    /// `defaultDatabase()` without touching real git. Never called from product code.
+    static func resetDefaultDatabaseStorageForTesting(gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe(), executablePath: String? = nil) {
+        defaultDatabaseStorage.resetForTesting(gitProbe: gitProbe, executablePathOverride: executablePath)
+    }
 
     public static func withDefaultDatabase<T>(_ body: (SpacesClientDatabase) throws -> T) throws -> T {
         let database = try defaultDatabase()
@@ -700,16 +736,57 @@ public final class SpacesClientDatabase {
 
 private final class DefaultDatabaseStorage: @unchecked Sendable {
     private let lock = NSLock()
-    private var path: String?
+    private var gitProbe: SpacesGitProfileProbe
+    private var executablePathOverride: String?
+    private var cachedKey: String?
     private var cachedDatabase: SpacesClientDatabase?
 
-    func database() throws -> SpacesClientDatabase {
-        let resolvedPath = try SpacesClientDatabase.defaultPath()
+    init(gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe()) { self.gitProbe = gitProbe }
+
+    /// Test-only: rewires this storage to a stub git probe (and optional fixed executable path) and
+    /// forgets its cached resolution, so the next `database()` call re-resolves through the stub instead
+    /// of returning an already-cached database from a previous probe/environment.
+    func resetForTesting(gitProbe: SpacesGitProfileProbe, executablePathOverride: String?) {
         lock.lock()
         defer { lock.unlock() }
-        if let cachedDatabase, path == resolvedPath { return cachedDatabase }
+        self.gitProbe = gitProbe
+        self.executablePathOverride = executablePathOverride
+        cachedKey = nil
+        cachedDatabase = nil
+    }
+
+    /// Every read through `SpacesClientDatabase.defaultDatabase()` — including every shortcut-setting
+    /// lookup the sidebar re-issues while it reloads — used to call `defaultPath()` first, which reruns
+    /// full profile resolution (including a repo-local dev build's synchronous git probe) before this
+    /// cache ever got a chance to compare paths. Checking `defaultPathCacheKey()` first skips resolution
+    /// entirely when none of its cheap inputs changed, so the probe runs once per process per distinct
+    /// key rather than once per call.
+    ///
+    /// The key intentionally excludes anything about the resolved profile's git state (branch, HEAD):
+    /// a dev build that switches its worktree's branch while the app keeps running keeps resolving to the
+    /// profile it launched with until relaunch, matching the paired daemon, which also resolves its
+    /// profile once at launch.
+    func database() throws -> SpacesClientDatabase {
+        lock.lock()
+        let gitProbe = self.gitProbe
+        let executablePathOverride = self.executablePathOverride
+        let key = SpacesClientDatabase.defaultPathCacheKey(executablePathOverride: executablePathOverride)
+        if let cachedDatabase, cachedKey == key {
+            defer { lock.unlock() }
+            return cachedDatabase
+        }
+        lock.unlock()
+
+        // Resolution (and the git probe it can run) happens outside the lock, matching this cache's
+        // original shape, so a slow resolution never blocks an unrelated read of the already-cached
+        // database on another thread.
+        let resolvedPath = try SpacesClientDatabase.defaultPath(executablePath: executablePathOverride, gitProbe: gitProbe)
+
+        lock.lock()
+        defer { lock.unlock() }
+        if let cachedDatabase, cachedKey == key { return cachedDatabase }
         let database = try SpacesClientDatabase(path: resolvedPath)
-        path = resolvedPath
+        cachedKey = key
         cachedDatabase = database
         return database
     }

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 12
+    public static let currentVersion = 13
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -382,6 +382,43 @@ public enum DatabaseSchema {
                       WHERE length(branch) > 0;
                     """)
         },
+        // Holds the name a user typed for a coding-agent row. It is its own column, separate from `label`,
+        // for the same reason `terminal_sessions.user_title` is separate from a terminal's live title: the
+        // hook and foreground-detection writers rewrite `label` from what the agent reports, so a rename
+        // stored there would be overwritten by the next signal. Existing rows carry NULL — nothing was
+        // renamed before this version — and read their name from `label` as they always have.
+        //
+        // The frozen pre-step shape is created first, exactly like the v9→v10 step and for the same
+        // load-bearing reason: no migration step before v10 ever created `agent_sessions`, so a chain can
+        // reach this ALTER with no table to alter (the v10→v11 step tolerates the absence rather than
+        // filling it). The shape frozen here is the v11 one (the v10 CREATE plus `detected_agent_kind`),
+        // so both arrival routes land the same v12 schema; on a database that already carries the table
+        // the CREATE is a no-op and every row is preserved.
+        DatabaseMigrationStep(fromVersion: 11, toVersion: 12, description: "Add agent_sessions.user_label", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      claimed_launcher_id TEXT,
+                      claimed_launcher_name TEXT,
+                      note TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      detected_agent_kind TEXT,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    ALTER TABLE agent_sessions ADD COLUMN user_label TEXT;
+                    """)
+        },
         // Adds the scheduled-automation surface (`automations`, `automation_runs`) and makes terminal
         // sessions workspace-optional so an automation's command can run in a workspace-less session,
         // attributed back to its run via `automation_run_id`. SQLite cannot drop a column's NOT NULL or
@@ -391,12 +428,12 @@ public enum DatabaseSchema {
         // drop/rename touches nothing else even with foreign_keys ON inside the migration transaction. The
         // new-table column shape here must match `terminalSessionsTableSQL`, which the fresh schema uses.
         //
-        // The frozen pre-v12 shape is created first for the same reason the v7→v8 and v8→v9 steps create
+        // The frozen pre-v13 shape is created first for the same reason the v7→v8 and v8→v9 steps create
         // theirs: a database that predates the terminal tables carries none of them (they were only ever
         // created by the fresh-schema SQL), and the rebuild needs a table to copy from; on a database
         // that already has the table the CREATE is a no-op.
         DatabaseMigrationStep(
-            fromVersion: 11, toVersion: 12, description: "Add automations tables and make terminal_sessions workspace-optional", requiresBackup: true
+            fromVersion: 12, toVersion: 13, description: "Add automations tables and make terminal_sessions workspace-optional", requiresBackup: true
         ) { handle in
             try migrationExecuteBatch(
                 handle,
@@ -748,6 +785,7 @@ public enum DatabaseSchema {
               workspace_id TEXT NOT NULL,
               provider TEXT NOT NULL,
               label TEXT,
+              user_label TEXT,
               status TEXT NOT NULL DEFAULT 'idle',
               runtime_target_id TEXT,
               terminal_session_id TEXT,

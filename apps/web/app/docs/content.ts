@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
-      "Jump between workspaces, focus windows, and trigger common actions with shortcuts you can configure.",
+      "Jump between workspaces, focus windows, and trigger common actions with shortcuts you can configure, plus the fixed keys that zoom terminal text.",
   },
   {
     href: "/docs/troubleshooting",

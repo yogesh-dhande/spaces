@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 import workspacecore
 
 @MainActor final class BrowserSessionsSection {
@@ -219,11 +220,11 @@ import workspacecore
         let visibleURL = collapsedDisplayURL ?? session.url
         let primaryText = session.name ?? visibleURL ?? "(unnamed)"
         nameLabel.stringValue = primaryText
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
         nameLabel.textColor = Theme.text
         let detailText = session.name != nil ? (visibleURL ?? "") : ""
         detailLabel.stringValue = detailText
-        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        detailLabel.font = Typography.rowDetail
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
         collapsedContainer.arrangedSubviews.first?.setAccessibilityIdentifier(
@@ -367,7 +368,7 @@ import workspacecore
 
         func labeled(_ title: String, _ field: NSView) -> NSStackView {
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.font = Typography.metadataTitle
             label.textColor = Theme.muted
             label.alignment = .right
             label.setContentHuggingPriority(.required, for: .horizontal)

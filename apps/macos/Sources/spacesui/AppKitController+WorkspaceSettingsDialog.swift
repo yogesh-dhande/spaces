@@ -1,6 +1,7 @@
 import AppKit
 import spacesclientcore
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 /// Free-standing workspace settings dialog, presented from the gear button on the
@@ -32,7 +33,7 @@ extension AppKitController {
 
         // --- Directory subtitle (the workspace name is shown in the dialog header) ---
         let dirField = NSTextField(string: workspace.dir)
-        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.font = Typography.monoMetadata
         dirField.textColor = .tertiaryLabelColor
         dirField.lineBreakMode = .byTruncatingMiddle
         dirField.isEditable = false

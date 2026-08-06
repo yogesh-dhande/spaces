@@ -1114,6 +1114,23 @@ public struct SpacesDeviceCodingAgentMutationRequest: Codable, Sendable, Equatab
     }
 }
 
+/// Renames a coding-agent row that has no configured launcher behind it, addressed by the agent session
+/// id its overview row carries.
+public struct SpacesDeviceAgentSessionRenameRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let agentID: String
+    /// The row's new name. An empty (or whitespace-only) title clears the rename rather than setting
+    /// one, restoring the name the agent reports for itself — the only way back from a rename, and the
+    /// reason this command never rejects an empty title.
+    public let title: String
+
+    public init(workspaceID: String, agentID: String, title: String) {
+        self.workspaceID = workspaceID
+        self.agentID = agentID
+        self.title = title
+    }
+}
+
 public struct SpacesDeviceTerminalSessionRequest: Codable, Sendable, Equatable {
     public let sessionID: String
 
@@ -1537,6 +1554,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case runCodingAgent(SpacesDeviceRunCodingAgentRequest)
     case stopCodingAgent(SpacesDeviceCodingAgentMutationRequest)
     case restartCodingAgent(SpacesDeviceCodingAgentMutationRequest)
+    /// Renames a coding-agent row whose name lives on its session rather than in the workspace config.
+    case renameAgentSession(SpacesDeviceAgentSessionRenameRequest)
     case state(SpacesDeviceTerminalSessionRequest)
     case terminalControl(SpacesDeviceTerminalControlRequest)
     case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
@@ -1617,6 +1636,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .runCodingAgent: "runCodingAgent"
         case .stopCodingAgent: "stopCodingAgent"
         case .restartCodingAgent: "restartCodingAgent"
+        case .renameAgentSession: "renameAgentSession"
         case .state: "state"
         case .terminalControl(let payload): payload.action.rawValue
         case .terminalPasteImage: "terminalPasteImage"
@@ -1745,6 +1765,7 @@ extension SpacesDeviceAPICommand: Codable {
         case runCodingAgent
         case stopCodingAgent
         case restartCodingAgent
+        case renameAgentSession
         case state
         case terminalControl
         case terminalPasteImage
@@ -1821,6 +1842,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .runCodingAgent: self = .runCodingAgent(try container.decode(SpacesDeviceRunCodingAgentRequest.self, forKey: key))
         case .stopCodingAgent: self = .stopCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .restartCodingAgent: self = .restartCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
+        case .renameAgentSession: self = .renameAgentSession(try container.decode(SpacesDeviceAgentSessionRenameRequest.self, forKey: key))
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
         case .terminalControl: self = .terminalControl(try container.decode(SpacesDeviceTerminalControlRequest.self, forKey: key))
         case .terminalPasteImage: self = .terminalPasteImage(try container.decode(SpacesDeviceTerminalPasteImageRequest.self, forKey: key))
@@ -1889,6 +1911,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .runCodingAgent(let payload): try container.encode(payload, forKey: .runCodingAgent)
         case .stopCodingAgent(let payload): try container.encode(payload, forKey: .stopCodingAgent)
         case .restartCodingAgent(let payload): try container.encode(payload, forKey: .restartCodingAgent)
+        case .renameAgentSession(let payload): try container.encode(payload, forKey: .renameAgentSession)
         case .state(let payload): try container.encode(payload, forKey: .state)
         case .terminalControl(let payload): try container.encode(payload, forKey: .terminalControl)
         case .terminalPasteImage(let payload): try container.encode(payload, forKey: .terminalPasteImage)
@@ -1946,10 +1969,11 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     public let projectID: String?
     public let workspaceID: String?
     public let sessionID: String?
-    /// What the mutation did beyond succeeding, when that is something the user asked for and has to be
-    /// told about — deleting a workspace's branches reports each branch it deleted, could not find, skipped
-    /// as protected, or failed to delete. `nil` when the mutation has nothing extra to report, which is what
-    /// lets a client show it only when there is something to show.
+    /// A failure-only report on something the user asked for beyond the mutation itself: deleting a
+    /// workspace's branches reports a branch skipped as protected, no branch name recorded, or a git error
+    /// deleting the branch. `nil` when there is nothing to report, including when the requested branches
+    /// were deleted cleanly or were already gone, which is what lets a client show it only when something
+    /// went wrong.
     public let notice: String?
 
     public init(

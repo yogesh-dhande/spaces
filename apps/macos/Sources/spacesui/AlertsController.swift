@@ -192,7 +192,7 @@ import workspacecore
         // Header
         let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let headerTitle = NSTextField(labelWithString: "Alerts")
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerTitle.font = Typography.pageTitle
         headerTitle.textColor = host.sidebarPrimaryTextColor(isSelected: false)
 
         let headerRow = NSStackView()
@@ -221,10 +221,10 @@ import workspacecore
             icon.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
             let emptyTitle = NSTextField(labelWithString: "No attention required")
-            emptyTitle.font = .systemFont(ofSize: 13, weight: .medium)
+            emptyTitle.font = Typography.rowLabel
             emptyTitle.textColor = .labelColor
             let emptyDetail = NSTextField(labelWithString: "All running workspaces are healthy.")
-            emptyDetail.font = .systemFont(ofSize: 11)
+            emptyDetail.font = Typography.metadata
             emptyDetail.textColor = .secondaryLabelColor
             let emptyStack = NSStackView()
             emptyStack.orientation = .vertical
@@ -254,17 +254,17 @@ import workspacecore
                 groupHeaderStack.translatesAutoresizingMaskIntoConstraints = false
 
                 let projectLabel = NSTextField(labelWithString: group.projectName)
-                projectLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+                projectLabel.font = Typography.compactTitle
                 projectLabel.textColor = .secondaryLabelColor
                 projectLabel.setContentHuggingPriority(.required, for: .horizontal)
 
                 let slashLabel = NSTextField(labelWithString: "/")
-                slashLabel.font = .systemFont(ofSize: 12)
+                slashLabel.font = Typography.rowDetail
                 slashLabel.textColor = .tertiaryLabelColor
                 slashLabel.setContentHuggingPriority(.required, for: .horizontal)
 
                 let workspaceLabel = NSTextField(labelWithString: group.workspaceName)
-                workspaceLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+                workspaceLabel.font = Typography.compactTitle
                 workspaceLabel.textColor = accentColor
                 workspaceLabel.lineBreakMode = .byTruncatingTail
                 workspaceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

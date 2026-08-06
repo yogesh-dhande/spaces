@@ -166,13 +166,13 @@ import systembridge
         icon.contentTintColor = .controlAccentColor
 
         let title = NSTextField(labelWithString: "Connect your coding agents")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.font = Typography.sheetTitle
         title.alignment = .center
 
         let body = NSTextField(
             wrappingLabelWithString: "Spaces can install lifecycle hooks so each agent reports when it starts, is working, is blocked on you, "
                 + "or finishes. You can install these later from Settings.")
-        body.font = .systemFont(ofSize: 13)
+        body.font = Typography.body
         body.textColor = .secondaryLabelColor
         body.alignment = .center
 
@@ -297,7 +297,7 @@ import systembridge
         spinner.startAnimation(nil)
 
         let label = NSTextField(labelWithString: "Checking your coding agents...")
-        label.font = .systemFont(ofSize: 13)
+        label.font = Typography.body
         label.textColor = .secondaryLabelColor
 
         let stack = NSStackView(views: [spinner, label])

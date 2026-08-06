@@ -572,6 +572,17 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
+    /// Renames a coding-agent row that has no configured launcher behind it. An empty title clears the
+    /// rename, restoring the name the agent reports for itself.
+    public static func renameAgentSession(
+        workspaceID: String, agentID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func runWorkspaceProcess(
         workspaceID: String, processKey: String, processTemplateID: String?, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -914,8 +925,8 @@ public enum SpacesDeviceClient {
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
-            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
+            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .renameAgentSession, .state,
+            .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
             .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
         }

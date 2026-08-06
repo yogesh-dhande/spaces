@@ -303,8 +303,9 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let agentWindows = [
             AgentWindowRecord(
-                id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now"),
+                id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-claude"), claimedLauncherName: "claude", status: .idle, createdAt: "now",
+                updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
                 status: .spinning, createdAt: "now", updatedAt: "now"),
@@ -367,8 +368,9 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex")]
         let agentWindows = [
             AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now"),
+                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-claude"), claimedLauncherName: "Claude", status: .idle, createdAt: "now",
+                updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
                 status: .spinning, createdAt: "now", updatedAt: "now"),
@@ -416,6 +418,45 @@ import workspacecore
         #expect(entries.map { $0.agentWindow?.id } == [nil, "codex-runtime"])
         #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "Codex")] == 1)
         #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "codex-runtime")] == 2)
+    }
+
+    @Test func renamedUnconfiguredAgentDoesNotClaimAMatchingLauncherSlot() {
+        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")]
+        let rows = [
+            SpacesDeviceWorkspaceCodingAgentRow(
+                id: "configured-agent:workspace:launcher-codex", workspaceID: "workspace", name: "codex", command: "codex",
+                launcherID: "launcher-codex", agentID: nil, sessionID: nil, isConfigured: true, runState: .notStarted, activityState: .idle,
+                canRun: true, canStop: false, canRestart: false),
+            SpacesDeviceWorkspaceCodingAgentRow(
+                id: "agent:agent-renamed", workspaceID: "workspace", name: "codex", command: "", launcherID: nil, agentID: "agent-renamed",
+                sessionID: "session-renamed", isConfigured: false, runState: .running, activityState: .spinning, canRun: false, canStop: true,
+                canRestart: false),
+        ]
+
+        let agentWindows = AppKitController.agentWindows(from: rows)
+        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+
+        #expect(agentWindows.map(\.id) == ["agent-renamed"])
+        #expect(entries.map(\.kind) == [.agentLauncher, .agent])
+        #expect(entries.map(\.launcherName) == ["codex", nil])
+        #expect(entries.map { $0.agentWindow?.id } == [nil, "agent-renamed"])
+    }
+
+    @Test func configuredAgentRowResolvesItsLauncherSlot() {
+        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")]
+        let rows = [
+            SpacesDeviceWorkspaceCodingAgentRow(
+                id: "configured-agent:workspace:launcher-codex", workspaceID: "workspace", name: "codex", command: "codex",
+                launcherID: "launcher-codex", agentID: "agent-codex", sessionID: "session-codex", isConfigured: true, runState: .running,
+                activityState: .spinning, canRun: false, canStop: true, canRestart: true)
+        ]
+
+        let agentWindows = AppKitController.agentWindows(from: rows)
+        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+
+        #expect(entries.map(\.kind) == [.agent])
+        #expect(entries.map(\.launcherName) == ["codex"])
+        #expect(entries.map { $0.agentWindow?.id } == ["agent-codex"])
     }
 
     @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {

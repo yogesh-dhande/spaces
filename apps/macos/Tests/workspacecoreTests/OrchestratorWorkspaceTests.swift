@@ -304,8 +304,55 @@ extension OrchestratorTests {
         XCTAssertFalse(client.branchExists(path: clone.path, branch: "feature-cleanup"))
         XCTAssertFalse(client.remoteBranchExists(path: clone.path, branch: "feature-cleanup"))
         XCTAssertNil(try store.workspace(id: workspace.id))
-        XCTAssertTrue(outcome.notice?.contains("Deleted remote branch 'feature-cleanup'.") == true)
-        XCTAssertTrue(outcome.notice?.contains("Deleted local branch 'feature-cleanup'.") == true)
+        XCTAssertNil(outcome.notice, "branch deletion going as asked reports nothing")
+    }
+
+    /// A protected branch (main/master) is never deleted even when the caller asks, so that outcome is the
+    /// one thing the notice exists to report.
+    func testArchiveWorkspaceReportsNoticeWhenBranchIsProtected() throws {
+        let repo = try makeTempGitRepo(name: "archive-protected-branch")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-protected")
+        // The protected check runs on the recorded branch name before any git delete, so overriding the
+        // record to "master" (without a matching real branch) is enough to exercise it.
+        try store.upsert(
+            workspace: WorkspaceRecord(
+                id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: "master",
+                baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isRunning: workspace.isRunning,
+                lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes))
+
+        let outcome = try orchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true)
+
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertTrue(outcome.notice?.contains("skipped branch deletion because 'master' is protected") == true, outcome.notice ?? "nil")
+    }
+
+    /// A workspace with no recorded branch cannot have its branches deleted, so the notice has to say why
+    /// nothing happened rather than silently doing nothing.
+    func testArchiveWorkspaceReportsNoticeWhenNoBranchIsRecorded() throws {
+        let repo = try makeTempGitRepo(name: "archive-no-recorded-branch")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-orphan")
+        try store.upsert(
+            workspace: WorkspaceRecord(
+                id: workspace.id, projectID: workspace.projectID, dir: workspace.dir, dirname: workspace.dirname, branch: nil,
+                baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isRunning: workspace.isRunning,
+                lastLaunchedAt: workspace.lastLaunchedAt, notes: workspace.notes))
+
+        let outcome = try orchestrator.archiveWorkspace(workspaceID: workspace.id, deleteLocalBranch: true)
+
+        XCTAssertNil(try store.workspace(id: workspace.id))
+        XCTAssertTrue(outcome.notice?.contains("no branch name was recorded") == true, outcome.notice ?? "nil")
     }
 
     /// The same reservation has to be released when the branch disappears outside Spaces — the usual
