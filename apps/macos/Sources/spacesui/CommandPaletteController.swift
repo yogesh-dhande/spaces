@@ -83,7 +83,7 @@ final class CommandPalettePanel: NSPanel {
 
         func addSep() {
             let sep = NSTextField(labelWithString: "|")
-            sep.font = .systemFont(ofSize: 10, weight: .thin)
+            sep.font = Typography.caption
             sep.textColor = .quaternaryLabelColor
             row.addArrangedSubview(sep)
         }
@@ -95,7 +95,7 @@ final class CommandPalettePanel: NSPanel {
             group.spacing = 3
             for key in keys { group.addArrangedSubview(RowPrimitives.shortcutChip(key)) }
             let lbl = NSTextField(labelWithString: label)
-            lbl.font = .systemFont(ofSize: 10.5, weight: .regular)
+            lbl.font = Typography.caption
             lbl.textColor = .secondaryLabelColor
             group.addArrangedSubview(lbl)
             row.addArrangedSubview(group)
@@ -377,7 +377,7 @@ final class CommandPalettePanel: NSPanel {
         ])
 
         let titleLabel = NSTextField(labelWithString: "Spaces")
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.font = Typography.sheetTitle
         titleLabel.textColor = Theme.text
         brandRow.addArrangedSubview(titleIconView)
         brandRow.addArrangedSubview(titleLabel)
@@ -385,7 +385,7 @@ final class CommandPalettePanel: NSPanel {
 
         let searchField = CommandPaletteSearchField()
         searchField.placeholderString = "fuzzy search workspaces, targets, and details"
-        searchField.font = .systemFont(ofSize: 13)
+        searchField.font = Typography.body
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = host
         searchField.focusRingType = .default
@@ -401,7 +401,7 @@ final class CommandPalettePanel: NSPanel {
         countBadge.translatesAutoresizingMaskIntoConstraints = false
 
         let countLabel = NSTextField(labelWithString: "")
-        countLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        countLabel.font = Typography.monoBadge
         countLabel.textColor = Theme.muted
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         countBadge.addSubview(countLabel)
@@ -452,7 +452,7 @@ final class CommandPalettePanel: NSPanel {
         tableView.translatesAutoresizingMaskIntoConstraints = false
 
         let emptyLabel = NSTextField(labelWithString: "No matching targets")
-        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.font = Typography.rowDetail
         emptyLabel.textColor = Theme.muted
         emptyLabel.isHidden = true
         emptyLabel.alignment = .center

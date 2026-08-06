@@ -348,11 +348,11 @@ import workspacecore
         currentLauncher = launcher
         agentTileTextLabel?.stringValue = Self.agentTileText(for: launcher)
         nameLabel.stringValue = launcher.name.isEmpty ? "(unnamed)" : launcher.name
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
         nameLabel.textColor = Theme.text
         nameLabel.setAccessibilityIdentifier("agent-launcher-row-name")
         detailLabel.stringValue = launcher.command
-        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        detailLabel.font = Typography.rowDetail
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.setAccessibilityIdentifier("agent-launcher-row-detail")
@@ -549,7 +549,7 @@ import workspacecore
 
         func labeled(_ title: String, _ field: NSView) -> NSStackView {
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.font = Typography.metadataTitle
             label.textColor = Theme.muted
             label.alignment = .right
             label.setContentHuggingPriority(.required, for: .horizontal)

@@ -84,13 +84,13 @@ final class CompatibilityBlockView: NSView {
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")
         icon.contentTintColor = .systemOrange
         let title = NSTextField(labelWithString: content.title)
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.font = Typography.sheetTitle
         header.addArrangedSubview(icon)
         header.addArrangedSubview(title)
         stack.addArrangedSubview(header)
 
         let detail = NSTextField(wrappingLabelWithString: content.detail)
-        detail.font = .systemFont(ofSize: 13)
+        detail.font = Typography.body
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         stack.addArrangedSubview(detail)
@@ -99,7 +99,7 @@ final class CompatibilityBlockView: NSView {
             let command = NSTextField(labelWithString: installerCommand)
             command.isSelectable = true
             command.isEditable = false
-            command.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            command.font = Typography.monoBody
             command.lineBreakMode = .byCharWrapping
             command.maximumNumberOfLines = 0
             stack.addArrangedSubview(command)

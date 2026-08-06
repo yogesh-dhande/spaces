@@ -6,6 +6,7 @@ import spacesterminalui
     var workspaceID: String { get }
     var sessionID: String { get }
     func applyAppearance(_ appearance: ThemeAppearance)
+    func applyTerminalTextSize(_ size: TerminalTextSize)
     func setAccessibilityRuntimeTargetName(_ name: String)
     func requestOwnershipIfNeeded()
     /// Whether this content already holds the session's owner attachment on a live surface (see
@@ -46,7 +47,8 @@ import spacesterminalui
 
     init(
         descriptor: PaneContentDescriptor, workspaceID: String, sessionID: String, pane: TerminalSessionPaneViewController,
-        setAppearanceAction: @escaping (ThemeAppearance) -> Void, linkOpenCoordinator: TerminalLinkOpenCoordinator? = nil
+        setAppearanceAction: @escaping (ThemeAppearance) -> Void, terminalTextZoomAction: @escaping @MainActor (TerminalTextZoomCommand) -> Void,
+        linkOpenCoordinator: TerminalLinkOpenCoordinator? = nil
     ) {
         self.descriptor = descriptor
         self.workspaceID = workspaceID
@@ -55,11 +57,17 @@ import spacesterminalui
         self.setAppearanceAction = setAppearanceAction
         self.linkOpenCoordinator = linkOpenCoordinator
         pane.onDisplayTitleChanged = { [weak self] title, _ in self?.onTitleChanged?(title) }
+        pane.terminalTextZoomAction = terminalTextZoomAction
     }
 
     /// Re-themes this session's live daemon rendering to the app's current light/dark appearance. Called by
     /// `PanelCoordinator.broadcastAppearance` for every open pane when the app appearance changes.
     func applyAppearance(_ appearance: ThemeAppearance) { setAppearanceAction(appearance) }
+
+    /// Renders this pane's terminal content at the app-wide terminal text size. Called by
+    /// `PanelCoordinator.broadcastTerminalTextSize` for every open pane when the size changes, and once
+    /// when the pane is built so it opens at the size the profile already holds.
+    func applyTerminalTextSize(_ size: TerminalTextSize) { pane.applyTerminalTextSize(size) }
 
     var contentView: NSView { pane.view }
     var displayTitle: String { pane.displayTitle }

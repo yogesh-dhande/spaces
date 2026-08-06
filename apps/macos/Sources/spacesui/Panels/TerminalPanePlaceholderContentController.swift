@@ -43,6 +43,10 @@ import spacesterminalui
     func handleKeyEvent(_: NSEvent) -> Bool { false }
     func handleCommandKeyEquivalent(_: NSEvent) -> Bool { false }
     func applyAppearance(_: ThemeAppearance) {}
+
+    /// A placeholder shows no terminal content; the real pane that replaces it is created with the
+    /// current size.
+    func applyTerminalTextSize(_: TerminalTextSize) {}
     func requestOwnershipIfNeeded() { requestsOwnershipWhenReady = true }
 
     /// A placeholder has no session attachment at all — its pane is still resolving — so a re-show of it
@@ -97,11 +101,11 @@ import spacesterminalui
         spinner.startAnimation(nil)
         spinner.translatesAutoresizingMaskIntoConstraints = false
 
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = .activeTheme(\.terminal.foreground)
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        detailLabel.font = .systemFont(ofSize: 12)
+        detailLabel.font = Typography.rowDetail
         detailLabel.textColor = .activeTheme(\.terminal.foreground).withAlphaComponent(0.72)
         detailLabel.lineBreakMode = .byWordWrapping
         detailLabel.maximumNumberOfLines = 3

@@ -50,7 +50,6 @@
             let snapshot: GhosttyTerminalSnapshot?
         }
 
-        private static let defaultFontSize: CGFloat = 12
         private static let searchUpBindingAction = "navigate_search:next"
         private static let searchDownBindingAction = "navigate_search:previous"
         private static let shortSearchQueryDebounceDelay: Duration = .milliseconds(300)
@@ -64,6 +63,12 @@
         private let searchDownButton = NSButton()
         private let searchCloseButton = NSButton()
         private var mirror: ghostty_mirror_t?
+        /// The app-wide terminal text size this pane renders at. Held here rather than pushed once at
+        /// a surface, because `GhosttyMirrorSurfaceMRU` frees and rebuilds surfaces as panes leave and
+        /// re-enter the screen: a rebuilt surface takes its font size from the generated Ghostty config
+        /// unless creation carries this one, so a zoomed pane would silently snap back to the config
+        /// baseline the first time it was evicted.
+        private var textSize: TerminalTextSize = .default
         private var latestFrame: GhosttyRenderFrame?
         private var renderStateKey = ""
         private var lastGeometry: SurfaceGeometry?
@@ -372,6 +377,20 @@
         func renderedSnapshotText() -> String? { snapshotText() }
         var hasRenderedSurfaceContent: Bool { latestFrame != nil }
 
+        /// Applies the app-wide terminal text size to this pane.
+        ///
+        /// A live surface is retuned in place: Ghostty's `set_font_size` rebuilds the font grid on the
+        /// existing surface, keeping the surface and its renderer resources. A surface built later takes
+        /// the size from `ensureMirrorIfNeeded` instead. The re-measurement afterwards is what carries a
+        /// zoom to the session: the new font yields a different column/row count, which the host announces
+        /// through the ordinary viewport-resize path.
+        func applyTerminalTextSize(_ size: TerminalTextSize) {
+            guard textSize != size else { return }
+            textSize = size
+            sendBindingAction("set_font_size:\(size.pointSize)")
+            reportViewportSizeIfNeeded()
+        }
+
         func surfaceCellSize() -> (columns: Int, rows: Int)? {
             ensureMirrorIfNeeded()
             updateSurfaceGeometry()
@@ -587,7 +606,7 @@
             searchField.setAccessibilityIdentifier("terminal-search-field")
 
             searchStatusLabel.translatesAutoresizingMaskIntoConstraints = false
-            searchStatusLabel.font = .systemFont(ofSize: 11)
+            searchStatusLabel.font = Typography.metadata
             searchStatusLabel.textColor = .secondaryLabelColor
             searchStatusLabel.alignment = .center
             searchStatusLabel.isHidden = true
@@ -651,6 +670,7 @@
                 config.surface.platform = host.platform
                 config.surface.scale_factor = host.scale_factor
                 config.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+                config.surface.font_size = Float(textSize.pointSize)
                 // Host-managed with no receive_buffer on purpose: the fork's HostManaged write path
                 // drops writes with no callback, so mouse reports the mirror encodes locally (its
                 // restored tracking flags collapse every mode to normal/X10) can never reach any
@@ -923,7 +943,7 @@
         }
 
         private func cellMetrics() -> CellMetrics {
-            let font = NSFont.monospacedSystemFont(ofSize: Self.defaultFontSize, weight: .regular)
+            let font = NSFont.monospacedSystemFont(ofSize: CGFloat(textSize.points), weight: .regular)
             let width = ceil(("W" as NSString).size(withAttributes: [.font: font]).width)
             let height = ceil(font.ascender - font.descender + font.leading)
             return CellMetrics(width: max(width, 1), height: max(height, 1))

@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// Read-only card in the workspace settings dialog listing the environment variables the daemon
 /// injects into every process and terminal of the workspace. The values are authoritative (computed
@@ -13,11 +14,11 @@ import AppKit
         let block = environment.keys.sorted().map { key in "\(key)=\(environment[key] ?? "")" }.joined(separator: "\n")
 
         let titleLabel = NSTextField(labelWithString: "Environment")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = Theme.text
 
         let subtitleLabel = NSTextField(labelWithString: "Injected into every process and terminal in this workspace.")
-        subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        subtitleLabel.font = Typography.metadata
         subtitleLabel.textColor = Theme.muted
         subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -29,7 +30,7 @@ import AppKit
         titleStack.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 0, right: 14)
 
         let body = NSTextField(labelWithString: block.isEmpty ? "(none)" : block)
-        body.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        body.font = Typography.monoMetadata
         body.textColor = block.isEmpty ? Theme.mutedSecondary : Theme.muted
         body.isSelectable = true
         body.maximumNumberOfLines = 0

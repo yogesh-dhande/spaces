@@ -1438,7 +1438,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let cell = NSTableCellView()
 
         let nameLabel = NSTextField(labelWithString: deviceSectionName(deviceID: deviceID).localizedUppercase)
-        nameLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        nameLabel.font = Typography.metadataTitle
         nameLabel.textColor = .secondaryLabelColor
         nameLabel.lineBreakMode = .byTruncatingTail
 
@@ -1458,7 +1458,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self, action: #selector(compatibilityActionClicked(_:)))
             button.bezelStyle = .inline
             button.controlSize = .small
-            button.font = .systemFont(ofSize: 11, weight: .semibold)
+            button.font = Typography.metadataTitle
             button.contentTintColor = .systemOrange
             button.identifier = NSUserInterfaceItemIdentifier("compat:\(deviceID)")
             button.setContentHuggingPriority(.required, for: .horizontal)
@@ -1474,7 +1474,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             switch deviceSectionStatus(deviceID: deviceID) {
             case .caption(let text, let isFailure):
                 let stateLabel = NSTextField(labelWithString: text)
-                stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                stateLabel.font = Typography.metadata
                 stateLabel.textColor = isFailure ? sidebarFailedIndicatorColor() : .tertiaryLabelColor
                 stateLabel.lineBreakMode = .byTruncatingTail
                 stateLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -1488,7 +1488,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 let button = NSButton(title: title, target: self, action: #selector(deviceRetryClicked(_:)))
                 button.bezelStyle = .inline
                 button.controlSize = .small
-                button.font = .systemFont(ofSize: 11, weight: .semibold)
+                button.font = Typography.metadataTitle
                 button.contentTintColor = sidebarFailedIndicatorColor()
                 button.identifier = NSUserInterfaceItemIdentifier("retry:\(deviceID)")
                 button.toolTip = offlineReason
@@ -1529,7 +1529,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
 
         let titleLabel = NSTextField(labelWithString: project.name)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
@@ -1652,7 +1652,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         cell.setAccessibilityIdentifier("sidebar-project-empty-\(project.id)")
 
         let hintLabel = NSTextField(labelWithString: "No workspaces yet")
-        hintLabel.font = NSFontManager.shared.convert(.systemFont(ofSize: 12), toHaveTrait: .italicFontMask)
+        hintLabel.font = NSFontManager.shared.convert(Typography.rowDetail, toHaveTrait: .italicFontMask)
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.lineBreakMode = .byTruncatingTail
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1710,7 +1710,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
-        nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        nameLabel.font = Typography.controlLabel
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
         nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
@@ -1865,7 +1865,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         if let renaming = renamingRuntimeTarget, renaming.workspaceID == workspace.id, renaming.item.key == item.key {
             let editor = NSTextField(string: item.title)
-            editor.font = .systemFont(ofSize: 11, weight: .regular)
+            editor.font = Typography.metadata
             editor.delegate = host
             editor.toolTip = "Press Return to save, Esc to cancel."
             editor.setAccessibilityIdentifier("sidebar-target-rename-input")
@@ -1894,7 +1894,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Name then secondary text, the two-part shape a process row already uses (see
             // `AppKitController.windowRow`): the name goes semibold once something trails it, so the
             // two halves stay tellable apart at the sidebar's one type size.
-            titleLabel.font = .systemFont(ofSize: 11, weight: item.detail == nil ? .regular : .semibold)
+            titleLabel.font = item.detail == nil ? Typography.metadata : Typography.metadataTitle
             titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1905,7 +1905,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // compresses before the name does, so a long title never squeezes out what the row is.
             if let detail = item.detail {
                 let detailLabel = NSTextField(labelWithString: detail)
-                detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                detailLabel.font = Typography.metadata
                 detailLabel.textColor = sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
                 detailLabel.lineBreakMode = .byTruncatingTail
                 detailLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
@@ -2160,7 +2160,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         icon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Typography.metadata
         label.textColor = sidebarMetadataTextColor(isSelected: isSelected)
         label.lineBreakMode = .byTruncatingTail
 
@@ -2631,7 +2631,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         // The window titlebar is hidden, so the app name lives here next to the logo.
         let appNameLabel = NSTextField(labelWithString: "Spaces")
-        appNameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        appNameLabel.font = Typography.sectionTitle
         appNameLabel.textColor = .labelColor
         appNameLabel.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -2685,16 +2685,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         bellIcon.setContentHuggingPriority(.required, for: .horizontal)
 
         let titleLabel = NSTextField(labelWithString: "Alerts")
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.font = Typography.controlLabel
         titleLabel.textColor = .labelColor
 
         let hintLabel = NSTextField(labelWithString: host.footerShortcutHint(for: .guiAlertsShortcut))
-        hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        hintLabel.font = Typography.caption
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         let badge = NSTextField(labelWithString: "")
-        badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
+        badge.font = Typography.monoBadgeStrong
         badge.textColor = sidebarFailedIndicatorColor()
         badge.alignment = .right
         badge.isBordered = false

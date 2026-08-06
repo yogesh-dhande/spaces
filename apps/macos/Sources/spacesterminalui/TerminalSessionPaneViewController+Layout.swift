@@ -18,24 +18,24 @@ extension TerminalSessionPaneViewController {
         contentView.setAccessibilityElement(true)
 
         titleLabel.stringValue = sessionID
-        titleLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        titleLabel.font = Typography.monoRowLabel
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        summaryLabel.font = .systemFont(ofSize: 13)
+        summaryLabel.font = Typography.body
         summaryLabel.textColor = .secondaryLabelColor
         summaryLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.translatesAutoresizingMaskIntoConstraints = false
         summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         summaryLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        stateLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        stateLabel.font = Typography.monoBody
         stateLabel.textColor = .secondaryLabelColor
         stateLabel.translatesAutoresizingMaskIntoConstraints = false
         stateLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stateLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        rendererLabel.font = .systemFont(ofSize: 12)
+        rendererLabel.font = Typography.rowDetail
         rendererLabel.textColor = .tertiaryLabelColor
         rendererLabel.translatesAutoresizingMaskIntoConstraints = false
         rendererLabel.lineBreakMode = .byTruncatingTail
@@ -43,12 +43,12 @@ extension TerminalSessionPaneViewController {
         rendererLabel.stringValue = rendererMode.statusSummary
 
         inputField.translatesAutoresizingMaskIntoConstraints = false
-        inputField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        inputField.font = Typography.monoBody
         inputField.placeholderString = "Send input to the session"
         inputField.target = self
         inputField.action = #selector(submitInputFromField)
 
-        inputStatusLabel.font = .systemFont(ofSize: 12)
+        inputStatusLabel.font = Typography.rowDetail
         inputStatusLabel.textColor = .secondaryLabelColor
         inputStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         inputStatusLabel.isHidden = true
@@ -78,7 +78,8 @@ extension TerminalSessionPaneViewController {
         outputView.isContinuousSpellCheckingEnabled = false
         outputView.isGrammarCheckingEnabled = false
         outputView.isAutomaticTextCompletionEnabled = false
-        outputView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        // Terminal content, not chrome: the fallback renderer follows the user's terminal text size.
+        outputView.font = .monospacedSystemFont(ofSize: CGFloat(terminalTextSize.points), weight: .regular)
         outputView.backgroundColor = .activeTheme(\.terminal.background)
         outputView.textColor = .activeTheme(\.terminal.foreground)
         outputView.drawsBackground = true
@@ -119,7 +120,7 @@ extension TerminalSessionPaneViewController {
         inputRowStackView.addArrangedSubview(inputField)
         inputRowStackView.addArrangedSubview(actionButtonStackView)
 
-        takeoverMessageLabel.font = .systemFont(ofSize: 13)
+        takeoverMessageLabel.font = Typography.body
         takeoverMessageLabel.textColor = .secondaryLabelColor
         takeoverMessageLabel.alignment = .center
         takeoverMessageLabel.lineBreakMode = .byWordWrapping

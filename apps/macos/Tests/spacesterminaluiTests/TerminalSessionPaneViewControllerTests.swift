@@ -120,6 +120,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         var searchDebugState = GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
         var activeOwnerClientIDValue: String?
         var debugSurfaceRefreshRequestCount = 0
+        var appliedTerminalTextSizes: [TerminalTextSize] = []
         func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
             attachCount += 1
             attachedModes.append(mode)
@@ -147,6 +148,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         func snapshotText() -> String? { snapshotTextValue }
         func sessionSnapshot() -> GhosttyTerminalSnapshot? { snapshotValue }
         func sessionSnapshotText() -> String? { sessionSnapshotTextValue ?? snapshotTextValue }
+        func applyTerminalTextSize(_ size: TerminalTextSize) { appliedTerminalTextSizes.append(size) }
         func copySelectionToPasteboard() -> Bool {
             copiedSelection = true
             return true
@@ -2471,6 +2473,59 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(host.pastedClipboard)
     }
 
+    /// Terminal zoom is a client-side display setting, so the keys work in a pane that owns nothing:
+    /// a viewer watching another client's session, showing the plain-text fallback rather than an
+    /// owner surface, still zooms. Every other Command shortcut stays refused there.
+    @MainActor func testTerminalZoomKeysWorkInAViewerPaneShowingTheTextFallback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let controller = makeGhosttyController(sessionID: "session-zoom-viewer", paths: paths, preferredAttachmentMode: .viewer)
+        var commands: [TerminalTextZoomCommand] = []
+        controller.terminalTextZoomAction = { commands.append($0) }
+
+        XCTAssertEqual(controller.visibleRenderer, .textView)
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_Equal, characters: "=")))
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_Equal, characters: "+", modifiers: [.command, .shift])))
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_Minus, characters: "-")))
+        XCTAssertFalse(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_0, characters: "0")))
+        XCTAssertFalse(controller.handleCommandKeyEquivalent(try keyEvent(keyCode: kVK_ANSI_C, characters: "c")))
+
+        XCTAssertEqual(commands, [.zoomIn, .zoomIn, .zoomOut])
+    }
+
+    /// An applied size reaches both renderers a pane can present: the plain-text fallback's font and
+    /// the live Ghostty surface. A host resolved after the size was applied is caught up on it, which
+    /// is what keeps a rebuilt surface from reverting to the config baseline.
+    @MainActor func testAppliedTerminalTextSizeReachesFallbackTextAndTheGhosttyHost() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-zoom-apply", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-zoom-apply", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(sessionID: "session-zoom-apply", paths: paths, host: host)
+
+        let zoomed = TerminalTextSize.default.applying(.zoomIn).applying(.zoomIn)
+        controller.applyTerminalTextSize(zoomed)
+        XCTAssertEqual(controller.outputView.font?.pointSize, CGFloat(zoomed.points))
+
+        controller.showEmbedded(focus: true)
+        XCTAssertEqual(host.appliedTerminalTextSizes.last, zoomed)
+    }
+
     @MainActor func testGhosttyOwnerControlVPastesImageAndConsumesTerminalKey() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -4060,6 +4115,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         func snapshotText() -> String? { nil }
         func sessionSnapshot() -> GhosttyTerminalSnapshot? { nil }
         func sessionSnapshotText() -> String? { nil }
+        func applyTerminalTextSize(_ size: TerminalTextSize) {}
         func copySelectionToPasteboard() -> Bool { false }
         func pasteClipboardContents() -> Bool { false }
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool { false }

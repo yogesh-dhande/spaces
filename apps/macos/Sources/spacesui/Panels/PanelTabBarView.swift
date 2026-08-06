@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 import systembridge
 
 /// The panel's single chrome row: flat tabs (title + close, accent underline on the
@@ -176,8 +177,8 @@ import systembridge
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
-                    onSelect: { [weak self] id in self?.onSelectTab?(id) },
-                    onClose: { [weak self] id in self?.onCloseTab?(id) }, onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
+                    onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
+                    onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
                     onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
         }
@@ -243,9 +244,8 @@ import systembridge
     private var widthConstraint: NSLayoutConstraint?
 
     init(
-        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void,
-        onClose: @escaping (String) -> Void, onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void,
-        onRenameCancel: @escaping (String) -> Void
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
+        onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
     ) {
         self.tabID = tabID
         self.onSelect = onSelect
@@ -261,7 +261,7 @@ import systembridge
         if isRenaming {
             let editor = NSTextField(string: title)
             editor.placeholderString = "Tab name"
-            editor.font = .systemFont(ofSize: 11)
+            editor.font = Typography.metadata
             editor.delegate = self
             editor.setAccessibilityIdentifier("panel-tab-rename-input")
             // The tab's own width bounds the editor; let it fill and compress inside it.
@@ -271,7 +271,7 @@ import systembridge
             titleView = editor
         } else {
             let titleLabel = NSTextField(labelWithString: title)
-            titleLabel.font = .systemFont(ofSize: 11, weight: isSelected ? .semibold : .regular)
+            titleLabel.font = isSelected ? Typography.metadataTitle : Typography.metadata
             titleLabel.textColor = isSelected ? Theme.text : Theme.muted
             titleLabel.lineBreakMode = .byTruncatingTail
             // Fill the tab and truncate when it shrinks; the tab width is the only cap.
@@ -322,9 +322,7 @@ import systembridge
         selectionChip.translatesAutoresizingMaskIntoConstraints = false
         selectionChip.wantsLayer = true
         selectionChip.layer?.cornerRadius = 4
-        bindAppearanceReactiveLayer(selectionChip) { view in
-            view.layer?.backgroundColor = isSelected ? Theme.chipBg.cgColor : NSColor.clear.cgColor
-        }
+        bindAppearanceReactiveLayer(selectionChip) { view in view.layer?.backgroundColor = isSelected ? Theme.chipBg.cgColor : NSColor.clear.cgColor }
         addSubview(selectionChip)
         addSubview(stack)
 

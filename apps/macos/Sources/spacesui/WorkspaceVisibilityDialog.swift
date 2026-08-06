@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// One row in the workspace visibility dialog table. Visibility is persisted as
 /// the workspace's `isHidden` flag; the checkbox shows `!isHidden`.
@@ -51,7 +52,7 @@ struct WorkspaceVisibilityRow: Sendable, Equatable {
         }
         let label = NSTextField(labelWithString: text)
         label.lineBreakMode = .byTruncatingTail
-        label.font = .systemFont(ofSize: 12)
+        label.font = Typography.rowDetail
         label.textColor = columnID == Self.titleColumn ? .labelColor : .secondaryLabelColor
         return label
     }
