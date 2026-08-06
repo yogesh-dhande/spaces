@@ -89,7 +89,7 @@ import spacesterminalcore
 /// there is no diffing to gain, and the row's two gestures read straight off an `NSView` — right-click
 /// opens the context menu through the standard `menu` property, and double-click opens the editor — while
 /// the enable switch and the contextual action keep their own click handling as ordinary subviews.
-@MainActor final class AutomationsTableRowView: NSView {
+@MainActor final class AutomationsTableRowView: NSView, NSGestureRecognizerDelegate {
     private let onDoubleClick: () -> Void
 
     private var isHovered = false {
@@ -105,7 +105,28 @@ import spacesterminalcore
         wantsLayer = true
         layer?.cornerRadius = 6
         translatesAutoresizingMaskIntoConstraints = false
+        // A recognizer rather than a `mouseDown` override so the double-click is genuinely row-wide: it
+        // observes events for the whole subtree, where a raw override only sees what the responder chain
+        // happens to bubble up. Clicks that land on a control (the enable switch, the action button) are
+        // refused below so a double-click there stays the control's own interaction.
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(rowDoubleClicked))
+        doubleClick.numberOfClicksRequired = 2
+        doubleClick.delaysPrimaryMouseButtonEvents = false
+        doubleClick.delegate = self
+        addGestureRecognizer(doubleClick)
         updateBackground()
+    }
+
+    @objc private func rowDoubleClicked() { onDoubleClick() }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        let location = convert(event.locationInWindow, from: nil)
+        var hit = hitTest(location)
+        while let view = hit, view !== self {
+            if view is NSControl { return false }
+            hit = view.superview
+        }
+        return true
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
@@ -120,13 +141,6 @@ import spacesterminalcore
     override func mouseEntered(with event: NSEvent) { isHovered = true }
 
     override func mouseExited(with event: NSEvent) { isHovered = false }
-
-    /// The table has no selection, so a single click deliberately does nothing rather than acting as a
-    /// weaker Edit; the row's own gesture is the double-click that opens the editor.
-    override func mouseDown(with event: NSEvent) {
-        guard event.clickCount == 2 else { return }
-        onDoubleClick()
-    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

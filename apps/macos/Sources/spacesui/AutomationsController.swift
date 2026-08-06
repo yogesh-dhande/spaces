@@ -27,6 +27,8 @@ import workspacecore
 
     /// Which tab is shown. Persisted across re-renders so an overview refresh keeps the user's place.
     private var selectedTab: Tab = .automations
+    /// Slow re-render beat keeping the visible pane's relative times fresh; see `armRelativeTimeRefresh`.
+    private var relativeTimeRefreshTimer: Timer?
     /// The device filter, or nil for "All devices". Persisted across re-renders.
     private var deviceFilterID: String?
 
@@ -105,6 +107,22 @@ import workspacecore
         }
 
         host.showScrollableDetailStack(stack)
+        armRelativeTimeRefresh()
+    }
+
+    /// Re-renders the visible pane on a slow beat so its relative times (next-run countdowns, running
+    /// durations) track the clock between overview refreshes; a single render's snapshot would otherwise
+    /// read "in 4 m" indefinitely on an idle system. The timer rides the default run-loop mode, so an open
+    /// context menu (which runs the tracking mode) pauses the rebuild instead of having its menu torn down.
+    /// Self-invalidating: the pane's own rebuild re-arms it, and a switch to any other pane lets it lapse.
+    private func armRelativeTimeRefresh() {
+        relativeTimeRefreshTimer?.invalidate()
+        relativeTimeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, host.showingAutomations else { return }
+                showAutomationsDetail()
+            }
+        }
     }
 
     // MARK: - Header & tabs
