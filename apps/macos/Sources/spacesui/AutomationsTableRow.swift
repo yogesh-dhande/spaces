@@ -93,6 +93,7 @@ import spacesterminalcore
 /// the enable switch and the contextual action keep their own click handling as ordinary subviews.
 @MainActor final class AutomationsTableRowView: NSView, NSGestureRecognizerDelegate {
     private let onDoubleClick: () -> Void
+    private var hoverTrackingArea: NSTrackingArea?
 
     private var isHovered = false {
         didSet {
@@ -136,11 +137,14 @@ import spacesterminalcore
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
 
+    // Replaces only this view's own hover area: AppKit's tooltip manager keeps its own tracking area on
+    // this view (installed by setting `toolTip`), and removing every area would silently kill the tooltip.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(
-            NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil))
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        hoverTrackingArea = area
+        addTrackingArea(area)
     }
 
     override func mouseEntered(with event: NSEvent) { isHovered = true }
