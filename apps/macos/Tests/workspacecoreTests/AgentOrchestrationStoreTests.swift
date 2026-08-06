@@ -286,6 +286,28 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "remote-child"), ["local-A"])
     }
 
+    /// A profile written before agent rows could be renamed keeps every row it had — label, note, and
+    /// detected kind — with no rename stored, so each row still reads as the label its agent reports.
+    /// Renaming then works on the carried-forward row.
+    func testMigrationFromV11CarriesAgentRowForwardAndEnablesRename() throws {
+        let dir = try makeTempDirectory()
+        let dbPath = dir.appendingPathComponent("v11.db").path
+        try createV11Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "agent-session")
+
+        // Opening the store runs the v11→v12 migration in place.
+        let store = try SQLiteStore(path: dbPath)
+
+        let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
+        XCTAssertEqual(migrated.id, "agent-1")
+        XCTAssertEqual(migrated.label, "Claude Code CLI")
+        XCTAssertEqual(migrated.note, "carried")
+        XCTAssertEqual(migrated.detectedAgentKind, "claude")
+        XCTAssertNil(migrated.userLabel)
+
+        XCTAssertTrue(try store.setAgentSessionUserLabel(id: "agent-1", userLabel: "Reviewer"))
+        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
+    }
+
     // MARK: - Shared orchestration rows (profile command + Device API)
 
     func testAgentSessionRowsCarryNoteProjectContextAndReadiness() throws {
@@ -493,6 +515,43 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
             if let errorMessage { sqlite3_free(errorMessage) }
             XCTFail("Failed seeding v3 fixture: \(message)")
+            return
+        }
+    }
+
+    /// Writes a minimal schema-v11 database (`migration_state` at 11 and the pre-rename `agent_sessions`
+    /// shape, plus the `runtime_targets` table the agent read joins) with one annotated, kind-detected
+    /// agent row. The migrator upgrades this fixture to v12 (adding `agent_sessions.user_label`) on open;
+    /// the test asserts the pre-existing row survives with no rename stored.
+    private func createV11Database(at path: String, workspaceID: String, agentID: String, terminalSessionID: String) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let db = handle else {
+            XCTFail("Failed opening fixture database at \(path)")
+            return
+        }
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+            INSERT INTO migration_state(current_version) VALUES (11);
+            CREATE TABLE runtime_targets (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
+              app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_sessions (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+              status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+              claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, detected_agent_kind TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            INSERT INTO agent_sessions(
+              id, workspace_id, provider, label, status, terminal_session_id, note, detected_agent_kind, created_at, updated_at)
+            VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'Claude Code CLI', 'spinning', '\(terminalSessionID)', 'carried', 'claude', 'now', 'now');
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
+            if let errorMessage { sqlite3_free(errorMessage) }
+            XCTFail("Failed seeding v11 fixture: \(message)")
             return
         }
     }

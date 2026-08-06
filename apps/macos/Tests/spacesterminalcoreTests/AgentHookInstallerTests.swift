@@ -627,7 +627,8 @@
             try install([.claudeCode], home: home)
 
             let contents = read(home.appendingPathComponent(".claude/settings.json"))
-            #expect(contents.contains("'\(spacesCLIPath(home: home))' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())"))
+            #expect(
+                contents.contains("'\(spacesCLIPath(home: home))' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())"))
             #expect(!contents.contains("\"command\" : \"spaces agent signal"))
         }
 

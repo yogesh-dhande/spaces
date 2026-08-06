@@ -1,7 +1,7 @@
 import Foundation
 import Testing
-
 import spacesterminalcore
+
 @testable import spacesui
 
 @Suite struct MCPClientConfigurationTests {
@@ -69,8 +69,7 @@ import spacesterminalcore
     @Test func clientSnippetsMatchConfiguration() {
         #expect(CodingAgent.allCases == [.claudeCode, .codex, .opencode])
         #expect(
-            CodingAgent.claudeCode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces")
-                == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
+            CodingAgent.claudeCode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
         #expect(CodingAgent.codex.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))
         #expect(CodingAgent.opencode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces").contains("\"type\": \"local\""))
     }

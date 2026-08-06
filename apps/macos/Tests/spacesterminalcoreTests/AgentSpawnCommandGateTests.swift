@@ -11,8 +11,7 @@ final class AgentSpawnCommandGateTests: XCTestCase {
             ("/usr/local/bin/claude -c", .claudeCode), ("opencode", .opencode), ("vim", nil), ("", nil), ("env", nil),
         ]
         for testCase in cases {
-            XCTAssertEqual(
-                CodingAgent.matching(command: testCase.command), testCase.expected, "matching(command: \"\(testCase.command)\")")
+            XCTAssertEqual(CodingAgent.matching(command: testCase.command), testCase.expected, "matching(command: \"\(testCase.command)\")")
         }
     }
 

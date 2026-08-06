@@ -27,7 +27,8 @@ extension SQLiteStore {
         agent_sessions.note,
         agent_sessions.created_at,
         agent_sessions.updated_at,
-        COALESCE(agent_sessions.detected_agent_kind, '')
+        COALESCE(agent_sessions.detected_agent_kind, ''),
+        COALESCE(agent_sessions.user_label, '')
         """
 
     /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
@@ -112,6 +113,13 @@ extension SQLiteStore {
           updated_at = agent_sessions.updated_at
         """
 
+    /// Neither upsert writes `user_label`: it is absent from the INSERT column list and from both conflict
+    /// clauses, so a lifecycle, hook, or detection write can neither set nor erase a user's rename, which
+    /// is what keeps a rename stable while the agent keeps signaling. Every write to the column goes
+    /// through `setAgentSessionUserLabel`, and only two callers reach it: the rename command, and claim
+    /// formation clearing a rename off an agent a configured launcher has taken over naming.
+    /// `AgentWindowRecord.userLabel` is therefore read-only here: a record carrying one is not rejected,
+    /// it simply does not carry that field into the table.
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
@@ -239,6 +247,20 @@ extension SQLiteStore {
     /// touch it or a stale blocked/finished event would appear to have just occurred.
     public func setAgentSessionNote(id: String, note: String?) throws {
         try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
+    }
+
+    /// Sets (or, with a nil `userLabel`, clears) the user-authored name of an agent session, writing that
+    /// column and nothing else. It is the only writer of `user_label`, which is what makes a rename
+    /// survive the hook and detection writes that keep `label` current. `updated_at` is deliberately left
+    /// alone for the same reason `setAgentSessionNote` leaves it: it marks when the row entered its current
+    /// lifecycle state (clients read it as an alert's event time), and renaming is not a transition.
+    /// Returns whether a row matched, so the rename can fail loudly on an unknown id.
+    @discardableResult public func setAgentSessionUserLabel(id: String, userLabel: String?) throws -> Bool {
+        try withImmediateTransaction {
+            try execute(sql: "UPDATE agent_sessions SET user_label = NULLIF(?, '') WHERE id = ?", bindings: [userLabel ?? "", id])
+            guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
+            return changed > 0
+        }
     }
 
     /// Records the coding-agent kind foreground detection classified for an agent session, writing that
@@ -719,7 +741,7 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 18 else { return nil }
+        guard row.count >= 19 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
@@ -728,10 +750,10 @@ extension SQLiteStore {
             runtimeTargetID: row[4], app: row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5], name: row[6],
             detail: row[7], trackingID: resolvedTrackingID)
         return AgentWindowRecord(
-            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
-            terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
-            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14],
-            detectedAgentKind: row[17].isEmpty ? nil : row[17], createdAt: row[15], updatedAt: row[16])
+            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], userLabel: row[18].isEmpty ? nil : row[18],
+            runtimeTargetID: row[4].isEmpty ? nil : row[4], terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10],
+            claimedLauncherID: row[11].isEmpty ? nil : row[11], claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status,
+            note: row[14].isEmpty ? nil : row[14], detectedAgentKind: row[17].isEmpty ? nil : row[17], createdAt: row[15], updatedAt: row[16])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {

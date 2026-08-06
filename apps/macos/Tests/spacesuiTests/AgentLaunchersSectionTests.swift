@@ -1,8 +1,8 @@
 import AppKit
 import Testing
+import spacesterminalcore
 import workspacecore
 
-import spacesterminalcore
 @testable import spacesui
 
 @MainActor @Suite struct AgentLaunchersSectionTests {

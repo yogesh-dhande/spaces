@@ -34,8 +34,7 @@ extension CodingAgent {
         case .claudeCode:
             return [
                 CodingAgentDetectionVariant(
-                    kind: .claudeCode, executableNames: ["claude-code"], nodeScriptNames: ["claude-code", "claude-code.js"],
-                    nodePathFragments: []),
+                    kind: .claudeCode, executableNames: ["claude-code"], nodeScriptNames: ["claude-code", "claude-code.js"], nodePathFragments: []),
                 CodingAgentDetectionVariant(
                     kind: .claude, executableNames: ["claude"], nodeScriptNames: ["claude", "claude.js"], nodePathFragments: []),
             ]
