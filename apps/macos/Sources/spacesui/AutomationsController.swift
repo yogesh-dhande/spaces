@@ -139,12 +139,9 @@ import workspacecore
 
     // MARK: - Header & tabs
 
+    /// The pane's controls row. It carries no page title: the tab control directly below it already names
+    /// the pane, and the sidebar row it was opened from names it again.
     private func makeHeaderRow(inputs: [AutomationDeviceInput]) -> NSView {
-        let title = NSTextField(labelWithString: "Automations")
-        title.font = Typography.pageTitle
-        title.textColor = host.sidebarPrimaryTextColor(isSelected: false)
-        title.setContentHuggingPriority(.required, for: .horizontal)
-
         let devicePopUp = NSPopUpButton()
         devicePopUp.addItem(withTitle: "All devices")
         devicePopUp.itemArray.last?.representedObject = nil
@@ -161,7 +158,7 @@ import workspacecore
             title: "New automation", symbol: "plus", tooltip: "Create an automation", action: #selector(newAutomationTapped), primary: true)
         newButton.target = self
 
-        let row = NSStackView(views: [title, NSView(), devicePopUp, newButton])
+        let row = NSStackView(views: [NSView(), devicePopUp, newButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
@@ -220,9 +217,10 @@ import workspacecore
         table.edgeInsets = NSEdgeInsets(top: 6, left: sideInset, bottom: 6, right: sideInset)
         table.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = makeAutomationHeaderLine(showDevice: showDevice)
+        let grid = AutomationTableGrid()
+        let header = makeAutomationHeaderLine(grid: grid, showDevice: showDevice)
         let divider = makeTableDivider()
-        let lines: [NSView] = [header, divider] + rows.map { makeAutomationRow($0, showDevice: showDevice, now: now) }
+        let lines: [NSView] = [header, divider] + rows.map { makeAutomationRow($0, grid: grid, showDevice: showDevice, now: now) }
         for line in lines { table.addArrangedSubview(line) }
         table.setCustomSpacing(4, after: header)
         table.setCustomSpacing(4, after: divider)
@@ -231,11 +229,13 @@ import workspacecore
         // Leading alignment gives arranged lines their intrinsic width, so pin each to the table's full
         // width (minus its edge insets) to keep the grid's trailing columns right-aligned.
         for line in lines { line.widthAnchor.constraint(equalTo: table.widthAnchor, constant: -sideInset * 2).isActive = true }
+        // Every line now shares the table's view hierarchy, so the rows can be tied to the header's columns.
+        grid.activateColumnAlignment()
         stack.addArrangedSubview(card)
         host.constrainFormFieldToFillWidth(card, in: stack)
     }
 
-    private func makeAutomationHeaderLine(showDevice: Bool) -> NSView {
+    private func makeAutomationHeaderLine(grid: AutomationTableGrid, showDevice: Bool) -> NSView {
         func header(_ text: String, alignment: NSTextAlignment = .left) -> NSTextField {
             let label = NSTextField(labelWithString: text)
             label.font = Typography.metadataTitle
@@ -244,14 +244,9 @@ import workspacecore
             label.lineBreakMode = .byTruncatingTail
             return label
         }
-        let line = AutomationTableColumns.layOut(
+        return grid.makeHeaderLine(
             status: RowPrimitives.statusSlot(), name: header("Name"), schedule: header("Schedule"), nextRun: header("Next run", alignment: .right),
-            lastResult: header("Last result"), device: showDevice ? header("Device") : nil, toggle: header("On"),
-            action: header("", alignment: .right))
-        // The same inset each row applies between its own edges and its columns, so header and rows share
-        // one grid origin.
-        line.edgeInsets = NSEdgeInsets(top: 0, left: AutomationTableColumns.horizontalInset, bottom: 0, right: AutomationTableColumns.horizontalInset)
-        return line
+            device: showDevice ? header("Device") : nil, toggle: header("On"), action: header("", alignment: .right))
     }
 
     private func makeTableDivider() -> NSView {
@@ -262,7 +257,7 @@ import workspacecore
         return divider
     }
 
-    private func makeAutomationRow(_ row: AutomationTableRow, showDevice: Bool, now: Date) -> NSView {
+    private func makeAutomationRow(_ row: AutomationTableRow, grid: AutomationTableGrid, showDevice: Bool, now: Date) -> NSView {
         let automation = row.automation
         let identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
 
@@ -281,11 +276,6 @@ import workspacecore
         name.font = Typography.rowLabel
         name.textColor = Theme.text
         name.lineBreakMode = .byTruncatingTail
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let nameColumn = NSStackView(views: [name, makeKindChip(automation), NSView()])
-        nameColumn.orientation = .horizontal
-        nameColumn.alignment = .centerY
-        nameColumn.spacing = 6
 
         let schedule = AutomationsViewModel.scheduleDescription(for: automation)
         var scheduleViews: [NSView] = [makeCellLabel(schedule.summary, font: Typography.rowDetail, color: Theme.text)]
@@ -305,18 +295,9 @@ import workspacecore
             AutomationsViewModel.nextRunDescription(for: automation, now: now), font: Self.tabularFigures(Typography.rowDetail), color: Theme.muted)
         nextRun.alignment = .right
 
-        let result = AutomationsViewModel.lastResultDescription(for: row.latestRun, now: now)
-        let lastResult = makeCellLabel(
-            result.text, font: Self.tabularFigures(Typography.rowDetail), color: result.isFailure ? Theme.statusFailed : Theme.muted)
-
-        // Registered after both labels exist: the beat rewrites exactly these two strings in place. The
-        // failure color never changes with the clock, so only the text is refreshed. Strong captures are
-        // fine: the refresher list is replaced on every render, releasing the previous rows.
-        let latestRun = row.latestRun
-        relativeTimeLabelRefreshers.append { now in
-            nextRun.stringValue = AutomationsViewModel.nextRunDescription(for: automation, now: now)
-            lastResult.stringValue = AutomationsViewModel.lastResultDescription(for: latestRun, now: now).text
-        }
+        // The beat rewrites exactly this string in place. Strong captures are fine: the refresher list is
+        // replaced on every render, releasing the previous rows.
+        relativeTimeLabelRefreshers.append { now in nextRun.stringValue = AutomationsViewModel.nextRunDescription(for: automation, now: now) }
 
         let enabledSwitch = NSSwitch()
         enabledSwitch.controlSize = .small
@@ -331,16 +312,17 @@ import workspacecore
         toggleColumn.spacing = 0
 
         let device = showDevice ? makeCellLabel(row.deviceName, font: Typography.rowDetail, color: Theme.muted) : nil
-        let line = AutomationTableColumns.layOut(
-            status: RowPrimitives.statusSlot(RowPrimitives.statusDot(Self.statusDotKind(for: row))), name: nameColumn, schedule: scheduleColumn,
-            nextRun: nextRun, lastResult: lastResult, device: device, toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
+        let line = grid.makeRowLine(
+            status: RowPrimitives.statusSlot(RowPrimitives.statusDot(Self.statusDotKind(for: row))), name: name, schedule: scheduleColumn,
+            nextRun: nextRun, device: device, toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
 
+        // Pinned edge to edge: the line carries the grid's own horizontal inset, the same one the header
+        // applies, so both start their columns at the same origin.
         rowView.addSubview(line)
         NSLayoutConstraint.activate([
-            line.leadingAnchor.constraint(equalTo: rowView.leadingAnchor, constant: AutomationTableColumns.horizontalInset),
-            line.trailingAnchor.constraint(equalTo: rowView.trailingAnchor, constant: -AutomationTableColumns.horizontalInset),
+            line.leadingAnchor.constraint(equalTo: rowView.leadingAnchor), line.trailingAnchor.constraint(equalTo: rowView.trailingAnchor),
             line.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
-            rowView.heightAnchor.constraint(equalToConstant: AutomationTableColumns.rowHeight),
+            rowView.heightAnchor.constraint(equalToConstant: AutomationTableGrid.rowHeight),
         ])
         return rowView
     }
@@ -366,30 +348,6 @@ import workspacecore
         button.toolTip = tooltip
         button.identifier = identifier
         return button
-    }
-
-    /// The automation's kind as a small chip beside its name: accent-tinted for an agent automation,
-    /// neutral for a script one.
-    private func makeKindChip(_ automation: TerminalServiceAutomationSummary) -> NSView {
-        let isAgent = AutomationKind(rawValue: automation.kind) == .agent
-        let chip = ColoredBackgroundView()
-        chip.fillColor = isAgent ? Theme.accentTint : Theme.chipBg
-        chip.cornerRadius = 4
-        chip.translatesAutoresizingMaskIntoConstraints = false
-        chip.setContentHuggingPriority(.required, for: .horizontal)
-        chip.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let label = NSTextField(labelWithString: AutomationsViewModel.kindLabel(for: automation))
-        label.font = Typography.caption
-        label.textColor = isAgent ? Theme.accentStrong : Theme.muted
-        label.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -5),
-            label.topAnchor.constraint(equalTo: chip.topAnchor, constant: 1), label.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -1),
-        ])
-        return chip
     }
 
     private func makeCellLabel(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
@@ -465,7 +423,7 @@ import workspacecore
     private func makeRunCard(_ row: AutomationRunTableRow) -> NSView {
         let run = row.run
         let status = AutomationRunStatus(rawValue: run.status)
-        let statusIcon = statusImageView(forRunStatus: run.status)
+        let statusIcon = statusIndicator(forRunStatus: run.status)
 
         let name = NSTextField(labelWithString: run.automationName ?? "Automation")
         name.font = Typography.rowLabel
@@ -528,11 +486,14 @@ import workspacecore
         topRow.spacing = 8
 
         let content: NSStackView
-        // Attributed coding agents (an agent-kind run's own agent, plus any a script-kind run's command
-        // spawned): one clickable chip each, its status dot reusing the app's shared agent-state language.
-        // The chips stack below the top row so their own click actions stay clear of the row gesture.
-        if !run.attributedAgents.isEmpty {
-            let chips = run.attributedAgents.map { makeAgentChip(deviceID: row.deviceID, agent: $0) }
+        // Attributed coding agents beyond the run's own session: one clickable chip each, its status dot
+        // reusing the app's shared agent-state language. The chips stack below the top row so their own
+        // click actions stay clear of the row gesture. The run's own session is left out because it is what
+        // the card already is: the title names it (an agent automation names its agent) and clicking the
+        // row opens that same terminal, so a chip for it would just repeat the row.
+        let additionalAgents = run.attributedAgents.filter { $0.terminalSessionID != run.terminalSessionID }
+        if !additionalAgents.isEmpty {
+            let chips = additionalAgents.map { makeAgentChip(deviceID: row.deviceID, agent: $0) }
             let chipsRow = NSStackView(views: chips + [NSView()])
             chipsRow.orientation = .horizontal
             chipsRow.alignment = .centerY
@@ -632,7 +593,19 @@ import workspacecore
         host.constrainFormFieldToFillWidth(empty, in: stack)
     }
 
-    private func statusImageView(forRunStatus rawStatus: String?) -> NSImageView {
+    /// The run's leading status indicator. A run in flight gets a live spinner rather than a glyph: a static
+    /// play symbol in a card that is already running reads as a button that starts it.
+    private func statusIndicator(forRunStatus rawStatus: String?) -> NSView {
+        if rawStatus.flatMap(AutomationRunStatus.init(rawValue:)) == .running {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isIndeterminate = true
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 16), spinner.heightAnchor.constraint(equalToConstant: 16)])
+            spinner.startAnimation(nil)
+            return spinner
+        }
         let icon = NSImageView()
         let (symbol, color) = Self.statusSymbol(forRunStatus: rawStatus, host: host)
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: rawStatus ?? "no runs")
@@ -646,6 +619,8 @@ import workspacecore
     /// carry status per the GUI rules; the tints match the sidebar running/failed/idle indicators.
     private static func statusSymbol(forRunStatus rawStatus: String?, host: AppKitController) -> (String, NSColor) {
         switch rawStatus.flatMap(AutomationRunStatus.init(rawValue:)) {
+        // A run in flight is drawn as a spinner by `statusIndicator` and never asks for a glyph; the case
+        // exists to keep the mapping total.
         case .running: ("play.circle.fill", host.sidebarRunningIndicatorColor())
         case .queued: ("clock", host.sidebarIdleIndicatorColor())
         case .succeeded: ("checkmark.circle.fill", host.sidebarRunningIndicatorColor())
@@ -673,9 +648,12 @@ import workspacecore
         return "started \(relativeFormatter.localizedString(for: date, relativeTo: Date()))"
     }
 
+    /// How long an ended run took. A run still going reports nothing: "took 3 m" alongside its own live
+    /// spinner would claim a total it has not reached, and "started 3 m ago" already carries that fact.
     private func durationDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
-        guard let startISO = run.startedAt, let start = Self.iso8601Formatter.date(from: startISO) else { return "" }
-        let end = run.endedAt.flatMap { Self.iso8601Formatter.date(from: $0) } ?? Date()
+        guard let startISO = run.startedAt, let start = Self.iso8601Formatter.date(from: startISO), let endISO = run.endedAt,
+            let end = Self.iso8601Formatter.date(from: endISO)
+        else { return "" }
         let interval = max(0, end.timeIntervalSince(start))
         return durationFormatter.string(from: interval).map { "took \($0)" } ?? ""
     }

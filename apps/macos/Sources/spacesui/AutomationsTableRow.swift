@@ -1,13 +1,20 @@
 import AppKit
 import spacesterminalcore
 
-/// The shared column grid the Automations pane's table lays its header and every row out on. The columns
-/// after the name are fixed width so the lines align without an `NSTableView`; the name column absorbs the
-/// remaining width and truncates last.
-@MainActor enum AutomationTableColumns {
+/// The shared column grid the Automations pane's table lays its header and every row out on.
+///
+/// The header owns the grid. It is built first and is the only line whose columns are sized by their own
+/// constraints; every row line then pins each of its columns to the width of the matching header column, so
+/// there is exactly one width solution in the table and the lines cannot drift apart. Sizing a line
+/// independently does not work here: a line is an `NSStackView`, whose nested flexible columns leave the
+/// solver free ties to break, and it breaks them differently per line (visibly so after a window resize).
+///
+/// `distribution` is `.fill` on every line for the same reason. The default `.gravityAreas` lays views out
+/// in gravity areas without forcing them to tile the line's pinned width, which leaves the leftover width
+/// unattributed and the columns free to slide.
+@MainActor final class AutomationTableGrid {
     static let schedule: CGFloat = 180
     static let nextRun: CGFloat = 88
-    static let lastResult: CGFloat = 104
     static let device: CGFloat = 96
     static let toggle: CGFloat = 36
     static let action: CGFloat = 88
@@ -18,64 +25,100 @@ import spacesterminalcore
     /// Horizontal breathing room between the table's card edge and its first and last columns.
     static let horizontalInset: CGFloat = 6
 
-    /// Lays one table line out on the grid. `device` is nil when the table shows a single device and the
-    /// column is dropped from every line at once.
-    static func layOut(
-        status: NSView, name: NSView, schedule: NSView, nextRun: NSView, lastResult: NSView, device: NSView?, toggle: NSView, action: NSView
-    ) -> NSStackView {
-        // The three widest data columns yield before the name column does: each holds its preferred width
-        // only while the name keeps its floor, and they give way in a fixed order (schedule first, then
-        // last-result, then device) so every line compresses identically and the grid stays aligned. With
-        // the device column shown, the preferred widths alone exceed a default-width window's row, so
-        // without this give the flexible name column would be the one to collapse.
-        flexWidth(schedule, preferred: self.schedule, minimum: 120, yieldOrder: 0)
-        fixWidth(nextRun, self.nextRun)
-        flexWidth(lastResult, preferred: self.lastResult, minimum: 88, yieldOrder: 1)
-        if let device { flexWidth(device, preferred: self.device, minimum: 78, yieldOrder: 2) }
-        fixWidth(toggle, self.toggle)
-        fixWidth(action, self.action)
+    /// The header's column views in line order, which every row's columns are matched against.
+    private var headerColumns: [NSView] = []
+    /// Row-to-header width equalities, held until `activateColumnAlignment()`. A constraint between two
+    /// views needs a common ancestor to install on, and a line has none until it joins the table stack.
+    private var pendingAlignment: [NSLayoutConstraint] = []
+
+    /// Builds the header line and fixes the grid to it. `device` is nil when the table shows a single
+    /// device and the column is dropped from every line at once. Call once, before any row line.
+    func makeHeaderLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView)
+        -> NSStackView
+    {
+        // The flexible columns hold their preferred width only while the name column keeps its floor, and
+        // give way before it does. With the device column shown, the preferred widths alone exceed a
+        // default-width window's line, so without this give the name column would be the one to collapse.
+        flexWidth(schedule, preferred: Self.schedule, minimum: 120)
+        fixWidth(nextRun, Self.nextRun)
+        if let device { flexWidth(device, preferred: Self.device, minimum: 78) }
+        fixWidth(toggle, Self.toggle)
+        fixWidth(action, Self.action)
 
         name.translatesAutoresizingMaskIntoConstraints = false
-        name.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The name column is the only one with no upper bound, so it absorbs whatever the others leave and
+        // truncates rather than pushing the grid.
+        name.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+        name.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         // Outranks the flexible columns' preferred widths (so they shrink first) while staying below
         // required (so an impossibly narrow pane degrades without unsatisfiable-constraint breakage).
-        let minimumName = name.widthAnchor.constraint(greaterThanOrEqualToConstant: nameMinimum)
+        let minimumName = name.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.nameMinimum)
         minimumName.priority = NSLayoutConstraint.Priority(900)
         minimumName.isActive = true
 
-        var views: [NSView] = [status, name, schedule, nextRun, lastResult]
-        if let device { views.append(device) }
-        views.append(contentsOf: [toggle, action])
+        headerColumns = Self.columnOrder(
+            status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle, action: action)
+        return Self.makeLine(headerColumns)
+    }
 
-        let line = NSStackView(views: views)
+    /// Builds one row line on the grid the header established.
+    func makeRowLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView) -> NSStackView
+    {
+        let columns = Self.columnOrder(
+            status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle, action: action)
+        precondition(columns.count == headerColumns.count, "row line must have the same columns as the header line")
+        for (column, headerColumn) in zip(columns, headerColumns) {
+            column.translatesAutoresizingMaskIntoConstraints = false
+            // The header equality owns this column's width outright: intrinsic-size priorities are pushed
+            // below it so a short label cannot hug the column narrower than the grid, and a long one
+            // truncates instead of widening it.
+            column.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+            column.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+            pendingAlignment.append(column.widthAnchor.constraint(equalTo: headerColumn.widthAnchor))
+        }
+        return Self.makeLine(columns)
+    }
+
+    /// Ties the rows to the header. Call once every line built here is installed in the pane's table stack.
+    func activateColumnAlignment() {
+        NSLayoutConstraint.activate(pendingAlignment)
+        pendingAlignment = []
+    }
+
+    private static func columnOrder(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView)
+        -> [NSView]
+    {
+        var columns: [NSView] = [status, name, schedule, nextRun]
+        if let device { columns.append(device) }
+        columns.append(contentsOf: [toggle, action])
+        return columns
+    }
+
+    private static func makeLine(_ columns: [NSView]) -> NSStackView {
+        let line = NSStackView(views: columns)
         line.orientation = .horizontal
         line.alignment = .centerY
+        line.distribution = .fill
         line.spacing = spacing
+        line.edgeInsets = NSEdgeInsets(top: 0, left: horizontalInset, bottom: 0, right: horizontalInset)
         line.translatesAutoresizingMaskIntoConstraints = false
         return line
     }
 
-    private static func fixWidth(_ view: NSView, _ width: CGFloat) {
+    private func fixWidth(_ view: NSView, _ width: CGFloat) {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.setContentHuggingPriority(.required, for: .horizontal)
         view.setContentCompressionResistancePriority(.required, for: .horizontal)
         view.widthAnchor.constraint(equalToConstant: width).isActive = true
     }
 
-    /// A column that prefers `preferred` but shrinks toward `minimum` when the row runs out of room.
-    /// A lower `yieldOrder` gives way first; the priorities all sit below the name column's floor (900),
-    /// which is what makes these columns yield before the name does. Identical constraints on every line
-    /// mean identical solutions, so the columns stay aligned across the whole table.
-    private static func flexWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat, yieldOrder: Int) {
+    /// A column that prefers `preferred` but shrinks toward `minimum` when the line runs out of room.
+    private func flexWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat) {
         view.translatesAutoresizingMaskIntoConstraints = false
-        // The explicit constraints own this column's width outright: intrinsic-size priorities are pushed
-        // below every width constraint so a short label cannot hug the column narrower than the shared
-        // grid, and a long one cannot resist compression past the floor (it truncates instead).
         view.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         let preferredWidth = view.widthAnchor.constraint(equalToConstant: preferred)
-        preferredWidth.priority = NSLayoutConstraint.Priority(Float(700 + yieldOrder * 10))
+        preferredWidth.priority = NSLayoutConstraint.Priority(700)
         let floor = view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum)
         // Below the name column's floor (900): when even the floors cannot all hold, these give way and
         // the name is the last column standing, not the first to collapse.

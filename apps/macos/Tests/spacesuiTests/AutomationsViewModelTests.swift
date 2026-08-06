@@ -394,11 +394,6 @@ struct AutomationsViewModelTests {
             AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A", enabled: false), latestRun: failed)) == .disabled)
     }
 
-    @Test func kindLabelNamesWhatTheAutomationRuns() {
-        #expect(AutomationsViewModel.kindLabel(for: automation(id: "a", name: "A", kind: AutomationKind.agent.rawValue)) == "agent")
-        #expect(AutomationsViewModel.kindLabel(for: automation(id: "s", name: "S")) == "script")
-    }
-
     @Test func scheduleDescriptionHumanizesEveryPresetShape() {
         func summary(_ cron: String) -> String {
             AutomationsViewModel.scheduleDescription(for: automation(id: "a", name: "A", triggerKind: "cron", cron: cron)).summary
@@ -444,36 +439,6 @@ struct AutomationsViewModelTests {
         #expect(AutomationsViewModel.nextRunDescription(for: automation(id: "a", name: "A"), now: now, timeZone: Self.utc) == placeholder)
         let disabled = automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", enabled: false, nextFireTime: "2026-08-06T02:00:00Z")
         #expect(AutomationsViewModel.nextRunDescription(for: disabled, now: now, timeZone: Self.utc) == placeholder)
-    }
-
-    @Test func lastResultReportsElapsedTimeForARunningRun() {
-        let running = run(
-            id: "r", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T13:13:00Z", createdAt: "2026-08-05T13:13:00Z")
-        let result = AutomationsViewModel.lastResultDescription(for: running, now: now, timeZone: Self.utc)
-        #expect(result == AutomationLastResult(text: "running · 47 m", isFailure: false))
-    }
-
-    @Test func lastResultReportsOutcomeAndWhenForAnEndedRun() {
-        func text(status: String, exitCode: Int? = nil, endedAt: String) -> AutomationLastResult {
-            AutomationsViewModel.lastResultDescription(
-                for: run(
-                    id: "r", automationID: "a", name: "A", status: status, exitCode: exitCode, startedAt: "2026-08-03T09:00:00Z", endedAt: endedAt,
-                    createdAt: "2026-08-03T09:00:00Z"), now: now, timeZone: Self.utc)
-        }
-        // Same day shows the clock time; an older day shows the date instead.
-        #expect(text(status: "succeeded", endedAt: "2026-08-05T12:45:00Z") == AutomationLastResult(text: "ok · 12:45", isFailure: false))
-        #expect(text(status: "failed", exitCode: 1, endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "exit 1 · Aug 3", isFailure: true))
-        #expect(text(status: "failed", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "failed · Aug 3", isFailure: true))
-        #expect(text(status: "timed_out", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "timed out · Aug 3", isFailure: true))
-        #expect(text(status: "canceled", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "canceled · Aug 3", isFailure: false))
-        #expect(text(status: "skipped", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "skipped · Aug 3", isFailure: false))
-    }
-
-    @Test func lastResultHandlesQueuedAndNeverRun() {
-        let queued = run(id: "r", automationID: "a", name: "A", status: "queued", startedAt: nil, createdAt: "2026-08-05T13:00:00Z")
-        #expect(AutomationsViewModel.lastResultDescription(for: queued, now: now, timeZone: Self.utc).text == "queued")
-        #expect(
-            AutomationsViewModel.lastResultDescription(for: nil, now: now, timeZone: Self.utc) == AutomationLastResult(text: "—", isFailure: false))
     }
 
     @Test func compactDurationKeepsAtMostTwoUnits() {

@@ -38,8 +38,8 @@ struct AutomationDeviceInput: Sendable, Equatable {
 }
 
 /// One merged automations-table row: an automation plus the device it lives on and the two runs the table
-/// reads, its most recent one (the Last result column and the status dot) and its in-flight one (the status
-/// dot's running state and the row's Open terminal action).
+/// reads, its most recent one (which decides whether the status dot reports a failure) and its in-flight one
+/// (the status dot's running state and the row's Open terminal action).
 struct AutomationTableRow: Sendable, Equatable, Identifiable {
     let deviceID: String
     let deviceName: String
@@ -74,12 +74,6 @@ struct AutomationScheduleDescription: Sendable, Equatable {
     /// The stored cron string, shown as quiet monospaced detail beside the summary. Nil for a manual
     /// automation, which has no expression.
     let cronDetail: String?
-}
-
-/// The last-result column's text plus whether it reports a failure, which the table tints red.
-struct AutomationLastResult: Sendable, Equatable {
-    let text: String
-    let isFailure: Bool
 }
 
 /// One merged runs-table row: a run plus the device it ran on.
@@ -245,11 +239,6 @@ enum AutomationsViewModel {
         }
     }
 
-    /// The kind chip's label: which sort of task the automation runs.
-    static func kindLabel(for automation: TerminalServiceAutomationSummary) -> String {
-        AutomationKind(rawValue: automation.kind) == .agent ? "agent" : "script"
-    }
-
     /// The schedule column: a humanized summary plus the raw cron string it came from.
     static func scheduleDescription(for automation: TerminalServiceAutomationSummary) -> AutomationScheduleDescription {
         guard AutomationTriggerKind(rawValue: automation.triggerKind) == .cron else {
@@ -286,34 +275,6 @@ enum AutomationsViewModel {
         return futureAbsolute(date, now: now, timeZone: timeZone)
     }
 
-    /// The last-result column: what the most recent run did and when, or a placeholder when it never ran.
-    static func lastResultDescription(for run: TerminalServiceAutomationRunSummary?, now: Date, timeZone: TimeZone = .current) -> AutomationLastResult
-    {
-        guard let run else { return AutomationLastResult(text: placeholderText, isFailure: false) }
-        switch AutomationRunStatus(rawValue: run.status) {
-        case .running:
-            // A live run reports how long it has been going, not when it started, since that is the number
-            // the user is watching.
-            let elapsed = run.startedAt.flatMap { iso8601Formatter.date(from: $0) }.map { max(0, now.timeIntervalSince($0)) }
-            return AutomationLastResult(text: elapsed.map { "running · \(compactDuration($0))" } ?? "running", isFailure: false)
-        case .queued: return AutomationLastResult(text: "queued", isFailure: false)
-        case let status:
-            let outcome =
-                switch status {
-                case .succeeded: "ok"
-                case .failed: run.exitCode.map { "exit \($0)" } ?? "failed"
-                case .timedOut: "timed out"
-                case .canceled: "canceled"
-                case .skipped: "skipped"
-                default: run.status
-                }
-            let when = iso8601Formatter.date(from: run.endedAt ?? run.startedAt ?? run.createdAt)
-            return AutomationLastResult(
-                text: when.map { "\(outcome) · \(pastAbsolute($0, now: now, timeZone: timeZone))" } ?? outcome,
-                isFailure: status == .failed || status == .timedOut)
-        }
-    }
-
     /// A compact duration for the table's time columns: seconds under a minute, then minutes, then hours and
     /// minutes, then days and hours. Two units at most so the columns stay narrow.
     static func compactDuration(_ interval: TimeInterval) -> String {
@@ -336,13 +297,6 @@ enum AutomationsViewModel {
 
     private static let weekdayAbbreviations = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     private static let monthAbbreviations = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-    /// A past event's short absolute time: the clock time when it happened today, else its month and day.
-    private static func pastAbsolute(_ date: Date, now: Date, timeZone: TimeZone) -> String {
-        let calendar = gregorianCalendar(timeZone)
-        if calendar.isDate(date, inSameDayAs: now) { return clockText(calendar.dateComponents([.hour, .minute], from: date)) }
-        return monthDayText(calendar.dateComponents([.month, .day], from: date))
-    }
 
     /// A future fire's short absolute time. Unlike a past event it keeps the clock time on another day too:
     /// knowing an automation fires on Aug 8 is not much use without knowing it fires at 04:30.
