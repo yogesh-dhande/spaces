@@ -20,7 +20,7 @@ const shortcutRows = [
   { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
   { shortcut: "cmd+1 … cmd+0", action: "Open or focus workspace target by number", scope: "App" },
   { shortcut: "cmd+= / cmd+shift+=", action: "Zoom terminal text in one point", scope: "Terminal pane" },
-  { shortcut: "cmd+-", action: "Zoom terminal text out one point", scope: "Terminal pane" },
+  { shortcut: "cmd+- / cmd+shift+-", action: "Zoom terminal text out one point", scope: "Terminal pane" },
 ];
 
 export default function ShortcutsDocsPage() {
