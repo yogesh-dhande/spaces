@@ -772,7 +772,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-parity"))
     }
 
-    /// A live terminal-window session stays an ad hoc summary. Only the ad hoc summary carries
+    /// A live terminal-window session stays an ad hoc summary. A window row's summary carries no
     /// `liveTitle`, so publishing a live session from its window record instead would drop what the
     /// program running in it prints.
     func testLiveTerminalWindowSessionStaysAnAdHocSummaryCarryingItsLiveTitle() throws {
@@ -822,6 +822,42 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
 
         XCTAssertEqual(overview.sessions.filter { $0.id == "session-shared" }.count, 1)
         XCTAssertEqual(overview.sessions.first { $0.id == "session-shared" }?.rowKind, .process)
+    }
+
+    /// Surfaces that list sessions rather than workspace rows (a bell's Alerts row, the iOS session list)
+    /// read the live title off the summary, so a claimed session's summary has to describe it the same way
+    /// its row does: an agent's carries the title its program reports, a configured process's does not.
+    func testClaimedSessionSummariesCarryTheLiveTitleForAgentsAndNotForProcesses() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
+        let agent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-agent", sessionKey: nil,
+            status: .spinning, createdAt: "now", updatedAt: "now")
+        let process = RunningProcessRecord(
+            id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: "Spaces",
+            terminalTrackingID: "session-process", pid: 42, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
+            project: project, workspace: workspace, runningProcesses: [process], agentWindows: [agent])
+        let agentSession = makeSessionCatalogEntry(
+            sessionID: "session-agent", title: "Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            runtimeTitle: "reviewing PR 420")
+        let processSession = makeSessionCatalogEntry(
+            sessionID: "session-process", title: "web", workingDirectory: workspace.dir, workspaceID: workspace.id, kind: .process,
+            attachmentSnapshot: .init(), runtimeTitle: "next dev")
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(
+            projects: [project], workspaces: [descriptor], liveSessions: [agentSession, processSession])
+
+        let agentSummary = try XCTUnwrap(overview.sessions.first { $0.id == "session-agent" })
+        XCTAssertEqual(agentSummary.rowKind, .agent)
+        XCTAssertEqual(agentSummary.title, "Codex", "what the program prints never renames the session")
+        XCTAssertEqual(agentSummary.liveTitle, "reviewing PR 420")
+
+        let processSummary = try XCTUnwrap(overview.sessions.first { $0.id == "session-process" })
+        XCTAssertEqual(processSummary.rowKind, .process)
+        XCTAssertNil(processSummary.liveTitle, "a configured process is described by the command its entry names")
     }
 
     /// An exited process/agent row keeps its session retained too, matching the collector's rule; a

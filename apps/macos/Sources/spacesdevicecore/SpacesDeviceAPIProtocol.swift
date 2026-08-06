@@ -520,9 +520,9 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     /// The session's stable name: the user's rename when set, else the name it was launched under. A
     /// session that backs a configured process or coding agent is named by that config entry.
     public let title: String
-    /// The title the program in this session last reported (OSC 0/2), nil when it reported none — and
-    /// always nil for a configured process or coding-agent session, which is described by the entry that
-    /// configured it rather than by what the program prints.
+    /// The title the program in this session last reported (OSC 0/2), nil when it reported none, and
+    /// always nil for a configured process's session, which is described by the command its configured
+    /// entry names rather than by what the program prints.
     public let liveTitle: String?
     public let workingDirectory: String
     /// Shell and launch command from the session's persisted launch configuration, so a
