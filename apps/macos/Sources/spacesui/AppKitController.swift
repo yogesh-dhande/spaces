@@ -4294,7 +4294,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch status {
             case .running: return 2
             case .exited: return 1
-            case .idle, .waiting: return 0
+            // `.waiting` and `.ready` never reach here — `statusKind(for:)` above never produces them —
+            // so they rank with the other not-running states rather than inventing a process meaning.
+            case .idle, .waiting, .ready: return 0
             }
         }
 
@@ -4570,7 +4572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let isReachable = section.loadState == .loaded
             let offlineMessage: String? = if case .offline(let message) = section.loadState { message } else { nil }
             return AutomationDeviceInput(
-                deviceID: section.deviceID, deviceName: section.deviceName, isLocal: section.isLocal, isReachable: isReachable,
+                deviceID: section.deviceID, deviceName: section.displayName, isLocal: section.isLocal, isReachable: isReachable,
                 offlineMessage: offlineMessage, automations: section.overview?.automations ?? [], runs: section.overview?.automationRuns ?? [],
                 timeZoneIdentifier: section.overview?.daemonStatus.timeZoneIdentifier)
         }
@@ -6485,6 +6487,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor), body.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             body.topAnchor.constraint(equalTo: headerDivider.bottomAnchor), body.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            // The window's resize floor, expressed on `body` (edge-pinned, autolayout) so it reaches the
+            // window through constraints. `minSize` alone does not hold: with an autolayout content view,
+            // AppKit derives the window's limits from the content constraints, and every form row is
+            // deliberately compressible (wrapping hints, truncating fields), so without these the user can
+            // squeeze the window far below `minSize` — and the squeezed frame then persists, because the
+            // window is reused across presents. Required constraints also push an already-squeezed reused
+            // window back out to the floor on the next present.
+            body.widthAnchor.constraint(greaterThanOrEqualToConstant: 520), body.heightAnchor.constraint(greaterThanOrEqualToConstant: 400),
         ])
         showScrollableDetailStack(stack, in: body)
 
@@ -6568,6 +6579,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func closeWorkspaceVisibilityWindow() { workspaceVisibility.closeWorkspaceVisibilityWindow() }
 
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
+
+    /// Header close buttons built by `buildFormWindowHeader` bind their target to the host (see
+    /// `iconButton`), so the automation editor's close routes through this forwarder.
+    @objc func closeAutomationEditorWindow() { automationEditor.closeWindow() }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
         // The new-workspace form is git-only: non-git projects own a single workspace

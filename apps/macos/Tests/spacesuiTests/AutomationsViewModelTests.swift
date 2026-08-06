@@ -7,11 +7,14 @@ import workspacecore
 
 /// Covers the cross-device merge, filter, running-run, and alert-derivation logic for the Automations pane.
 struct AutomationsViewModelTests {
-    private func automation(id: String, name: String, triggerKind: String = "manual", cron: String? = nil) -> TerminalServiceAutomationSummary {
+    private func automation(
+        id: String, name: String, triggerKind: String = "manual", cron: String? = nil, enabled: Bool = true,
+        kind: String = AutomationKind.script.rawValue, nextFireTime: String? = nil
+    ) -> TerminalServiceAutomationSummary {
         TerminalServiceAutomationSummary(
-            id: id, name: name, enabled: true, triggerKind: triggerKind, cronExpression: cron, script: "echo hi", workingDirectory: "/tmp",
-            timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "2026-01-01T00:00:00Z",
-            updatedAt: "2026-01-01T00:00:00Z")
+            id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cron, kind: kind, script: "echo hi",
+            workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nextFireTime,
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
     }
 
     private func run(
@@ -28,7 +31,8 @@ struct AutomationsViewModelTests {
     private func agent(sessionID: String, status: AgentWindowStatus, live: Bool, title: String? = nil, workspaceID: String? = "ws-1")
         -> TerminalServiceAutomationAgentSummary
     {
-        TerminalServiceAutomationAgentSummary(terminalSessionID: sessionID, status: status.rawValue, live: live, title: title, workspaceID: workspaceID)
+        TerminalServiceAutomationAgentSummary(
+            terminalSessionID: sessionID, status: status.rawValue, live: live, title: title, workspaceID: workspaceID)
     }
 
     // MARK: - Merge & sort
@@ -48,7 +52,8 @@ struct AutomationsViewModelTests {
 
     @Test func unreachableDeviceContributesNoAutomationRowsButIsMarked() {
         let inputs = [
-            AutomationDeviceInput(deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, automations: [automation(id: "a1", name: "A")]),
+            AutomationDeviceInput(
+                deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, automations: [automation(id: "a1", name: "A")]),
             AutomationDeviceInput(deviceID: "srv", deviceName: "Server", isLocal: false, isReachable: false, offlineMessage: "unreachable"),
         ]
         #expect(AutomationsViewModel.mergedAutomations(from: inputs).map(\.deviceID) == ["mac"])
@@ -62,12 +67,20 @@ struct AutomationsViewModelTests {
             AutomationDeviceInput(
                 deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
                 runs: [
-                    run(id: "r-old", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z", createdAt: "2026-01-01T08:00:00Z"),
-                    run(id: "r-new", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T12:00:00Z", createdAt: "2026-01-01T12:00:00Z"),
+                    run(
+                        id: "r-old", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z",
+                        createdAt: "2026-01-01T08:00:00Z"),
+                    run(
+                        id: "r-new", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T12:00:00Z",
+                        createdAt: "2026-01-01T12:00:00Z"),
                 ]),
             AutomationDeviceInput(
                 deviceID: "srv", deviceName: "Server", isLocal: false, isReachable: true,
-                runs: [run(id: "r-mid", automationID: "b", name: "B", status: "running", startedAt: "2026-01-01T10:00:00Z", createdAt: "2026-01-01T10:00:00Z")]),
+                runs: [
+                    run(
+                        id: "r-mid", automationID: "b", name: "B", status: "running", startedAt: "2026-01-01T10:00:00Z",
+                        createdAt: "2026-01-01T10:00:00Z")
+                ]),
         ]
         #expect(AutomationsViewModel.mergedRuns(from: inputs).map(\.run.id) == ["r-new", "r-mid", "r-old"])
     }
@@ -77,7 +90,9 @@ struct AutomationsViewModelTests {
             AutomationDeviceInput(
                 deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
                 runs: [
-                    run(id: "r-started", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z", createdAt: "2026-01-01T09:00:00Z"),
+                    run(
+                        id: "r-started", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z",
+                        createdAt: "2026-01-01T09:00:00Z"),
                     run(id: "r-queued", automationID: "a", name: "A", status: "queued", startedAt: nil, createdAt: "2026-01-01T09:30:00Z"),
                 ])
         ]
@@ -92,9 +107,13 @@ struct AutomationsViewModelTests {
             AutomationDeviceInput(
                 deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
                 runs: [
-                    run(id: "r1", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z", createdAt: "2026-01-01T09:00:00Z"),
+                    run(
+                        id: "r1", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z",
+                        createdAt: "2026-01-01T09:00:00Z"),
                     run(id: "r2", automationID: "a", name: "A", status: "queued", startedAt: nil, createdAt: "2026-01-01T09:30:00Z"),
-                    run(id: "r3", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z", createdAt: "2026-01-01T08:00:00Z"),
+                    run(
+                        id: "r3", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z",
+                        createdAt: "2026-01-01T08:00:00Z"),
                 ])
         ]
         #expect(AutomationsViewModel.runningRuns(from: inputs).map(\.run.id) == ["r1"])
@@ -104,8 +123,10 @@ struct AutomationsViewModelTests {
 
     @Test func filterAutomationsByDevice() {
         let rows = AutomationsViewModel.mergedAutomations(from: [
-            AutomationDeviceInput(deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, automations: [automation(id: "a1", name: "A")]),
-            AutomationDeviceInput(deviceID: "srv", deviceName: "Server", isLocal: false, isReachable: true, automations: [automation(id: "a2", name: "B")]),
+            AutomationDeviceInput(
+                deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, automations: [automation(id: "a1", name: "A")]),
+            AutomationDeviceInput(
+                deviceID: "srv", deviceName: "Server", isLocal: false, isReachable: true, automations: [automation(id: "a2", name: "B")]),
         ])
         #expect(AutomationsViewModel.filterAutomations(rows, deviceID: "srv").map(\.id) == ["srv::a2"])
         #expect(AutomationsViewModel.filterAutomations(rows, deviceID: nil).count == 2)
@@ -128,10 +149,18 @@ struct AutomationsViewModelTests {
 
     @Test func alertEntriesCoverFailedAndTimedOutWithText() {
         let runs = [
-            run(id: "r-fail", automationID: "a", name: "Nightly audit", status: "failed", exitCode: 3, startedAt: "2026-01-01T09:00:00Z", endedAt: "2026-01-01T09:05:00Z", createdAt: "2026-01-01T09:00:00Z"),
-            run(id: "r-timeout", automationID: "b", name: "Backup", status: "timed_out", startedAt: "2026-01-01T10:00:00Z", endedAt: "2026-01-01T10:30:00Z", createdAt: "2026-01-01T10:00:00Z"),
-            run(id: "r-ok", automationID: "c", name: "OK", status: "succeeded", startedAt: "2026-01-01T11:00:00Z", endedAt: "2026-01-01T11:01:00Z", createdAt: "2026-01-01T11:00:00Z"),
-            run(id: "r-skip", automationID: "d", name: "Skipped", status: "skipped", skipReason: "concurrency", startedAt: nil, createdAt: "2026-01-01T12:00:00Z"),
+            run(
+                id: "r-fail", automationID: "a", name: "Nightly audit", status: "failed", exitCode: 3, startedAt: "2026-01-01T09:00:00Z",
+                endedAt: "2026-01-01T09:05:00Z", createdAt: "2026-01-01T09:00:00Z"),
+            run(
+                id: "r-timeout", automationID: "b", name: "Backup", status: "timed_out", startedAt: "2026-01-01T10:00:00Z",
+                endedAt: "2026-01-01T10:30:00Z", createdAt: "2026-01-01T10:00:00Z"),
+            run(
+                id: "r-ok", automationID: "c", name: "OK", status: "succeeded", startedAt: "2026-01-01T11:00:00Z", endedAt: "2026-01-01T11:01:00Z",
+                createdAt: "2026-01-01T11:00:00Z"),
+            run(
+                id: "r-skip", automationID: "d", name: "Skipped", status: "skipped", skipReason: "concurrency", startedAt: nil,
+                createdAt: "2026-01-01T12:00:00Z"),
         ]
         let entries = AutomationsViewModel.alertEntries(deviceID: "mac", deviceName: "This Mac", runs: runs)
         // Newest ended first: the timeout ended 10:30, the failure 09:05.
@@ -142,7 +171,11 @@ struct AutomationsViewModelTests {
     }
 
     @Test func alertEntriesFallBackWhenNoExitCode() {
-        let runs = [run(id: "r", automationID: "a", name: nil, status: "failed", startedAt: "2026-01-01T09:00:00Z", endedAt: "2026-01-01T09:05:00Z", createdAt: "2026-01-01T09:00:00Z")]
+        let runs = [
+            run(
+                id: "r", automationID: "a", name: nil, status: "failed", startedAt: "2026-01-01T09:00:00Z", endedAt: "2026-01-01T09:05:00Z",
+                createdAt: "2026-01-01T09:00:00Z")
+        ]
         let entries = AutomationsViewModel.alertEntries(deviceID: "mac", deviceName: "This Mac", runs: runs)
         #expect(entries.first?.text == "Automation failed on This Mac")
     }
@@ -154,7 +187,10 @@ struct AutomationsViewModelTests {
             name: "  Nightly agent  ", kind: .agent, enabled: true, triggerKind: .cron, cronExpression: "0 9 * * *", workspaceID: " ws-1 ",
             agentCommand: " claude --model opus ", agentPrompt: "  review the diff  ", script: "leftover script", workingDirectory: "/leftover",
             timeoutSeconds: 120, concurrencyPolicy: "queue", missedRunPolicy: "skip")
-        guard case .success(let fields) = result else { Issue.record("expected success, got \(result)"); return }
+        guard case .success(let fields) = result else {
+            Issue.record("expected success, got \(result)")
+            return
+        }
         #expect(fields.name == "Nightly agent")
         #expect(fields.kind == AutomationKind.agent.rawValue)
         #expect(fields.workspaceID == "ws-1")
@@ -175,7 +211,10 @@ struct AutomationsViewModelTests {
             name: "Nightly script", kind: .script, enabled: false, triggerKind: .manual, cronExpression: nil, workspaceID: "ws-1",
             agentCommand: "claude", agentPrompt: "ignored", script: "echo hi", workingDirectory: " /tmp ", timeoutSeconds: nil,
             concurrencyPolicy: "allow", missedRunPolicy: "run_once")
-        guard case .success(let fields) = result else { Issue.record("expected success, got \(result)"); return }
+        guard case .success(let fields) = result else {
+            Issue.record("expected success, got \(result)")
+            return
+        }
         #expect(fields.kind == AutomationKind.script.rawValue)
         #expect(fields.script == "echo hi")
         #expect(fields.workingDirectory == "/tmp")
@@ -223,9 +262,9 @@ struct AutomationsViewModelTests {
         let script = AutomationsViewModel.agentEquivalentScript(workspaceID: "ws-1", command: "claude", prompt: "the prompt")
         #expect(
             script == """
-            SESSION=$(spaces agent spawn --command 'claude' --workspace ws-1 | cut -f1)
-            spaces terminal send text "$SESSION" 'the prompt' --submit
-            """)
+                SESSION=$(spaces agent spawn --command 'claude' --workspace ws-1 | cut -f1)
+                spaces terminal send text "$SESSION" 'the prompt' --submit
+                """)
     }
 
     @Test func agentEquivalentScriptEscapesSingleQuotes() {
@@ -264,8 +303,8 @@ struct AutomationsViewModelTests {
                 deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
                 runs: [
                     run(
-                        id: "r1", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z", createdAt: "2026-01-01T09:00:00Z",
-                        attributedAgents: agents)
+                        id: "r1", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z",
+                        createdAt: "2026-01-01T09:00:00Z", attributedAgents: agents)
                 ])
         ]
         let rows = AutomationsViewModel.mergedRuns(from: inputs)
@@ -283,6 +322,169 @@ struct AutomationsViewModelTests {
 
         let scriptAutomation = automation(id: "s1", name: "Script")  // script "echo hi"
         #expect(AutomationsViewModel.excerpt(for: scriptAutomation) == "echo hi")
+    }
+
+    // MARK: - Automations table columns
+
+    private static let utc = TimeZone(identifier: "UTC")!
+    private func date(_ iso: String) -> Date { ISO8601DateFormatter().date(from: iso)! }
+    /// The fixed clock every table-column test measures against.
+    private var now: Date { date("2026-08-05T14:00:00Z") }
+
+    private func tableRow(
+        automation: TerminalServiceAutomationSummary, latestRun: TerminalServiceAutomationRunSummary? = nil,
+        runningRun: TerminalServiceAutomationRunSummary? = nil
+    ) -> AutomationTableRow {
+        AutomationTableRow(
+            deviceID: "mac", deviceName: "This Mac", isLocal: true, automation: automation, latestRun: latestRun, runningRun: runningRun)
+    }
+
+    @Test func latestAndRunningRunAreResolvedPerAutomation() {
+        let runs = [
+            run(id: "r1", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-08-05T09:00:00Z", createdAt: "2026-08-05T09:00:00Z"),
+            run(id: "r2", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T13:00:00Z", createdAt: "2026-08-05T13:00:00Z"),
+            run(id: "r3", automationID: "b", name: "B", status: "failed", startedAt: "2026-08-05T12:00:00Z", createdAt: "2026-08-05T12:00:00Z"),
+        ]
+        #expect(AutomationsViewModel.latestRun(automationID: "a", in: runs)?.id == "r2")
+        #expect(AutomationsViewModel.runningRun(automationID: "a", in: runs)?.id == "r2")
+        #expect(AutomationsViewModel.latestRun(automationID: "b", in: runs)?.id == "r3")
+        // "b" has only a failed run, so it has nothing in flight.
+        #expect(AutomationsViewModel.runningRun(automationID: "b", in: runs) == nil)
+        #expect(AutomationsViewModel.latestRun(automationID: "missing", in: runs) == nil)
+    }
+
+    @Test func mergedAutomationRowsCarryLatestAndRunningRuns() {
+        let inputs = [
+            AutomationDeviceInput(
+                deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, automations: [automation(id: "a", name: "A")],
+                runs: [
+                    run(
+                        id: "r1", automationID: "a", name: "A", status: "failed", startedAt: "2026-08-05T09:00:00Z", createdAt: "2026-08-05T09:00:00Z"
+                    ),
+                    run(
+                        id: "r2", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T13:00:00Z",
+                        createdAt: "2026-08-05T13:00:00Z"),
+                ])
+        ]
+        let row = AutomationsViewModel.mergedAutomations(from: inputs).first
+        #expect(row?.latestRun?.id == "r2")
+        #expect(row?.runningRun?.id == "r2")
+        #expect(row?.lastRunStatus == "running")
+    }
+
+    @Test func rowStatusPrefersRunningOverEverythingElse() {
+        let running = run(
+            id: "r", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T13:00:00Z", createdAt: "2026-08-05T13:00:00Z")
+        // A run already in flight keeps the running dot even though the schedule is switched off.
+        let disabledButRunning = tableRow(automation: automation(id: "a", name: "A", enabled: false), latestRun: running, runningRun: running)
+        #expect(AutomationsViewModel.rowStatus(for: disabledButRunning) == .running)
+    }
+
+    @Test func rowStatusReportsDisabledFailedAndReady() {
+        let failed = run(id: "r", automationID: "a", name: "A", status: "failed", exitCode: 1, startedAt: nil, createdAt: "2026-08-05T09:00:00Z")
+        let timedOut = run(id: "r", automationID: "a", name: "A", status: "timed_out", startedAt: nil, createdAt: "2026-08-05T09:00:00Z")
+        let succeeded = run(id: "r", automationID: "a", name: "A", status: "succeeded", startedAt: nil, createdAt: "2026-08-05T09:00:00Z")
+
+        #expect(AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A"), latestRun: failed)) == .failed)
+        #expect(AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A"), latestRun: timedOut)) == .failed)
+        #expect(AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A"), latestRun: succeeded)) == .ready)
+        #expect(AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A"))) == .ready)
+        // Disabled outranks a failed history: the row's point is that it will not fire.
+        #expect(
+            AutomationsViewModel.rowStatus(for: tableRow(automation: automation(id: "a", name: "A", enabled: false), latestRun: failed)) == .disabled)
+    }
+
+    @Test func kindLabelNamesWhatTheAutomationRuns() {
+        #expect(AutomationsViewModel.kindLabel(for: automation(id: "a", name: "A", kind: AutomationKind.agent.rawValue)) == "agent")
+        #expect(AutomationsViewModel.kindLabel(for: automation(id: "s", name: "S")) == "script")
+    }
+
+    @Test func scheduleDescriptionHumanizesEveryPresetShape() {
+        func summary(_ cron: String) -> String {
+            AutomationsViewModel.scheduleDescription(for: automation(id: "a", name: "A", triggerKind: "cron", cron: cron)).summary
+        }
+        #expect(summary("*/15 * * * *") == "Every 15 min")
+        #expect(summary("30 * * * *") == "Hourly at :30")
+        #expect(summary("0 2 * * *") == "Daily at 02:00")
+        #expect(summary("30 4 * * 0") == "Weekly Sun 04:30")
+        #expect(summary("0 9 * * 1,3") == "Weekly Mon, Wed 09:00")
+        // Anything the builder does not recognize reads as Custom and leans on the raw string beside it.
+        #expect(summary("5 */2 * * *") == "Custom")
+    }
+
+    @Test func scheduleDescriptionKeepsRawCronAndHasNoneForManual() {
+        let cron = AutomationsViewModel.scheduleDescription(for: automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *"))
+        #expect(cron.cronDetail == "0 2 * * *")
+
+        let manual = AutomationsViewModel.scheduleDescription(for: automation(id: "a", name: "A"))
+        #expect(manual == AutomationScheduleDescription(summary: "Manual", cronDetail: nil))
+
+        // A cron automation whose expression never made it through still names its trigger.
+        let empty = AutomationsViewModel.scheduleDescription(for: automation(id: "a", name: "A", triggerKind: "cron", cron: "  "))
+        #expect(empty == AutomationScheduleDescription(summary: "Cron", cronDetail: nil))
+    }
+
+    @Test func nextRunCountsDownWhileNearAndTurnsAbsoluteBeyond() {
+        func next(_ fireTime: String, from clock: Date? = nil) -> String {
+            AutomationsViewModel.nextRunDescription(
+                for: automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", nextFireTime: fireTime), now: clock ?? now,
+                timeZone: Self.utc)
+        }
+        #expect(next("2026-08-05T14:04:00Z") == "in 4 m")
+        #expect(next("2026-08-05T17:12:00Z") == "in 3 h 12 m")
+        // Past the twelve-hour horizon the wall-clock time is the useful fact, with the day when it differs.
+        #expect(next("2026-08-06T04:30:00Z") == "Aug 6 04:30")
+        #expect(next("2026-08-05T13:00:00Z", from: date("2026-08-05T00:30:00Z")) == "13:00")
+        // A fire time the daemon has not caught up to yet reads as due, never as a negative countdown.
+        #expect(next("2026-08-05T13:59:00Z") == "due")
+    }
+
+    @Test func nextRunIsBlankWithoutAScheduledFire() {
+        let placeholder = "—"
+        #expect(AutomationsViewModel.nextRunDescription(for: automation(id: "a", name: "A"), now: now, timeZone: Self.utc) == placeholder)
+        let disabled = automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", enabled: false, nextFireTime: "2026-08-06T02:00:00Z")
+        #expect(AutomationsViewModel.nextRunDescription(for: disabled, now: now, timeZone: Self.utc) == placeholder)
+    }
+
+    @Test func lastResultReportsElapsedTimeForARunningRun() {
+        let running = run(
+            id: "r", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T13:13:00Z", createdAt: "2026-08-05T13:13:00Z")
+        let result = AutomationsViewModel.lastResultDescription(for: running, now: now, timeZone: Self.utc)
+        #expect(result == AutomationLastResult(text: "running · 47 m", isFailure: false))
+    }
+
+    @Test func lastResultReportsOutcomeAndWhenForAnEndedRun() {
+        func text(status: String, exitCode: Int? = nil, endedAt: String) -> AutomationLastResult {
+            AutomationsViewModel.lastResultDescription(
+                for: run(
+                    id: "r", automationID: "a", name: "A", status: status, exitCode: exitCode, startedAt: "2026-08-03T09:00:00Z", endedAt: endedAt,
+                    createdAt: "2026-08-03T09:00:00Z"), now: now, timeZone: Self.utc)
+        }
+        // Same day shows the clock time; an older day shows the date instead.
+        #expect(text(status: "succeeded", endedAt: "2026-08-05T12:45:00Z") == AutomationLastResult(text: "ok · 12:45", isFailure: false))
+        #expect(text(status: "failed", exitCode: 1, endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "exit 1 · Aug 3", isFailure: true))
+        #expect(text(status: "failed", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "failed · Aug 3", isFailure: true))
+        #expect(text(status: "timed_out", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "timed out · Aug 3", isFailure: true))
+        #expect(text(status: "canceled", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "canceled · Aug 3", isFailure: false))
+        #expect(text(status: "skipped", endedAt: "2026-08-03T09:02:00Z") == AutomationLastResult(text: "skipped · Aug 3", isFailure: false))
+    }
+
+    @Test func lastResultHandlesQueuedAndNeverRun() {
+        let queued = run(id: "r", automationID: "a", name: "A", status: "queued", startedAt: nil, createdAt: "2026-08-05T13:00:00Z")
+        #expect(AutomationsViewModel.lastResultDescription(for: queued, now: now, timeZone: Self.utc).text == "queued")
+        #expect(
+            AutomationsViewModel.lastResultDescription(for: nil, now: now, timeZone: Self.utc) == AutomationLastResult(text: "—", isFailure: false))
+    }
+
+    @Test func compactDurationKeepsAtMostTwoUnits() {
+        #expect(AutomationsViewModel.compactDuration(45) == "45 s")
+        #expect(AutomationsViewModel.compactDuration(60) == "1 m")
+        #expect(AutomationsViewModel.compactDuration(47 * 60) == "47 m")
+        #expect(AutomationsViewModel.compactDuration(3 * 3600) == "3 h")
+        #expect(AutomationsViewModel.compactDuration(3 * 3600 + 12 * 60) == "3 h 12 m")
+        #expect(AutomationsViewModel.compactDuration(26 * 3600) == "1 d 2 h")
+        #expect(AutomationsViewModel.compactDuration(48 * 3600) == "2 d")
+        #expect(AutomationsViewModel.compactDuration(-10) == "0 s")
     }
 
     // MARK: - Workspace choice preservation

@@ -134,6 +134,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     // Automations sidebar row (header + collapsible running-run children)
     private var automationsRowContainer: NSView?
     private var automationsHeaderStack: NSStackView?
+    private var automationsRowRail: NSView?
     private var automationsRowBadge: NSTextField?
     private var automationsChildrenStack: NSStackView?
     private var automationsDisclosureButton: NSButton?
@@ -2655,11 +2656,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         icon.setContentHuggingPriority(.required, for: .horizontal)
 
         let titleLabel = NSTextField(labelWithString: "Automations")
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.font = Typography.controlLabel
         titleLabel.textColor = .labelColor
 
         let badge = NSTextField(labelWithString: "")
-        badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
+        badge.font = Typography.monoBadgeStrong
         badge.textColor = sidebarRunningIndicatorColor()
         badge.alignment = .right
         badge.isBordered = false
@@ -2698,6 +2699,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         container.addSubview(header)
         container.addSubview(children)
+        // Selection rail: same squared teal bar as the Alerts row, on the container's leading edge and
+        // spanning only the header — the expanded running-run children are navigation shortcuts, not part
+        // of the selected surface.
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        automationsRowRail = rail
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -2705,6 +2715,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             children.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             children.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
             children.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
         ])
         automationsRowContainer = container
 
@@ -2756,7 +2768,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         dot.setContentHuggingPriority(.required, for: .horizontal)
         let name = row.run.automationName ?? "Automation"
         let label = NSTextField(labelWithString: showDevice ? "\(name) — \(row.deviceName)" : name)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Typography.metadata
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         let stack = NSStackView(views: [dot, label])
@@ -2772,11 +2784,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func updateAutomationsRowAppearance() {
         guard let header = automationsHeaderStack else { return }
-        let isShowing = host.showingAutomations
-        header.layer?.borderWidth = isShowing ? 1 : 0
-        bindAppearanceReactiveLayer(header) { [weak self] view in
-            view.layer?.backgroundColor = isShowing ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
+        // Selection reads from the leading teal rail alone, matching the Alerts row — no fill/border.
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        automationsRowRail?.isHidden = !host.showingAutomations
+        if let rail = automationsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
     }
 

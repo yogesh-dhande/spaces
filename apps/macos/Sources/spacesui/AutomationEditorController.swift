@@ -136,7 +136,7 @@ import workspacecore
         } else {
             let deviceName = deviceInputs.first(where: { $0.deviceID == deviceID })?.deviceName ?? "this device"
             let label = NSTextField(labelWithString: deviceName)
-            label.font = .systemFont(ofSize: 13)
+            label.font = Typography.body
             label.textColor = .secondaryLabelColor
             addRow(host.settingsLabeledField(name: "Device", hint: "An automation stays on its device.", control: label), to: stack)
         }
@@ -186,7 +186,10 @@ import workspacecore
         applyScheduleVisibility()
         updatePreview()
 
-        let header = host.buildFormWindowHeader(symbol: "clock.arrow.circlepath", title: title, closeAction: #selector(cancelTapped))
+        // The header close button targets the host (see `iconButton`), so the action must be a host
+        // selector; `cancelTapped` here would silently never fire.
+        let header = host.buildFormWindowHeader(
+            symbol: "clock.arrow.circlepath", title: title, closeAction: #selector(AppKitController.closeAutomationEditorWindow))
         window = host.presentFormWindow(existing: window, header: header, hosting: stack)
         window?.delegate = self
     }
@@ -201,7 +204,7 @@ import workspacecore
     private func makeNameField(seed: TerminalServiceAutomationSummary?) -> NSView {
         let field = NSTextField(string: seed?.name ?? "")
         field.placeholderString = "Nightly audit"
-        field.font = .systemFont(ofSize: 13)
+        field.font = Typography.body
         nameField = field
         return field
     }
@@ -247,7 +250,7 @@ import workspacecore
     private func makeAgentCommandField(seed: TerminalServiceAutomationSummary?) -> NSView {
         let field = NSTextField(string: seed?.agentCommand ?? "claude")
         field.placeholderString = "claude"
-        field.font = .systemFont(ofSize: 13)
+        field.font = Typography.body
         agentCommandField = field
         return field
     }
@@ -258,7 +261,7 @@ import workspacecore
         textView.isRichText = false
         // Prose, not code: use the system font (matching the script editor's visual language but not its
         // monospace). Smart substitutions stay off so the prompt reaches the agent verbatim.
-        textView.font = .systemFont(ofSize: 13)
+        textView.font = Typography.body
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isVerticallyResizable = true
@@ -272,7 +275,7 @@ import workspacecore
         let textView = NSTextView()
         textView.string = seed?.script ?? ""
         textView.isRichText = false
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = Typography.monoBody
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isVerticallyResizable = true
@@ -285,7 +288,7 @@ import workspacecore
     private func makeWorkingDirectoryControl(seed: TerminalServiceAutomationSummary?) -> NSView {
         let field = NSTextField(string: seed?.workingDirectory ?? "")
         field.placeholderString = "/path/to/project"
-        field.font = .systemFont(ofSize: 13)
+        field.font = Typography.body
         workingDirectoryField = field
         // The Browse folder picker is only meaningful for the local device — a remote path can't be resolved
         // from this Mac's file system — so it is offered for local automations only.
@@ -376,7 +379,7 @@ import workspacecore
 
         let advancedField = NSTextField(string: "")
         advancedField.placeholderString = "*/15 * * * *"
-        advancedField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        advancedField.font = Typography.monoBody
         advancedField.target = self
         advancedField.action = #selector(scheduleValueChanged)
         advancedField.delegate = self
@@ -441,7 +444,7 @@ import workspacecore
 
     private func makeIntegerField(range: ClosedRange<Int>, value: Int) -> NSTextField {
         let field = NSTextField(string: "\(value)")
-        field.font = .systemFont(ofSize: 13)
+        field.font = Typography.body
         field.alignment = .right
         field.target = self
         field.action = #selector(scheduleValueChanged)
@@ -480,7 +483,7 @@ import workspacecore
     private func makeTimeoutField(seed: TerminalServiceAutomationSummary?) -> NSView {
         let field = NSTextField(string: seed?.timeoutSeconds.map(String.init) ?? "")
         field.placeholderString = "none"
-        field.font = .systemFont(ofSize: 13)
+        field.font = Typography.body
         field.translatesAutoresizingMaskIntoConstraints = false
         field.widthAnchor.constraint(equalToConstant: 96).isActive = true
         timeoutField = field
@@ -703,6 +706,9 @@ import workspacecore
     }
 
     @objc private func cancelTapped() { window?.performClose(nil) }
+
+    /// Host-forwarded close for the header X button, which cannot target this controller directly.
+    func closeWindow() { window?.performClose(nil) }
 
     @objc private func saveTapped() {
         guard !isSaving else { return }

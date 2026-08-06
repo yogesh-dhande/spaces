@@ -18,6 +18,9 @@ enum RowPrimitives {
         case exited
         case idle
         case waiting
+        /// Healthy and armed, but nothing running right now: a solid green dot without the running halo.
+        /// Distinct from `idle`, which is the hollow dot for something switched off or never started.
+        case ready
     }
 
     /// 14×14 view that draws an 8-point dot. `running` also paints an outer
@@ -330,6 +333,9 @@ nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
             dotPath.stroke()
         case .waiting:
             Theme.statusWaitingFill.setFill()
+            dotPath.fill()
+        case .ready:
+            Theme.statusRunningFill.setFill()
             dotPath.fill()
         }
     }

@@ -37,18 +37,49 @@ struct AutomationDeviceInput: Sendable, Equatable {
     }
 }
 
-/// One merged automations-table row: an automation plus the device it lives on and its most recent run's
-/// status (for the last-run status icon).
+/// One merged automations-table row: an automation plus the device it lives on and the two runs the table
+/// reads, its most recent one (the Last result column and the status dot) and its in-flight one (the status
+/// dot's running state and the row's Open terminal action).
 struct AutomationTableRow: Sendable, Equatable, Identifiable {
     let deviceID: String
     let deviceName: String
     let isLocal: Bool
     let automation: TerminalServiceAutomationSummary
-    /// The raw `AutomationRunStatus` value of this automation's most recent run on its device, or nil if it
-    /// has never run.
-    let lastRunStatus: String?
+    /// This automation's most recent run on its device, or nil if it has never run.
+    let latestRun: TerminalServiceAutomationRunSummary?
+    /// This automation's currently-running run, when it has one.
+    let runningRun: TerminalServiceAutomationRunSummary?
 
     var id: String { "\(deviceID)::\(automation.id)" }
+
+    /// The raw `AutomationRunStatus` value of the most recent run, or nil if it has never run.
+    var lastRunStatus: String? { latestRun?.status }
+}
+
+/// What the automations table's leading status dot reports for one row.
+enum AutomationRowStatus: Sendable, Equatable {
+    /// A run is in flight, whether the schedule or a person started it.
+    case running
+    /// The most recent run failed or timed out.
+    case failed
+    /// Enabled with nothing in flight and nothing wrong.
+    case ready
+    /// Switched off, so the schedule will not fire it.
+    case disabled
+}
+
+/// The schedule column's two parts: a humanized summary and the raw cron string it was derived from.
+struct AutomationScheduleDescription: Sendable, Equatable {
+    let summary: String
+    /// The stored cron string, shown as quiet monospaced detail beside the summary. Nil for a manual
+    /// automation, which has no expression.
+    let cronDetail: String?
+}
+
+/// The last-result column's text plus whether it reports a failure, which the table tints red.
+struct AutomationLastResult: Sendable, Equatable {
+    let text: String
+    let isFailure: Bool
 }
 
 /// One merged runs-table row: a run plus the device it ran on.
@@ -98,7 +129,8 @@ enum AutomationsViewModel {
                 rows.append(
                     AutomationTableRow(
                         deviceID: input.deviceID, deviceName: input.deviceName, isLocal: input.isLocal, automation: automation,
-                        lastRunStatus: lastRunStatus(automationID: automation.id, in: input.runs)))
+                        latestRun: latestRun(automationID: automation.id, in: input.runs),
+                        runningRun: runningRun(automationID: automation.id, in: input.runs)))
             }
         }
         return rows.sorted { lhs, rhs in
@@ -147,14 +179,26 @@ enum AutomationsViewModel {
 
     /// The unreachable paired devices, in input order, so the pane can render a marker for each.
     static func unreachableDevices(from inputs: [AutomationDeviceInput]) -> [AutomationUnreachableDevice] {
-        inputs.filter { !$0.isReachable }.map { AutomationUnreachableDevice(deviceID: $0.deviceID, deviceName: $0.deviceName, message: $0.offlineMessage) }
+        inputs.filter { !$0.isReachable }.map {
+            AutomationUnreachableDevice(deviceID: $0.deviceID, deviceName: $0.deviceName, message: $0.offlineMessage)
+        }
+    }
+
+    /// An automation's most recent run (by start-or-create time), or nil if it has none.
+    static func latestRun(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> TerminalServiceAutomationRunSummary? {
+        runs.filter { $0.automationID == automationID }.max { lhs, rhs in (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt) }
+    }
+
+    /// An automation's currently-running run, newest first when a concurrency policy allowed more than one.
+    static func runningRun(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> TerminalServiceAutomationRunSummary? {
+        runs.filter { $0.automationID == automationID && $0.status == AutomationRunStatus.running.rawValue }.max { lhs, rhs in
+            (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt)
+        }
     }
 
     /// The raw status of an automation's most recent run (by start-or-create time), or nil if it has none.
     static func lastRunStatus(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> String? {
-        runs.filter { $0.automationID == automationID }
-            .max { lhs, rhs in (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt) }?
-            .status
+        latestRun(automationID: automationID, in: runs)?.status
     }
 
     /// The failed/timed-out runs for one device, derived into dismissible attention entries newest first.
@@ -162,20 +206,18 @@ enum AutomationsViewModel {
     /// queued/running one is not yet an outcome. The entry text names the automation, the failure, and the
     /// device (e.g. "Nightly audit failed (exit 3) on This Mac").
     static func alertEntries(deviceID: String, deviceName: String, runs: [TerminalServiceAutomationRunSummary]) -> [AutomationAlertEntry] {
-        runs.filter { $0.status == "failed" || $0.status == "timed_out" }
-            .map { run in
-                AutomationAlertEntry(
-                    attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)", text: alertText(run: run, deviceName: deviceName),
-                    deviceID: deviceID, runID: run.id, status: run.status,
-                    eventDate: (run.endedAt ?? run.createdAt).flatMap { iso8601Formatter.date(from: $0) })
+        runs.filter { $0.status == "failed" || $0.status == "timed_out" }.map { run in
+            AutomationAlertEntry(
+                attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)", text: alertText(run: run, deviceName: deviceName),
+                deviceID: deviceID, runID: run.id, status: run.status,
+                eventDate: (run.endedAt ?? run.createdAt).flatMap { iso8601Formatter.date(from: $0) })
+        }.sorted { lhs, rhs in
+            switch (lhs.eventDate, rhs.eventDate) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
             }
-            .sorted { lhs, rhs in
-                switch (lhs.eventDate, rhs.eventDate) {
-                case (let a?, let b?): return a > b
-                case (nil, _): return false
-                case (_, nil): return true
-                }
-            }
+        }
     }
 
     /// The human-readable attention text for a failed/timed-out run.
@@ -189,6 +231,147 @@ enum AutomationsViewModel {
         }
         return "\(name) \(outcome) on \(deviceName)"
     }
+
+    // MARK: - Automations table columns (pure, unit-testable)
+
+    /// What the row's leading status dot reports. A run in flight outranks everything else, including a
+    /// disabled automation: disabling stops the schedule from firing but never touches a run already going.
+    static func rowStatus(for row: AutomationTableRow) -> AutomationRowStatus {
+        if row.runningRun != nil { return .running }
+        guard row.automation.enabled else { return .disabled }
+        switch row.latestRun.flatMap({ AutomationRunStatus(rawValue: $0.status) }) {
+        case .failed, .timedOut: return .failed
+        default: return .ready
+        }
+    }
+
+    /// The kind chip's label: which sort of task the automation runs.
+    static func kindLabel(for automation: TerminalServiceAutomationSummary) -> String {
+        AutomationKind(rawValue: automation.kind) == .agent ? "agent" : "script"
+    }
+
+    /// The schedule column: a humanized summary plus the raw cron string it came from.
+    static func scheduleDescription(for automation: TerminalServiceAutomationSummary) -> AutomationScheduleDescription {
+        guard AutomationTriggerKind(rawValue: automation.triggerKind) == .cron else {
+            return AutomationScheduleDescription(summary: "Manual", cronDetail: nil)
+        }
+        let expression = automation.cronExpression?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !expression.isEmpty else { return AutomationScheduleDescription(summary: "Cron", cronDetail: nil) }
+        return AutomationScheduleDescription(summary: scheduleSummary(cronExpression: expression), cronDetail: expression)
+    }
+
+    /// The humanized form of a stored cron string, read through the same preset shapes the editor's schedule
+    /// builder recognizes so the table and the builder describe one schedule the same way. An expression
+    /// that fits no preset reads as "Custom" and leans on the raw string shown beside it.
+    static func scheduleSummary(cronExpression: String) -> String {
+        switch AutomationSchedulePreset.from(cronExpression: cronExpression) {
+        case .everyNMinutes(let minutes): "Every \(minutes) min"
+        case .hourlyAtMinute(let minute): "Hourly at :\(paddedTwoDigits(minute))"
+        case .dailyAtTime(let hour, let minute): "Daily at \(clockText(hour: hour, minute: minute))"
+        case .weeklyOnDaysAtTime(let days, let hour, let minute):
+            "Weekly \(days.sorted().map { weekdayAbbreviations[$0] }.joined(separator: ", ")) \(clockText(hour: hour, minute: minute))"
+        case .advanced: "Custom"
+        }
+    }
+
+    /// The next-run column: a countdown while the fire is near, a short absolute time beyond that, and a
+    /// placeholder for an automation that has no scheduled fire (manual, disabled, or never scheduled).
+    static func nextRunDescription(for automation: TerminalServiceAutomationSummary, now: Date, timeZone: TimeZone = .current) -> String {
+        guard automation.enabled, let iso = automation.nextFireTime, let date = iso8601Formatter.date(from: iso) else { return placeholderText }
+        let interval = date.timeIntervalSince(now)
+        // A fire time already in the past means the daemon has not caught up to it yet; say so rather than
+        // counting up from it, which would read like the run had been going for that long.
+        guard interval > 0 else { return "due" }
+        guard interval >= nearFireHorizon else { return "in \(compactDuration(interval))" }
+        return futureAbsolute(date, now: now, timeZone: timeZone)
+    }
+
+    /// The last-result column: what the most recent run did and when, or a placeholder when it never ran.
+    static func lastResultDescription(for run: TerminalServiceAutomationRunSummary?, now: Date, timeZone: TimeZone = .current) -> AutomationLastResult
+    {
+        guard let run else { return AutomationLastResult(text: placeholderText, isFailure: false) }
+        switch AutomationRunStatus(rawValue: run.status) {
+        case .running:
+            // A live run reports how long it has been going, not when it started, since that is the number
+            // the user is watching.
+            let elapsed = run.startedAt.flatMap { iso8601Formatter.date(from: $0) }.map { max(0, now.timeIntervalSince($0)) }
+            return AutomationLastResult(text: elapsed.map { "running · \(compactDuration($0))" } ?? "running", isFailure: false)
+        case .queued: return AutomationLastResult(text: "queued", isFailure: false)
+        case let status:
+            let outcome =
+                switch status {
+                case .succeeded: "ok"
+                case .failed: run.exitCode.map { "exit \($0)" } ?? "failed"
+                case .timedOut: "timed out"
+                case .canceled: "canceled"
+                case .skipped: "skipped"
+                default: run.status
+                }
+            let when = iso8601Formatter.date(from: run.endedAt ?? run.startedAt ?? run.createdAt)
+            return AutomationLastResult(
+                text: when.map { "\(outcome) · \(pastAbsolute($0, now: now, timeZone: timeZone))" } ?? outcome,
+                isFailure: status == .failed || status == .timedOut)
+        }
+    }
+
+    /// A compact duration for the table's time columns: seconds under a minute, then minutes, then hours and
+    /// minutes, then days and hours. Two units at most so the columns stay narrow.
+    static func compactDuration(_ interval: TimeInterval) -> String {
+        let seconds = Int(max(0, interval.rounded()))
+        if seconds < 60 { return "\(seconds) s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) m" }
+        let hours = minutes / 60
+        if hours < 24 { return minutes % 60 == 0 ? "\(hours) h" : "\(hours) h \(minutes % 60) m" }
+        let days = hours / 24
+        return hours % 24 == 0 ? "\(days) d" : "\(days) d \(hours % 24) h"
+    }
+
+    /// The placeholder for a column with no value to report.
+    private static let placeholderText = "—"
+
+    /// Under twelve hours a next run reads better as a countdown; past that the wall-clock time is the more
+    /// useful fact, so the column switches to an absolute time.
+    private static let nearFireHorizon: TimeInterval = 12 * 3600
+
+    private static let weekdayAbbreviations = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    private static let monthAbbreviations = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    /// A past event's short absolute time: the clock time when it happened today, else its month and day.
+    private static func pastAbsolute(_ date: Date, now: Date, timeZone: TimeZone) -> String {
+        let calendar = gregorianCalendar(timeZone)
+        if calendar.isDate(date, inSameDayAs: now) { return clockText(calendar.dateComponents([.hour, .minute], from: date)) }
+        return monthDayText(calendar.dateComponents([.month, .day], from: date))
+    }
+
+    /// A future fire's short absolute time. Unlike a past event it keeps the clock time on another day too:
+    /// knowing an automation fires on Aug 8 is not much use without knowing it fires at 04:30.
+    private static func futureAbsolute(_ date: Date, now: Date, timeZone: TimeZone) -> String {
+        let calendar = gregorianCalendar(timeZone)
+        let parts = calendar.dateComponents([.month, .day, .hour, .minute], from: date)
+        if calendar.isDate(date, inSameDayAs: now) { return clockText(parts) }
+        return "\(monthDayText(parts)) \(clockText(parts))"
+    }
+
+    /// The table's dates are assembled from calendar components rather than a `DateFormatter` so the columns
+    /// render one fixed shape (`14:05`, `Aug 8`) that matches the app's other English chrome, independent of
+    /// the host's locale, and so the formatting stays a deterministic pure function under test.
+    private static func gregorianCalendar(_ timeZone: TimeZone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    private static func clockText(_ parts: DateComponents) -> String { clockText(hour: parts.hour ?? 0, minute: parts.minute ?? 0) }
+
+    private static func clockText(hour: Int, minute: Int) -> String { "\(paddedTwoDigits(hour)):\(paddedTwoDigits(minute))" }
+
+    private static func monthDayText(_ parts: DateComponents) -> String {
+        let month = monthAbbreviations[min(max(parts.month ?? 1, 1), 12) - 1]
+        return "\(month) \(parts.day ?? 1)"
+    }
+
+    private static func paddedTwoDigits(_ value: Int) -> String { value < 10 ? "0\(value)" : "\(value)" }
 
     // MARK: - Schedule preview zone (pure, unit-testable)
 
@@ -223,9 +406,7 @@ enum AutomationsViewModel {
     /// workspace is appended when it is not already visible, labeled with its real "<project> / <workspace>"
     /// name plus a " (hidden)" suffix when it still resolves, or a plain raw-id fallback when its row is gone
     /// entirely. A nil stored id (a new automation, or a script automation) leaves the visible list unchanged.
-    static func workspaceChoices(
-        visible: [WorkspaceChoice], preservingWorkspaceID: String?, resolveLabel: (String) -> String?
-    ) -> [WorkspaceChoice] {
+    static func workspaceChoices(visible: [WorkspaceChoice], preservingWorkspaceID: String?, resolveLabel: (String) -> String?) -> [WorkspaceChoice] {
         guard let preservingWorkspaceID, !preservingWorkspaceID.isEmpty else { return visible }
         guard !visible.contains(where: { $0.workspaceID == preservingWorkspaceID }) else { return visible }
         let label = resolveLabel(preservingWorkspaceID).map { "\($0) (hidden)" } ?? preservingWorkspaceID
@@ -234,9 +415,7 @@ enum AutomationsViewModel {
 
     /// A fail-fast validation problem from `buildAutomationFields`, carrying the message shown inline in the
     /// editor.
-    struct ValidationError: Error, Equatable {
-        let message: String
-    }
+    struct ValidationError: Error, Equatable { let message: String }
 
     /// The one-line excerpt shown for an automation in the table: an `agent`-kind automation's prompt (first
     /// non-empty line), a `script`-kind automation's script (first non-empty line). Empty when nothing to show.
@@ -278,9 +457,7 @@ enum AutomationsViewModel {
     }
 
     /// Wraps a value in single quotes for a POSIX shell, escaping embedded single quotes as `'\''`.
-    static func shellSingleQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
+    static func shellSingleQuoted(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     /// Validates the editor's collected values for the chosen kind and assembles the wire fields, or returns
     /// the first problem's message. The daemon re-validates; this fails fast inline. `cronExpression` and
@@ -308,14 +485,17 @@ enum AutomationsViewModel {
                     kind: AutomationKind.agent.rawValue, script: "", agentCommand: command, agentPrompt: prompt, workspaceID: workspace,
                     workingDirectory: "", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
         case .script:
-            guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .failure(ValidationError(message: "Enter a script.")) }
+            guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .failure(ValidationError(message: "Enter a script."))
+            }
             let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !directory.isEmpty else { return .failure(ValidationError(message: "Enter a working directory.")) }
             return .success(
                 TerminalServiceAutomationFields(
                     name: trimmedName, enabled: enabled, triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
                     kind: AutomationKind.script.rawValue, script: script, agentCommand: nil, agentPrompt: nil, workspaceID: nil,
-                    workingDirectory: directory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
+                    workingDirectory: directory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
+                    missedRunPolicy: missedRunPolicy))
         }
     }
 }

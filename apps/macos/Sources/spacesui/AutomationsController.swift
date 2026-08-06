@@ -111,7 +111,7 @@ import workspacecore
 
     private func makeHeaderRow(inputs: [AutomationDeviceInput]) -> NSView {
         let title = NSTextField(labelWithString: "Automations")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
+        title.font = Typography.pageTitle
         title.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         title.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -153,7 +153,7 @@ import workspacecore
         icon.contentTintColor = host.sidebarThemeColor(light: (180, 120, 0), dark: (230, 170, 40))
         icon.setContentHuggingPriority(.required, for: .horizontal)
         let label = NSTextField(labelWithString: "\(device.deviceName) is unreachable\(device.message.map { " — \($0)" } ?? "")")
-        label.font = .systemFont(ofSize: 11)
+        label.font = Typography.metadata
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         let row = NSStackView(views: [icon, label])
@@ -175,71 +175,237 @@ import workspacecore
             appendEmptyState(to: stack, icon: "clock.arrow.circlepath", title: "No automations", detail: "Create one to run a command on a schedule.")
             return
         }
-        for row in rows {
-            let card = makeAutomationCard(row)
-            stack.addArrangedSubview(card)
-            host.constrainFormFieldToFillWidth(card, in: stack)
-        }
+        // The device column earns its width only when the table actually spans devices; with one device
+        // paired, or the filter narrowed to one, it would repeat the same name down every row.
+        let showDevice = Set(rows.map(\.deviceID)).count > 1
+        // One clock for the whole render so every relative time in the table is measured from the same
+        // instant and the columns stay consistent with each other.
+        let now = Date()
+
+        let sideInset: CGFloat = 4
+        let table = NSStackView()
+        table.orientation = .vertical
+        table.alignment = .leading
+        table.spacing = 0
+        table.edgeInsets = NSEdgeInsets(top: 6, left: sideInset, bottom: 6, right: sideInset)
+        table.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = makeAutomationHeaderLine(showDevice: showDevice)
+        let divider = makeTableDivider()
+        let lines: [NSView] = [header, divider] + rows.map { makeAutomationRow($0, showDevice: showDevice, now: now) }
+        for line in lines { table.addArrangedSubview(line) }
+        table.setCustomSpacing(4, after: header)
+        table.setCustomSpacing(4, after: divider)
+
+        let card = cardContainer(table)
+        // Leading alignment gives arranged lines their intrinsic width, so pin each to the table's full
+        // width (minus its edge insets) to keep the grid's trailing columns right-aligned.
+        for line in lines { line.widthAnchor.constraint(equalTo: table.widthAnchor, constant: -sideInset * 2).isActive = true }
+        stack.addArrangedSubview(card)
+        host.constrainFormFieldToFillWidth(card, in: stack)
     }
 
-    private func makeAutomationCard(_ row: AutomationTableRow) -> NSView {
+    private func makeAutomationHeaderLine(showDevice: Bool) -> NSView {
+        func header(_ text: String, alignment: NSTextAlignment = .left) -> NSTextField {
+            let label = NSTextField(labelWithString: text)
+            label.font = Typography.metadataTitle
+            label.textColor = Theme.mutedSecondary
+            label.alignment = alignment
+            label.lineBreakMode = .byTruncatingTail
+            return label
+        }
+        let line = AutomationTableColumns.layOut(
+            status: RowPrimitives.statusSlot(), name: header("Name"), schedule: header("Schedule"), nextRun: header("Next run", alignment: .right),
+            lastResult: header("Last result"), device: showDevice ? header("Device") : nil, toggle: header("On"),
+            action: header("", alignment: .right))
+        // The same inset each row applies between its own edges and its columns, so header and rows share
+        // one grid origin.
+        line.edgeInsets = NSEdgeInsets(top: 0, left: AutomationTableColumns.horizontalInset, bottom: 0, right: AutomationTableColumns.horizontalInset)
+        return line
+    }
+
+    private func makeTableDivider() -> NSView {
+        let divider = ColoredBackgroundView()
+        divider.fillColor = Theme.border
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return divider
+    }
+
+    private func makeAutomationRow(_ row: AutomationTableRow, showDevice: Bool, now: Date) -> NSView {
         let automation = row.automation
-        let statusIcon = statusImageView(forRunStatus: row.lastRunStatus)
+        let identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
+
+        let rowView = AutomationsTableRowView { [weak self] in self?.presentEditor(deviceID: row.deviceID, automationID: automation.id) }
+        rowView.menu = makeAutomationRowMenu(row)
+        rowView.setAccessibilityIdentifier("automations.row.\(row.id)")
+        // The table has no room for the one-line excerpt the card layout showed, so what an automation
+        // actually does stays reachable as the row's tooltip.
+        let excerpt = AutomationsViewModel.excerpt(for: automation)
+        if !excerpt.isEmpty { rowView.toolTip = excerpt }
+        // A disabled automation dims whole-row, the same 55% treatment that marks an unreachable device's
+        // rows. Opacity does not block hit-testing, so its enable switch stays usable.
+        if !automation.enabled { rowView.alphaValue = Self.disabledRowAlpha }
 
         let name = NSTextField(labelWithString: automation.name)
-        name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = host.sidebarPrimaryTextColor(isSelected: false)
+        name.font = Typography.rowLabel
+        name.textColor = Theme.text
         name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let nameColumn = NSStackView(views: [name, makeKindChip(automation), NSView()])
+        nameColumn.orientation = .horizontal
+        nameColumn.alignment = .centerY
+        nameColumn.spacing = 6
 
-        let metaText = [row.deviceName, triggerDescription(automation), nextFireDescription(automation), policiesDescription(automation)].filter {
-            !$0.isEmpty
-        }.joined(separator: "  •  ")
-        let meta = NSTextField(labelWithString: metaText)
-        meta.font = .systemFont(ofSize: 11)
-        meta.textColor = .secondaryLabelColor
-        meta.lineBreakMode = .byTruncatingTail
+        let schedule = AutomationsViewModel.scheduleDescription(for: automation)
+        var scheduleViews: [NSView] = [makeCellLabel(schedule.summary, font: Typography.rowDetail, color: Theme.text)]
+        if let cron = schedule.cronDetail { scheduleViews.append(makeCellLabel(cron, font: Typography.monoMetadata, color: Theme.muted)) }
+        let scheduleColumn = NSStackView(views: scheduleViews)
+        scheduleColumn.orientation = .horizontal
+        // Baseline alignment so the 12 pt summary and the 11 pt monospaced cron sit on one line. The last
+        // label absorbs the column's leftover width, which keeps both left-aligned without a spacer view
+        // (a plain spacer has no baseline to align to).
+        scheduleColumn.alignment = .firstBaseline
+        scheduleColumn.spacing = 6
+        // The column is too narrow for a long weekly schedule plus its cron string, so the full text stays
+        // available on hover rather than being lost to truncation.
+        scheduleColumn.toolTip = schedule.cronDetail.map { "\(schedule.summary) (\($0))" } ?? schedule.summary
 
-        var columnViews: [NSView] = [name]
-        // A kind-appropriate one-line excerpt (an agent automation's prompt, a script automation's script) as
-        // plain text — the type itself is not marked here; the user identifies it from the automation name.
-        let excerpt = AutomationsViewModel.excerpt(for: automation)
-        if !excerpt.isEmpty {
-            let excerptLabel = NSTextField(labelWithString: excerpt)
-            excerptLabel.font = .systemFont(ofSize: 11)
-            excerptLabel.textColor = .secondaryLabelColor
-            excerptLabel.lineBreakMode = .byTruncatingTail
-            columnViews.append(excerptLabel)
-        }
-        columnViews.append(meta)
+        let nextRun = makeCellLabel(
+            AutomationsViewModel.nextRunDescription(for: automation, now: now), font: Self.tabularFigures(Typography.rowDetail), color: Theme.muted)
+        nextRun.alignment = .right
 
-        let textColumn = NSStackView(views: columnViews)
-        textColumn.orientation = .vertical
-        textColumn.alignment = .leading
-        textColumn.spacing = 2
+        let result = AutomationsViewModel.lastResultDescription(for: row.latestRun, now: now)
+        let lastResult = makeCellLabel(
+            result.text, font: Self.tabularFigures(Typography.rowDetail), color: result.isFailure ? Theme.statusFailed : Theme.muted)
 
         let enabledSwitch = NSSwitch()
+        enabledSwitch.controlSize = .small
         enabledSwitch.state = automation.enabled ? .on : .off
         enabledSwitch.target = self
         enabledSwitch.action = #selector(enabledToggled(_:))
-        enabledSwitch.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
+        enabledSwitch.identifier = identifier
         enabledSwitch.toolTip = automation.enabled ? "Enabled" : "Disabled"
+        let toggleColumn = NSStackView(views: [enabledSwitch, NSView()])
+        toggleColumn.orientation = .horizontal
+        toggleColumn.alignment = .centerY
+        toggleColumn.spacing = 0
 
-        let runButton = host.iconButton(symbol: "play.fill", tooltip: "Run now", action: #selector(runNowTapped(_:)))
-        runButton.target = self
-        runButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
-        let editButton = host.iconButton(symbol: "pencil", tooltip: "Edit", action: #selector(editTapped(_:)))
-        editButton.target = self
-        editButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
-        let deleteButton = host.iconButton(symbol: "trash", tooltip: "Delete", action: #selector(deleteTapped(_:)))
-        deleteButton.target = self
-        deleteButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(automation.id)")
+        let device = showDevice ? makeCellLabel(row.deviceName, font: Typography.rowDetail, color: Theme.muted) : nil
+        let line = AutomationTableColumns.layOut(
+            status: RowPrimitives.statusSlot(RowPrimitives.statusDot(Self.statusDotKind(for: row))), name: nameColumn, schedule: scheduleColumn,
+            nextRun: nextRun, lastResult: lastResult, device: device, toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
 
-        let content = NSStackView(views: [statusIcon, textColumn, NSView(), enabledSwitch, runButton, editButton, deleteButton])
-        content.orientation = .horizontal
-        content.alignment = .centerY
-        content.spacing = 8
-        content.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        return cardContainer(content)
+        rowView.addSubview(line)
+        NSLayoutConstraint.activate([
+            line.leadingAnchor.constraint(equalTo: rowView.leadingAnchor, constant: AutomationTableColumns.horizontalInset),
+            line.trailingAnchor.constraint(equalTo: rowView.trailingAnchor, constant: -AutomationTableColumns.horizontalInset),
+            line.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
+            rowView.heightAnchor.constraint(equalToConstant: AutomationTableColumns.rowHeight),
+        ])
+        return rowView
+    }
+
+    /// The row's single contextual action: a running automation offers its live terminal, everything else
+    /// offers the manual trigger. Both stay quiet text controls so the table reads as data, not buttons.
+    private func makeRowActionButton(_ row: AutomationTableRow, identifier: NSUserInterfaceItemIdentifier) -> NSButton {
+        guard let running = row.runningRun else {
+            return makeTextActionButton(
+                title: "Run now", tooltip: "Run this automation now", action: #selector(runNowTapped(_:)), identifier: identifier)
+        }
+        return makeTextActionButton(
+            title: "Open terminal", tooltip: "Open this run's live terminal", action: #selector(openRunTerminalTapped(_:)),
+            identifier: NSUserInterfaceItemIdentifier("\(row.deviceID)::\(running.id)"))
+    }
+
+    private func makeTextActionButton(title: String, tooltip: String, action: Selector, identifier: NSUserInterfaceItemIdentifier) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: Theme.muted, .font: Typography.metadataEmphasis])
+        button.alignment = .right
+        button.toolTip = tooltip
+        button.identifier = identifier
+        return button
+    }
+
+    /// The automation's kind as a small chip beside its name: accent-tinted for an agent automation,
+    /// neutral for a script one.
+    private func makeKindChip(_ automation: TerminalServiceAutomationSummary) -> NSView {
+        let isAgent = AutomationKind(rawValue: automation.kind) == .agent
+        let chip = ColoredBackgroundView()
+        chip.fillColor = isAgent ? Theme.accentTint : Theme.chipBg
+        chip.cornerRadius = 4
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        chip.setContentHuggingPriority(.required, for: .horizontal)
+        chip.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let label = NSTextField(labelWithString: AutomationsViewModel.kindLabel(for: automation))
+        label.font = Typography.caption
+        label.textColor = isAgent ? Theme.accentStrong : Theme.muted
+        label.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -5),
+            label.topAnchor.constraint(equalTo: chip.topAnchor, constant: 1), label.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: -1),
+        ])
+        return chip
+    }
+
+    private func makeCellLabel(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        return label
+    }
+
+    /// The row's right-click menu. The per-row Edit and Delete buttons the card layout carried are gone, so
+    /// this menu is where they live; double-clicking the row repeats Edit.
+    private func makeAutomationRowMenu(_ row: AutomationTableRow) -> NSMenu {
+        let identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(row.automation.id)")
+        let menu = NSMenu()
+        func addItem(_ title: String, symbol: String, action: Selector) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.identifier = identifier
+            menu.addItem(item)
+        }
+        addItem("Run now", symbol: "play", action: #selector(runNowMenuItem(_:)))
+        addItem("Edit…", symbol: "pencil", action: #selector(editMenuItem(_:)))
+        menu.addItem(.separator())
+        addItem("Delete…", symbol: "trash", action: #selector(deleteMenuItem(_:)))
+        return menu
+    }
+
+    /// The same 55% dimming that marks an unreachable device's rows, reused for an automation that is
+    /// switched off: the row stays listed and operable, but reads as inert.
+    private static let disabledRowAlpha: CGFloat = 0.55
+
+    private static func statusDotKind(for row: AutomationTableRow) -> RowPrimitives.StatusKind {
+        switch AutomationsViewModel.rowStatus(for: row) {
+        case .running: .running
+        case .failed: .exited
+        case .ready: .ready
+        case .disabled: .idle
+        }
+    }
+
+    /// The same role token with tabular (fixed-advance) figures, so the time columns' digits line up down
+    /// the table. Derived from the token's own descriptor, so size and weight still come from `Typography`
+    /// rather than a font literal at the call site.
+    private static func tabularFigures(_ font: NSFont) -> NSFont {
+        let descriptor = font.fontDescriptor.addingAttributes([
+            .featureSettings: [
+                [
+                    NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                    NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector,
+                ]
+            ]
+        ])
+        return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
     }
 
     // MARK: - Runs tab
@@ -263,7 +429,7 @@ import workspacecore
         let statusIcon = statusImageView(forRunStatus: run.status)
 
         let name = NSTextField(labelWithString: run.automationName ?? "Automation")
-        name.font = .systemFont(ofSize: 13, weight: .semibold)
+        name.font = Typography.rowLabel
         name.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         name.lineBreakMode = .byTruncatingTail
 
@@ -275,7 +441,7 @@ import workspacecore
         let liveAgentCount = run.attributedAgents.filter(\.live).count
         if liveAgentCount > 0 { metaParts.append("\(liveAgentCount) live agent\(liveAgentCount == 1 ? "" : "s")") }
         let meta = NSTextField(labelWithString: metaParts.filter { !$0.isEmpty }.joined(separator: "  •  "))
-        meta.font = .systemFont(ofSize: 11)
+        meta.font = Typography.metadata
         meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingTail
 
@@ -361,7 +527,7 @@ import workspacecore
         dot.setContentHuggingPriority(.required, for: .horizontal)
         let title = agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent"
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Typography.metadata
         label.textColor = host.sidebarPrimaryTextColor(isSelected: false)
         label.lineBreakMode = .byTruncatingTail
 
@@ -413,10 +579,10 @@ import workspacecore
         iconView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 26), iconView.heightAnchor.constraint(equalToConstant: 26)])
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        titleLabel.font = Typography.emptyStateTitle
         titleLabel.textColor = .labelColor
         let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.font = Typography.metadata
         detailLabel.textColor = .secondaryLabelColor
         let empty = NSStackView(views: [iconView, titleLabel, detailLabel])
         empty.orientation = .vertical
@@ -454,24 +620,6 @@ import workspacecore
 
     // MARK: - Formatting
 
-    private func triggerDescription(_ automation: TerminalServiceAutomationSummary) -> String {
-        switch AutomationTriggerKind(rawValue: automation.triggerKind) {
-        case .cron: automation.cronExpression.map { "cron: \($0)" } ?? "cron"
-        default: "manual"
-        }
-    }
-
-    private func nextFireDescription(_ automation: TerminalServiceAutomationSummary) -> String {
-        guard automation.enabled, let iso = automation.nextFireTime, let date = Self.iso8601Formatter.date(from: iso) else { return "" }
-        return "next \(relativeFormatter.localizedString(for: date, relativeTo: Date()))"
-    }
-
-    private func policiesDescription(_ automation: TerminalServiceAutomationSummary) -> String {
-        var parts = ["on overlap: \(automation.concurrencyPolicy)"]
-        if let timeout = automation.timeoutSeconds { parts.append("timeout \(timeout)s") }
-        return parts.joined(separator: ", ")
-    }
-
     private func runTriggerDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
         switch AutomationRunTrigger(rawValue: run.trigger) {
         case .manual: "manual"
@@ -507,21 +655,46 @@ import workspacecore
 
     @objc private func newAutomationTapped() { host.automationEditor.presentCreate(inputs: host.automationDeviceInputs()) }
 
-    @objc private func editTapped(_ sender: NSButton) {
-        guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue),
-            let automation = host.automationSummary(deviceID: deviceID, automationID: automationID)
-        else { return }
+    // The automations table reaches one automation from three places — the row's action button, its context
+    // menu, and its double-click — so each action is a plain method and the `@objc` entry points only decode
+    // the `deviceID::automationID` identifier their sender carries.
+
+    @objc private func editMenuItem(_ sender: NSMenuItem) {
+        guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
+        presentEditor(deviceID: deviceID, automationID: automationID)
+    }
+
+    private func presentEditor(deviceID: String, automationID: String) {
+        guard let automation = host.automationSummary(deviceID: deviceID, automationID: automationID) else { return }
         host.automationEditor.presentEdit(deviceID: deviceID, automation: automation)
     }
 
     @objc private func runNowTapped(_ sender: NSButton) {
         guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
+        runNow(deviceID: deviceID, automationID: automationID)
+    }
+
+    @objc private func runNowMenuItem(_ sender: NSMenuItem) {
+        guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
+        runNow(deviceID: deviceID, automationID: automationID)
+    }
+
+    private func runNow(deviceID: String, automationID: String) {
         performMutation(deviceID: deviceID) { device, clientApp in
             try SpacesDeviceClient.triggerAutomation(id: automationID, device: device, clientApp: clientApp)
         }
     }
 
-    @objc private func deleteTapped(_ sender: NSButton) {
+    /// Opens a running automation's live terminal. The run is re-resolved from the current device inputs
+    /// rather than captured with the row, so a pane that re-rendered since still opens the daemon's run.
+    @objc private func openRunTerminalTapped(_ sender: NSButton) {
+        guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue),
+            let run = host.automationDeviceInputs().first(where: { $0.deviceID == deviceID })?.runs.first(where: { $0.id == runID })
+        else { return }
+        host.openAutomationRunTerminal(deviceID: deviceID, run: run)
+    }
+
+    @objc private func deleteMenuItem(_ sender: NSMenuItem) {
         guard let (deviceID, automationID) = Self.splitIdentifier(sender.identifier?.rawValue),
             let automation = host.automationSummary(deviceID: deviceID, automationID: automationID)
         else { return }
