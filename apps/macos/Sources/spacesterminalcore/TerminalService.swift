@@ -245,6 +245,23 @@ import Foundation
         /// two cannot disagree about whether a pin is in force.
         static let pinnedExecutableEnvironmentVariable = "SPACESD_EXECUTABLE"
 
+        /// Environment bindings that forbid starting a daemon through launchd, whatever the profile.
+        ///
+        /// One criterion covers the whole list: launchd starts the job with its own environment, so any Spaces
+        /// binding that changes WHICH daemon runs or HOW it serves this client is dropped on the way to a
+        /// kickstarted daemon. What comes up is then the wrong build, or a daemon serving a socket or an
+        /// endpoint this caller is not talking to, and the caller's poll times out against a daemon that is
+        /// running perfectly well. Spawning directly is what carries the binding to the daemon that has to
+        /// honor it.
+        ///
+        /// The Device API variables are mirrored as literals rather than referenced: `SpacesDeviceAPIConfiguration`
+        /// owns them and its module depends on this one, so they cannot be imported here. Those declarations
+        /// carry a note pointing back at this list so a rename cannot silently drift.
+        static let kickstartForbiddingEnvironmentVariables = [
+            pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, CaddyService.executableEnvironmentVariable,
+            "SPACES_DEVICE_API_DISABLED", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
+        ]
+
         /// How `ensureRunning` starts a daemon once it has decided one has to be started.
         enum DaemonStartPlan: Equatable {
             /// Spawn the `spacesd` this client resolves, as a child of this process.
@@ -263,36 +280,46 @@ import Foundation
         /// client-owned daemon lives. Routing the start through launchd keeps ownership where the supervision
         /// is.
         ///
-        /// An environment binding that launchd cannot honor wins for every profile, including the installed
-        /// one, because the daemon launchd starts would not be the daemon this client needs. `SPACESD_EXECUTABLE`
-        /// is how the E2E scripts pin which daemon build runs, and launchd starts whatever the plist names
-        /// instead, silently ignoring the pin. `SPACES_RUNTIME_DIR` redirects the profile's runtime root, and
-        /// with it the socket path this caller polls, while leaving the profile itself installed (its root is
-        /// still `~/.spaces`): a kickstarted daemon inherits launchd's clean environment, binds the default
-        /// runtime socket, and would leave the caller waiting out its startup timeout on a socket nothing is
-        /// listening on. Spawning directly is what passes both bindings to the daemon that has to serve them.
+        /// Any binding in `kickstartForbiddingEnvironmentVariables` forces a direct spawn, for every profile
+        /// including the installed one, because launchd would drop it.
+        ///
+        /// A kickstart is also only correct when this process's home IS the account home. `launchctl kickstart`
+        /// addresses a job REGISTERED in the user's GUI domain by label; it does not load or even read the plist
+        /// path checked here. A process running with an isolated `HOME` therefore still reaches the real
+        /// account's registered job, whatever its own home contains, so it would start the production daemon
+        /// against a profile resolved somewhere else entirely and then poll a socket that job will never bind.
+        /// The plist check cannot see that, because a same-named plist under an isolated home (exactly what a
+        /// test fixture writes) looks identical to the installed one. Comparing the home the profile resolved
+        /// from against the account home from the password database is what establishes that the registered job
+        /// and this caller's profile belong to the same user. An unknown account home means that identity cannot
+        /// be established at all, so it spawns directly.
         ///
         /// A development profile has no agent, and an installed profile can be missing its plist when the
         /// install is partial. Both are started directly.
         ///
+        /// - Parameter accountHomeDirectoryPath: The account's real home, from the password database rather
+        ///   than `HOME`, which is what makes it evidence of identity rather than of what the environment
+        ///   claims. `nil` means it could not be read.
         /// - Parameter launchAgentURL: Where to look for the agent plist. `nil` resolves it under the same home
-        ///   `environment` resolves a profile from (`SpacesProfile.currentHomeDirectoryURL`), which is the only
-        ///   way the two can agree: `SpacesBinaryLayout.launchAgentURL()` defaults to `NSHomeDirectory()`, and
-        ///   that API ignores an overridden `HOME`. A process running with an isolated home resolves its
-        ///   profile under that home while `NSHomeDirectory()` still names the real user's, so defaulting to it
-        ///   would find the real user's plist and kickstart the production daemon while this caller polls a
-        ///   socket under the isolated home that nothing will ever bind.
+        ///   `environment` resolves a profile from (`SpacesProfile.currentHomeDirectoryURL`), rather than
+        ///   `SpacesBinaryLayout.launchAgentURL()`'s `NSHomeDirectory()`, which ignores an overridden `HOME`.
+        ///   Past the home-identity gate above the two homes are the same path, so this is the same lookup
+        ///   stated in terms of the home actually in play.
         static func resolveStartPlan(
             environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
-            launchAgentURL: URL? = nil
+            accountHomeDirectoryPath: String? = SpacesProfile.accountHomeDirectoryPath(), launchAgentURL: URL? = nil
         ) -> DaemonStartPlan {
-            for variable in [pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable] {
+            for variable in kickstartForbiddingEnvironmentVariables {
                 let value = environment[variable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard value.isEmpty else { return .directSpawn }
             }
-            let plistURL =
-                launchAgentURL ?? SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: SpacesProfile.currentHomeDirectoryURL(environment: environment))
-            guard profile.isInstalledProfile, fileManager.fileExists(atPath: plistURL.path) else { return .directSpawn }
+            guard profile.isInstalledProfile, let accountHomeDirectoryPath else { return .directSpawn }
+            let environmentHomeURL = SpacesProfile.currentHomeDirectoryURL(environment: environment)
+            guard SpacesProfile.canonicalPath(environmentHomeURL.path) == SpacesProfile.canonicalPath(accountHomeDirectoryPath) else {
+                return .directSpawn
+            }
+            let plistURL = launchAgentURL ?? SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: environmentHomeURL)
+            guard fileManager.fileExists(atPath: plistURL.path) else { return .directSpawn }
             return .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel)
         }
 
