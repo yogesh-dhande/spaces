@@ -23,19 +23,25 @@ import spacesterminalcore
     static func layOut(
         status: NSView, name: NSView, schedule: NSView, nextRun: NSView, lastResult: NSView, device: NSView?, toggle: NSView, action: NSView
     ) -> NSStackView {
-        fixWidth(schedule, self.schedule)
+        // The three widest data columns yield before the name column does: each holds its preferred width
+        // only while the name keeps its floor, and they give way in a fixed order (schedule first, then
+        // last-result, then device) so every line compresses identically and the grid stays aligned. With
+        // the device column shown, the preferred widths alone exceed a default-width window's row, so
+        // without this give the flexible name column would be the one to collapse.
+        flexWidth(schedule, preferred: self.schedule, minimum: 120, yieldOrder: 0)
         fixWidth(nextRun, self.nextRun)
-        fixWidth(lastResult, self.lastResult)
-        if let device { fixWidth(device, self.device) }
+        flexWidth(lastResult, preferred: self.lastResult, minimum: 88, yieldOrder: 1)
+        if let device { flexWidth(device, preferred: self.device, minimum: 78, yieldOrder: 2) }
         fixWidth(toggle, self.toggle)
         fixWidth(action, self.action)
 
         name.translatesAutoresizingMaskIntoConstraints = false
         name.setContentHuggingPriority(.defaultLow, for: .horizontal)
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // A low priority so a narrow pane squeezes the name column rather than breaking the grid.
+        // Outranks the flexible columns' preferred widths (so they shrink first) while staying below
+        // required (so an impossibly narrow pane degrades without unsatisfiable-constraint breakage).
         let minimumName = name.widthAnchor.constraint(greaterThanOrEqualToConstant: nameMinimum)
-        minimumName.priority = .defaultLow
+        minimumName.priority = NSLayoutConstraint.Priority(900)
         minimumName.isActive = true
 
         var views: [NSView] = [status, name, schedule, nextRun, lastResult]
@@ -55,6 +61,25 @@ import spacesterminalcore
         view.setContentHuggingPriority(.required, for: .horizontal)
         view.setContentCompressionResistancePriority(.required, for: .horizontal)
         view.widthAnchor.constraint(equalToConstant: width).isActive = true
+    }
+
+    /// A column that prefers `preferred` but shrinks toward `minimum` when the row runs out of room.
+    /// A lower `yieldOrder` gives way first; the priorities all sit below the name column's floor (900),
+    /// which is what makes these columns yield before the name does. Identical constraints on every line
+    /// mean identical solutions, so the columns stay aligned across the whole table.
+    private static func flexWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat, yieldOrder: Int) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        // The explicit constraints own this column's width outright: intrinsic-size priorities are pushed
+        // below every width constraint so a short label cannot hug the column narrower than the shared
+        // grid, and a long one cannot resist compression past the floor (it truncates instead).
+        view.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+        view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
+        let preferredWidth = view.widthAnchor.constraint(equalToConstant: preferred)
+        preferredWidth.priority = NSLayoutConstraint.Priority(Float(700 + yieldOrder * 10))
+        let floor = view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum)
+        floor.priority = NSLayoutConstraint.Priority(950)
+        let cap = view.widthAnchor.constraint(lessThanOrEqualToConstant: preferred)
+        NSLayoutConstraint.activate([preferredWidth, floor, cap])
     }
 }
 
