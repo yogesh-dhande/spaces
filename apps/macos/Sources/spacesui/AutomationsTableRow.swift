@@ -77,7 +77,9 @@ import spacesterminalcore
         let preferredWidth = view.widthAnchor.constraint(equalToConstant: preferred)
         preferredWidth.priority = NSLayoutConstraint.Priority(Float(700 + yieldOrder * 10))
         let floor = view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum)
-        floor.priority = NSLayoutConstraint.Priority(950)
+        // Below the name column's floor (900): when even the floors cannot all hold, these give way and
+        // the name is the last column standing, not the first to collapse.
+        floor.priority = NSLayoutConstraint.Priority(850)
         let cap = view.widthAnchor.constraint(lessThanOrEqualToConstant: preferred)
         NSLayoutConstraint.activate([preferredWidth, floor, cap])
     }
@@ -119,11 +121,14 @@ import spacesterminalcore
 
     @objc private func rowDoubleClicked() { onDoubleClick() }
 
+    /// Refuses the double-click only where an actionable control owns the click (the enable switch, the
+    /// action button). A plain `NSControl` test would be wrong here: the row's labels are `NSTextField`s,
+    /// which are controls too, and they cover most of the row the gesture is meant to serve.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
         let location = convert(event.locationInWindow, from: nil)
         var hit = hitTest(location)
         while let view = hit, view !== self {
-            if view is NSControl { return false }
+            if view is NSButton || view is NSSwitch { return false }
             hit = view.superview
         }
         return true

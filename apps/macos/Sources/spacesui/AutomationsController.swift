@@ -27,8 +27,11 @@ import workspacecore
 
     /// Which tab is shown. Persisted across re-renders so an overview refresh keeps the user's place.
     private var selectedTab: Tab = .automations
-    /// Slow re-render beat keeping the visible pane's relative times fresh; see `armRelativeTimeRefresh`.
+    /// Slow beat keeping the visible pane's relative times fresh; see `armRelativeTimeRefresh`.
     private var relativeTimeRefreshTimer: Timer?
+    /// One closure per rendered time label, each rewriting its label for a given clock reading. Rebuilt
+    /// with every render; the beat runs them in place of any pane rebuild.
+    private var relativeTimeLabelRefreshers: [(Date) -> Void] = []
     /// The device filter, or nil for "All devices". Persisted across re-renders.
     private var deviceFilterID: String?
 
@@ -101,6 +104,7 @@ import workspacecore
             host.constrainFormFieldToFillWidth(marker, in: stack)
         }
 
+        relativeTimeLabelRefreshers = []
         switch selectedTab {
         case .automations: appendAutomationsTab(to: stack, inputs: inputs)
         case .runs: appendRunsTab(to: stack, inputs: inputs)
@@ -110,17 +114,25 @@ import workspacecore
         armRelativeTimeRefresh()
     }
 
-    /// Re-renders the visible pane on a slow beat so its relative times (next-run countdowns, running
-    /// durations) track the clock between overview refreshes; a single render's snapshot would otherwise
-    /// read "in 4 m" indefinitely on an idle system. The timer rides the default run-loop mode, so an open
-    /// context menu (which runs the tracking mode) pauses the rebuild instead of having its menu torn down.
-    /// Self-invalidating: the pane's own rebuild re-arms it, and a switch to any other pane lets it lapse.
+    /// Rewrites the rendered time labels in place on a slow beat so relative values (next-run countdowns,
+    /// running durations) track the clock between overview refreshes; a single render's snapshot would
+    /// otherwise read "in 4 m" indefinitely on an idle system. Only label strings change: no rebuild, so
+    /// scroll position, focus, open form windows, and an open context menu are all untouched (the timer
+    /// also rides the default run-loop mode, which pauses during menu tracking). Self-terminating: it
+    /// invalidates itself on the first fire after the pane stops showing, and every render re-arms it.
     private func armRelativeTimeRefresh() {
         relativeTimeRefreshTimer?.invalidate()
-        relativeTimeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+        relativeTimeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, host.showingAutomations else { return }
-                showAutomationsDetail()
+                guard let self else { return }
+                guard host.showingAutomations else {
+                    relativeTimeRefreshTimer?.invalidate()
+                    relativeTimeRefreshTimer = nil
+                    relativeTimeLabelRefreshers = []
+                    return
+                }
+                let now = Date()
+                for refresher in relativeTimeLabelRefreshers { refresher(now) }
             }
         }
     }
@@ -296,6 +308,15 @@ import workspacecore
         let result = AutomationsViewModel.lastResultDescription(for: row.latestRun, now: now)
         let lastResult = makeCellLabel(
             result.text, font: Self.tabularFigures(Typography.rowDetail), color: result.isFailure ? Theme.statusFailed : Theme.muted)
+
+        // Registered after both labels exist: the beat rewrites exactly these two strings in place. The
+        // failure color never changes with the clock, so only the text is refreshed. Strong captures are
+        // fine: the refresher list is replaced on every render, releasing the previous rows.
+        let latestRun = row.latestRun
+        relativeTimeLabelRefreshers.append { now in
+            nextRun.stringValue = AutomationsViewModel.nextRunDescription(for: automation, now: now)
+            lastResult.stringValue = AutomationsViewModel.lastResultDescription(for: latestRun, now: now).text
+        }
 
         let enabledSwitch = NSSwitch()
         enabledSwitch.controlSize = .small
