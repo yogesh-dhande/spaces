@@ -656,11 +656,13 @@ import workspacecore
                     servicePID: 321, childPID: 654, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
-    // An ended agent-kind run whose session is gone from the overview falls back to a synthesized `.agent`
-    // request with a nil shell (so the ended session can still cold-resolve) titled with the automation name.
+    // An ended agent-kind run's session leaves the overview, so its request is synthesized the same way the
+    // script branch is: the automation's name, workspace, working directory, and agent command, plus the
+    // seeded login shell: a panel window opens with no cold-resolution step, so a request with no shell has
+    // no launch configuration to build the replay pane from.
     @Test func automationRunTerminalRequestFallsBackForEndedAgentSession() {
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
-        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1", workingDirectory: "/tmp/agent")
         let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -669,8 +671,24 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
-                    shell: nil, command: nil, initialState: .exited))
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "/tmp/agent",
+                    kind: .agent, shell: "/bin/zsh", command: "codex", initialState: .exited))
+    }
+
+    // A run whose automation was deleted still opens: the synthesized fallback drops to its neutral defaults
+    // rather than failing to build a request.
+    @Test func automationRunTerminalRequestFallsBackForEndedAgentSessionWithNoAutomation() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Automation", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
     // Dispatch keys off the RUN's kind, not the automation's current kind. A historical script-kind run whose
@@ -706,8 +724,8 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent, shell: nil,
-                    command: nil, initialState: .exited))
+                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "/tmp/work", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
     @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {

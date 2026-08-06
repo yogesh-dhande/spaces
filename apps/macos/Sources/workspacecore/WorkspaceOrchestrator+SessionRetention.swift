@@ -9,12 +9,12 @@ extension WorkspaceOrchestrator {
     /// PRECONDITION: the caller (the daemon GC) has already established that the session is ended and has no
     /// live attachment. This method NEVER inspects or mutates the session's own runtime/on-disk state — it
     /// only removes the `agent_sessions`, `running_processes`, and `runtime_targets` rows that reference it,
-    /// because the backing terminal is provably gone. That fact is exactly the contract of the agent
-    /// chokepoint's `.destroyed` disposition and of `stopRunningProcess`'s row cleanup, so both are reused
-    /// here with their live-termination side effects (killing the terminal / process group, closing a
-    /// window) suppressed — there is nothing left alive to terminate.
+    /// and drops its automation attribution, because the backing terminal is provably gone. That fact is
+    /// exactly the contract of the agent chokepoint's `.destroyed` disposition and of `stopRunningProcess`'s
+    /// row cleanup, so both are reused here with their live-termination side effects (killing the terminal /
+    /// process group, closing a window) suppressed — there is nothing left alive to terminate.
     ///
-    /// After this returns, `store.terminalSessionIsReferencedByProduct(sessionID)` is false: the three
+    /// After this returns, `store.terminalSessionIsReferencedByProduct(sessionID)` is false: the four
     /// reference sources it checks are cleared in order. It throws on the first failure; the GC contains
     /// per-session errors so one poisoned session cannot stall the sweep.
     ///
@@ -52,9 +52,7 @@ extension WorkspaceOrchestrator {
         // 2. Running-process rows — mirror the row-cleanup half of `stopRunningProcess` without its
         //    termination side effects (no `terminateBuiltInTerminalSession` / `terminateProcessGroup` /
         //    `builtInTerminalWindowCloser`), since the process and its terminal are already dead.
-        for process in try store.runningProcessesByTerminalSession(terminalSessionID: sessionID) {
-            try releaseEndedRunningProcessRow(process)
-        }
+        for process in try store.runningProcessesByTerminalSession(terminalSessionID: sessionID) { try releaseEndedRunningProcessRow(process) }
 
         // 3. Any remaining `runtime_targets` focus rows — ad-hoc terminal panes a workspace layout holds
         //    directly, not owned by a process or agent row. Sweeping these last clears the final reference
@@ -64,13 +62,17 @@ extension WorkspaceOrchestrator {
             workspaceIDsToRecheck.insert(window.workspaceID)
         }
 
+        // 4. Automation attribution, the reference that keeps an automation run's terminal replayable from
+        //    the Runs tab. Dropping the stamp (never the run row, which the Runs tab still lists) is what
+        //    subjects an automation session to the same age-expiry and byte-budget bounds as any ended pane,
+        //    so a run retained for months cannot pin its transcript forever.
+        try store.clearTerminalSessionAutomationAttribution(sessionID: sessionID)
+
         // Steps 1 and 3 delete rows without recomputing the owning workspace's running flag, so do it
         // here for every workspace either step touched.
-        for workspaceID in workspaceIDsToRecheck {
-            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
-        }
+        for workspaceID in workspaceIDsToRecheck { try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID) }
 
-        // 4. Retire the session's own standing as a SUBSCRIBER: drop its pending inbound queue and every
+        // 5. Retire the session's own standing as a SUBSCRIBER: drop its pending inbound queue and every
         //    outgoing local/remote watch edge. Unconditional because a bare shell/process terminal can be a
         //    subscriber without owning an agent row (step 1 only covers agent-row owners). Idempotent, so
         //    re-running it for a session that also owned an agent row (torn down in step 1) is a no-op.

@@ -79,9 +79,9 @@ public final class AutomationService: @unchecked Sendable {
     private var pendingKills: [String: PendingKill] = [:]
 
     public init(
-        store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String,
-        timeZone: @escaping @Sendable () -> TimeZone = { .current }, now: @escaping () -> Date = Date.init, terminationGrace: TimeInterval = 10,
-        retentionLimit: Int = 100, ticksSuspended: @escaping @Sendable () -> Bool = { false }, logError: @escaping (String) -> Void = { _ in }
+        store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String, timeZone: @escaping @Sendable () -> TimeZone = { .current },
+        now: @escaping () -> Date = Date.init, terminationGrace: TimeInterval = 10, retentionLimit: Int = 100,
+        ticksSuspended: @escaping @Sendable () -> Bool = { false }, logError: @escaping (String) -> Void = { _ in }
     ) {
         self.store = store
         self.orchestrator = orchestrator
@@ -100,9 +100,7 @@ public final class AutomationService: @unchecked Sendable {
     /// Used by the daemon to drain a possibly in-flight `tick()` before quiescing cores for an exec handoff.
     /// Async, and must never be called as a sync block from the main actor: the service's executor hops the
     /// terminal engine actor (and thus main), so a main-actor sync wait would deadlock (the one-way rule).
-    public func waitUntilIdle() async {
-        await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
-    }
+    public func waitUntilIdle() async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } }
 
     // MARK: - Scheduling entry points
 
@@ -160,8 +158,7 @@ public final class AutomationService: @unchecked Sendable {
             for automation in try store.enabledCronAutomations() {
                 // Scheduler-side: one automation's anchor failing must not wedge the recompute for the rest,
                 // so each is isolated and logged rather than propagated (the command surface propagates).
-                do { try computeInitialNextFireTimeLocked(automationID: automation.id) }
-                catch {
+                do { try computeInitialNextFireTimeLocked(automationID: automation.id) } catch {
                     recomputeFailed = true
                     logError("automation_next_fire_time_error id=\(automation.id) error=\(error)")
                 }
@@ -178,9 +175,7 @@ public final class AutomationService: @unchecked Sendable {
     /// elapsed while the daemon was down, apply the missed-run policy exactly once (one catch-up run, or one
     /// skipped row), then recompute the next fire time from now. Automations with no elapsed anchor (freshly
     /// created, or whose next time is still in the future) are left untouched.
-    public func reconcileMissedRunsOnStart() {
-        queue.sync { reconcileMissedRunsOnStartLocked() }
-    }
+    public func reconcileMissedRunsOnStart() { queue.sync { reconcileMissedRunsOnStartLocked() } }
 
     private func reconcileMissedRunsOnStartLocked() {
         // Reconcile stale `running` run rows left by the previous daemon lifetime BEFORE firing any catch-up.
@@ -232,9 +227,7 @@ public final class AutomationService: @unchecked Sendable {
     /// Creates a new automation from a validated draft. On an enabled cron automation the initial next fire
     /// time is computed from now (no backfill). Returns the persisted automation, including any computed
     /// next fire time.
-    public func createAutomation(_ draft: AutomationDraft) throws -> Automation {
-        try queue.sync { try createAutomationLocked(draft) }
-    }
+    public func createAutomation(_ draft: AutomationDraft) throws -> Automation { try queue.sync { try createAutomationLocked(draft) } }
 
     private func createAutomationLocked(_ draft: AutomationDraft) throws -> Automation {
         let validated = try draft.validated()
@@ -314,9 +307,7 @@ public final class AutomationService: @unchecked Sendable {
     /// Cancels a run, returning its resulting terminal row. A terminal run is returned unchanged
     /// (idempotent). Throws when the run does not exist or its teardown/finalization fails, so the transport
     /// surfaces the failure instead of reporting success over a still-running row.
-    public func cancelAutomationRun(runID: String) throws -> AutomationRun {
-        try queue.sync { try cancelAutomationRunLocked(runID: runID) }
-    }
+    public func cancelAutomationRun(runID: String) throws -> AutomationRun { try queue.sync { try cancelAutomationRunLocked(runID: runID) } }
 
     private func cancelAutomationRunLocked(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
@@ -336,12 +327,10 @@ public final class AutomationService: @unchecked Sendable {
     /// timestamps are left untouched: end-agents cleans up lingering sessions, it does not re-finalize the
     /// run. A non-terminal (queued/running) run is rejected
     /// loudly — a live run is stopped with cancel, not end-agents. Each live attributed session is torn down
-    /// through the exact seams cancel's agent teardown uses: capture the transcript, then the agent-kill flow
-    /// (which finalizes the agent row and notifies subscribers), falling back to a plain session termination
-    /// for a not-yet-signalled `.agent` session with no row.
-    public func endAttributedAgents(runID: String) throws -> AutomationRun {
-        try queue.sync { try endAttributedAgentsLocked(runID: runID) }
-    }
+    /// through the exact seam cancel's agent teardown uses: the agent-kill flow (which finalizes the agent
+    /// row and notifies subscribers), falling back to a plain session termination for a not-yet-signalled
+    /// `.agent` session with no row.
+    public func endAttributedAgents(runID: String) throws -> AutomationRun { try queue.sync { try endAttributedAgentsLocked(runID: runID) } }
 
     private func endAttributedAgentsLocked(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
@@ -349,7 +338,6 @@ public final class AutomationService: @unchecked Sendable {
             throw AutomationValidationError("Cannot end agents for automation run \(runID): it is still \(run.status.rawValue). Cancel it instead.")
         }
         for sessionID in try store.terminalSessionIDs(automationRunID: run.id) where orchestrator.automationSessionIsLive(sessionID: sessionID) {
-            try captureAttributedTranscript(runID: run.id, sessionID: sessionID)
             if try !orchestrator.killAgentSession(terminalSessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
         }
         // A run beyond the retention cap can be retained solely because its attributed agent was live (the
@@ -427,8 +415,7 @@ public final class AutomationService: @unchecked Sendable {
             let queued = active.contains { $0.status == .queued }
             let blocking = try running || (automation.kind == .agent && automationHasLiveAttributedSession(automationID: automation.id))
             switch automation.concurrencyPolicy {
-            case .allow:
-                return try startRun(automation: automation, trigger: trigger)
+            case .allow: return try startRun(automation: automation, trigger: trigger)
             case .skip:
                 if !blocking && !queued { return try startRun(automation: automation, trigger: trigger) }
                 return try recordSkippedRun(automation: automation, trigger: trigger, reason: .concurrency)
@@ -560,8 +547,7 @@ public final class AutomationService: @unchecked Sendable {
             // Invariant: a run may never finalize while a session it launched is still live and unrecorded.
             // A persist failure leaves the spawned session running but unrecorded; its automationRunID stamp on the
             // session table keeps `automationHasLiveAttributedSession` true, permanently blocking future agent fires.
-            // Mirror `teardownAgentRunSession`'s fallback without the transcript capture (nothing ran yet): the kill
-            // is best-effort so the run still lands `.failed`.
+            // Mirror `teardownAgentRunSession`'s fallback: the kill is best-effort so the run still lands `.failed`.
             if let launchedSessionID, (try? orchestrator.killAgentSession(terminalSessionID: launchedSessionID)) != true {
                 orchestrator.automationTerminateSession(sessionID: launchedSessionID)
             }
@@ -620,8 +606,7 @@ public final class AutomationService: @unchecked Sendable {
         // inserting the row and persisting its session id; it would otherwise stay `.running` forever and block
         // skip/queue concurrency. Fail it (nil exit code) so the automation is unblocked.
         guard run.terminalSessionID != nil else {
-            do { try finishRun(run, status: .failed, exitCode: nil) }
-            catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
+            do { try finishRun(run, status: .failed, exitCode: nil) } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
             return
         }
         switch automation.kind {
@@ -685,7 +670,7 @@ public final class AutomationService: @unchecked Sendable {
     /// Drives an agent-kind run through its two phases, both derived from the run row so a restart resumes
     /// deterministically: `promptDeliveredAt == nil` is the detecting/sending phase, otherwise the run is
     /// awaiting the agent's `done` signal or its session end. The timeout budget applies to the agent
-    /// session in either phase (capture-then-kill via the agent-kill flow).
+    /// session in either phase (torn down via the agent-kill flow).
     private func pollRunningAgentRun(_ run: AutomationRun, automation: Automation) {
         do {
             guard let sessionID = run.terminalSessionID else { return }
@@ -770,13 +755,13 @@ public final class AutomationService: @unchecked Sendable {
         try finishRun(run, status: recordedFailure ? .failed : .succeeded, exitCode: nil)
     }
 
-    /// Timeout/cancel teardown for an agent-kind run: capture the agent session's transcript, then kill it
-    /// through the agent-kill flow so its subscribers get their exited notice and the agent row is finalized.
-    /// `killAgentSession` also handles a not-yet-signaled `.agent` session (no row yet) by terminating it
-    /// directly; only if it recognizes neither do we fall back to a plain session termination.
+    /// Timeout/cancel teardown for an agent-kind run: kill the agent session through the agent-kill flow so
+    /// its subscribers get their exited notice and the agent row is finalized. `killAgentSession` also
+    /// handles a not-yet-signaled `.agent` session (no row yet) by terminating it directly; only if it
+    /// recognizes neither do we fall back to a plain session termination. The killed session's transcript is
+    /// not copied anywhere: the session itself survives, frozen and replayable, until the run is pruned.
     private func teardownAgentRunSession(_ run: AutomationRun) throws {
         guard let sessionID = run.terminalSessionID else { return }
-        if orchestrator.automationSessionIsLive(sessionID: sessionID) { try captureAttributedTranscript(runID: run.id, sessionID: sessionID) }
         if try !orchestrator.killAgentSession(terminalSessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
     }
 
@@ -801,8 +786,8 @@ public final class AutomationService: @unchecked Sendable {
 
     // MARK: - Cancellation
 
-    /// Cancels a run, recorded `canceled`. A script-kind run gets the same teardown as a timeout (capture +
-    /// terminate attributed sessions, signal the command process group); an agent-kind run is torn down
+    /// Cancels a run, recorded `canceled`. A script-kind run gets the same teardown as a timeout (terminate
+    /// attributed sessions, signal the command process group); an agent-kind run is torn down
     /// through the agent-kill flow so its subscribers are notified and the agent row finalized. A run whose
     /// automation was deleted out from under it falls back to the plain-session teardown. A no-op for an
     /// already-terminal run. Teardown/finalization failures propagate so the command surface
@@ -820,13 +805,10 @@ public final class AutomationService: @unchecked Sendable {
     /// Log-only wrapper around the cancel core for resilient scheduler-side callers — the delete path (which
     /// best-effort cancels every running run before tearing the automation down) — where one run's teardown
     /// failure must not abort the surrounding sweep. Command-surface cancels go through `cancelAutomationRun`.
-    public func cancelRun(runID: String) {
-        queue.sync { cancelRunLocked(runID: runID) }
-    }
+    public func cancelRun(runID: String) { queue.sync { cancelRunLocked(runID: runID) } }
 
     private func cancelRunLocked(runID: String) {
-        do { try cancelRunThrowing(runID: runID) }
-        catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
+        do { try cancelRunThrowing(runID: runID) } catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
     }
 
     // MARK: - Run finalization + teardown
@@ -850,14 +832,13 @@ public final class AutomationService: @unchecked Sendable {
             promptDeliveredAt: run.promptDeliveredAt)
     }
 
-    /// Teardown for a timeout/cancel: capture + terminate + finalize the run's still-live coding-agent
-    /// sessions, then signal the run's own command process group so the command stops. The command's
-    /// process group gets SIGTERM now and SIGKILL after the grace via `processPendingKills`.
+    /// Teardown for a timeout/cancel: terminate + finalize the run's still-live coding-agent sessions, then
+    /// signal the run's own command process group so the command stops. The command's process group gets
+    /// SIGTERM now and SIGKILL after the grace via `processPendingKills`.
     private func teardownRunSessions(_ run: AutomationRun, terminate: Bool) throws {
         let ownSessionID = run.terminalSessionID
         let attributedSessionIDs = try store.terminalSessionIDs(automationRunID: run.id).filter { $0 != ownSessionID }
         for sessionID in attributedSessionIDs where orchestrator.automationSessionIsLive(sessionID: sessionID) {
-            try captureAttributedTranscript(runID: run.id, sessionID: sessionID)
             orchestrator.automationTerminateSession(sessionID: sessionID)
             try finalizeAttributedAgentRow(sessionID: sessionID)
         }
@@ -872,8 +853,7 @@ public final class AutomationService: @unchecked Sendable {
             let processGroupID = signalableProcessGroupID(childPID: childPID)
             signalProcessGroup(childPID: childPID, processGroupID: processGroupID, signal: SIGTERM)
             pendingKills[run.id] = PendingKill(
-                childPID: childPID, processGroupID: processGroupID,
-                sigkillDeadline: now().addingTimeInterval(terminationGrace))
+                childPID: childPID, processGroupID: processGroupID, sigkillDeadline: now().addingTimeInterval(terminationGrace))
         } else {
             // Fallback for the no-PID window: under write-behind persistence the runtime row (or its childPID)
             // can be absent while the session is genuinely live — a cancel, or a short timeout expiring while
@@ -884,31 +864,22 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     /// Sweeps the prior runs of an automation when a new run starts: for each attributed coding-agent
-    /// session whose terminal has ENDED (never a live one), capture its transcript if not already captured,
-    /// finalize its agent row, and remove the ended session from the product.
+    /// session whose terminal has ENDED (never a live one), finalize its agent row so no orchestration state
+    /// (agent row, tracked window, workspace running flag) leaks from a session nothing will ever revive.
+    ///
+    /// The session itself is deliberately left in place, rows and directory both. Its run is still listed in
+    /// the Runs tab and offers a read-only replay, so the session is the replay source and must survive until
+    /// its run does; retention pruning and automation deletion are the only paths that remove it.
     private func sweepPriorRunSessions(automationID: String, excludingRunID: String) {
         do {
             for priorRun in try store.automationRuns(automationID: automationID) where priorRun.id != excludingRunID {
                 let ownSessionID = priorRun.terminalSessionID
                 for sessionID in try store.terminalSessionIDs(automationRunID: priorRun.id) where sessionID != ownSessionID {
                     guard !orchestrator.automationSessionIsLive(sessionID: sessionID) else { continue }
-                    try captureAttributedTranscript(runID: priorRun.id, sessionID: sessionID)
                     try finalizeAttributedAgentRow(sessionID: sessionID)
-                    try removeEndedSession(sessionID: sessionID)
                 }
             }
         } catch { logError("automation_sweep_error automation=\(automationID) error=\(error)") }
-    }
-
-    /// Copies a coding-agent session's `output.log` into the run's artifacts directory as
-    /// `agent-<sessionID>.log`, unless it was already captured. Missing output is not an error.
-    private func captureAttributedTranscript(runID: String, sessionID: String) throws {
-        let destination = try AutomationPaths.attributedSessionLogPath(runID: runID, sessionID: sessionID)
-        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
-        let sourcePath = try TerminalSessionPaths.forSession(id: sessionID).outputPath
-        guard FileManager.default.fileExists(atPath: sourcePath) else { return }
-        try AutomationPaths.ensureRunDirectory(runID: runID)
-        try FileManager.default.copyItem(atPath: sourcePath, toPath: destination.path)
     }
 
     /// Finalizes the coding-agent orchestration row bound to an attributed terminal session through the
@@ -919,12 +890,11 @@ public final class AutomationService: @unchecked Sendable {
     /// spawned agent session persists workspace-side state (a tracked terminal window plus the workspace
     /// marked running) at spawn time, before the foreground reconciler registers its agent row. A session
     /// that ends inside that window has no `AgentWindowRecord`, so `finalizeAgentRow` cannot reach it; left
-    /// alone, its tracked window and running flag would leak past the sweep (which removes only the
-    /// terminal-session row and files). For that row-less case route through
-    /// `terminateSpawnedAgentTerminalSession` — the existing `.agent` cleanup seam shared with `agent kill`
-    /// that drops the tracked window and clears the workspace's running flag when no runtime indicators
-    /// remain. Its terminate call is a harmless no-op here: the sweep only reaches ended sessions, and
-    /// teardown has already terminated the live one.
+    /// alone, its tracked window and running flag would leak past the sweep. For that row-less case route
+    /// through `terminateSpawnedAgentTerminalSession` — the existing `.agent` cleanup seam shared with
+    /// `agent kill` that drops the tracked window and clears the workspace's running flag when no runtime
+    /// indicators remain. Its terminate call is a harmless no-op here: the sweep only reaches ended sessions,
+    /// and teardown has already terminated the live one.
     private func finalizeAttributedAgentRow(sessionID: String) throws {
         guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: sessionID) else {
             _ = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: sessionID)
@@ -933,22 +903,16 @@ public final class AutomationService: @unchecked Sendable {
         try orchestrator.finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false))
     }
 
-    /// Removes an ended attributed session from the product: its terminal-session row and its session
-    /// directory. Only ever called for sessions confirmed ended by the sweep.
-    private func removeEndedSession(sessionID: String) throws {
-        try store.deleteTerminalSession(sessionID: sessionID)
-        if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
-            try? FileManager.default.removeItem(atPath: paths.rootDirectory)
-            try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
-            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
-        }
-    }
-
     // MARK: - Retention
 
     /// Prunes an automation's terminal runs beyond the newest `retentionLimit`, deleting each pruned run's
     /// artifacts, its attributed terminal-session directories/rows, and the run row itself. Live
     /// (queued/running) runs are never eligible.
+    ///
+    /// This is the product-side bound on how long a run's terminals stay replayable: a run's sessions are
+    /// held against the daemon's session garbage collector by their `automation_run_id` stamp, so they live
+    /// exactly as long as the run row unless the collector's global ended-session limits (age, disk budget)
+    /// expire them first.
     ///
     /// A prunable run whose attributed agent session is STILL live is skipped and stays retained past the
     /// cap. `deleteRunArtifactsAndSessions` terminates any live session before removing its records, so
@@ -985,9 +949,7 @@ public final class AutomationService: @unchecked Sendable {
             // one: an agent session that ended before the foreground reconciler registered its row still holds
             // spawn-time workspace tracking (a tracked terminal window plus the workspace-running flag), which
             // `finalizeAttributedAgentRow`'s row-less fallback releases. Deleting the session rows/files without
-            // it would leak that tracking permanently — no later sweep can reach the gone rows. No transcript is
-            // captured here — the run's entire artifacts directory is deleted in this same call, so a capture
-            // would be written and immediately removed.
+            // it would leak that tracking permanently — no later sweep can reach the gone rows.
             try finalizeAttributedAgentRow(sessionID: sessionID)
             try store.deleteTerminalSession(sessionID: sessionID)
             if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
@@ -996,9 +958,7 @@ public final class AutomationService: @unchecked Sendable {
                 try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
             }
         }
-        if let runDirectory = try? AutomationPaths.runDirectory(runID: runID) {
-            try? FileManager.default.removeItem(at: runDirectory)
-        }
+        if let runDirectory = try? AutomationPaths.runDirectory(runID: runID) { try? FileManager.default.removeItem(at: runDirectory) }
     }
 
     // MARK: - Automation deletion
@@ -1009,9 +969,7 @@ public final class AutomationService: @unchecked Sendable {
     /// instead of leaving the automation row — and its cron schedule — in place while reporting success. Each
     /// running run's cancel stays best-effort (the log-only `cancelRun`) so one stuck teardown does not abort
     /// the surrounding deletion.
-    public func deleteAutomation(id: String) throws {
-        try queue.sync { try deleteAutomationLocked(id: id) }
-    }
+    public func deleteAutomation(id: String) throws { try queue.sync { try deleteAutomationLocked(id: id) } }
 
     private func deleteAutomationLocked(id: String) throws {
         for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRunLocked(runID: run.id) }
@@ -1028,8 +986,7 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     private func readExitCode(runID: String) -> Int? {
-        guard let path = try? AutomationPaths.exitCodePath(runID: runID).path,
-            let contents = try? String(contentsOfFile: path, encoding: .utf8)
+        guard let path = try? AutomationPaths.exitCodePath(runID: runID).path, let contents = try? String(contentsOfFile: path, encoding: .utf8)
         else { return nil }
         return Int(contents.trimmingCharacters(in: .whitespacesAndNewlines))
     }

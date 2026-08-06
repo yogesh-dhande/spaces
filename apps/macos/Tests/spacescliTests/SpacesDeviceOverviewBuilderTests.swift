@@ -656,6 +656,17 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
     }
 
+    /// An automation run's ended terminal has no workspace, no process/agent row, and no window row (a
+    /// script run's session never had one, and an ended agent run's row is finalized away), so the run
+    /// attribution is the only thing that can keep it retained. Without it the client would close the Runs
+    /// tab's replay pane on the next overview.
+    func testRetainedIncludesAutomationAttributedSessionWithNoOtherRecord() {
+        let overview = SpacesDeviceOverviewBuilder.build(
+            workspaces: [], workspaceRows: [], liveSessions: [], automationAttributedSessionIDs: ["session-automation-run"])
+
+        XCTAssertEqual(overview.retainedTerminalSessionIDs, ["session-automation-run"])
+    }
+
     /// A session whose only product record is its terminal window keeps its `sessions` entry after it
     /// exits, and its row keeps offering the open — `docs/spec.md`: an exited target opens its pane in
     /// its ended state, and the terminal row is named there alongside process and coding-agent rows. The

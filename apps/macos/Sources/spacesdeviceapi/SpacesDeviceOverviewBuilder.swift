@@ -68,7 +68,8 @@ struct SpacesDeviceOverviewBuilder {
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
         liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
-        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = []
+        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [],
+        automationAttributedSessionIDs: [String] = []
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -142,7 +143,8 @@ struct SpacesDeviceOverviewBuilder {
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
-            retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces),
+            retainedTerminalSessionIDs: retainedTerminalSessionIDs(
+                liveSessions: liveSessions, workspaces: workspaces, automationAttributedSessionIDs: automationAttributedSessionIDs),
             workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
             automationRuns: automationRuns)
     }
@@ -153,13 +155,22 @@ struct SpacesDeviceOverviewBuilder {
     /// This is the daemon's authoritative retention rule, mirroring the session garbage collector's
     /// `SQLiteStore.terminalSessionIsReferencedByProduct` plus a live core: a session is retained while
     /// it has a live interactive service (`liveSessions`, the same catalog that feeds `sessions`) or while
-    /// a `running_processes`, `agent_sessions`, or `runtime_targets` row references it. It reads the raw
-    /// product records' tracking ids directly, BEFORE `sessions`' live-map stripping drops an ended
-    /// session's id — so a bare ad hoc shell that has exited but is still held by its `runtime_targets`
+    /// a `running_processes`, `agent_sessions`, `runtime_targets`, or automation-run row references it. It
+    /// reads the raw product records' tracking ids directly, BEFORE `sessions`' live-map stripping drops an
+    /// ended session's id — so a bare ad hoc shell that has exited but is still held by its `runtime_targets`
     /// (terminal window) row remains in the keep-set, and its client-side ended pane stays open for
     /// scrollback until that row is removed. Ids are whitespace-trimmed, empties dropped, and sorted so
     /// the payload is stable tick-to-tick (the client dedupes overviews by equality).
-    private static func retainedTerminalSessionIDs(liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor]) -> [String] {
+    ///
+    /// `automationAttributedSessionIDs` covers the automation-run arm of that rule, which no workspace
+    /// descriptor can supply: an automation run's terminals are replayable from the Runs tab until the run is
+    /// pruned, and a script run's terminal is workspace-less while an ended agent run's agent row is already
+    /// finalized away, so neither would otherwise appear here and the client would close the replay pane on
+    /// the next overview. It is read from the store rather than derived from `automationRuns` so the keep-set
+    /// covers every retained run, not just the ones inside the overview's bounded run window.
+    private static func retainedTerminalSessionIDs(
+        liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor], automationAttributedSessionIDs: [String]
+    ) -> [String] {
         var retained = Set<String>()
         func insert(_ trackingID: String?) {
             guard let normalized = trackingID?.trimmingCharacters(in: .whitespacesAndNewlines), !normalized.isEmpty else { return }
@@ -171,6 +182,7 @@ struct SpacesDeviceOverviewBuilder {
             for agent in descriptor.agentWindows { insert(agent.terminalTrackingID) }
             for window in descriptor.windows { insert(window.terminalTrackingID) }
         }
+        for sessionID in automationAttributedSessionIDs { insert(sessionID) }
         return retained.sorted()
     }
 

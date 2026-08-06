@@ -4228,12 +4228,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// metadata only — the pane attaches to the daemon's existing session and streams its real render — so
     /// the user's login shell is a faithful label locally and a reasonable one remotely.
     ///
-    /// An `agent`-kind run's session IS a real workspace agent session present in the device overview, so it
-    /// is resolved through `deviceTerminalOpenRequest` for its true workspace/kind/command/shell (which is
-    /// what makes pane dedup and correct labeling work), falling back to a synthesized `.agent` request. The
-    /// fallback carries a nil shell so an ended session can still cold-resolve, is titled with the automation
-    /// name, and seeds its initial state from the run's status. Metadata (name, script, workspace) still comes
-    /// from the automation when it exists, with the same nil-automation fallbacks for a deleted automation.
+    /// An `agent`-kind run's session IS a real workspace agent session, so while it is live the overview
+    /// carries it and `deviceTerminalOpenRequest` resolves its true workspace/kind/command/shell (which is
+    /// what makes pane dedup and correct labeling work). An ENDED agent session is absent from the overview
+    /// (the overview lists live sessions, and the run's agent row is finalized away by the next run's sweep),
+    /// so the fallback synthesizes the request the same way the script branch does, seeding the automation's
+    /// workspace, working directory, agent command, and the login shell so the pane has display metadata to
+    /// label the replay with. Metadata (name, script, workspace) still comes from the automation when it
+    /// exists, with the same nil-automation fallbacks for a deleted automation.
     nonisolated static func automationRunTerminalOpenRequest(
         deviceID: String, sessionID: String, run: TerminalServiceAutomationRunSummary, automation: TerminalServiceAutomationSummary?,
         overview: SpacesDeviceOverviewPayload?, loginShell: String
@@ -4246,12 +4248,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 initialState: initialState)
         }
         let workspaceID = automation?.workspaceID ?? ""
-        let resolved = deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
+        guard let resolved = deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview) else {
+            return DeviceTerminalOpenRequest(
+                workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
+                workingDirectory: automation?.workingDirectory ?? "", kind: .agent, shell: loginShell, command: automation?.agentCommand,
+                initialState: initialState)
+        }
         return DeviceTerminalOpenRequest(
-            workspaceID: resolved?.workspaceID ?? workspaceID, deviceID: deviceID, sessionID: sessionID,
-            title: resolved?.title ?? automation?.name ?? "Automation", workingDirectory: resolved?.workingDirectory ?? "",
-            kind: resolved?.kind ?? .agent, shell: resolved?.shell, command: resolved?.command, initialState: resolved?.initialState ?? initialState,
-            servicePID: resolved?.servicePID, childPID: resolved?.childPID, createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
+            workspaceID: resolved.workspaceID, deviceID: deviceID, sessionID: sessionID, title: resolved.title,
+            workingDirectory: resolved.workingDirectory, kind: resolved.kind, shell: resolved.shell, command: resolved.command,
+            initialState: resolved.initialState ?? initialState, servicePID: resolved.servicePID, childPID: resolved.childPID,
+            createdAt: resolved.createdAt, updatedAt: resolved.updatedAt)
     }
 
     nonisolated private static func terminalSessionKind(rowKind: SpacesDeviceTerminalSessionRowKind) -> TerminalSessionKind {
@@ -4605,10 +4612,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// session's final render lands).
     ///
     /// A `script`-kind run's session is workspace-less and deliberately excluded from the workspace-scoped
-    /// overview's `sessions`, so its request is synthesized as a `.automation` pane. An `agent`-kind run's
-    /// session is a real workspace agent session present in the overview, so it resolves its true
+    /// overview's `sessions`, so its request is synthesized as a `.automation` pane. A LIVE `agent`-kind
+    /// run's session is a real workspace agent session present in the overview, so it resolves its true
     /// workspace/kind/command identity from that overview instead (see `automationRunTerminalOpenRequest`),
-    /// which is what keeps pane dedup and labeling correct.
+    /// which is what keeps pane dedup and labeling correct. An ended one is synthesized the same way the
+    /// script branch is.
     func openAutomationRunTerminal(deviceID: String, run: TerminalServiceAutomationRunSummary) {
         guard let sessionID = run.terminalSessionID else {
             showError(Self.terminalSessionNotFoundError())
@@ -4627,15 +4635,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// device's overview when the session is present (for the real shell/command/state) and synthesized
     /// otherwise; it opens in a standalone panel window like the run's own terminal, since the Automations
     /// pane has no workspace pane to host it.
+    ///
+    /// The synthesized fallback is the ENDED agent's path (an ended session leaves the overview), and it
+    /// seeds the login shell for the same reason the run's own request does: a panel window opens with no
+    /// cold-resolution step, so a request with no shell and no overview summary has no launch configuration
+    /// to build the pane from and the replay would fail to open.
     func openAutomationAgentSession(deviceID: String, agent: TerminalServiceAutomationAgentSummary) {
         let workspaceID = agent.workspaceID ?? ""
         let overview = deviceSection(id: deviceID)?.overview
+        let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let resolved = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: agent.terminalSessionID, overview: overview)
         let request = DeviceTerminalOpenRequest(
             workspaceID: resolved?.workspaceID ?? workspaceID, deviceID: deviceID, sessionID: agent.terminalSessionID,
             title: resolved?.title ?? agent.title ?? "Agent", workingDirectory: resolved?.workingDirectory ?? "", kind: resolved?.kind ?? .agent,
-            shell: resolved?.shell, command: resolved?.command, initialState: resolved?.initialState ?? (agent.live ? .running : .exited),
-            servicePID: resolved?.servicePID, childPID: resolved?.childPID, createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
+            shell: resolved?.shell ?? loginShell, command: resolved?.command,
+            initialState: resolved?.initialState ?? (agent.live ? .running : .exited), servicePID: resolved?.servicePID, childPID: resolved?.childPID,
+            createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }
 

@@ -47,8 +47,8 @@ extension SQLiteStore {
                 automation.id, automation.name, automation.enabled ? "1" : "0", automation.triggerKind.rawValue, automation.cronExpression ?? "",
                 automation.kind.rawValue, automation.script, automation.agentCommand ?? "", automation.agentPrompt ?? "",
                 automation.workspaceID ?? "", automation.workingDirectory, automation.timeoutSeconds.map(String.init) ?? "",
-                automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue,
-                automation.nextFireTime.map(Self.epochString) ?? "", Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
+                automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue, automation.nextFireTime.map(Self.epochString) ?? "",
+                Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
             ])
     }
 
@@ -62,9 +62,8 @@ extension SQLiteStore {
     }
 
     public func enabledCronAutomations() throws -> [Automation] {
-        try queryRows(
-            sql: "SELECT \(Self.automationColumns) FROM automations WHERE enabled = 1 AND trigger_kind = 'cron' ORDER BY created_at, id"
-        ).compactMap(Self.decodeAutomation)
+        try queryRows(sql: "SELECT \(Self.automationColumns) FROM automations WHERE enabled = 1 AND trigger_kind = 'cron' ORDER BY created_at, id")
+            .compactMap(Self.decodeAutomation)
     }
 
     /// Persists a cron automation's next-due time (the missed-run anchor a restarted daemon reads). Touches
@@ -72,8 +71,7 @@ extension SQLiteStore {
     /// user edit.
     public func setAutomationNextFireTime(id: String, nextFireTime: Date?) throws {
         try execute(
-            sql: "UPDATE automations SET next_fire_time = NULLIF(?, '') WHERE id = ?",
-            bindings: [nextFireTime.map(Self.epochString) ?? "", id])
+            sql: "UPDATE automations SET next_fire_time = NULLIF(?, '') WHERE id = ?", bindings: [nextFireTime.map(Self.epochString) ?? "", id])
     }
 
     public func deleteAutomation(id: String) throws { try execute(sql: "DELETE FROM automations WHERE id = ?", bindings: [id]) }
@@ -119,8 +117,8 @@ extension SQLiteStore {
     /// Updates the mutable fields of a run row. Every field is written from the passed value, so the caller
     /// composes the full desired state (e.g. terminal state + exit code + ended_at) in one update.
     public func updateAutomationRun(
-        id: String, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?, exitCode: Int?, terminalSessionID: String?,
-        startedAt: Date?, endedAt: Date?, promptDeliveredAt: Date?
+        id: String, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?, exitCode: Int?, terminalSessionID: String?, startedAt: Date?,
+        endedAt: Date?, promptDeliveredAt: Date?
     ) throws {
         try execute(
             sql: """
@@ -136,9 +134,7 @@ extension SQLiteStore {
     }
 
     public func automationRun(id: String) throws -> AutomationRun? {
-        guard let row = try queryRow(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE id = ?", bindings: [id]) else {
-            return nil
-        }
+        guard let row = try queryRow(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE id = ?", bindings: [id]) else { return nil }
         return Self.decodeAutomationRun(row: row)
     }
 
@@ -152,9 +148,8 @@ extension SQLiteStore {
 
     /// Runs across every automation, newest first — the unfiltered runs listing.
     public func allAutomationRuns() throws -> [AutomationRun] {
-        try queryRows(
-            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC"
-        ).compactMap(Self.decodeAutomationRun)
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC").compactMap(
+            Self.decodeAutomationRun)
     }
 
     /// The newest terminal-status runs across every automation, capped at `limit` — the overview's recent-run
@@ -197,9 +192,8 @@ extension SQLiteStore {
     /// Runs across every automation that are still active (queued or running), oldest first — the overview
     /// always includes these regardless of the recent-run window so a live run is never dropped.
     public func activeAutomationRuns() throws -> [AutomationRun] {
-        try queryRows(
-            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status IN ('queued', 'running') ORDER BY created_at, id"
-        ).compactMap(Self.decodeAutomationRun)
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status IN ('queued', 'running') ORDER BY created_at, id")
+            .compactMap(Self.decodeAutomationRun)
     }
 
     /// Runs of one automation in a non-terminal state (queued or running), oldest first.
@@ -215,9 +209,8 @@ extension SQLiteStore {
 
     /// Every run across all automations that is currently `running` — the executor's poll set.
     public func runningAutomationRuns() throws -> [AutomationRun] {
-        try queryRows(
-            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status = 'running' ORDER BY created_at, id"
-        ).compactMap(Self.decodeAutomationRun)
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status = 'running' ORDER BY created_at, id").compactMap(
+            Self.decodeAutomationRun)
     }
 
     /// The single pending queued run for one automation (there is at most one under the queue policy),
@@ -255,9 +248,10 @@ extension SQLiteStore {
         guard let trigger = AutomationRunTrigger(rawValue: row[5]) else { return nil }
         guard let createdAt = date(fromEpoch: row[10]) else { return nil }
         return AutomationRun(
-            id: row[0], automationID: row[1], kind: kind, status: status, skipReason: row[4].isEmpty ? nil : AutomationRunSkipReason(rawValue: row[4]),
-            trigger: trigger, exitCode: row[6].isEmpty ? nil : Int(row[6]), terminalSessionID: row[7].isEmpty ? nil : row[7],
-            startedAt: date(fromEpoch: row[8]), endedAt: date(fromEpoch: row[9]), createdAt: createdAt, promptDeliveredAt: date(fromEpoch: row[11]))
+            id: row[0], automationID: row[1], kind: kind, status: status,
+            skipReason: row[4].isEmpty ? nil : AutomationRunSkipReason(rawValue: row[4]), trigger: trigger,
+            exitCode: row[6].isEmpty ? nil : Int(row[6]), terminalSessionID: row[7].isEmpty ? nil : row[7], startedAt: date(fromEpoch: row[8]),
+            endedAt: date(fromEpoch: row[9]), createdAt: createdAt, promptDeliveredAt: date(fromEpoch: row[11]))
     }
 
     // MARK: - Attributed terminal sessions
@@ -266,13 +260,36 @@ extension SQLiteStore {
     /// own `.automation` session and every coding-agent session spawned during the run.
     public func terminalSessionIDs(automationRunID: String) throws -> [String] {
         try queryRows(
-            sql: "SELECT session_id FROM terminal_sessions WHERE automation_run_id = ? ORDER BY created_at, session_id",
-            bindings: [automationRunID]
+            sql: "SELECT session_id FROM terminal_sessions WHERE automation_run_id = ? ORDER BY created_at, session_id", bindings: [automationRunID]
         ).compactMap { $0.first }
     }
 
-    /// Deletes a terminal session and every companion row keyed by its session id — used to remove an ended
-    /// automation-attributed session from the product once its artifacts have been captured. The session row
+    /// Every terminal session attributed to a run row that still exists: the automation half of the daemon's
+    /// retained-session keep-set, matching the `automation_runs` JOIN in
+    /// `terminalSessionIsReferencedByProduct`. A stamp whose run was pruned or deleted is excluded, so a
+    /// dangling id never keeps a pane open.
+    public func terminalSessionIDsAttributedToExistingAutomationRuns() throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT terminal_sessions.session_id
+                FROM terminal_sessions
+                JOIN automation_runs ON automation_runs.id = terminal_sessions.automation_run_id
+                ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
+                """
+        ).compactMap { $0.first }
+    }
+
+    /// Drops a terminal session's automation attribution, releasing the reference that keeps a retained
+    /// run's session replayable. Called only by the session-retention release path, where a long-ended (or
+    /// over-budget) session's product rows are cleared so the daemon's garbage collector may reclaim it:
+    /// automation sessions then age out on exactly the same 7-day / byte-budget terms as ended panes,
+    /// leaving the run row itself untouched so the run still lists in the Runs tab without a replay.
+    public func clearTerminalSessionAutomationAttribution(sessionID: String) throws {
+        try execute(sql: "UPDATE terminal_sessions SET automation_run_id = NULL WHERE session_id = ?", bindings: [sessionID])
+    }
+
+    /// Deletes a terminal session and every companion row keyed by its session id — used to remove an
+    /// automation-attributed session from the product when its run is pruned or its automation deleted. The session row
     /// and its runtime state, client, attachment, remote-session-state, and agent-signal-event rows are
     /// removed in one transaction so a deleted session leaves no orphaned persistence behind (none of these
     /// tables declares a foreign-key cascade onto `terminal_sessions`, so each must be deleted explicitly).
@@ -280,7 +297,7 @@ extension SQLiteStore {
     /// session directory alone would leave a signaling agent's signal history behind forever.
     ///
     /// The session may itself be an agent-watch SUBSCRIBER (its script ran `spaces agent … --subscribe`).
-    /// Retention/sweep deletion reaches this transaction directly and never routes the orchestrator's
+    /// Retention/automation-deletion reaches this transaction directly and never routes the orchestrator's
     /// `subscriberDidExit` path, so its subscriber-keyed edges in `agent_subscriptions`,
     /// `agent_pending_notifications`, and `agent_remote_subscriptions` are dropped here — otherwise remote
     /// watch streams stay alive and notifications target a nonexistent session. Only the subscriber SIDE is

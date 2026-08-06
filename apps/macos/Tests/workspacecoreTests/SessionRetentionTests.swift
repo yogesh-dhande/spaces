@@ -18,8 +18,7 @@ final class SessionRetentionTests: XCTestCase {
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "ended-agent-session"
-        let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .idle)
+        let agent = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .idle)
         try store.updateAgentWindowStatus(id: agent.id, status: .exited, updatedAt: "2026-07-14T00:00:00Z")
 
         // An inbound watch edge: a bypass delete of the watched row would fail loudly under RESTRICT, so a
@@ -158,8 +157,7 @@ final class SessionRetentionTests: XCTestCase {
 
         let targetAgent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: target, status: .idle)
-        let otherAgent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: other, status: .idle)
+        let otherAgent = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: other, status: .idle)
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "proc-other", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
@@ -186,8 +184,7 @@ final class SessionRetentionTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let sessionID = "agent-only-session"
-        let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .exited)
+        let agent = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .exited)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
 
         try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
@@ -218,7 +215,88 @@ final class SessionRetentionTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
     }
 
+    // MARK: - Automation attribution
+
+    /// An automation run listed in the Runs tab offers its terminal for read-only replay, so a session
+    /// stamped with that run's id must read as referenced for as long as the run row exists, even with no
+    /// process, agent, or window row of its own, which is exactly a script run's workspace-less session.
+    /// Deleting the run (retention pruning, or automation deletion) is what makes it collectable.
+    func testRunAttributedSessionIsReferencedUntilItsRunRowIsDeleted() throws {
+        let store = try makeTemporaryStore()
+        let sessionID = "automation-run-session"
+        let run = try seedAutomationRunWithAttributedSession(store: store, sessionID: sessionID)
+
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(sessionID), "a retained run keeps its terminal replayable")
+
+        try store.deleteAutomationRun(id: run.id)
+
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID), "once the run is gone nothing replays the session")
+    }
+
+    /// A stamp left pointing at a run row that no longer exists pins nothing: the reference check JOINs
+    /// `automation_runs`, so a dangling attribution can never keep a session out of the collector's reach.
+    func testDanglingAutomationAttributionDoesNotReferenceTheSession() throws {
+        let store = try makeTemporaryStore()
+        let sessionID = "dangling-attribution-session"
+        let run = try seedAutomationRunWithAttributedSession(store: store, sessionID: sessionID)
+        try store.deleteAutomationRun(id: run.id)
+
+        XCTAssertEqual(try store.terminalSessionIDs(automationRunID: run.id), [sessionID], "the stamp itself survives the run row")
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID))
+    }
+
+    /// Age expiry and budget eviction must reach automation sessions on the same terms as ended panes, so
+    /// the release drops the run attribution too. The run row itself is left alone: the Runs tab still
+    /// lists the run, it just no longer has a transcript to replay.
+    func testReleaseDropsAutomationAttributionAndLeavesTheRunRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let sessionID = "expired-automation-session"
+        let run = try seedAutomationRunWithAttributedSession(store: store, sessionID: sessionID)
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID))
+        XCTAssertTrue(try store.terminalSessionIDs(automationRunID: run.id).isEmpty, "the attribution is cleared")
+        XCTAssertNotNil(try store.automationRun(id: run.id), "the run stays in history without its replay")
+    }
+
+    /// The daemon's published keep-set (what stops a client closing an open replay pane) reads the same
+    /// automation attribution the collector does, and drops a session as soon as its run is gone.
+    func testAttributedKeepSetTracksTheRunRow() throws {
+        let store = try makeTemporaryStore()
+        let sessionID = "keep-set-session"
+        let run = try seedAutomationRunWithAttributedSession(store: store, sessionID: sessionID)
+
+        XCTAssertEqual(try store.terminalSessionIDsAttributedToExistingAutomationRuns(), [sessionID])
+
+        try store.deleteAutomationRun(id: run.id)
+
+        XCTAssertTrue(try store.terminalSessionIDsAttributedToExistingAutomationRuns().isEmpty)
+    }
+
     // MARK: - Fixtures
+
+    /// A terminal run with one workspace-less `.automation` terminal session stamped to it: the shape a
+    /// finished script run leaves behind, with no process, agent, or window row referencing the session.
+    @discardableResult private func seedAutomationRunWithAttributedSession(store: SQLiteStore, sessionID: String) throws -> AutomationRun {
+        let automation = Automation(
+            id: UUID().uuidString, name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: Date(),
+            updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .succeeded, skipReason: nil, trigger: .manual, exitCode: 0,
+            terminalSessionID: sessionID, startedAt: Date(), endedAt: Date(), createdAt: Date())
+        try store.insertAutomationRun(run)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "Nightly", workingDirectory: "/tmp", shell: "/bin/zsh", command: "true",
+                createdAt: "2026-06-06T00:00:00Z", workspaceID: nil, kind: .automation, automationRunID: run.id), paths: paths)
+        return run
+    }
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path

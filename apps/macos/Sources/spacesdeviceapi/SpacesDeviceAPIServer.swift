@@ -1820,7 +1820,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceOverviewBuilder.build(
             projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions,
             workspaceIDsWithTeardownInFlight: workspaceTeardownRegistry.snapshot(), daemonStatus: daemonStatus, automations: automationSummaries,
-            automationRuns: automationRunSummaries)
+            automationRuns: automationRunSummaries, automationAttributedSessionIDs: try store.terminalSessionIDsAttributedToExistingAutomationRuns())
     }
 
     /// Builds the overview's automation section: every automation, plus the runs a client needs — all
