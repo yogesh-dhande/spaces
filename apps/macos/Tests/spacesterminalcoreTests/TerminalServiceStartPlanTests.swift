@@ -87,6 +87,33 @@ import XCTest
             }
         }
 
+        /// The agent plist is read under the same home the profile resolved from. These two tests use the
+        /// resolved default rather than injecting a URL, because the alignment itself is what is under test:
+        /// `SpacesBinaryLayout.launchAgentURL()` defaults to `NSHomeDirectory()`, which ignores an overridden
+        /// `HOME`, so a process running with an isolated home (routine in this repo's tests) would otherwise
+        /// find the real user's plist and kickstart the production daemon while polling an isolated socket.
+        func testAgentPlistIsFoundUnderTheOverriddenHome() throws {
+            let home = try makeTemporaryDirectory()
+            let agentDirectory = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            try FileManager.default.createDirectory(at: agentDirectory, withIntermediateDirectories: true)
+            try Data().write(to: agentDirectory.appendingPathComponent("dev.usespaces.spacesd.plist", isDirectory: false))
+
+            let plan = TerminalService.resolveStartPlan(environment: ["HOME": home.path], profile: makeProfile(isInstalled: true))
+
+            XCTAssertEqual(plan, .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel))
+        }
+
+        /// The counterpart, and the one that would fail against `NSHomeDirectory()`: an isolated home with no
+        /// agent of its own spawns directly even though this machine's real user very likely does have an
+        /// installed agent plist.
+        func testOverriddenHomeWithoutAnAgentPlistSpawnsDirectly() throws {
+            let home = try makeTemporaryDirectory()
+
+            let plan = TerminalService.resolveStartPlan(environment: ["HOME": home.path], profile: makeProfile(isInstalled: true))
+
+            XCTAssertEqual(plan, .directSpawn)
+        }
+
         private func makeProfile(isInstalled: Bool) -> SpacesProfile {
             let root = "/tmp/spaces-profile-\(UUID().uuidString)"
             return SpacesProfile(

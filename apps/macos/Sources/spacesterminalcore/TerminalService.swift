@@ -274,15 +274,25 @@ import Foundation
         ///
         /// A development profile has no agent, and an installed profile can be missing its plist when the
         /// install is partial. Both are started directly.
+        ///
+        /// - Parameter launchAgentURL: Where to look for the agent plist. `nil` resolves it under the same home
+        ///   `environment` resolves a profile from (`SpacesProfile.currentHomeDirectoryURL`), which is the only
+        ///   way the two can agree: `SpacesBinaryLayout.launchAgentURL()` defaults to `NSHomeDirectory()`, and
+        ///   that API ignores an overridden `HOME`. A process running with an isolated home resolves its
+        ///   profile under that home while `NSHomeDirectory()` still names the real user's, so defaulting to it
+        ///   would find the real user's plist and kickstart the production daemon while this caller polls a
+        ///   socket under the isolated home that nothing will ever bind.
         static func resolveStartPlan(
             environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
-            launchAgentURL: URL = SpacesBinaryLayout.launchAgentURL()
+            launchAgentURL: URL? = nil
         ) -> DaemonStartPlan {
             for variable in [pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable] {
                 let value = environment[variable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard value.isEmpty else { return .directSpawn }
             }
-            guard profile.isInstalledProfile, fileManager.fileExists(atPath: launchAgentURL.path) else { return .directSpawn }
+            let plistURL =
+                launchAgentURL ?? SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: SpacesProfile.currentHomeDirectoryURL(environment: environment))
+            guard profile.isInstalledProfile, fileManager.fileExists(atPath: plistURL.path) else { return .directSpawn }
             return .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel)
         }
 
