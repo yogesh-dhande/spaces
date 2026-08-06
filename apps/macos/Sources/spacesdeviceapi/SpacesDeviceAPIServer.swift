@@ -1917,9 +1917,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             // A terminal window's own row. Only sessions the live catalog does not already carry: a live
-            // one is published as an ad hoc summary, which is the only summary that carries a `liveTitle`,
-            // so claiming it here would drop what the program prints. What is left is the ended-but-held
-            // session — the case the process and agent loops above already cover through the same lookup.
+            // one is published as an ad hoc summary, which is where a shell's `liveTitle` reaches clients
+            // (a window row's summary carries none), so claiming it here would drop what the program
+            // prints. What is left is the ended-but-held session, the case the process and agent loops
+            // above already cover through the same lookup.
             for window in descriptor.windows where window.roleValue == .terminal {
                 guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), sessionsByID[sessionID] == nil else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }

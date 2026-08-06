@@ -92,9 +92,14 @@ struct SpacesDeviceOverviewBuilder {
             }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }.map { row in
+            // A summary describes its session exactly as the row claiming it does, since the surfaces that
+            // list sessions rather than rows (a bell's Alerts row, the iOS session list) read the pairing
+            // off the summary: an ad hoc shell and a coding agent both carry the title their program
+            // reports, and a configured process carries none, because the command its configured entry
+            // names already says what it is doing.
             summary(
-                for: row.entry, matchedWorkspace: row.workspace, title: row.title, rowKind: row.rowKind, rowSourceID: row.rowSourceID,
-                hasFinalRender: row.hasFinalRender)
+                for: row.entry, matchedWorkspace: row.workspace, title: row.title, liveTitle: row.rowKind == .agent ? row.entry.liveTitle : nil,
+                rowKind: row.rowKind, rowSourceID: row.rowSourceID, hasFinalRender: row.hasFinalRender)
         }
 
         let adHocSessionSummaries = adHocLiveSessions.sorted { lhs, rhs in
@@ -104,8 +109,6 @@ struct SpacesDeviceOverviewBuilder {
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }.map { session in
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
-            // Only an ad hoc shell carries a live title: a session claimed by a configured process or
-            // coding agent is described by that entry, so nothing displays what its program prints.
             return summary(
                 for: session, matchedWorkspace: matchedWorkspace, title: session.name, liveTitle: session.liveTitle, rowKind: .liveSession,
                 rowSourceID: nil, hasFinalRender: false)
@@ -363,7 +366,7 @@ struct SpacesDeviceOverviewBuilder {
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
             isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), updatedAt: agent?.updatedAt, canRun: canRun,
-            canStop: canStop, canRestart: canRestart)
+            canStop: canStop, canRestart: canRestart, liveTitle: session?.liveTitle)
     }
 
     private static func workspaceTerminalRows(
