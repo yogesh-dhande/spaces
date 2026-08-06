@@ -57,17 +57,33 @@ import XCTest
             XCTAssertEqual(plan, .directSpawn)
         }
 
-        /// An empty or whitespace-only `SPACESD_EXECUTABLE` pins nothing, so it must not push the installed
-        /// profile off launchd. `resolveExecutableURL` ignores such a value too, which would leave the two
-        /// disagreeing about whether a pin exists.
-        func testBlankPinnedExecutableDoesNotDisableTheLaunchAgent() throws {
+        /// `SPACES_RUNTIME_DIR` moves the runtime root, and with it the socket path the caller polls, while the
+        /// profile stays installed because its root is still the real `~/.spaces`. launchd starts the job with
+        /// its own clean environment, so a kickstarted daemon would bind the default socket and leave the
+        /// caller waiting out its startup timeout on one nothing is listening on.
+        func testOverriddenRuntimeDirectoryWinsOverTheInstalledLaunchAgent() throws {
             let agent = try makeExistingLaunchAgentPlist()
 
-            for blank in ["", "   "] {
-                let plan = TerminalService.resolveStartPlan(
-                    environment: ["SPACESD_EXECUTABLE": blank], profile: makeProfile(isInstalled: true), launchAgentURL: agent)
+            let plan = TerminalService.resolveStartPlan(
+                environment: [SpacesProfile.runtimeDirectoryEnvironmentVariable: "/tmp/spaces-runtime-override"],
+                profile: makeProfile(isInstalled: true), launchAgentURL: agent)
 
-                XCTAssertEqual(plan, .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel), "blank pin \"\(blank)\"")
+            XCTAssertEqual(plan, .directSpawn)
+        }
+
+        /// An empty or whitespace-only binding binds nothing, so it must not push the installed profile off
+        /// launchd. Profile resolution and `resolveExecutableURL` both ignore such a value, and treating it as
+        /// a binding here would leave this decision disagreeing with the paths it exists to serve.
+        func testBlankEnvironmentBindingsDoNotDisableTheLaunchAgent() throws {
+            let agent = try makeExistingLaunchAgentPlist()
+
+            for variable in [TerminalService.pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable] {
+                for blank in ["", "   "] {
+                    let plan = TerminalService.resolveStartPlan(
+                        environment: [variable: blank], profile: makeProfile(isInstalled: true), launchAgentURL: agent)
+
+                    XCTAssertEqual(plan, .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel), "\(variable) = \"\(blank)\"")
+                }
             }
         }
 

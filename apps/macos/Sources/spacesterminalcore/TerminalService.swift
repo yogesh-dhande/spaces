@@ -241,6 +241,10 @@ import Foundation
             throw TerminalServiceError.serviceStartupTimedOut(startedBy)
         }
 
+        /// Pins which `spacesd` binary starts. Shared by daemon resolution and the start-plan decision so the
+        /// two cannot disagree about whether a pin is in force.
+        static let pinnedExecutableEnvironmentVariable = "SPACESD_EXECUTABLE"
+
         /// How `ensureRunning` starts a daemon once it has decided one has to be started.
         enum DaemonStartPlan: Equatable {
             /// Spawn the `spacesd` this client resolves, as a child of this process.
@@ -259,9 +263,14 @@ import Foundation
         /// client-owned daemon lives. Routing the start through launchd keeps ownership where the supervision
         /// is.
         ///
-        /// `SPACESD_EXECUTABLE` wins for every profile, including the installed one: it is how the E2E scripts
-        /// pin which daemon build runs, and launchd would start whatever the plist names instead, silently
-        /// ignoring the pin.
+        /// An environment binding that launchd cannot honor wins for every profile, including the installed
+        /// one, because the daemon launchd starts would not be the daemon this client needs. `SPACESD_EXECUTABLE`
+        /// is how the E2E scripts pin which daemon build runs, and launchd starts whatever the plist names
+        /// instead, silently ignoring the pin. `SPACES_RUNTIME_DIR` redirects the profile's runtime root, and
+        /// with it the socket path this caller polls, while leaving the profile itself installed (its root is
+        /// still `~/.spaces`): a kickstarted daemon inherits launchd's clean environment, binds the default
+        /// runtime socket, and would leave the caller waiting out its startup timeout on a socket nothing is
+        /// listening on. Spawning directly is what passes both bindings to the daemon that has to serve them.
         ///
         /// A development profile has no agent, and an installed profile can be missing its plist when the
         /// install is partial. Both are started directly.
@@ -269,8 +278,10 @@ import Foundation
             environment: [String: String] = ProcessInfo.processInfo.environment, profile: SpacesProfile, fileManager: FileManager = .default,
             launchAgentURL: URL = SpacesBinaryLayout.launchAgentURL()
         ) -> DaemonStartPlan {
-            let pinnedExecutable = environment["SPACESD_EXECUTABLE"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard pinnedExecutable.isEmpty else { return .directSpawn }
+            for variable in [pinnedExecutableEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable] {
+                let value = environment[variable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard value.isEmpty else { return .directSpawn }
+            }
             guard profile.isInstalledProfile, fileManager.fileExists(atPath: launchAgentURL.path) else { return .directSpawn }
             return .launchAgentKickstart(label: SpacesBinaryLayout.launchAgentLabel)
         }
@@ -712,7 +723,7 @@ import Foundation
                 candidates.append(trimmed)
             }
 
-            appendCandidate(environment["SPACESD_EXECUTABLE"])
+            appendCandidate(environment[pinnedExecutableEnvironmentVariable])
             appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
