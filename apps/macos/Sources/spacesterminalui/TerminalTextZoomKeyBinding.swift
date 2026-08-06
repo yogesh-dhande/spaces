@@ -10,8 +10,12 @@ public enum TerminalTextZoomKeyBinding {
     ///
     /// Cmd+Shift+= zooms in alongside Cmd+=: `=` and `+` are one key, so a user reaching for "Cmd
     /// plus" holds shift and means the same thing.
+    ///
+    /// Caps lock, the function bit, and the numeric-pad bit are dropped before matching: they describe
+    /// the keyboard's state rather than a modifier the user is holding for this chord, and a chord
+    /// matched exactly would otherwise stop zooming for as long as caps lock is on.
     public static func command(keyCode: Int, modifierFlags: NSEvent.ModifierFlags) -> TerminalTextZoomCommand? {
-        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .function, .numericPad])
         switch (keyCode, flags) {
         case (kVK_ANSI_Equal, [.command]), (kVK_ANSI_Equal, [.command, .shift]): return .zoomIn
         case (kVK_ANSI_Minus, [.command]): return .zoomOut

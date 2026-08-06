@@ -26,6 +26,8 @@ import spacesterminalcore
     /// a laptop keyboard sets on its own) must not stop a zoom key from being recognized.
     @Test func incidentalModifierBitsAreIgnored() {
         #expect(TerminalTextZoomKeyBinding.command(keyCode: kVK_ANSI_Minus, modifierFlags: [.command, .function, .numericPad]) == .zoomOut)
+        #expect(TerminalTextZoomKeyBinding.command(keyCode: kVK_ANSI_Minus, modifierFlags: [.command, .capsLock]) == .zoomOut)
+        #expect(TerminalTextZoomKeyBinding.command(keyCode: kVK_ANSI_Equal, modifierFlags: [.command, .shift, .capsLock]) == .zoomIn)
     }
 
     /// Chords that are not the zoom keys are left alone, so they keep reaching the terminal and the

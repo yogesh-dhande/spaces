@@ -308,6 +308,12 @@ extension TerminalSessionPaneViewController {
         // Zoom is a client-side display setting, not an act on the session, so it is claimed ahead of
         // the ownership and renderer guards below: a viewer watching a session another client owns, and
         // a pane showing the plain-text fallback for an ended session, both resize their text.
+        //
+        // Reaching this at all requires the pane to hold the key window's first responder, which is what
+        // the app's key monitor resolves a focused pane from. A pane showing an ended session's frozen
+        // final render deliberately holds none (`assignPreferredFirstResponder`), and a focused find or
+        // input field is claimed by the monitor before pane routing, so a zoom is started from some other
+        // pane and reaches those panes through the app-wide broadcast instead.
         if let zoomCommand = TerminalTextZoomKeyBinding.command(keyCode: Int(event.keyCode), modifierFlags: event.modifierFlags),
             let terminalTextZoomAction
         {
@@ -317,7 +323,10 @@ extension TerminalSessionPaneViewController {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner,
             visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender
         else { return false }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
+        // Caps lock is dropped alongside the function and numeric-pad bits: it describes the keyboard's
+        // state rather than a modifier held for this chord, and the exact match below would otherwise
+        // refuse every edit and find shortcut for as long as caps lock is on.
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .function, .numericPad])
         guard flags == [.command] || flags == [.command, .shift] else { return false }
         let keyCode = Int(event.keyCode)
         if isFieldEditorFirstResponder, flags == [.command], keyCode == kVK_ANSI_C || keyCode == kVK_ANSI_V || keyCode == kVK_ANSI_A { return false }
