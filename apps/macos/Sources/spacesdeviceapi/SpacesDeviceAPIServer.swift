@@ -1257,6 +1257,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
         case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload, context: context)
+        case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
@@ -1904,14 +1905,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
-                ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
+                ($0.effectiveLabel ?? "").localizedStandardCompare($1.effectiveLabel ?? "") == .orderedAscending
             }) {
                 guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID) else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? catalogEntry(sessionID) else { continue }
                 rows.append(
                     SpacesDeviceOverviewBuilder.WorkspaceTerminalRow(
-                        entry: entry, workspace: descriptor, title: agent.label ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
+                        entry: entry, workspace: descriptor, title: agent.effectiveLabel ?? entry.name, rowKind: .agent, rowSourceID: agent.id,
                         hasFinalRender: sessionIDsWithFinalRender.contains(sessionID)))
             }
 
@@ -1985,7 +1986,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
             return "agent-id:\(claimedLauncherID)"
         }
-        let slotName = record.claimedLauncherName ?? record.label ?? record.id
+        // The slot name has to be the name the row displays: a rename frees the raw label for a new agent
+        // to register under, and keying on it would collapse two live agents into one slot.
+        let slotName = record.claimedLauncherName ?? record.effectiveLabel ?? record.id
         return "agent:\(normalizedSlotName(slotName))"
     }
 
@@ -2451,6 +2454,23 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
     }
 
+    /// Renames a coding-agent row whose name is stored on its session (one with no configured launcher
+    /// behind it). An empty title clears the rename, restoring the name the agent reports for itself (see
+    /// `SpacesDeviceAgentSessionRenameRequest.title`); an id that names no agent session in the workspace
+    /// throws from the orchestrator and is reported as a failure.
+    private func handleRenameAgentSessionRequest(_ request: SpacesDeviceAgentSessionRenameRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        guard let agentID = normalizedString(request.agentID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
+        }
+        let title = normalizedString(request.title)
+        try context.orchestrator().renameAgentSession(workspaceID: workspaceID, agentID: agentID, title: title ?? "")
+        return try refreshedMutationResponse(
+            context: context, message: title == nil ? "Cleared coding agent name." : "Renamed coding agent.", workspaceID: workspaceID)
+    }
+
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the
     /// local `spaces agent spawn` — the command must launch a supported coding agent (see `CodingAgent`).
     /// Hooks are not required. Unlike the local path there is no cwd to infer the workspace
@@ -2578,8 +2598,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         guard let agentName = normalizedString(request.agentName) else { return nil }
         let normalizedAgentName = normalizedRowKey(agentName)
-        return try store.agentWindows(workspaceID: workspaceID).first { normalizedRowKey($0.label ?? $0.claimedLauncherName) == normalizedAgentName }?
-            .id
+        return try store.agentWindows(workspaceID: workspaceID).first {
+            normalizedRowKey($0.effectiveLabel ?? $0.claimedLauncherName) == normalizedAgentName
+        }?.id
     }
 
     private func normalizedString(_ value: String?) -> String? {

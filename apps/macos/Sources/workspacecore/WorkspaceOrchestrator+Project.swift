@@ -334,7 +334,7 @@ extension WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
+        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         if syncPorts {
             let appConfig = try store.appConfig()

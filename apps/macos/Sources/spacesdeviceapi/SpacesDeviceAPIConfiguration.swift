@@ -20,6 +20,10 @@ public enum SpacesDeviceAPIDefaults {
     /// development port can never collide with the installed daemon a client already paired with.
     public static let developmentPortRange: ClosedRange<Int> = 47_848...47_947
 
+    /// These three names are also mirrored as string literals in `TerminalService.kickstartForbiddingEnvironmentVariables`,
+    /// which cannot import them because this module depends on `spacesterminalcore` rather than the other way
+    /// around. A binding on any of them forbids starting the daemon through launchd, whose clean environment
+    /// would drop it. Renaming one here means renaming it there too.
     public static let disabledEnvironmentVariable = "SPACES_DEVICE_API_DISABLED"
     public static let hostEnvironmentVariable = "SPACES_DEVICE_API_HOST"
     public static let portEnvironmentVariable = "SPACES_DEVICE_API_PORT"

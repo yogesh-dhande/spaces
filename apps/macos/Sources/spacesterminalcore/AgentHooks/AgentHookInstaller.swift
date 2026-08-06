@@ -83,8 +83,8 @@ public enum AgentHookInstaller {
     /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent
     /// alongside one failure entry per agent that could not be installed. Each agent is attempted
     /// independently, so a config Spaces refuses to edit costs only that agent.
-    @discardableResult public static func install(_ kinds: [CodingAgent], home: URL = defaultHome(), fileManager: FileManager = .default)
-        throws -> AgentHookInstallOutcome
+    @discardableResult public static func install(_ kinds: [CodingAgent], home: URL = defaultHome(), fileManager: FileManager = .default) throws
+        -> AgentHookInstallOutcome
     {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
         return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
@@ -131,9 +131,9 @@ public enum AgentHookInstaller {
     /// An agent that is not available, or whose config cannot be edited, becomes a failure entry; the
     /// remaining agents still install. Only a missing `spaces` CLI aborts the request, because every
     /// hook command it would write invokes that binary by absolute path.
-    private static func install(
-        _ kinds: [CodingAgent], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver
-    ) throws -> AgentHookInstallOutcome {
+    private static func install(_ kinds: [CodingAgent], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) throws
+        -> AgentHookInstallOutcome
+    {
         guard let resolvedSpacesExecutablePath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName),
             let spacesExecutablePath = hookSpacesExecutablePath(resolvedPath: resolvedSpacesExecutablePath, home: home, fileManager: fileManager)
         else { throw AgentHookInstallerError.spacesCLINotFound }

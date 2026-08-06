@@ -315,42 +315,33 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func codingAgentRows(for descriptor: WorkspaceDescriptor, sessionsByID: [String: TerminalSessionCatalogEntry]) -> CodingAgentRows {
-        var usedAgentIDs = Set<String>()
         var claimedTerminalKeys = Set<String>()
         var rows: [SpacesDeviceWorkspaceCodingAgentRow] = []
         let configuredLaunchers = descriptor.settings?.agentLaunchers ?? []
-        let agentByConfiguredID = Dictionary(
-            descriptor.agentWindows.compactMap { agent -> (String, AgentWindowRecord)? in
-                guard let id = agent.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { return nil }
-                return (id, agent)
-            }, uniquingKeysWith: { existing, _ in existing })
-        let agentByConfiguredName = Dictionary(
-            descriptor.agentWindows.compactMap { agent -> (String, AgentWindowRecord)? in
-                guard agent.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return nil }
-                let names = [agent.claimedLauncherName, agent.label].compactMap { $0 }.map(normalizedRunRowName).filter { !$0.isEmpty }
-                guard let name = names.first else { return nil }
-                return (name, agent)
-            }, uniquingKeysWith: { existing, _ in existing })
+        // Which agent belongs to which configured launcher is the one rule in `AgentLauncherClaim`, shared
+        // with the agent-session rename so the two can never disagree about which name a row answers to.
+        let claims = AgentLauncherClaim.resolve(agents: descriptor.agentWindows, launchers: configuredLaunchers)
+        let agentsByID = Dictionary(descriptor.agentWindows.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
 
         for launcher in configuredLaunchers {
-            let key = normalizedRunRowName(launcher.name)
-            guard !key.isEmpty else { continue }
-            let agent = agentByConfiguredID[launcher.id] ?? agentByConfiguredName[key]
-            if let agent {
-                usedAgentIDs.insert(agent.id)
-                if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
-            }
+            guard !AgentLauncherClaim.normalizedName(launcher.name).isEmpty else { continue }
+            let agent = claims.agentIDByLauncherID[launcher.id].flatMap { agentsByID[$0] }
+            if let agent, let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
                 codingAgentRow(
                     id: "configured-agent:\(descriptor.workspace.id):\(launcher.id)", workspaceID: descriptor.workspace.id, name: launcher.name,
                     command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
         }
 
-        for agent in descriptor.agentWindows where !usedAgentIDs.contains(agent.id) {
+        // A row with no configured launcher behind it is named by its session: the user's rename when one
+        // is stored, else the label the agent reports for itself. A configured row above keeps taking its
+        // name from the launcher entry, which is what a rename edits there.
+        for agent in descriptor.agentWindows where !claims.claimedAgentIDs.contains(agent.id) {
             if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
                 codingAgentRow(
-                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
+                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id,
+                    name: agent.effectiveLabel ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
                     isConfigured: false, sessionsByID: sessionsByID))
         }

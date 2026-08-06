@@ -29,9 +29,7 @@ import Testing
     /// (`[.codex, .claudeCode, .opencode]`) rather than `allCases`, so an agent added to the registry
     /// but never added to that list would fail to resolve here even though every other facet compiles.
     @Test func launcherMatchingResolvesEveryAgentsPrimaryCommand() {
-        for agent in CodingAgent.allCases {
-            #expect(CodingAgent.matching(launcherText: agent.primaryCommandName) == agent)
-        }
+        for agent in CodingAgent.allCases { #expect(CodingAgent.matching(launcherText: agent.primaryCommandName) == agent) }
     }
 
     /// `TerminalForegroundProcessInspector`'s definition table is `CodingAgent.allCases.flatMap(\.detectionVariants)`,

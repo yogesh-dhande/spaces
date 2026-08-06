@@ -807,6 +807,37 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertFalse(overview.retainedTerminalSessionIDs.contains("session-never-existed"))
     }
 
+    /// A rename hides an agent's reported label, so a new agent can register under that label. The two are
+    /// separate rows and each owns its own terminal session, so both must be published as agent rows: a
+    /// slot keyed by the raw label would collapse them and drop one session's row.
+    func testTwoAgentsSharingARawLabelAfterARenameEachKeepTheirTerminalRow() throws {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
+        let renamedAgent = AgentWindowRecord(
+            id: "agent-renamed", workspaceID: workspace.id, provider: .spaces, label: "Codex", userLabel: "Reviewer",
+            terminalTarget: TerminalTargetRecord(trackingID: "session-renamed"), status: .idle, createdAt: "now", updatedAt: "now")
+        let secondAgent = AgentWindowRecord(
+            id: "agent-second", workspaceID: workspace.id, provider: .spaces, label: "Codex",
+            terminalTarget: TerminalTargetRecord(trackingID: "session-second"), status: .idle, createdAt: "now", updatedAt: "later")
+        let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
+            project: project, workspace: workspace, agentWindows: [renamedAgent, secondAgent])
+        let sessions = ["session-renamed", "session-second"].map { sessionID in
+            makeSessionCatalogEntry(
+                sessionID: sessionID, title: "codex", workingDirectory: "/repo/feature", workspaceID: workspace.id,
+                attachmentSnapshot: .init())
+        }
+
+        let overview = SpacesDeviceOverviewBuilder.buildWithServerRows(projects: [project], workspaces: [descriptor], liveSessions: sessions)
+
+        XCTAssertEqual(overview.sessions.first { $0.id == "session-renamed" }?.rowKind, .agent)
+        XCTAssertEqual(overview.sessions.first { $0.id == "session-second" }?.rowKind, .agent)
+        XCTAssertEqual(
+            overview.sessions.filter { $0.rowKind == .agent }.map(\.title).sorted(), ["Codex", "Reviewer"],
+            "each agent keeps its own session row, named as it displays")
+    }
+
     private func makeSessionCatalogEntry(
         sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running, workspaceID: String,
         kind: TerminalSessionKind = .shell, attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true,

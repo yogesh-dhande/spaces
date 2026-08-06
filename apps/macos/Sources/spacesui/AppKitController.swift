@@ -3463,10 +3463,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
+            // `label` is the row's display name and may be a rename the user typed; only a configured row's
+            // name is a launcher name, so only that row carries `claimedLauncherName`. See the launcher
+            // matching in `resolvedCodingAgentRunEntries` for why the distinction matters.
             return AgentWindowRecord(
                 id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
                 terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: row.launcherID,
-                claimedLauncherName: row.name, status: agentStatus(from: row.activityState), createdAt: now, updatedAt: now)
+                claimedLauncherName: row.isConfigured ? row.name : nil, status: agentStatus(from: row.activityState), createdAt: now, updatedAt: now)
         }
     }
 
@@ -3832,13 +3835,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Configured coding agents always own the first slots in the Coding Agents
         // section. If a live agent matches one of those names, the slot resolves to
         // that agent; otherwise the slot stays launchable from the config row.
+        //
+        // Launcher association is the daemon's call, so matching only reads the identifiers the daemon
+        // assigned: `claimedLauncherID`, and `claimedLauncherName`, which the daemon's rows carry only
+        // when the row is a configured launcher's row. Display names are never matched: an unconfigured
+        // row's name is whatever the user renamed it to, and renaming an agent to "codex" must not hand
+        // it the "codex" launcher's slot.
         for launcher in configuredAgentLaunchers {
             let normalizedName = normalizedRunRowName(launcher.name)
             guard !normalizedName.isEmpty else { continue }
             let matchedAgent = agentWindows.first(where: { agentWindow in
                 if agentWindow.claimedLauncherID == launcher.id { return true }
                 guard agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return false }
-                return normalizedRunRowName(agentWindow.label ?? "") == normalizedName
+                return normalizedRunRowName(agentWindow.claimedLauncherName ?? "") == normalizedName
             })
             entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
         }
@@ -3847,7 +3856,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
                 if configuredAgentIDs.contains(claimedLauncherID) { continue }
             } else {
-                guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.label ?? "")) else { continue }
+                guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.claimedLauncherName ?? "")) else { continue }
             }
             entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
         }
