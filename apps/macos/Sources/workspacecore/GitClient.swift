@@ -267,6 +267,12 @@ public final class GitClient {
         try waitForProcess(process, timeout: metadataCommandTimeout, arguments: arguments)
         switch process.terminationStatus {
         case 0: return .exists
+        // Accepted risk: exit 1 also covers a ref file git can reach but not resolve (malformed contents,
+        // an unreadable single ref) — `show-ref --verify --quiet` reports those identically to a genuinely
+        // absent branch, and without `--quiet` both collapse to exit 128, so the only way to tell them
+        // apart is parsing git's stderr text, which is fragile across git versions. That corruption is
+        // rare and its cost is a branch lingering after a workspace delete, recoverable manually, so it is
+        // deliberately read as "missing" rather than guarded with message sniffing.
         case 1: return .missing
         default:
             let errData = err.fileHandleForReading.readDataToEndOfFile()
