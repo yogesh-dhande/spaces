@@ -314,6 +314,12 @@ extension TerminalSessionPaneViewController {
         // final render deliberately holds none (`assignPreferredFirstResponder`), and a focused find or
         // input field is claimed by the monitor before pane routing, so a zoom is started from some other
         // pane and reaches those panes through the app-wide broadcast instead.
+        //
+        // A configurable app shortcut a user has assigned to one of these chords also runs ahead of this
+        // and takes the key: accepted, and deliberately not special-cased. The shortcut recorder checks
+        // no chord against any other, so every reserved key in the app (close pane, the numbered window
+        // keys, a terminal's own command equivalents) yields to an assignment the same way. Hoisting zoom
+        // above that chain would make it the one binding a user cannot reassign away from.
         if let zoomCommand = TerminalTextZoomKeyBinding.command(keyCode: Int(event.keyCode), modifierFlags: event.modifierFlags),
             let terminalTextZoomAction
         {
