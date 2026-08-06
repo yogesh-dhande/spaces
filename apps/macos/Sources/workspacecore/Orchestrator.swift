@@ -1035,6 +1035,9 @@ public final class WorkspaceOrchestrator {
         try store.deleteWorkspace(id: workspace.id)
     }
 
+    /// The notice is failure-only: a nil return means branch deletion went as asked (deleted, or already
+    /// absent). Only outcomes the user needs to act on or be aware of are reported: a protected branch that
+    /// was skipped, no branch name recorded to delete, or a git error deleting the branch.
     private func branchDeletionNotice(project: ProjectRecord, workspace: WorkspaceRecord, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws
         -> String?
     {
@@ -1048,20 +1051,12 @@ public final class WorkspaceOrchestrator {
         var notices: [String] = []
         if deleteRemoteBranch {
             do {
-                if try git.deleteRemoteBranch(path: project.dir, branch: branch) {
-                    notices.append("Deleted remote branch '\(branch)'.")
-                } else {
-                    notices.append("Remote branch '\(branch)' was not found.")
-                }
+                _ = try git.deleteRemoteBranch(path: project.dir, branch: branch)
             } catch { notices.append("Failed to delete remote branch '\(branch)': \(error.localizedDescription)") }
         }
         if deleteLocalBranch {
             do {
-                if try git.deleteBranch(path: project.dir, branch: branch) {
-                    notices.append("Deleted local branch '\(branch)'.")
-                } else {
-                    notices.append("Local branch '\(branch)' was not found.")
-                }
+                _ = try git.deleteBranch(path: project.dir, branch: branch)
             } catch { notices.append("Failed to delete local branch '\(branch)': \(error.localizedDescription)") }
         }
         guard !notices.isEmpty else { return nil }
