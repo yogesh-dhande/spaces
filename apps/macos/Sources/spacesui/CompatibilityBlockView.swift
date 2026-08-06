@@ -11,7 +11,9 @@ import workspacecore
 /// `SpacesWireCompatibility` verdict: a too-old daemon with nothing staged on its device
 /// (`.installUpdateOnDevice`) cannot be fixed by a restart — that would just re-exec the same binary and
 /// leave the block stuck — so every OS in that state shows install guidance instead of a button:
-///   - Linux: the version-pinned `install.sh` one-liner the user runs on the device.
+///   - Linux: the version-pinned `install.sh` one-liner. When the device's pairing stored SSH details,
+///     an "Update over SSH" button runs that same installer on the device from here; the one-liner stays
+///     on screen either way, as the fallback for a device Spaces cannot reach over SSH.
 ///   - A remote Mac: instructions to open Spaces on that device and install the update there.
 ///   - This Mac (the local daemon): a "Check for Updates…" button wired to Sparkle, when available.
 /// Only `.applyStagedUpdate` — a newer build already installed on the device — offers a restart/update
@@ -39,6 +41,13 @@ final class CompatibilityBlockView: NSView {
             if case .applyStagedUpdate = self { return true }
             return false
         }
+
+        /// The only case an Update-over-SSH run is trying to resolve, so it is also the only one whose
+        /// presence justifies keeping that run's in-progress state alive.
+        var isInstallUpdateOnDevice: Bool {
+            if case .installUpdateOnDevice = self { return true }
+            return false
+        }
     }
 
     /// Pure "what should the block show" descriptor, independent of AppKit so it is unit-testable
@@ -48,23 +57,28 @@ final class CompatibilityBlockView: NSView {
         let detail: String
         let installerCommand: String?
         let actionButtonTitle: String?
+        /// Whether a spinner accompanies the copy, for the one state that waits on work Spaces itself
+        /// started: the Update-over-SSH installer run.
+        let showsProgress: Bool
     }
 
     private let onAction: (() -> Void)?
 
     init(
-        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, onRestart: (() -> Void)?, onCheckForUpdates: (() -> Void)?
+        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool,
+        onRestart: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?
     ) {
         let content = Self.content(
             remedy: remedy, deviceName: deviceName, isLocalDevice: isLocalDevice, isLinuxDaemon: isLinuxDaemon, clientVersion: AppVersion.short,
-            canCheckForUpdates: onCheckForUpdates != nil)
+            canCheckForUpdates: onCheckForUpdates != nil, canUpdateOverSSH: canUpdateOverSSH, isUpdatingOverSSH: isUpdatingOverSSH)
         // Only one of these is ever the button's target for a given remedy — see `content(...)`, which
         // decides the button's *title*, and this switch, which picks the matching closure. The caller
         // (`AppKitController`) already withholds whichever closure isn't justified for this device, so at
-        // most one is non-nil in practice.
+        // most one is non-nil in practice. `.installUpdateOnDevice` splits by device: this Mac checks for
+        // an app update, any other device runs the installer over SSH when its pairing allows it.
         switch remedy {
         case .applyStagedUpdate: onAction = onRestart
-        case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : nil
+        case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : onUpdateOverSSH
         case .updateClient: onAction = nil
         }
         super.init(frame: .zero)
@@ -103,6 +117,15 @@ final class CompatibilityBlockView: NSView {
             command.lineBreakMode = .byCharWrapping
             command.maximumNumberOfLines = 0
             stack.addArrangedSubview(command)
+        }
+
+        if content.showsProgress {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
+            spinner.startAnimation(nil)
+            stack.addArrangedSubview(spinner)
         }
 
         if let actionButtonTitle = content.actionButtonTitle, onAction != nil {
@@ -172,7 +195,8 @@ final class CompatibilityBlockView: NSView {
     /// own build alongside the daemon's in `.updateClient`, and pinning the Linux installer command to
     /// the version this app ships with.
     nonisolated static func content(
-        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, clientVersion: String, canCheckForUpdates: Bool
+        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, clientVersion: String, canCheckForUpdates: Bool,
+        canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool
     ) -> Content {
         switch remedy {
         case .updateClient(let daemonVersion):
@@ -183,13 +207,16 @@ final class CompatibilityBlockView: NSView {
                 ? "\(deviceName) runs Spaces \(daemonVersion!) and this app is Spaces \(clientVersion). It speaks a newer connection protocol "
                     + "than this app, so update this app to reconnect to it."
                 : "\(deviceName) speaks a newer connection protocol than this app. Update this app to reconnect to it."
-            return Content(title: "Device version not compatible", detail: detail, installerCommand: nil, actionButtonTitle: nil)
+            return Content(
+                title: "Device version not compatible", detail: detail, installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
 
         case .applyStagedUpdate(let daemonVersion, let installedVersion):
             let detail =
                 "\(deviceName) is running Spaces \(daemonVersion); Spaces \(installedVersion) is installed there. Update the daemon to apply "
                 + "it — running terminals, agents, and processes keep running. Other paired devices remain available."
-            return Content(title: "\(deviceName) needs a daemon update", detail: detail, installerCommand: nil, actionButtonTitle: "Update Daemon")
+            return Content(
+                title: "\(deviceName) needs a daemon update", detail: detail, installerCommand: nil, actionButtonTitle: "Update Daemon",
+                showsProgress: false)
 
         case .installUpdateOnDevice(let daemonVersion):
             // The reason is always the connection protocol, never a version comparison: this app and a
@@ -199,13 +226,33 @@ final class CompatibilityBlockView: NSView {
             // is behind, and drops out entirely (commas included) when the status did not carry one.
             let daemonLabel = daemonVersion.map { ", running Spaces \($0)," } ?? ""
             if isLinuxDaemon {
+                let installerCommand = SpacesLinuxInstaller.installCommand(version: clientVersion)
+                // The installer command stays on screen through all three Linux states, so a run Spaces
+                // cannot start (no stored SSH details) or one that fails is always one copy away from
+                // being run by hand on the device.
+                if isUpdatingOverSSH {
+                    return Content(
+                        title: "Update \(deviceName)'s Spaces daemon",
+                        detail: "Updating Spaces on \(deviceName)... This can take a few minutes. Running terminals, agents, and processes on it "
+                            + "are preserved.", installerCommand: installerCommand, actionButtonTitle: nil, showsProgress: true)
+                }
+                if canUpdateOverSSH {
+                    let detail =
+                        "The daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and a restart won't change "
+                        + "that — nothing newer is installed there. Spaces can run the installer on \(deviceName) over SSH; running terminals, "
+                        + "agents, and processes on it are preserved. You can also run the command below on the device yourself. Other paired "
+                        + "devices remain available."
+                    return Content(
+                        title: "Update \(deviceName)'s Spaces daemon", detail: detail, installerCommand: installerCommand,
+                        actionButtonTitle: "Update over SSH", showsProgress: false)
+                }
                 let detail =
                     "The daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and a restart won't change "
                     + "that — nothing newer is installed there. Run the command below on the Linux device — running terminals, agents, and "
                     + "processes on it are preserved — then reconnect. Other paired devices remain available."
                 return Content(
-                    title: "Update \(deviceName)'s Spaces daemon", detail: detail,
-                    installerCommand: SpacesLinuxInstaller.installCommand(version: clientVersion), actionButtonTitle: nil)
+                    title: "Update \(deviceName)'s Spaces daemon", detail: detail, installerCommand: installerCommand, actionButtonTitle: nil,
+                    showsProgress: false)
             }
             if isLocalDevice {
                 // Does not promise the daemon picks the update up by itself: the silent handoff fires
@@ -217,13 +264,14 @@ final class CompatibilityBlockView: NSView {
                     + "processes are preserved."
                 return Content(
                     title: "This Mac needs a Spaces update", detail: detail, installerCommand: nil,
-                    actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil)
+                    actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil, showsProgress: false)
             }
             let detail =
                 "The Spaces daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is "
                 + "installed there. Open Spaces on \(deviceName) and install the update; this pane then offers to apply it to the daemon. Other "
                 + "paired devices remain available."
-            return Content(title: "\(deviceName) needs a Spaces update", detail: detail, installerCommand: nil, actionButtonTitle: nil)
+            return Content(
+                title: "\(deviceName) needs a Spaces update", detail: detail, installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
         }
     }
 

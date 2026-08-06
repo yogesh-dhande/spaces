@@ -200,6 +200,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// already staged or that failed/was refused — a failed handoff surfaces via the still-pending
     /// caption and the daemon log rather than a retry loop.
     private var silentDaemonHandoffRequestedKeys: Set<String> = []
+    /// Devices whose compatibility-block "Update over SSH" installer run is in flight, so the block
+    /// renders a spinner instead of re-offering the button. Entries are dropped by
+    /// `updateRemoteDaemonOverSSH` on failure and by `reconcileCompatibilityBlock` once a fresh verdict
+    /// for the device stops calling for `.installUpdateOnDevice`, so a finished run can never pin a
+    /// spinner permanently.
+    private var daemonSSHUpdateInProgressDeviceIDs: Set<String> = []
     var alertsGroups: [AlertsGroup] = []
     /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
     /// one content replaces the previous one. Written only through `presentDetailPane`.
@@ -5186,11 +5192,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// navigate away and back). Called from every apply path after a reload updates a section's
     /// verdict/status. See `reconcileCompatibilityBlockAction` for the pure decision.
     func reconcileCompatibilityBlock(deviceID: String) {
-        guard let renderedRemedy = visibleCompatibilityBlockRemedy else { return }
         let verdict = deviceCompatibility(forDeviceID: deviceID)
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        // Runs ahead of the visible-block guard: an SSH update started from the block outlives whatever
+        // the detail pane is showing, so the in-progress entry has to be retired from the device's own
+        // facts rather than from the pane's. Only a verdict that resolves to something other than
+        // "install an update on that device" clears it — an absent verdict is the device being offline,
+        // which is exactly what a daemon mid-handoff looks like.
+        if let verdict, CompatibilityBlockView.blockRemedy(verdict: verdict, status: status)?.isInstallUpdateOnDevice != true {
+            daemonSSHUpdateInProgressDeviceIDs.remove(deviceID)
+        }
+        guard let renderedRemedy = visibleCompatibilityBlockRemedy else { return }
         let action = Self.reconcileCompatibilityBlockAction(
-            isVisibleBlockDevice: visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict,
-            status: deviceDaemonStatus(forDeviceID: deviceID))
+            isVisibleBlockDevice: visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict, status: status)
         switch action {
         case .leaveAlone: return
         case .clear:
@@ -5239,11 +5253,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let isLocalDevice = deviceID == SpacesPairedDeviceRecord.localDeviceID
         let offersCheckForUpdates = Self.shouldOfferCheckForUpdatesAction(isLocalDevice: isLocalDevice, updaterAvailable: updaterController != nil)
+        let canUpdateOverSSH = Self.shouldOfferUpdateOverSSH(
+            isLocalDevice: isLocalDevice, isLinuxDaemon: status?.isLinuxDaemon == true,
+            hasSSHDetails: Self.hasSSHDetails(deviceRecord(forDeviceID: deviceID)))
         let card = CompatibilityBlockView(
             remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
-            isLinuxDaemon: status?.isLinuxDaemon == true,
+            isLinuxDaemon: status?.isLinuxDaemon == true, canUpdateOverSSH: canUpdateOverSSH,
+            isUpdatingOverSSH: daemonSSHUpdateInProgressDeviceIDs.contains(deviceID),
             onRestart: remedy.offersDaemonUpdateAction ? { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) } : nil,
-            onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil)
+            onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil,
+            onUpdateOverSSH: canUpdateOverSSH ? { [weak self] in self?.updateRemoteDaemonOverSSH(deviceID: deviceID) } : nil)
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
@@ -5260,10 +5279,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// running terminals, agents, and processes survive), then reloads the sidebar after a short delay
     /// so the app re-handshakes against the new build. Shared by the compatibility block's Restart
     /// button, which reports RPC failures, and `maybeRequestSilentDaemonHandoff`, which stays silent —
-    /// the only two daemon-restart entry points. A remote
-    /// Linux daemon that is too old for this app is not updated over SSH: the user re-runs the
-    /// version-pinned installer on the Linux device — surfaced in the compatibility block — which
-    /// replaces the binary and restarts the service.
+    /// the only two daemon-restart entry points. A remote Linux daemon too old for this app has nothing
+    /// staged to restart into, so it is updated by re-running the version-pinned installer instead:
+    /// `updateRemoteDaemonOverSSH` runs it from here for a device whose pairing stored SSH details, and
+    /// the compatibility block's copyable one-liner covers a device without them. Either way the
+    /// installer pokes the live daemon for the same in-place handoff this RPC triggers.
     private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord, reportsFailure: Bool) {
         Task { @MainActor [weak self] in
             do { _ = try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value } catch {
@@ -5304,6 +5324,67 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func shouldOfferCheckForUpdatesAction(isLocalDevice: Bool, updaterAvailable: Bool) -> Bool {
         isLocalDevice && updaterAvailable
     }
+
+    /// Pure eligibility for the compatibility block's "Update over SSH" action. Linux only: a Mac has no
+    /// headless installer artifact to run, and a remote Mac's staged update already applies over the
+    /// Device API. It needs a device the client can actually reach over SSH, which a link-paired record
+    /// (no stored `sshHost`) cannot promise, and it is never offered for this Mac's own daemon.
+    nonisolated static func shouldOfferUpdateOverSSH(isLocalDevice: Bool, isLinuxDaemon: Bool, hasSSHDetails: Bool) -> Bool {
+        !isLocalDevice && isLinuxDaemon && hasSSHDetails
+    }
+
+    /// Whether a paired-device record carries an SSH host to run the installer against.
+    private nonisolated static func hasSSHDetails(_ device: SpacesPairedDeviceRecord?) -> Bool {
+        guard let host = device?.sshHost else { return false }
+        return !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The compatibility block's "Update over SSH" action: runs the version-pinned Linux installer on the
+    /// device over SSH, which lands the new release and pokes the live daemon into an in-place handoff, so
+    /// the device's terminals, agents, and processes survive the update. User-initiated, so a missing
+    /// record and a failed installer run are both visible errors rather than silent no-ops.
+    private func updateRemoteDaemonOverSSH(deviceID: String) {
+        guard let device = deviceRecord(forDeviceID: deviceID), Self.hasSSHDetails(device) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        guard !daemonSSHUpdateInProgressDeviceIDs.contains(deviceID) else { return }
+        daemonSSHUpdateInProgressDeviceIDs.insert(deviceID)
+        rerenderCompatibilityBlockIfVisible(deviceID: deviceID)
+        Task { @MainActor [weak self] in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try SpacesDevicePairingClient.updateSpacesOnRemoteDevice(device: device, appVersion: AppVersion.short)
+                }.value
+            } catch {
+                guard let self else { return }
+                self.daemonSSHUpdateInProgressDeviceIDs.remove(deviceID)
+                self.rerenderCompatibilityBlockIfVisible(deviceID: deviceID)
+                self.showError(error)
+                return
+            }
+            guard let self else { return }
+            // Deliberately does not clear the in-progress entry: the installer returns as soon as the
+            // daemon accepts the handoff, and for the moments it spends re-execing and replaying sessions
+            // it still answers with the old wire version. Dropping the spinner here would put the
+            // "Update over SSH" button back mid-update and invite a second run. `reconcileCompatibilityBlock`
+            // retires the entry from the device's own next verdict instead.
+            try? await Task.sleep(for: .seconds(2))
+            self.requestSidebarReload(forceRemoteRefresh: true)
+        }
+    }
+
+    /// Re-renders the compatibility block for `deviceID` when that block is the one on screen, so a
+    /// change in this app's own in-progress state reaches the card without disturbing whatever the user
+    /// navigated to instead.
+    private func rerenderCompatibilityBlockIfVisible(deviceID: String) {
+        guard visibleCompatibilityBlockDeviceID == deviceID, let verdict = deviceCompatibility(forDeviceID: deviceID) else { return }
+        showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+    }
+
+    /// Drops any Update-over-SSH in-progress state for a device the app is about to stop tracking, so a
+    /// later pairing of the same device cannot inherit a spinner from a run that is no longer observable.
+    func forgetDaemonSSHUpdateProgress(deviceID: String) { daemonSSHUpdateInProgressDeviceIDs.remove(deviceID) }
 
     /// Silently requests a daemon exec-in-place handoff when a compatible daemon reports a staged
     /// update (`isUpdatePending` — the daemon's own installed-vs-running comparison; never this app's
