@@ -285,6 +285,11 @@
 
         public func sessionSnapshotText() -> String? { snapshotText() }
 
+        /// The mirror carries the size itself, including across the surface rebuilds
+        /// `GhosttyMirrorSurfaceMRU` forces, and re-measures its grid; the measurement reaches the daemon
+        /// through `onViewportSizeChanged` like any other resize, so there is nothing to send from here.
+        public func applyTerminalTextSize(_ size: TerminalTextSize) { terminalView.applyTerminalTextSize(size) }
+
         public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
         public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }

@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// Small view builders shared across the workspace detail, sidebar, and
 /// alerts screens. Encodes the compact row vocabulary from
@@ -104,7 +105,7 @@ enum RowPrimitives {
         }
 
         let label = NSTextField(labelWithString: text)
-        label.font = .monospacedSystemFont(ofSize: 9.5, weight: .semibold)
+        label.font = Typography.monoBadgeStrong
         label.textColor = fg
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
@@ -125,14 +126,14 @@ enum RowPrimitives {
     /// Monospace shortcut label like "⌘1" inside a muted rounded chip.
     /// Width enforces a minimum so single-digit shortcuts don't collapse.
     @MainActor static func shortcutChip(_ text: String) -> NSView {
-        makeChip(text: text, font: .monospacedSystemFont(ofSize: 10.5, weight: .medium), foreground: Theme.muted, minWidth: 26)
+        makeChip(text: text, font: Typography.monoBadge, foreground: Theme.muted, minWidth: 26)
     }
 
     /// Plain monospace shortcut hint for dense sidebar target rows, where the
     /// indentation slot already separates the hint from the target identity.
     @MainActor static func sidebarShortcutHint(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        label.font = Typography.monoBadge
         label.textColor = Theme.muted
         label.alignment = .right
         label.lineBreakMode = .byClipping
@@ -144,12 +145,12 @@ enum RowPrimitives {
 
     /// Project name chip (e.g. "Spaces") that sits next to the workspace title.
     @MainActor static func projectChip(_ text: String) -> NSView {
-        makeChip(text: text, font: .systemFont(ofSize: 11, weight: .regular), foreground: Theme.muted, minWidth: 0)
+        makeChip(text: text, font: Typography.metadata, foreground: Theme.muted, minWidth: 0)
     }
 
     /// Branch name chip (e.g. "main").
     @MainActor static func branchChip(_ text: String) -> NSView {
-        makeChip(text: text, font: .monospacedSystemFont(ofSize: 11, weight: .regular), foreground: Theme.muted, minWidth: 0)
+        makeChip(text: text, font: Typography.monoMetadata, foreground: Theme.muted, minWidth: 0)
     }
 
     @MainActor private static func makeChip(text: String, font: NSFont, foreground: NSColor, minWidth: CGFloat) -> NSView {

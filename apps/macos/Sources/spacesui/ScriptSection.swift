@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// A single-script card with an inline editor, used for both the project setup
 /// script and the workspace stop script. The two differ only in their title and
@@ -24,13 +25,13 @@ import AppKit
         self.formAccessibilityPrefix = formAccessibilityPrefix
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = Theme.text
 
         let titleView: NSView
         if let subtitle {
             let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            subtitleLabel.font = Typography.metadata
             subtitleLabel.textColor = Theme.muted
             subtitleLabel.lineBreakMode = .byTruncatingTail
             subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -121,7 +122,7 @@ import AppKit
         editButton.isHidden = false
 
         let preview = NSTextField(labelWithString: currentValue.isEmpty ? "(none)" : currentValue)
-        preview.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        preview.font = Typography.monoMetadata
         preview.textColor = currentValue.isEmpty ? Theme.mutedSecondary : Theme.muted
         preview.lineBreakMode = .byTruncatingTail
         preview.translatesAutoresizingMaskIntoConstraints = false
@@ -180,7 +181,7 @@ import AppKit
     ) -> (NSStackView, NSTextView) {
         let textView = NSTextView()
         textView.isRichText = false
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = Typography.monoBody
         textView.textColor = Theme.text
         textView.backgroundColor = Theme.surface2
         textView.isEditable = true

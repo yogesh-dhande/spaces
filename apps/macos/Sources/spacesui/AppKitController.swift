@@ -258,6 +258,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceSetupDetailRefreshTimer: Timer?
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
+    /// The app-wide terminal text size every open pane renders at, loaded from the profile at launch
+    /// and moved by the focused pane's zoom keys (see `AppKitController+TerminalTextSize`).
+    var terminalTextSize: TerminalTextSize = .default
     lazy var commandPalette = CommandPaletteController(host: self)
     lazy var panelCoordinator: PanelCoordinator = {
         let coordinator = PanelCoordinator(host: self)
@@ -538,6 +541,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Apply the stored appearance before any window, menu, or terminal is built so they
         // all render in the chosen light/dark variant from the first frame.
         applyStoredAppAppearance()
+        loadStoredTerminalTextSize()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -2136,9 +2140,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }, requestSender: requestSender, banner: pane.banner,
                 openSpacesTerminalLink: { [weak self] link in self?.handleTerminalDeepLink(link) })
             linkOpenBox.coordinator = linkOpenCoordinator
-            return TerminalPaneContentController(
+            let content = TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
-                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction, linkOpenCoordinator: linkOpenCoordinator)
+                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction,
+                terminalTextZoomAction: { [weak self] command in self?.adjustTerminalTextSize(command) }, linkOpenCoordinator: linkOpenCoordinator)
+            // The size is app-wide and already loaded, so a pane opens at it rather than at the default
+            // and waiting for the next change.
+            content.applyTerminalTextSize(terminalTextSize)
+            return content
         } catch {
             showError(error)
             return nil
@@ -5119,7 +5128,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearWorkspaceDetailFooter()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
-        placeholder.font = .systemFont(ofSize: 14)
+        placeholder.font = Typography.emptyStateTitle
         placeholder.textColor = .secondaryLabelColor
         placeholder.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(placeholder)
@@ -5331,13 +5340,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.addArrangedSubview(spinner)
 
         let title = NSTextField(labelWithString: message)
-        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.font = Typography.emptyStateTitle
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
 
         if let detail, !detail.isEmpty {
             let detailLabel = NSTextField(labelWithString: detail)
-            detailLabel.font = .systemFont(ofSize: 12)
+            detailLabel.font = Typography.rowDetail
             detailLabel.textColor = .secondaryLabelColor
             detailLabel.alignment = .center
             stack.addArrangedSubview(detailLabel)
@@ -5463,10 +5472,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
         let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
 
         let hintLabel = NSTextField(labelWithString: hint)
-        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.font = Typography.metadata
         hintLabel.textColor = .secondaryLabelColor
         hintLabel.lineBreakMode = .byWordWrapping
         hintLabel.maximumNumberOfLines = 2
@@ -5488,10 +5497,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func settingsSettingRow(name: String, hint: String, control: NSView) -> NSView {
         let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
 
         let hintLabel = NSTextField(labelWithString: hint)
-        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.font = Typography.metadata
         hintLabel.textColor = .secondaryLabelColor
         hintLabel.lineBreakMode = .byWordWrapping
         hintLabel.maximumNumberOfLines = 2
@@ -5550,7 +5559,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
 
             let titleLabel = NSTextField(labelWithString: setting.label)
-            titleLabel.font = .systemFont(ofSize: 12)
+            titleLabel.font = Typography.rowDetail
             titleLabel.translatesAutoresizingMaskIntoConstraints = false
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -5558,7 +5567,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             captureButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
             captureButton.isBordered = false
             captureButton.alignment = .center
-            captureButton.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            captureButton.font = Typography.monoBody
             captureButton.translatesAutoresizingMaskIntoConstraints = false
             updateShortcutCaptureButtonText(captureButton, text: shortcutCaptureButtonTitle(setting: setting), active: false)
             styleShortcutCaptureButton(captureButton, active: false)
@@ -5619,7 +5628,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         // --- Directory subtitle (the project name is shown in the dialog header) ---
         let dirField = NSTextField(string: project.dir)
-        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.font = Typography.monoMetadata
         dirField.textColor = .tertiaryLabelColor
         dirField.lineBreakMode = .byTruncatingMiddle
         dirField.isEditable = false
@@ -5750,11 +5759,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let accentColor = iconColor ?? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.font = Typography.cardTitle
         titleLabel.textColor = .labelColor
 
         let subtitleLabel = NSTextField(labelWithString: subtitle)
-        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.font = Typography.rowDetail
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 2
@@ -5830,7 +5839,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         section.setContentHuggingPriority(.required, for: .vertical)
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = Theme.text
 
         let titleStack = NSStackView()
@@ -5840,7 +5849,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         titleStack.addArrangedSubview(titleLabel)
         if !subtitle.isEmpty {
             let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            subtitleLabel.font = Typography.metadata
             subtitleLabel.textColor = Theme.muted
             subtitleLabel.lineBreakMode = .byTruncatingTail
             subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -5925,7 +5934,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
         let spacesYAMLMissingLabel = NSTextField(
             wrappingLabelWithString: "No spaces.yaml found in this repository. Set up the configuration below as needed.")
-        spacesYAMLMissingLabel.font = .systemFont(ofSize: 12)
+        spacesYAMLMissingLabel.font = Typography.rowDetail
         spacesYAMLMissingLabel.textColor = .secondaryLabelColor
         spacesYAMLMissingLabel.setAccessibilityIdentifier("add-project-spaces-yaml-missing")
 
@@ -5985,7 +5994,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         spinner.setContentHuggingPriority(.required, for: .horizontal)
 
         let label = NSTextField(labelWithString: detail)
-        label.font = .systemFont(ofSize: 12)
+        label.font = Typography.rowDetail
         label.textColor = .secondaryLabelColor
 
         let row = NSStackView()
@@ -6085,10 +6094,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let titleField = NSTextField(labelWithString: title)
-        titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleField.font = Typography.sectionTitle
         titleField.textColor = .labelColor
         let captionField = NSTextField(labelWithString: subtitle)
-        captionField.font = .systemFont(ofSize: 11)
+        captionField.font = Typography.metadata
         captionField.textColor = .secondaryLabelColor
         captionField.lineBreakMode = .byTruncatingTail
 
@@ -6252,7 +6261,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.font = Typography.sheetTitle
         titleLabel.textColor = .labelColor
 
         let closeButton = iconButton(symbol: "xmark", tooltip: "Close", action: closeAction)
@@ -6553,7 +6562,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         footer.addArrangedSubview(statusDot)
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
-        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.font = Typography.compactTitle
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
@@ -6579,7 +6588,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             branchIcon.contentTintColor = .tertiaryLabelColor
             branchIcon.setContentHuggingPriority(.required, for: .horizontal)
             let branchLabel = NSTextField(labelWithString: branch)
-            branchLabel.font = .systemFont(ofSize: 11)
+            branchLabel.font = Typography.metadata
             branchLabel.textColor = .secondaryLabelColor
             branchLabel.lineBreakMode = .byTruncatingTail
             branchLabel.setAccessibilityIdentifier("workspace-detail-branch")
@@ -6589,7 +6598,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         let dirLabel = NSTextField(labelWithString: workspace.dir)
-        dirLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        dirLabel.font = Typography.monoCaption
         dirLabel.textColor = .tertiaryLabelColor
         dirLabel.lineBreakMode = .byTruncatingMiddle
         dirLabel.toolTip = workspace.dir
@@ -6602,7 +6611,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The focused pane's identity (panes carry no header of their own), kept in
         // sync by the panel coordinator. ⌘W closes it.
         let paneLabel = NSTextField(labelWithString: "")
-        paneLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        paneLabel.font = Typography.metadataEmphasis
         paneLabel.textColor = .secondaryLabelColor
         paneLabel.lineBreakMode = .byTruncatingTail
         paneLabel.setAccessibilityIdentifier("workspace-detail-focused-pane")
@@ -6717,7 +6726,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let textView = makeEditableTextView()
         textView.string = workspace.notes ?? ""
-        textView.font = .systemFont(ofSize: 12)
+        textView.font = Typography.rowDetail
         textView.setAccessibilityIdentifier("workspace-detail-notes-input")
         textView.onSave = { [weak self, weak textView] in
             guard let self, let textView else { return }
@@ -6799,13 +6808,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.addArrangedSubview(spinner)
 
         let title = NSTextField(labelWithString: "Loading \(workspace.displayName)...")
-        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.font = Typography.emptyStateTitle
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
 
         let workspaceDeviceName = deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? localDeviceName
         let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(workspaceDeviceName).")
-        detail.font = .systemFont(ofSize: 12)
+        detail.font = Typography.rowDetail
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         stack.addArrangedSubview(detail)
@@ -6831,7 +6840,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let titleLabel = NSTextField(labelWithString: workspace.displayName)
-        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        titleLabel.font = Typography.pageTitle
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
@@ -6845,7 +6854,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         statusIcon.heightAnchor.constraint(equalToConstant: 14).isActive = true
 
         let statusLabel = NSTextField(labelWithString: workspaceSetupStatusTitle(setupState.status))
-        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.font = Typography.controlLabel
         statusLabel.textColor = workspaceSetupStatusColor(setupState.status)
 
         let headerRow = NSStackView(views: [titleLabel, NSView(), statusIcon, statusLabel])
@@ -6854,7 +6863,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         headerRow.spacing = 8
 
         let dirField = NSTextField(string: workspace.dir)
-        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        dirField.font = Typography.monoMetadata
         dirField.textColor = .tertiaryLabelColor
         dirField.lineBreakMode = .byTruncatingMiddle
         dirField.isEditable = false
@@ -6989,14 +6998,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func workspaceSetupMetadataRow(label: String, value: String, valueColor: NSColor = .secondaryLabelColor) -> NSView {
         let labelField = NSTextField(labelWithString: label)
-        labelField.font = .systemFont(ofSize: 11, weight: .semibold)
+        labelField.font = Typography.metadataTitle
         labelField.textColor = .tertiaryLabelColor
         labelField.translatesAutoresizingMaskIntoConstraints = false
         labelField.widthAnchor.constraint(equalToConstant: 62).isActive = true
         labelField.setContentHuggingPriority(.required, for: .horizontal)
 
         let valueField = NSTextField(labelWithString: value)
-        valueField.font = label == "Log" ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 11)
+        valueField.font = label == "Log" ? Typography.monoMetadata : Typography.metadata
         valueField.textColor = valueColor
         valueField.lineBreakMode = .byTruncatingMiddle
         valueField.maximumNumberOfLines = 2
@@ -7015,7 +7024,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         textView.isRichText = false
         textView.isEditable = false
         textView.isSelectable = true
-        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.font = Typography.monoMetadata
         let text = content ?? ""
         textView.string = text.isEmpty ? "No setup log output." : text
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
@@ -7210,14 +7219,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func label(text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = Typography.compactTitle
         label.textColor = .secondaryLabelColor
         return label
     }
 
     func helpTextLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Typography.metadata
         label.textColor = .tertiaryLabelColor
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0
@@ -7279,7 +7288,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let labelField = NSTextField(labelWithString: label)
         if let automationID { labelField.setAccessibilityIdentifier("\(automationID)-label") }
-        labelField.font = detail == nil ? .systemFont(ofSize: 12) : .systemFont(ofSize: 12, weight: .semibold)
+        labelField.font = detail == nil ? Typography.rowDetail : Typography.compactTitle
         labelField.textColor = .labelColor
         labelField.lineBreakMode = .byTruncatingTail
         labelField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
@@ -7287,7 +7296,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let detailField = NSTextField(labelWithString: detail ?? "")
         if let automationID { detailField.setAccessibilityIdentifier("\(automationID)-detail") }
-        detailField.font = .systemFont(ofSize: 11)
+        detailField.font = Typography.metadata
         detailField.textColor = .secondaryLabelColor
         detailField.lineBreakMode = .byTruncatingTail
         detailField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -7295,7 +7304,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         detailField.isHidden = detail == nil
 
         let badge = NSTextField(labelWithString: shortcut)
-        badge.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        badge.font = Typography.monoBadge
         badge.textColor = .secondaryLabelColor
         badge.setContentHuggingPriority(.required, for: .horizontal)
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -7441,7 +7450,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 16), iconView.heightAnchor.constraint(equalToConstant: 16)])
 
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = Typography.compactTitle
         label.textColor = .secondaryLabelColor
 
         row.addArrangedSubview(iconView)
@@ -7454,9 +7463,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.orientation = .horizontal
         stack.spacing = 8
         let label = NSTextField(labelWithString: "\(title):")
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = Typography.compactTitle
         let valueField = NSTextField(labelWithString: value)
-        valueField.font = .systemFont(ofSize: 12)
+        valueField.font = Typography.rowDetail
         valueField.lineBreakMode = .byTruncatingMiddle
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(valueField)
@@ -7468,7 +7477,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.orientation = .horizontal
         stack.spacing = 8
         let label = NSTextField(labelWithString: "Status:")
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = Typography.compactTitle
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: isRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
         icon.contentTintColor = isRunning ? .systemGreen : .tertiaryLabelColor
@@ -7495,7 +7504,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         row.spacing = 8
 
         let title = NSTextField(labelWithString: setting.label)
-        title.font = .systemFont(ofSize: 12)
+        title.font = Typography.rowDetail
         title.setContentHuggingPriority(.defaultLow, for: .horizontal)
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -7504,7 +7513,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: #selector(beginShortcutCapture(_:)), primary: false)
         captureButton.identifier = NSUserInterfaceItemIdentifier(setting.settingKey)
         captureButton.alignment = .center
-        captureButton.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        captureButton.font = Typography.monoBody
         captureButton.isBordered = false
         captureButton.translatesAutoresizingMaskIntoConstraints = false
         captureButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -7678,9 +7687,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byTruncatingTail
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: color, .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .paragraphStyle: paragraph,
-        ]
+        let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: color, .font: Typography.monoBody, .paragraphStyle: paragraph]
         button.attributedTitle = NSAttributedString(string: "  \(text)  ", attributes: attrs)
     }
 
@@ -7712,7 +7719,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.font = Typography.metadataTitle
         label.textColor = .secondaryLabelColor
 
         stack.addArrangedSubview(label)
@@ -7808,7 +7815,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         row.alignment = .centerY
         row.spacing = 12
         let labelField = NSTextField(labelWithString: text)
-        labelField.font = .systemFont(ofSize: 12, weight: .semibold)
+        labelField.font = Typography.compactTitle
         labelField.textColor = .secondaryLabelColor
         labelField.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([labelField.widthAnchor.constraint(equalToConstant: labelWidth)])
@@ -7906,7 +7913,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         textView.isSelectable = true
         textView.isRichText = false
         textView.allowsUndo = true
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = Typography.monoBody
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -8151,14 +8158,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let nameField = NSTextField(labelWithString: section.displayName)
-        nameField.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameField.font = Typography.sectionTitle
         nameField.textColor = .labelColor
         nameField.lineBreakMode = .byTruncatingMiddle
         nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let caption = selectable ? (section.isLocal ? "This device" : "Remote device") : "Offline"
         let captionField = NSTextField(labelWithString: caption)
-        captionField.font = .systemFont(ofSize: 11)
+        captionField.font = Typography.metadata
         captionField.textColor = .secondaryLabelColor
         captionField.lineBreakMode = .byTruncatingTail
 
@@ -11533,17 +11540,17 @@ struct CommandPaletteItem: Sendable {
         textStack.spacing = 1
         textStack.translatesAutoresizingMaskIntoConstraints = false
 
-        labelField.font = .systemFont(ofSize: 13, weight: .semibold)
+        labelField.font = Typography.sectionTitle
         labelField.textColor = Theme.text
         labelField.lineBreakMode = .byTruncatingTail
         labelField.maximumNumberOfLines = 1
 
-        detailField.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        detailField.font = Typography.monoMetadata
         detailField.textColor = Theme.muted
         detailField.lineBreakMode = .byTruncatingTail
         detailField.maximumNumberOfLines = 1
 
-        workspaceField.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        workspaceField.font = Typography.captionTitle
         workspaceField.textColor = Theme.accentStrong
         workspaceField.lineBreakMode = .byTruncatingTail
         workspaceField.maximumNumberOfLines = 1
@@ -11562,7 +11569,7 @@ struct CommandPaletteItem: Sendable {
             branchIconView.widthAnchor.constraint(equalToConstant: 9), branchIconView.heightAnchor.constraint(equalToConstant: 9),
         ])
 
-        branchField.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        branchField.font = Typography.monoCaption
         branchField.textColor = Theme.mutedSecondary
         branchField.lineBreakMode = .byTruncatingTail
         branchField.maximumNumberOfLines = 1

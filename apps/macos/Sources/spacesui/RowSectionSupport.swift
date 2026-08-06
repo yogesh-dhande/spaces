@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// Shared scaffolding for the workspace-detail "section" views (Processes,
 /// Coding Agents, Browser Sessions, Ports). Each renders a header with a title,
@@ -8,10 +9,10 @@ import AppKit
 @MainActor enum RowSectionHeader {
     static func make(title: String, addButtonAccessibilityIdentifier: String, countLabel: NSTextField, subtitle: String? = nil) -> NSStackView {
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = Typography.sectionTitle
         titleLabel.textColor = Theme.text
 
-        countLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        countLabel.font = Typography.metadataEmphasis
         countLabel.textColor = Theme.muted
 
         let spacer = NSView()
@@ -22,7 +23,7 @@ import AppKit
         addButton.bezelStyle = .inline
         addButton.isBordered = false
         addButton.contentTintColor = Theme.muted
-        addButton.font = .systemFont(ofSize: 11.5, weight: .medium)
+        addButton.font = Typography.metadataEmphasis
         addButton.setAccessibilityIdentifier(addButtonAccessibilityIdentifier)
 
         if let subtitle {
@@ -34,7 +35,7 @@ import AppKit
             titleRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
             let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            subtitleLabel.font = Typography.metadata
             subtitleLabel.textColor = Theme.muted
             subtitleLabel.lineBreakMode = .byTruncatingTail
             subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

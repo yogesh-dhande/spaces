@@ -37,6 +37,9 @@
         func sessionSnapshotText() -> String?
         func copySelectionToPasteboard() -> Bool
         func pasteClipboardContents() -> Bool
+        /// Renders this session at the app-wide terminal text size. A client-side display setting, so
+        /// it applies whatever this host's attachment mode is and whether or not the session is live.
+        func applyTerminalTextSize(_ size: TerminalTextSize)
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool
         @discardableResult func performBindingAction(_ action: String) -> Bool
         @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)

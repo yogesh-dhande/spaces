@@ -484,6 +484,11 @@ import spacesterminalcore
     /// already on `appearance` sends nothing.
     func broadcastAppearance(_ appearance: ThemeAppearance) { for content in contentControllers.values { content.applyAppearance(appearance) } }
 
+    /// Re-renders every open pane's terminal content at the app-wide terminal text size. One value is
+    /// shared by every pane, so a zoom in the focused pane resizes the text in all of them, not only
+    /// in panes opened afterwards.
+    func broadcastTerminalTextSize(_ size: TerminalTextSize) { for content in contentControllers.values { content.applyTerminalTextSize(size) } }
+
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
         contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()

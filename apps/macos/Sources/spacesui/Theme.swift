@@ -138,8 +138,7 @@ enum Theme {
         button.layer?.masksToBounds = true
         let fg = primaryButtonText
         button.contentTintColor = fg
-        button.attributedTitle = NSAttributedString(
-            string: button.title, attributes: [.foregroundColor: fg, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        button.attributedTitle = NSAttributedString(string: button.title, attributes: [.foregroundColor: fg, .font: Typography.primaryButtonLabel])
         applyButtonLayout(to: button, minimumWidth: 96)
     }
 
@@ -157,7 +156,7 @@ enum Theme {
         }
         button.contentTintColor = .labelColor
         button.attributedTitle = NSAttributedString(
-            string: button.title, attributes: [.foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 13)])
+            string: button.title, attributes: [.foregroundColor: NSColor.labelColor, .font: Typography.secondaryButtonLabel])
         applyButtonLayout(to: button)
     }
 
@@ -167,8 +166,7 @@ enum Theme {
         button.wantsLayer = false
         button.layer = nil
         button.contentTintColor = color
-        button.attributedTitle = NSAttributedString(
-            string: button.title, attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 13, weight: .medium)])
+        button.attributedTitle = NSAttributedString(string: button.title, attributes: [.foregroundColor: color, .font: Typography.textButtonLabel])
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setContentHuggingPriority(.required, for: .horizontal)
     }

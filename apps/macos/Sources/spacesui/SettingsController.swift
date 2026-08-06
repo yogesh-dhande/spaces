@@ -145,7 +145,7 @@ import workspacecore
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let title = NSTextField(labelWithString: "Settings")
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.font = Typography.sheetTitle
         title.textColor = .labelColor
 
         let closeButton = host.iconButton(symbol: "xmark", tooltip: "Close settings", action: #selector(AppKitController.closeSettingsWindow))
@@ -206,7 +206,7 @@ import workspacecore
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
         let label = NSTextField(labelWithString: section.title)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.font = Typography.rowLabel
         label.textColor = .labelColor
         row.setAccessibilityLabel(section.title)
 
@@ -363,7 +363,7 @@ import workspacecore
         textView.isRichText = false
         textView.isEditable = false
         textView.isSelectable = true
-        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.font = Typography.monoMetadata
         textView.string = selectedMCPClient.mcpConfigSnippet(cliPath: cliPath)
         textView.setAccessibilityIdentifier("settings-mcp-config")
         mcpConfigTextView = textView

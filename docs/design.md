@@ -45,13 +45,18 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 ## Typography
 - Keep typography compact.
 - Use weight, spacing, and color to create hierarchy before using large size jumps.
-- A typical hierarchy should include:
-  - Compact but prominent page titles.
-  - Small semibold section titles.
-  - Medium-weight primary row labels.
-  - Muted secondary detail text.
-  - Quiet metadata labels only when they add structure.
-- Use monospaced text selectively for paths, commands, branches, shortcuts, ports, and scripts.
+- Chrome text is sized by role token, never by a font literal at the call site. Tokens live in `TypographyRole` (`spacesterminalcore`) with `Typography` as the AppKit adapter, mirroring the `ThemeDescriptor`/`Theme` split. Text sizing is deliberately outside the theme: switching themes recolors the interface without moving any text.
+- Pick a token by what the text is, not by what size it should be. A token fixes both size and weight, so a call site never chooses a weight of its own; a genuine variant is a token of its own.
+- The scale is 20, 16, 14, 13, 12, 11, and 10 pt. Nothing else, and no half points.
+- The roles, largest to smallest:
+  - `pageTitle` (20) for a top-level pane or window; `sheetTitle` (16) for a sheet, form window, setup step, or the command palette.
+  - `cardTitle` (14) for a card that leads a pane; `emptyStateTitle` (14) for the centered headline of an empty or loading pane.
+  - `sectionTitle` (13) for a section heading, `rowLabel` (13) for a row's primary label, `body` (13) for explanatory copy, and `primaryButtonLabel`/`secondaryButtonLabel`/`textButtonLabel` (13) for the three button styles.
+  - `compactTitle` (12) for a compact element's name or a labeled value's key, `controlLabel` (12) for a control or dense row name, `rowDetail` (12) for secondary detail.
+  - `metadataTitle`, `metadataEmphasis`, and `metadata` (11) for quiet headers, counts, and supporting text.
+  - `captionTitle` and `caption` (10) for the smallest text: dense-row tags, shortcut hints, footer legends.
+- Use monospaced text selectively for paths, commands, branches, shortcuts, ports, and scripts. Its roles ride the same scale: `monoRowLabel` and `monoBody` (12), `monoMetadata` (11), and `monoCaption`, `monoBadge`, and `monoBadgeStrong` (10).
+- Terminal content is not chrome. It is sized by the terminal's own font setting and takes no chrome token.
 - Favor short labels and concise helper text over long explanatory copy inside the interface.
 
 ## Spacing And Density

@@ -19,6 +19,8 @@ const shortcutRows = [
   { shortcut: "cmd+alt+t", action: "Open a terminal for the selected workspace", scope: "App" },
   { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
   { shortcut: "cmd+1 … cmd+0", action: "Open or focus workspace target by number", scope: "App" },
+  { shortcut: "cmd+= / cmd+shift+=", action: "Zoom terminal text in one point", scope: "Terminal pane" },
+  { shortcut: "cmd+-", action: "Zoom terminal text out one point", scope: "Terminal pane" },
 ];
 
 export default function ShortcutsDocsPage() {
@@ -67,9 +69,16 @@ export default function ShortcutsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Terminal Text Zoom</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          The zoom shortcuts work while a terminal pane has focus, and range from 9 to 18 points; Spaces starts at 12 points and there is no reset key, so you step back down to return to it. One size is shared across the app, so zooming resizes text in every open terminal pane at once, and it is remembered the next time you launch Spaces. <code>cmd+0</code> is not a zoom key: it keeps focusing the tenth numbered target, in a terminal pane the same as everywhere else.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Customization</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Every shortcut is configurable from Settings (<code>cmd+,</code>) Menu
+          The workspace and app shortcuts are configurable from Settings (<code>cmd+,</code>) Menu. The terminal text zoom shortcuts are fixed.
         </p>
       </article>
     </DocsShell>

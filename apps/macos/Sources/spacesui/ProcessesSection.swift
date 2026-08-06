@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 import workspacecore
 
 /// Phase 2b.1 prototype. Replaces the table-style `ProcessEditor` for processes
@@ -384,10 +385,10 @@ import workspacecore
 
     private func rebindDisplayContent(name: String, detail: String?, status: RowPrimitives.StatusKind) {
         nameLabel.stringValue = name
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.font = Typography.rowLabel
         nameLabel.textColor = Theme.text
         detailLabel.stringValue = detail ?? ""
-        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        detailLabel.font = Typography.rowDetail
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.isHidden = (detail ?? "").isEmpty
@@ -565,7 +566,7 @@ import workspacecore
 
         func labeled(_ title: String, _ field: NSView) -> NSStackView {
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.font = Typography.metadataTitle
             label.textColor = Theme.muted
             label.alignment = .right
             label.setContentHuggingPriority(.required, for: .horizontal)

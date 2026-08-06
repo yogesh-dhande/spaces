@@ -304,7 +304,17 @@ extension TerminalSessionPaneViewController {
     /// terminal. Hosts call this from their `performKeyEquivalent` routing; returns
     /// true when the shortcut was consumed.
     public func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner,
+        guard event.type == .keyDown else { return false }
+        // Zoom is a client-side display setting, not an act on the session, so it is claimed ahead of
+        // the ownership and renderer guards below: a viewer watching a session another client owns, and
+        // a pane showing the plain-text fallback for an ended session, both resize their text.
+        if let zoomCommand = TerminalTextZoomKeyBinding.command(keyCode: Int(event.keyCode), modifierFlags: event.modifierFlags),
+            let terminalTextZoomAction
+        {
+            terminalTextZoomAction(zoomCommand)
+            return true
+        }
+        guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner,
             visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender
         else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])

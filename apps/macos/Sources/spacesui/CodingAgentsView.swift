@@ -196,14 +196,14 @@ extension AppKitController: CodingAgentsHost {}
         let tile = RowPrimitives.typeTextTile(.agent, text: kind.tileText, accessibilityLabel: kind.displayName)
 
         let name = NSTextField(labelWithString: kind.displayName)
-        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.font = Typography.rowLabel
 
         // A recorded failure explains a row Spaces just tried and could not fix — most often a
         // `config.toml` only the user can untangle. Once hooks are current the message is stale by
         // definition, so it is never shown then.
         let failureMessage = installState == .current ? nil : failures[kind]
         let caption = NSTextField(labelWithString: captionText(status: status, failureMessage: failureMessage, isLoading: isLoading))
-        caption.font = .systemFont(ofSize: 11)
+        caption.font = Typography.metadata
         caption.textColor = (failureMessage != nil && !isLoading) ? .systemRed : .secondaryLabelColor
         caption.lineBreakMode = .byWordWrapping
         caption.maximumNumberOfLines = 3

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import spacesterminalcore
 import systembridge
 
 /// The first-run blocking screen that gates the workspace UI until Spaces is allowed to control
@@ -90,18 +91,18 @@ import systembridge
         icon.contentTintColor = .controlAccentColor
 
         let title = NSTextField(labelWithString: "Allow Spaces to control Google Chrome")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.font = Typography.sheetTitle
         title.alignment = .center
 
         let body = NSTextField(
             wrappingLabelWithString: "Spaces opens and focuses your workspace browser sessions in Google Chrome. macOS asks for your "
                 + "permission before Spaces can control Chrome.")
-        body.font = .systemFont(ofSize: 13)
+        body.font = Typography.body
         body.textColor = .secondaryLabelColor
         body.alignment = .center
         body.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.font = Typography.rowDetail
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.alignment = .center
 

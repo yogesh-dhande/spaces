@@ -1,4 +1,5 @@
 import AppKit
+import spacesterminalcore
 
 /// One panel: a tab bar over the selected tab's pane tree. Instantiated per
 /// `PanelScope` and kept alive (detached) while its workspace is not selected, so
@@ -38,7 +39,7 @@ import AppKit
         paneTree.onSplitWeightsChanged = { [weak self] splitID, weights in self?.onSplitWeightsChanged?(splitID, weights) }
         paneTree.onConfigurePane = { [weak self] paneView, pane in self?.configure(paneView: paneView, pane: pane) }
 
-        emptyStateLabel.font = .systemFont(ofSize: 12)
+        emptyStateLabel.font = Typography.rowDetail
         emptyStateLabel.textColor = Theme.mutedSecondary
         emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
 
