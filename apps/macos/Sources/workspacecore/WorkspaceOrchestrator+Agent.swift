@@ -293,13 +293,11 @@ extension WorkspaceOrchestrator {
         return ((try? store.agentWindows(workspaceID: window.workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
     }
 
-    func fallbackAgentFocusName(_ record: AgentWindowRecord) throws -> String? {
-        let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
-        if let title = sanitizedFocusName(trackedWindow?.name) { return sanitizedFocusName("Coding Agent \(title)") ?? title }
-        if let detail = sanitizedFocusName(trackedWindow?.detail) { return sanitizedFocusName("Coding Agent \(detail)") ?? detail }
-        return sanitizedFocusName("Coding Agent")
-    }
+    /// The name a coding-agent row carries when nothing reported one. A hook `init` signal carries no
+    /// label and foreground detection cannot classify every command, so nameless registrations are
+    /// routine; registration stores this as the row's real label rather than leaving the row nameless, so
+    /// the row, its pane, its focus name, and `spaces open` routing all read one stored string.
+    public static let defaultAgentLabel = "Coding Agent"
 
     func uniqueAgentFocusLabel(workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil) throws -> String? {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
@@ -591,7 +589,10 @@ extension WorkspaceOrchestrator {
                     environmentKeys: environmentKeys), createdAt: now)
             return updated
         }
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label)
+        // A registration that reports no label materializes `Coding Agent` as the row's stored label,
+        // through the same uniquifier a reported label runs through, so a second nameless agent in the
+        // workspace stores "Coding Agent-2" and the two rows stay one-name-to-one-row for focus.
+        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: sanitizedFocusName(label) ?? Self.defaultAgentLabel)
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
             terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
@@ -1014,11 +1015,9 @@ extension WorkspaceOrchestrator {
     /// `uniqueAgentFocusLabel` means the recovered name is chosen by the same numeric-suffix rule
     /// registration applies ("Codex" taken yields "Codex-2"), and the user is free to rename again.
     private func clearedAgentSessionUserLabel(_ existing: AgentWindowRecord) throws -> String? {
-        // A row with no reported label has no name to recover, and none to collide with either: the
-        // "Coding Agent" placeholder surfaces render for it is presentation, not a name, so such rows
-        // contribute no focus-name entry and take no part in uniqueness (two label-less registrations
-        // already share the placeholder without any rename involved). Suffixing here would invent and
-        // persist a name for a row that has none.
+        // Registration materializes a label for every row, including one nothing reported, so the recovered
+        // name is the stored label. The guard covers only a row stored before labels were materialized: it
+        // has no name to recover and none to collide with, and suffixing would invent one for it.
         guard let reportedLabel = sanitizedFocusName(existing.label) else { return nil }
         let uniqueLabel = try uniqueAgentFocusLabel(
             workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id)

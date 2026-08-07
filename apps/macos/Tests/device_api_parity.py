@@ -549,8 +549,8 @@ def wait_for_process_row(args: argparse.Namespace, app: dict, workspace_id: str,
 
 def agent_row_for_session(workspace: dict, session_id: str) -> dict | None:
     # A live agent row is addressed by the terminal session the agent runs in, not by a name: a row
-    # registered from hook signals reports whatever label the agent gives itself, and a placeholder
-    # when it gives none.
+    # registered from hook signals is named by whatever label the agent gives itself, and by the
+    # materialized default name when it gives none.
     for row in workspace.get("codingAgentRows") or []:
         if row.get("sessionID") == session_id:
             return row

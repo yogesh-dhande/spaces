@@ -1907,6 +1907,64 @@ extension OrchestratorTests {
         XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the kind the row carries, got: \(line)")
     }
 
+    /// A hook `init` carries no label, and foreground detection cannot classify every command, so a row
+    /// registered with nothing to name it would otherwise have no name at all. Registration materializes
+    /// "Coding Agent" as the row's real stored label, so the row, its pane, and focus all read one string.
+    func testRegisteringAnAgentWithNoReportedLabelStoresTheDefaultName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle, eventType: "init",
+            eventSource: "spaces_agent_signal")
+
+        XCTAssertEqual(agent.label, "Coding Agent")
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.label, "Coding Agent")
+    }
+
+    /// The materialized name runs through the same uniquifier a reported label does, so two nameless
+    /// agents in one workspace keep a one-name-to-one-row mapping instead of both answering to one name.
+    func testASecondAgentWithNoReportedLabelIsSuffixed() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-1", status: .idle)
+        let second = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-2", status: .idle)
+
+        XCTAssertEqual(first.label, "Coding Agent")
+        XCTAssertEqual(second.label, "Coding Agent-2")
+        XCTAssertEqual(try store.agentWindow(id: second.id)?.label, "Coding Agent-2")
+    }
+
+    /// `spaces open` resolves a name against the workspace's focusable targets, and the app routes the
+    /// request by the row's own name. With the label materialized both read the same string, so an agent
+    /// nothing named is reachable by name.
+    func testAnAgentWithNoReportedLabelIsFocusableByItsMaterializedName() throws {
+        let (_, orchestrator, workspace) = try makeAgentRenameFixture()
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-1", status: .idle)
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-2", status: .idle)
+
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+
+        XCTAssertTrue(names.contains("Coding Agent"), "got: \(names)")
+        XCTAssertTrue(names.contains("Coding Agent-2"), "got: \(names)")
+        XCTAssertEqual(Set(names).count, names.count, "no two rows may share a visible name, got: \(names)")
+    }
+
+    /// Clearing a rename recovers the row's stored label, and a materialized one is a stored label like
+    /// any other: the row comes back under the name registration gave it rather than under no name.
+    func testClearingARenameOnAnUnnamedAgentRestoresItsMaterializedName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "  ")
+
+        XCTAssertNil(try store.agentWindow(id: agent.id)?.userLabel)
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.effectiveLabel, "Coding Agent")
+    }
+
     /// A renamed agent has to answer to the name the user gave it. Focus resolution reads names, so a row
     /// still listed under the label nothing displays is unreachable by the name on screen.
     func testRenamingAnAgentMovesItsFocusNameToTheNewName() throws {

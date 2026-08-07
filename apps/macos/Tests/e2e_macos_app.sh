@@ -77,11 +77,11 @@ LANTERN_BRANCH_WORKSPACE_BRANCH="redesign-hero"
 LANTERN_BRANCH_WORKSPACE_NOTES="Redesign the API error console hero section"
 # The mock coding agent runs in a plain workspace terminal titled MOCK_AGENT_TERMINAL_TITLE and
 # becomes a coding-agent row through its own hook signals — the only way an agent comes into
-# existence. Such a row reports no label of its own, so the orchestrator addresses it by the fallback
-# focus name "Coding Agent <terminal title>" (MOCK_AGENT_LABEL) while the pane keeps showing the
-# terminal's own title.
+# existence. Its hook signals report no label, so registration materializes the stored label
+# MOCK_AGENT_LABEL: the row, its pane, and `spaces open` all address that one name, while the
+# terminal keeps its own launch title.
 MOCK_AGENT_TERMINAL_TITLE="Mock Agent"
-MOCK_AGENT_LABEL="Coding Agent $MOCK_AGENT_TERMINAL_TITLE"
+MOCK_AGENT_LABEL="Coding Agent"
 SPACES_PID=""
 CAFFEINATE_PID=""
 RECORDER_PID=""
@@ -4280,8 +4280,8 @@ wait_for_event_log_contains_since_line() {
   fail "timed out waiting for event log pattern: $pattern"
 }
 
-# Agent rows are addressed by the terminal session the agent runs in: a hook-registered row reports
-# whatever label the agent gives itself, and none at all for an agent that reports no label.
+# Agent rows are addressed here by the terminal session the agent runs in, not by name: a row is
+# named by whatever label the agent reports, and by the materialized default when it reports none.
 wait_for_agent_status() {
   local workspace_dir="$1"
   local session_id="$2"
@@ -4742,8 +4742,8 @@ wait_for_cycle_target_focus() {
     terminal:*|process:*|agent:*)
       local target_name target_session_id
       if [[ "$cycle_target" == agent:* ]]; then
-        # A hook-registered agent row reports no label of its own, so the app names it by row id in the
-        # cycle perf line. These lanes run exactly one coding agent, so its identity is already known.
+        # The cycle perf line names an agent target by row id, so resolve it to the row's stored name.
+        # These lanes run exactly one coding agent, so its identity is already known.
         target_name="$MOCK_AGENT_LABEL"
         target_session_id="$KNOWN_SPACES_AGENT_SESSION_ID"
       else
@@ -4796,7 +4796,7 @@ refocus_cycle_target() {
       target_name="docs"
       ;;
     agent:*)
-      # The cycle perf line names a label-less agent row by row id; refocus it by its focus name.
+      # The cycle perf line names an agent row by row id; refocus it by the row's stored name.
       target_name="$MOCK_AGENT_LABEL"
       ;;
     terminal:*|process:*)
@@ -4890,9 +4890,6 @@ seed_cycle_focus_history() {
       activate_google_chrome
       chrome_focus_window_if_present "$docs_window_id"
       wait_for_condition "chrome_front_url" "$browser_docs_url"
-    elif [[ "$seed_target" == "$MOCK_AGENT_LABEL" ]]; then
-      # The agent is addressed by its focus name; its pane shows the terminal it runs in.
-      wait_for_spaces_front_window_title "$MOCK_AGENT_TERMINAL_TITLE"
     else
       wait_for_spaces_front_window_title "$seed_target"
     fi
@@ -5265,7 +5262,7 @@ run_window_cycle_small_assertions() {
   run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
   transition_pause "$host open agent for cycle profile"
   wait_for_condition "spaces_front_terminal_pane_session_id" "$KNOWN_SPACES_AGENT_SESSION_ID"
-  wait_for_spaces_front_window_title "$MOCK_AGENT_TERMINAL_TITLE"
+  wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
   wait_for_terminal_session_live_render "$KNOWN_SPACES_AGENT_SESSION_ID" "$host agent cycle profile"
 
   open_ad_hoc_spaces_terminal_for_cycle_profile "$host" "$workspace_dir" "$dump_file"
@@ -5569,7 +5566,7 @@ PY
     send_spaces_window_shortcut_with_ack "$agent_shortcut_index"
     transition_pause "$host shortcut focus agent"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    wait_for_spaces_front_window_title "$MOCK_AGENT_TERMINAL_TITLE"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
     assert_shortcut_focus_surface_state
 
     ui_show_workspace_detail "$workspace_dir" "$workspace_title"
@@ -5658,7 +5655,7 @@ PY
     wait_for_spaces_front_window_title "frontend"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
     transition_pause "$host seed agent focus for cycling"
-    wait_for_spaces_front_window_title "$MOCK_AGENT_TERMINAL_TITLE"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-adhoc.log open "$adhoc_name" "$workspace_dir"
     transition_pause "$host seed ad hoc terminal focus for cycling"
     wait_for_spaces_front_window_title "$adhoc_name"

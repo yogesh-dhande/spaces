@@ -1601,7 +1601,7 @@ public final class WorkspaceOrchestrator {
             results.append((name, target))
         }
 
-        for target in runtimeTargets { append(try focusName(for: target, workspaceID: workspaceID), target: focusableTarget(from: target)) }
+        for target in runtimeTargets { append(focusName(for: target), target: focusableTarget(from: target)) }
 
         for session in configuredBrowsers where !runtimeBrowserURLs.contains(normalizedFocusName(session.targetURL)) {
             append(session.name, target: .browserSession(targetURL: session.targetURL))
@@ -1626,11 +1626,12 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
+    /// A target's focus name is the name it displays. An agent row's is its stored name and nothing else:
+    /// registration materializes a label for a row nothing named, so there is no second name derived from
+    /// the terminal's title for a caller to have to guess at.
+    private func focusName(for target: WorkspaceNavigationTarget) -> String? {
         switch target {
-        case .agent(let record):
-            if let label = sanitizedFocusName(record.effectiveLabel) { return label }
-            return try fallbackAgentFocusName(record)
+        case .agent(let record): return sanitizedFocusName(record.effectiveLabel)
         case .browser(let window): return sanitizedFocusName(window.name)
         case .process(let process): return sanitizedFocusName(process.templateName)
         case .window(let window): return sanitizedFocusName(window.name)

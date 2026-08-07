@@ -4186,7 +4186,7 @@ while time.time() < deadline:
     workspace = workspace_snapshot()
     if workspace is not None:
         # A live agent row is addressed by the terminal session the agent runs in: the row is named by
-        # whatever label the agent reports for itself, and by a placeholder when it reports none.
+        # whatever label the agent reports for itself, and by the materialized default when it reports none.
         agents = [row for row in workspace.get("codingAgentRows") or [] if row.get("sessionID") == agent_session_id]
         exited_terminals = [row for row in workspace.get("terminalRows") or [] if row.get("runState") == "exited"]
         observed = {

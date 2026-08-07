@@ -304,7 +304,7 @@ seed_and_launch() {
   for event in init working blocked; do
     demo_env "$spaces_cli" agent signal --workspace "$harbor_ws" --session "$agent_session" "$event" >/dev/null
   done
-  # The stand-in reports no label of itself, so the row would read as the generic placeholder. Name it
+  # The stand-in reports no label of itself, so the row carries the materialized default name. Name it
   # the way a user would, through the same rename the app and the mobile clients issue.
   name_coding_agent "$harbor_ws" "$agent_session" "Fix checkout 500"
 

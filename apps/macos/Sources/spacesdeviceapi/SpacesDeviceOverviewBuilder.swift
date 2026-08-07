@@ -315,8 +315,9 @@ struct SpacesDeviceOverviewBuilder {
         var claimedTerminalKeys = Set<String>()
         var rows: [SpacesDeviceWorkspaceCodingAgentRow] = []
         // Every coding-agent row is a live session: an agent exists only once its command is running in a
-        // terminal. It is named by that session — the user's rename when one is stored, else the label the
-        // agent reports for itself.
+        // terminal. It is named by that session: the user's rename when one is stored, else the stored
+        // label, which registration materializes even when nothing reported one. The literal is reached
+        // only by a row stored before labels were materialized, and is pure display, never a focus name.
         for agent in descriptor.agentWindows {
             if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
