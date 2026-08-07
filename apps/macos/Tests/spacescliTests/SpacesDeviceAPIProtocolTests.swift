@@ -173,11 +173,23 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(
                 command: .runWorkspaceProcess(.init(workspaceID: "workspace-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
-            SpacesDeviceAPIRequest(
-                command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
+    /// The conditional stop a closed owner pane sends. It names the same session as the unconditional
+    /// stop and, like it, must not be replayed after an ambiguous failure: a replay could catch the
+    /// terminal at a prompt it was busy at the first time.
+    func testStopWorkspaceTerminalIfBareShellRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: "workspace-1", sessionID: "session-1")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "stopWorkspaceTerminalIfBareShell")
+        XCTAssertEqual(request.sessionID, "session-1")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
     func testRenameTerminalSessionRequestRoundTripsAndIsNotReplaySafe() throws {

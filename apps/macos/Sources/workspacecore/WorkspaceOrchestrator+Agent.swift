@@ -82,14 +82,14 @@ extension WorkspaceOrchestrator {
     /// unclassified but still-running program (`python3 agent.py`) — neither of those is the detected
     /// agent process exiting, and demoting on either would drop a still-active coding-agent row. Only a
     /// foreground executable name that matches the session's own launch-configured shell basename is
-    /// unambiguous evidence the terminal is back at a bare prompt.
+    /// unambiguous evidence the terminal is back at a bare prompt, which `TerminalBareShellForeground`
+    /// decides: the same rule the conditional stop of a user-closed ad hoc terminal applies, so a shell
+    /// interpreting a script (`zsh build.sh`) counts as a running program for both.
     func foregroundHasRevertedToPlainShell(_ session: TerminalSessionCatalogEntry) -> Bool {
-        guard session.runtimeState.foregroundDetectedAgentKind == nil,
-            let executableName = session.runtimeState.foregroundExecutableName?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !executableName.isEmpty
-        else { return false }
-        let shellBasename = URL(fileURLWithPath: session.launchConfiguration.shell).lastPathComponent
-        return executableName == shellBasename
+        guard session.runtimeState.foregroundDetectedAgentKind == nil else { return false }
+        return TerminalBareShellForeground.isBareShell(
+            executableName: session.runtimeState.foregroundExecutableName, argv: session.runtimeState.foregroundArgv,
+            launchShell: session.launchConfiguration.shell)
     }
 
     func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (kind: String, label: String, displayCommand: String?)? {

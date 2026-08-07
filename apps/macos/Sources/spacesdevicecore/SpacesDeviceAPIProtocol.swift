@@ -974,6 +974,10 @@ public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equ
     }
 }
 
+/// Addresses one terminal session inside a workspace. Shared by the unconditional stop
+/// (`stopWorkspaceTerminal`, the sidebar's explicit Stop) and the conditional one
+/// (`stopWorkspaceTerminalIfBareShell`, a closed owner pane), which differ only in the decision the
+/// daemon makes, not in what they name.
 public struct SpacesDeviceWorkspaceTerminalRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let sessionID: String
@@ -1430,6 +1434,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case updateWorkspaceMetadata(SpacesDeviceWorkspaceMetadataUpdateRequest)
     case openWorkspaceTerminal(SpacesDeviceWorkspaceReference)
     case stopWorkspaceTerminal(SpacesDeviceWorkspaceTerminalRequest)
+    /// Stops a workspace terminal only when the daemon finds it idle at a bare shell prompt: the
+    /// close of the pane that owned an ad hoc terminal. A terminal with a real foreground process, a
+    /// surviving owner attachment, or a configured owner is kept and stays recoverable.
+    case stopWorkspaceTerminalIfBareShell(SpacesDeviceWorkspaceTerminalRequest)
     case renameTerminalSession(SpacesDeviceTerminalSessionRenameRequest)
     case runWorkspaceProcess(SpacesDeviceRunWorkspaceProcessRequest)
     case stopWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest)
@@ -1497,6 +1505,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
         case .stopWorkspaceTerminal: "stopWorkspaceTerminal"
+        case .stopWorkspaceTerminalIfBareShell: "stopWorkspaceTerminalIfBareShell"
         case .renameTerminalSession: "renameTerminalSession"
         case .runWorkspaceProcess: "runWorkspaceProcess"
         case .stopWorkspaceProcess: "stopWorkspaceProcess"
@@ -1526,6 +1535,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     public var terminalSessionID: String? {
         switch self {
         case .stopWorkspaceTerminal(let payload): payload.sessionID
+        case .stopWorkspaceTerminalIfBareShell(let payload): payload.sessionID
         case .renameTerminalSession(let payload): payload.sessionID
         case .state(let payload): payload.sessionID
         case .terminalControl(let payload): payload.sessionID
@@ -1615,6 +1625,7 @@ extension SpacesDeviceAPICommand: Codable {
         case updateWorkspaceMetadata
         case openWorkspaceTerminal
         case stopWorkspaceTerminal
+        case stopWorkspaceTerminalIfBareShell
         case renameTerminalSession
         case runWorkspaceProcess
         case stopWorkspaceProcess
@@ -1681,6 +1692,8 @@ extension SpacesDeviceAPICommand: Codable {
             self = .updateWorkspaceMetadata(try container.decode(SpacesDeviceWorkspaceMetadataUpdateRequest.self, forKey: key))
         case .openWorkspaceTerminal: self = .openWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceReference.self, forKey: key))
         case .stopWorkspaceTerminal: self = .stopWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
+        case .stopWorkspaceTerminalIfBareShell:
+            self = .stopWorkspaceTerminalIfBareShell(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
         case .renameTerminalSession: self = .renameTerminalSession(try container.decode(SpacesDeviceTerminalSessionRenameRequest.self, forKey: key))
         case .runWorkspaceProcess: self = .runWorkspaceProcess(try container.decode(SpacesDeviceRunWorkspaceProcessRequest.self, forKey: key))
         case .stopWorkspaceProcess: self = .stopWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
@@ -1739,6 +1752,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateWorkspaceMetadata(let payload): try container.encode(payload, forKey: .updateWorkspaceMetadata)
         case .openWorkspaceTerminal(let payload): try container.encode(payload, forKey: .openWorkspaceTerminal)
         case .stopWorkspaceTerminal(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminal)
+        case .stopWorkspaceTerminalIfBareShell(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminalIfBareShell)
         case .renameTerminalSession(let payload): try container.encode(payload, forKey: .renameTerminalSession)
         case .runWorkspaceProcess(let payload): try container.encode(payload, forKey: .runWorkspaceProcess)
         case .stopWorkspaceProcess(let payload): try container.encode(payload, forKey: .stopWorkspaceProcess)
@@ -1800,16 +1814,22 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
     /// were deleted cleanly or were already gone, which is what lets a client show it only when something
     /// went wrong.
     public let notice: String?
+    /// The outcome of a mutation that decides for itself whether to act: `stopWorkspaceTerminalIfBareShell`
+    /// reports `true` when it terminated the session and `false` when it kept it (a real foreground
+    /// process, a surviving owner attachment, or a configured owner). `nil` for every other mutation,
+    /// which has no such choice to report.
+    public let terminatedTerminalSession: Bool?
 
     public init(
         overview: SpacesDeviceOverviewPayload? = nil, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        notice: String? = nil
+        notice: String? = nil, terminatedTerminalSession: Bool? = nil
     ) {
         self.overview = overview
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.sessionID = sessionID
         self.notice = notice
+        self.terminatedTerminalSession = terminatedTerminalSession
     }
 }
 
@@ -1925,6 +1945,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
 
     /// The mutation's extra outcome, when it had one (see `SpacesDeviceMutationResult.notice`).
     public var mutationNotice: String? { if case .mutation(let payload) = result { payload.notice } else { nil } }
+
+    /// Whether a conditional terminal stop terminated the session (see
+    /// `SpacesDeviceMutationResult.terminatedTerminalSession`).
+    public var terminatedTerminalSession: Bool? { if case .mutation(let payload) = result { payload.terminatedTerminalSession } else { nil } }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
 

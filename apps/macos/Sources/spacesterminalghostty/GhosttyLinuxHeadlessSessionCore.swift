@@ -324,6 +324,13 @@
                 hasFinalRender: false)
         }
 
+        /// The session's foreground process read from the PTY right now, not the periodic sample carried
+        /// on runtime state. Platform parity with `GhosttyEmbeddedSessionCore.currentForegroundProcess()`
+        /// on macOS; the conditional stop of a user-closed ad hoc terminal decides against this.
+        public func currentForegroundProcess() -> TerminalForegroundProcessSnapshot? {
+            ptyDriver.foregroundPID().flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
+        }
+
         private func handleSessionClosed() {
             guard !terminating else { return }
             terminate()

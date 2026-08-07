@@ -402,6 +402,49 @@ extension OrchestratorTests {
         }
     }
 
+    /// A shell that is interpreting a script is running the user's program, not sitting at a prompt, so a
+    /// detected coding-agent row must NOT be demoted while its foreground reports `zsh build.sh` even
+    /// though the foreground executable is the session's own shell.
+    func testReconcileTerminalForegroundAgentClassificationsKeepsAdHocAgentWhileShellRunsAScript() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-foreground-agent-script"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh", "build.sh"]), paths: paths)
+
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [promotedAgent.id])
+        }
+    }
+
     /// A detection-created ad-hoc row that has SINCE recorded a hook lifecycle signal is no longer pure
     /// detection state: it has subscribers owed an `exited` notice. When its foreground reverts to a plain
     /// shell, the reconciler must run the full hookless-exit flow — deliver the exited notice, record the

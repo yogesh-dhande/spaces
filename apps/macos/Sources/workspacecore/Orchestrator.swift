@@ -20,6 +20,12 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
+    /// Reads a live session's foreground process from its PTY at call time, by session id. Distinct from
+    /// the foreground fields on persisted runtime state, which are a periodic sample up to a second old:
+    /// the conditional stop of a user-closed ad hoc terminal decides whether to kill a shell, so it must
+    /// see a command the user started an instant before closing. Returns nil when the session is not live
+    /// in this process or its foreground cannot be resolved.
+    public typealias BuiltInTerminalForegroundProcessSampler = @Sendable (String) -> TerminalForegroundProcessSnapshot?
     /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.
@@ -40,6 +46,7 @@ public final class WorkspaceOrchestrator {
     #endif
     private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
+    private static let builtInTerminalForegroundProcessSamplerOverrideStore = LockedBox<BuiltInTerminalForegroundProcessSampler?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
     private static let daemonHandoffInProgressOverrideStore = LockedBox<DaemonHandoffInProgressPredicate?>(nil)
@@ -109,6 +116,14 @@ public final class WorkspaceOrchestrator {
 
     public static func setProcessWideBuiltInTerminalSessionTerminator(_ terminator: BuiltInTerminalSessionTerminator?) {
         builtInTerminalSessionTerminatorOverrideStore.set(terminator)
+    }
+
+    /// Installs the process-wide fresh-foreground sampler. Only the daemon owns live sessions, and it
+    /// serves the conditional stop from transient per-request orchestrators, so the sampler is installed
+    /// once for the process rather than threaded through every construction site. Orchestrators built
+    /// without one resolve no foreground at all, which the conditional stop reads as a bare shell.
+    public static func setProcessWideBuiltInTerminalForegroundProcessSampler(_ sampler: BuiltInTerminalForegroundProcessSampler?) {
+        builtInTerminalForegroundProcessSamplerOverrideStore.set(sampler)
     }
 
     /// Installs a process-wide notification deliverer used when an orchestrator is
@@ -229,6 +244,7 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
+    let builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler
     /// Reports whether the owning daemon is mid exec-in-place handoff. During a handoff the daemon's
     /// terminal terminator no-ops (live sessions are quiesced and carried across the exec, not killed),
     /// so a destructive workspace operation that deleted its process/window/agent rows would leave the
@@ -264,9 +280,12 @@ public final class WorkspaceOrchestrator {
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
-        currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
+        builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler? = nil,
+        daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
+        self.builtInTerminalForegroundProcessSampler =
+            builtInTerminalForegroundProcessSampler ?? Self.builtInTerminalForegroundProcessSamplerOverrideStore.get() ?? { _ in nil }
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
