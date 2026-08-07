@@ -8,11 +8,6 @@ extension CodingAgent {
     ///
     /// Used both to gate `spaces agent spawn` (only supported agents report the lifecycle signals spawn
     /// readiness depends on) and to derive a spawned session's default title from the agent it launches.
-    ///
-    /// Distinct from `CodingAgent.matching(launcherText:)`, the fuzzier launcher-name/command matcher used
-    /// only for agent-launchers-row tile rendering: that one tokenizes the whole string and looks for
-    /// known-agent tokens anywhere in it, since a launcher's display name (not just its command) may be
-    /// the only readable hint. This one is the stricter shell-executable-token matcher.
     public static func matching(command: String) -> CodingAgent? {
         guard let token = executableToken(inCommand: command) else { return nil }
         let name = (token as NSString).lastPathComponent

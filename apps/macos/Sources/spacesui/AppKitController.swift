@@ -334,7 +334,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.runWorkspaceProcess, #selector(handleRunWorkspaceProcessIPC(_:))),
         (IPCNotification.stopWorkspaceProcess, #selector(handleStopWorkspaceProcessIPC(_:))),
         (IPCNotification.restartWorkspaceProcess, #selector(handleRestartWorkspaceProcessIPC(_:))),
-        (IPCNotification.launchWorkspaceAgent, #selector(handleLaunchWorkspaceAgentIPC(_:))),
         (IPCNotification.openTerminalSessionWindow, #selector(handleOpenTerminalSessionWindowIPC(_:))),
         (IPCNotification.closeTerminalSessionWindow, #selector(handleCloseTerminalSessionWindowIPC(_:))),
         (IPCNotification.dumpTerminalSessionWindowState, #selector(handleDumpTerminalSessionWindowStateIPC(_:))),
@@ -496,15 +495,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case workspaceWindow(workspaceID: String, index: Int)
         case workspaceProcess(workspaceID: String, processID: String)
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
-        case workspaceAgentLauncher(workspaceID: String, name: String)
         case agentWindow(AgentWindowRecord)
         case terminalSession(workspaceID: String, sessionID: String)
 
         var workspaceID: String {
             switch self {
             case .workspaceBrowserSession(let workspaceID, _), .workspaceWindow(let workspaceID, _), .workspaceProcess(let workspaceID, _),
-                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _),
-                .terminalSession(let workspaceID, _):
+                .workspaceMissingConfiguredProcess(let workspaceID, _), .terminalSession(let workspaceID, _):
                 return workspaceID
             case .agentWindow(let record): return record.workspaceID
             }
@@ -519,7 +516,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .workspaceWindow(let workspaceID, let index): "window:\(workspaceID):\(index)"
             case .workspaceProcess(let workspaceID, let processID): "process:\(workspaceID):\(processID)"
             case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): "missing-process:\(workspaceID):\(processKey)"
-            case .workspaceAgentLauncher(let workspaceID, let name): "agent-launcher:\(workspaceID):\(name)"
             case .agentWindow(let record): "agent-window:\(record.id)"
             case .terminalSession(let workspaceID, let sessionID): "session:\(workspaceID):\(sessionID)"
             }
@@ -862,7 +858,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .window: return target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
         case .agent: return target.agentWindow?.label
         case .missingConfiguredProcess: return target.processKey
-        case .agentLauncher: return target.launcherName
         }
     }
 
@@ -1209,7 +1204,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .process, .window, .agent:
                 guard let sessionID = cycleTargetSessionID(for: target, detail: detail), !sessionID.isEmpty else { return false }
                 return openTerminalSessionIDs.contains(sessionID)
-            case .missingConfiguredProcess, .agentLauncher: return false
+            case .missingConfiguredProcess: return false
             }
         }
     }
@@ -1231,7 +1226,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .window: return "terminal:\(cycleTargetSessionID(for: target, detail: detail) ?? String(target.windowListIndex ?? -1))"
         case .agent: return "agent:\(target.agentWindow?.id ?? "")"
         case .missingConfiguredProcess: return "missing:\(target.processKey ?? "")"
-        case .agentLauncher: return "launcher:\(target.launcherName ?? "")"
         }
     }
 
@@ -1244,7 +1238,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             return detail.terminalRows[index].sessionID
         case .agent: return detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == target.agentWindow?.id })?.sessionID
-        case .browser, .missingConfiguredProcess, .agentLauncher: return nil
+        case .browser, .missingConfiguredProcess: return nil
         }
     }
 
@@ -1272,9 +1266,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 workspaceID: request.workspaceID, sessionID: request.sessionID, preserveWindowCycleSession: preserveWindowCycleSession)
         case .runProcess(_, let processKey, _):
             rememberWindowNavigationProcess(workspaceID: workspaceID, processKey: processKey, preserveWindowCycleSession: preserveWindowCycleSession)
-        case .runCodingAgent(_, let agentName, let launcherID):
-            rememberWindowNavigationCodingAgent(
-                workspaceID: workspaceID, agentName: agentName, launcherID: launcherID, preserveWindowCycleSession: preserveWindowCycleSession)
         case .noWorkspace, .noMatch: return
         }
     }
@@ -1285,7 +1276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch target.kind {
         case .browser: guard target.targetURL?.isEmpty == false else { return false }
         case .process, .window, .agent: guard Self.cycleTargetSessionID(for: target, detail: detail)?.isEmpty == false else { return false }
-        case .missingConfiguredProcess, .agentLauncher: return false
+        case .missingConfiguredProcess: return false
         }
         rememberWindowNavigationCursor(
             Self.cycleCursorKey(for: target, detail: detail), workspaceID: workspaceID, preserveWindowCycleSession: preserveWindowCycleSession)
@@ -1337,22 +1328,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func rememberWindowNavigationCodingAgent(workspaceID: String, agentName: String, launcherID: String?, preserveWindowCycleSession: Bool) {
-        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return }
-        let target = context.targets.first { target in
-            guard target.kind == .agent, let agentWindow = target.agentWindow,
-                let row = context.detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
-            else { return false }
-            if let launcherID, !launcherID.isEmpty, row.launcherID == launcherID { return true }
-            return Self.normalizedRunRowName(row.name) == Self.normalizedRunRowName(agentName)
-                || Self.normalizedRunRowName(agentWindow.label ?? "") == Self.normalizedRunRowName(agentName)
-        }
-        if let target {
-            rememberWindowNavigationTargetIfCycleable(
-                target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
-        }
-    }
-
     private func rememberWindowNavigationCursor(_ cursor: WorkspaceWindowCycle.Cursor, workspaceID: String, preserveWindowCycleSession: Bool) {
         guard !cursor.isEmpty else { return }
         windowNavigationCursorByWorkspace[workspaceID] = cursor
@@ -1366,7 +1341,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated private static func workspaceID(for resolution: DeviceWindowShortcutResolution) -> String? {
         switch resolution {
-        case .openURL(let workspaceID, _), .runProcess(let workspaceID, _, _), .runCodingAgent(let workspaceID, _, _): return workspaceID
+        case .openURL(let workspaceID, _), .runProcess(let workspaceID, _, _): return workspaceID
         case .openTerminal(let request): return request.workspaceID
         case .noWorkspace, .noMatch: return nil
         }
@@ -1383,9 +1358,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .window:
             let title = target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
             return "terminal:\(title ?? "")"
-        case .agent: return "agent:\(target.agentWindow?.label ?? target.agentWindow?.id ?? "")"
+        case .agent: return "agent:\(target.agentWindow?.effectiveLabel ?? target.agentWindow?.id ?? "")"
         case .missingConfiguredProcess: return "process:\(target.processKey ?? "")"
-        case .agentLauncher: return "agent:\(target.launcherName ?? "")"
         }
     }
 
@@ -1479,16 +1453,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self, object, workspaceID, processName] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             self.restartWorkspaceProcess(workspaceID: workspaceID, processName: processName)
-        }
-    }
-
-    @objc private nonisolated func handleLaunchWorkspaceAgentIPC(_ notification: Notification) {
-        let object = notification.object as? String
-        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
-        guard let launcherName = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, object, workspaceID, launcherName] in
-            guard let self, self.matchesProfileIPCObject(object) else { return }
-            self.launchWorkspaceAgent(workspaceID: workspaceID, launcherName: launcherName)
         }
     }
 
@@ -3182,15 +3146,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
                         icon: "cpu.fill", iconTint: iconTint, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
                         agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
-                        // The alert is for an existing waiting/done agent, so activating it must focus that
-                        // agent's session — not `.workspaceAgentLauncher`, which resolves to a fresh launch and
-                        // would start a second agent. Mirror `agentWindows(from:)` so the `.agentWindow`
-                        // resolution finds the row by `agentID`/`id` and opens its session.
+                        // Mirror `agentWindows(from:)` so the `.agentWindow` resolution finds the row by
+                        // `agentID`/`id` and opens its session.
                         focusRequest: .agentWindow(
                             AgentWindowRecord(
                                 id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
-                                terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
-                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
+                                terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) },
+                                status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
                                 updatedAt: agent.updatedAt ?? ""))))
             }
             // Every session with a bell gets an entry, including one the user is looking at right now:
@@ -3391,19 +3353,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceBrowserSession(name: session.name, url: session.url)
     }
 
-    nonisolated private static func localAgentLauncher(from launcher: SpacesDeviceAgentLauncher) -> AgentLauncher {
-        AgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
-    }
-
-    nonisolated private static func deviceAgentLauncher(from launcher: AgentLauncher) -> SpacesDeviceAgentLauncher {
-        SpacesDeviceAgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
-    }
-
     nonisolated static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
         WorkspaceSettings(
             stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
-            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
-            agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:)))
+            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)))
     }
 
     nonisolated private static func deviceWorkspaceConfig(
@@ -3412,18 +3365,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceWorkspaceConfig(
             stopScript: settings.stopScript, ports: settings.ports.map(deviceServiceDefinition(from:)),
             processes: settings.processes.map(deviceProcessTemplate(from:)),
-            browserSessions: settings.browserSessions.map(deviceBrowserSession(from:)), resolvedBrowserSessions: resolvedBrowserSessions,
-            agentLaunchers: settings.agentLaunchers.map(deviceAgentLauncher(from:)))
+            browserSessions: settings.browserSessions.map(deviceBrowserSession(from:)), resolvedBrowserSessions: resolvedBrowserSessions)
     }
 
     nonisolated private static func localProjectSettings(from config: SpacesDeviceProjectConfig) -> (
-        setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
-        agentLaunchers: [AgentLauncher]
+        setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession]
     ) {
         (
             setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
-            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
-            agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:))
+            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:))
         )
     }
 
@@ -3433,8 +3383,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
             ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
-            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
-            agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
+            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)))
     }
 
     private static func deviceProjectConfig(from refs: AddProjectFieldRefs) -> SpacesDeviceProjectConfig {
@@ -3443,8 +3392,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
             ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
-            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
-            agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
+            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)))
     }
 
     nonisolated private static func localSetupStatus(from status: SpacesDeviceWorkspaceSetupStatus) -> WorkspaceSetupStatus {
@@ -3503,13 +3451,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
-            // `label` is the row's display name and may be a rename the user typed; only a configured row's
-            // name is a launcher name, so only that row carries `claimedLauncherName`. See the launcher
-            // matching in `resolvedCodingAgentRunEntries` for why the distinction matters.
             return AgentWindowRecord(
                 id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
-                terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: row.launcherID,
-                claimedLauncherName: row.isConfigured ? row.name : nil, status: agentStatus(from: row.activityState), createdAt: now, updatedAt: now)
+                terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, status: agentStatus(from: row.activityState),
+                createdAt: now, updatedAt: now)
         }
     }
 
@@ -3568,7 +3513,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case process
             case window
             case missingConfiguredProcess
-            case agentLauncher
             case agent
         }
 
@@ -3577,7 +3521,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let windowListIndex: Int?
         let targetURL: String?
         let processKey: String?
-        let launcherName: String?
         let agentWindow: AgentWindowRecord?
     }
 
@@ -3591,11 +3534,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         init(
             browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-            configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+            agentWindows: [AgentWindowRecord]
         ) {
             let orderedTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
             self.orderedTargets = orderedTargets
 
             var targetsByProcessID: [String: WorkspaceRunShortcutTarget] = [:]
@@ -3625,11 +3567,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     }
                 case .missingConfiguredProcess:
                     if let processKey = target.processKey, !processKey.isEmpty, index <= 10 { processesByName[processKey] = index }
-                case .agentLauncher:
-                    if let launcherName = target.launcherName, !launcherName.isEmpty, index <= 10 {
-                        codingAgentsByName[launcherName] = index
-                        codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: launcherName)] = index
-                    }
                 case .agent:
                     if let agentWindow = target.agentWindow {
                         targetsByAgentID[agentWindow.id, default: target] = target
@@ -3728,7 +3665,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case openURL(workspaceID: String, targetURL: String)
         case openTerminal(DeviceTerminalOpenRequest)
         case runProcess(workspaceID: String, processKey: String, processTemplateID: String?)
-        case runCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
         case noWorkspace
         case noMatch
     }
@@ -3738,18 +3674,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let processesByName: [String: Int]
         let codingAgentsByName: [String: Int]
         let codingAgentsByIdentity: [String: Int]
-    }
-
-    struct ResolvedCodingAgentRunEntry: Sendable {
-        let launcher: AgentLauncher?
-        let agentWindow: AgentWindowRecord?
-
-        var launcherName: String? { launcher?.name }
-
-        var kind: WorkspaceRunShortcutTarget.Kind {
-            if agentWindow != nil { return .agent }
-            return .agentLauncher
-        }
     }
 
     enum RunningWorkspaceProcessEditDecision: Equatable, Sendable {
@@ -3865,61 +3789,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    nonisolated static func resolvedCodingAgentRunEntries(configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord])
-        -> [ResolvedCodingAgentRunEntry]
-    {
-        let configuredAgentNames = Set(configuredAgentLaunchers.map(\.name).map(normalizedRunRowName).filter { !$0.isEmpty })
-        let configuredAgentIDs = Set(configuredAgentLaunchers.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-        var entries: [ResolvedCodingAgentRunEntry] = []
-
-        // Configured coding agents always own the first slots in the Coding Agents
-        // section. If a live agent matches one of those names, the slot resolves to
-        // that agent; otherwise the slot stays launchable from the config row.
-        //
-        // Launcher association is the daemon's call, so matching only reads the identifiers the daemon
-        // assigned: `claimedLauncherID`, and `claimedLauncherName`, which the daemon's rows carry only
-        // when the row is a configured launcher's row. Display names are never matched: an unconfigured
-        // row's name is whatever the user renamed it to, and renaming an agent to "codex" must not hand
-        // it the "codex" launcher's slot.
-        for launcher in configuredAgentLaunchers {
-            let normalizedName = normalizedRunRowName(launcher.name)
-            guard !normalizedName.isEmpty else { continue }
-            let matchedAgent = agentWindows.first(where: { agentWindow in
-                if agentWindow.claimedLauncherID == launcher.id { return true }
-                guard agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return false }
-                return normalizedRunRowName(agentWindow.claimedLauncherName ?? "") == normalizedName
-            })
-            entries.append(ResolvedCodingAgentRunEntry(launcher: launcher, agentWindow: matchedAgent))
-        }
-
-        for agentWindow in agentWindows {
-            if let claimedLauncherID = agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
-                if configuredAgentIDs.contains(claimedLauncherID) { continue }
-            } else {
-                guard !configuredAgentNames.contains(normalizedRunRowName(agentWindow.claimedLauncherName ?? "")) else { continue }
-            }
-            entries.append(ResolvedCodingAgentRunEntry(launcher: nil, agentWindow: agentWindow))
-        }
-
-        return entries
-    }
-
-    nonisolated static func codingAgentShortcutIdentity(launcherName: String) -> String { "launcher:\(normalizedRunRowName(launcherName))" }
-
     nonisolated static func codingAgentShortcutIdentity(agentWindowID: String) -> String { "agent:\(agentWindowID)" }
-
-    nonisolated static func codingAgentDisplayName(label: String?, runtimeWindowTitle: String?) -> String {
-        if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty { return label }
-        if let runtimeWindowTitle = runtimeWindowTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !runtimeWindowTitle.isEmpty {
-            return "Coding Agent \(runtimeWindowTitle)"
-        }
-        return "Coding Agent"
-    }
-
-    nonisolated static func isAdHocCodingAgent(_ agentWindow: AgentWindowRecord) -> Bool {
-        agentWindow.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-            && agentWindow.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-    }
 
     nonisolated static func agentTerminalTrackingKeys(for record: AgentWindowRecord) -> Set<String> {
         var keys = Set<String>()
@@ -4046,7 +3916,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func orderedWorkspaceRunShortcutTargets(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunShortcutTarget] {
         var targets: [WorkspaceRunShortcutTarget] = []
 
@@ -4054,7 +3924,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let targetURL = session.url, !targetURL.isEmpty else { continue }
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil))
+                    kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, agentWindow: nil))
         }
 
         // Row families are grouped: browser sessions, then configured processes, then coding agents, then
@@ -4068,31 +3938,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let processID = entry.processID, processesByID[processID] != nil else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
-                        kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
-                        agentWindow: nil))
+                        kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, agentWindow: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
-                        launcherName: nil, agentWindow: nil))
+                        agentWindow: nil))
             case .window: continue
             }
         }
 
-        for entry in resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows) {
+        for agentWindow in agentWindows {
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: entry.kind, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil,
-                    launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow))
+                    kind: .agent, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil, agentWindow: agentWindow))
         }
 
         for entry in processEntries {
             guard case .window = entry.kind, let windowListIndex = entry.windowListIndex else { continue }
             targets.append(
                 WorkspaceRunShortcutTarget(
-                    kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
-                    agentWindow: nil))
+                    kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, agentWindow: nil))
         }
 
         return targets
@@ -4125,8 +3992,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
         return workspaceRuntimeTargetIndex(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows
         ).orderedTargets
     }
 
@@ -4159,10 +4025,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let processKey = target.processKey else { return .noMatch }
             let processTemplateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
             return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
-        case .agentLauncher:
-            guard let launcherName = target.launcherName else { return .noMatch }
-            let launcherID = detail.config.agentLaunchers.first { normalizedRunRowName($0.name) == normalizedRunRowName(launcherName) }?.id
-            return .runCodingAgent(workspaceID: workspaceID, agentName: launcherName, agentLauncherID: launcherID)
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id }),
                 let sessionID = row.sessionID
@@ -4201,21 +4063,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func workspaceDetailShortcutIndices(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        agentWindows: [AgentWindowRecord]
     ) -> WorkspaceDetailShortcutIndices {
         workspaceRuntimeTargetIndex(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows
         ).shortcutIndices
     }
 
     nonisolated static func workspaceRuntimeTargetIndex(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
-        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        agentWindows: [AgentWindowRecord]
     ) -> WorkspaceRuntimeTargetIndex {
         WorkspaceRuntimeTargetIndex(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
     }
 
     nonisolated static func workspaceProcessStatusByName(_ processes: [RunningProcessRecord]) -> [String: RowPrimitives.StatusKind] {
@@ -5924,14 +5784,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         projectHasUnsavedChanges = false
 
         let projectSettings:
-            (
-                setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate],
-                browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]
-            )
+            (setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession])
         if let activeProject = deviceProjectSummary(projectID: project.id).map({ SpacesDeviceProjectSettingsViewModel(project: $0) }) {
             projectSettings = Self.localProjectSettings(from: activeProject.config)
         } else {
-            projectSettings = (setupScript: nil, stopScript: nil, ports: [], processes: [], browserSessions: [], agentLaunchers: [])
+            projectSettings = (setupScript: nil, stopScript: nil, ports: [], processes: [], browserSessions: [])
         }
 
         let stack = NSStackView()
@@ -5966,8 +5823,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             processes: projectSettings.processes, subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
             sessions: projectSettings.browserSessions, subtitle: "Named URLs that open in Chrome when you focus them.")
-        let agentLaunchersSection = AgentLaunchersSection(
-            launchers: projectSettings.agentLaunchers, subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -5985,14 +5840,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         browserSessionsSection.presentRemoveConfirmation = { [weak self] session, confirm in
             self?.presentProjectBrowserSessionRemoveConfirmation(session: session, confirm: confirm)
         }
-        agentLaunchersSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
-        agentLaunchersSection.presentRemoveConfirmation = { [weak self] launcher, confirm in
-            self?.presentProjectAgentLauncherRemoveConfirmation(launcher: launcher, confirm: confirm)
-        }
 
         for section in [
-            setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
-            stopScriptSection.view,
+            setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, stopScriptSection.view,
         ] {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
@@ -6044,15 +5894,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let fieldsTag = storeProjectFields(
             projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportButton)
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection, importButton: importButton,
+            exportButton: exportButton, discardImportedConfigButton: discardImportButton)
         saveButton.tag = fieldsTag
         discardImportButton.tag = fieldsTag
         importButton.tag = fieldsTag
         exportButton.tag = fieldsTag
         registerDirtyTracking(
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
+            processesSection: processesSection, browserSessionsSection: browserSessionsSection)
     }
 
     private func presentProjectSettingsWindow(hosting stack: NSStackView, project: ProjectSummary) {
@@ -6244,7 +6094,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         gitInputRow.isHidden = true
 
         // Config-step controls are built now and shown after Continue loads the config.
-        let (setup, stop, ports, processes, browsers, agents) = makeAddProjectConfigSections()
+        let (setup, stop, ports, processes, browsers) = makeAddProjectConfigSections()
         let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
         let spacesYAMLMissingLabel = NSTextField(
             wrappingLabelWithString: "No spaces.yaml found in this repository. Set up the configuration below as needed.")
@@ -6260,8 +6110,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let id = storeAddProjectFields(
             folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
             repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setup, stopScriptSection: stop, portsSection: ports,
-            processesSection: processes, browserSessionsSection: browsers, agentLaunchersSection: agents, createButton: createButton,
-            spacesYAMLMissingLabel: spacesYAMLMissingLabel)
+            processesSection: processes, browserSessionsSection: browsers, createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
         activeAddProjectFormTag = id
         guard let refs = addProjectFieldRefs else { return }
         refs.selectedDeviceID = deviceID
@@ -6350,7 +6199,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let sectionViews = [
             refs.spacesYAMLMissingLabel, refs.setupScriptSection.view, refs.portsSection.view, refs.processesSection.view,
-            refs.browserSessionsSection.view, refs.agentLaunchersSection.view, refs.stopScriptSection.view, buttonRow,
+            refs.browserSessionsSection.view, refs.stopScriptSection.view, buttonRow,
         ]
         let stack = addProjectStepStack()
         for view in sectionViews {
@@ -6373,9 +6222,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    private func makeAddProjectConfigSections() -> (
-        ScriptSection, ScriptSection, PortsSection, ProcessesSection, BrowserSessionsSection, AgentLaunchersSection
-    ) {
+    private func makeAddProjectConfigSections() -> (ScriptSection, ScriptSection, PortsSection, ProcessesSection, BrowserSessionsSection) {
         let setupScriptSection = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "",
             subtitle: "Runs when each new workspace is created.")
@@ -6385,8 +6232,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.", showsEnvironmentVariableHints: true)
         let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
-        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
-        return (setupScriptSection, stopScriptSection, portsSection, processesSection, browserSessionsSection, agentLaunchersSection)
+        return (setupScriptSection, stopScriptSection, portsSection, processesSection, browserSessionsSection)
     }
 
     /// A left-aligned, hover-highlighted, selectable source row (icon, title, caption). Selecting it
@@ -7301,7 +7147,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         let updated = SpacesDeviceProjectConfig(
                             setupScript: trimmed.isEmpty ? nil : value, stopScript: current.stopScript, ports: current.ports,
-                            processes: current.processes, browserSessions: current.browserSessions, agentLaunchers: current.agentLaunchers)
+                            processes: current.processes, browserSessions: current.browserSessions)
                         let response = try SpacesDeviceClient.updateProjectConfig(
                             projectID: project.id, config: updated, device: device,
                             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -7443,18 +7289,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 })
             else { return }
 
-            if isAdHocCodingAgent(agentWindow) {
-                if let detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
-                    let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if normalizedRunRowName(detail) != normalizedRunRowName(label) { result[agentWindow.id] = detail }
-                }
-                return
-            }
-
-            let title =
-                (window.name?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                ?? (window.detail?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            if let title { result[agentWindow.id] = title }
+            // The agent row already shows its own name, so its secondary text is the terminal's live
+            // title and only carries when it says something the name does not.
+            guard let detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty else { return }
+            let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if normalizedRunRowName(detail) != normalizedRunRowName(label) { result[agentWindow.id] = detail }
         }
     }
 
@@ -8280,30 +8119,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func storeProjectFields(
         projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
-        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, importButton: NSButton, exportButton: NSButton,
+        discardImportedConfigButton: NSButton
     ) -> Int {
         let id = projectID.hashValue
         projectSettingsFieldRefs = ProjectFieldRefs(
             formTag: id, projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
             portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
-            agentLaunchersSection: agentLaunchersSection, importButton: importButton, exportButton: exportButton,
-            discardImportedConfigButton: discardImportedConfigButton)
+            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
         return id
     }
 
     private func storeAddProjectFields(
         folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
         repoURLField: NSTextField, continueButton: NSButton, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection,
-        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection,
-        agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
+        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, createButton: NSButton,
+        spacesYAMLMissingLabel: NSTextField
     ) -> Int {
         let id = UUID().uuidString.hashValue
         addProjectFieldRefs = AddProjectFieldRefs(
             formTag: id, folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
             repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
             portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
-            agentLaunchersSection: agentLaunchersSection, createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
+            createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
         continueButton.tag = id
         createButton.tag = id
         return id
@@ -8654,7 +8492,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.portsSection.replace(ports: project.ports)
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
-        refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
     }
 
     private func hydrateProjectSettings(_ refs: ProjectFieldRefs, from config: SpacesDeviceProjectConfig) {
@@ -8664,7 +8501,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.portsSection.replace(ports: settings.ports)
         refs.processesSection.replace(processes: settings.processes)
         refs.browserSessionsSection.replace(sessions: settings.browserSessions)
-        refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
     /// Whether the project is a git repo (vs a non-git project standing in for its single
@@ -8939,7 +8775,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.portsSection.replace(ports: settings.ports)
         refs.processesSection.replace(processes: settings.processes)
         refs.browserSessionsSection.replace(sessions: settings.browserSessions)
-        refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
     private func defaultWorkspaceBaseBranch(project: ProjectSummary, branches: [String]) -> String? {
@@ -9846,38 +9681,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func launchWorkspaceAgent(workspaceID: String, launcherName: String) {
-        let startedAt = Date()
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
-                let result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.runCodingAgent(
-                        workspaceID: workspaceID, agentName: launcherName, agentLauncherID: nil, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-                switch result {
-                case .success(let response):
-                    logPerfMetric(
-                        "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                        success: true, detail: "route=ipc name=\(launcherName)")
-                    applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
-                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
-                case .failure(let error):
-                    logPerfMetric(
-                        "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                        success: false, detail: "route=ipc name=\(launcherName)")
-                    showError(error)
-                }
-                return
-            }
-            logPerfMetric(
-                "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "route=ipc name=\(launcherName)")
-            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
-        }
-    }
-
     private func openWorkspaceFinder(workspaceID: String) {
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: workspaceID) { return }
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
@@ -10777,11 +10580,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey)
             }?.id
             return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: templateID)
-        case .workspaceAgentLauncher(let workspaceID, let name):
-            let launcherID = workspaceDetail(workspaceID, in: overview)?.config.agentLaunchers.first {
-                normalizedRunRowName($0.name) == normalizedRunRowName(name)
-            }?.id
-            return .runCodingAgent(workspaceID: workspaceID, agentName: name, agentLauncherID: launcherID)
         case .agentWindow(let record):
             guard let detail = workspaceDetail(record.workspaceID, in: overview),
                 let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == record.id }), let sessionID = row.sessionID
@@ -10811,8 +10609,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             target = targets.first {
                 $0.kind == .missingConfiguredProcess && normalizedRunRowName($0.processKey ?? "") == normalizedRunRowName(processKey)
             }
-        case .workspaceAgentLauncher(_, let name):
-            target = targets.first { $0.kind == .agentLauncher && normalizedRunRowName($0.launcherName ?? "") == normalizedRunRowName(name) }
         case .agentWindow(let record): target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
         // A bell alert's session isn't one of the workspace's numbered run-shortcut targets, so it
         // has no run-shortcut target to resolve.
@@ -10948,20 +10744,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     operation: { device in
                         try SpacesDeviceClient.runWorkspaceProcess(
                             workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    })
-            else { return nil }
-            rememberWindowNavigationFocus(
-                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
-                preserveWindowCycleSession: preserveWindowCycleSession)
-            return action
-        case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-            guard
-                let action = await runTerminalSessionMutationAndOpenPane(
-                    workspaceID: workspaceID,
-                    operation: { device in
-                        try SpacesDeviceClient.runCodingAgent(
-                            workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
                             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     })
             else { return nil }
@@ -11107,7 +10889,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .openURL: return "browser"
         case .openTerminal: return "terminal"
         case .runProcess: return "process"
-        case .runCodingAgent: return "agent_launcher"
         case .noWorkspace, .noMatch: return "none"
         }
     }
@@ -11588,7 +11369,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func registerDirtyTracking(
         setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
-        browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
+        browserSessionsSection: BrowserSessionsSection
     ) {
         projectHasUnsavedChanges = false
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -11596,7 +11377,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         portsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         browserSessionsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
-        agentLaunchersSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
     }
 
     private func applySplitViewWidth() {
@@ -11735,16 +11515,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         confirm(alert.runModal() == .alertFirstButtonReturn)
     }
 
-    private func presentProjectAgentLauncherRemoveConfirmation(launcher: AgentLauncher, confirm: @escaping (Bool) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = "Remove \(launcher.name)?"
-        alert.informativeText = "This removes the coding agent from the project."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
-    }
-
 }
 
 struct CommandPaletteItem: Sendable {
@@ -11796,7 +11566,6 @@ struct CommandPaletteItem: Sendable {
         case .workspaceWindow(let workspaceID, let index): return "window:\(workspaceID):\(index)"
         case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
-        case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.id)"
         case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
@@ -11813,14 +11582,14 @@ struct CommandPaletteItem: Sendable {
         case .browser: return "globe"
         case .process, .missingConfiguredProcess: return "terminal"
         case .window: return (detail?.localizedStandardContains("http") == true) ? "globe" : "chevron.left.forwardslash.chevron.right"
-        case .agentLauncher, .agent: return "cpu.fill"
+        case .agent: return "cpu.fill"
         }
     }
 
     var typeKind: RowPrimitives.TypeKind {
         switch kind {
         case .browser: return .browser
-        case .agentLauncher, .agent: return .agent
+        case .agent: return .agent
         case .process, .window, .missingConfiguredProcess: return .process
         }
     }
@@ -11839,7 +11608,6 @@ struct CommandPaletteItem: Sendable {
             return "window:\(workspaceID):\(index):\(normalizedDetail)"
         case .workspaceProcess(let workspaceID, let processID): return "process:\(workspaceID):\(processID)"
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
-        case .workspaceAgentLauncher(let workspaceID, let name): return "agent-launcher:\(workspaceID):\(name)"
         case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
         case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
         }
@@ -12159,7 +11927,6 @@ extension AppKitController {
         case .workspaceWindow: return .window
         case .workspaceProcess: return .process
         case .workspaceMissingConfiguredProcess: return .missingConfiguredProcess
-        case .workspaceAgentLauncher: return .agentLauncher
         case .agentWindow: return .agent
         case .terminalSession: return .window
         case nil:
@@ -12227,10 +11994,8 @@ extension AppKitController {
                     configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                    configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
+                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
                 let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
-                let configuredAgentByName = Dictionary(uniqueKeysWithValues: settings.agentLaunchers.map { ($0.name, $0) })
 
                 for (offset, target) in shortcutTargets.enumerated() {
                     let itemID = "\(workspace.id)::\(offset)"
@@ -12280,17 +12045,6 @@ extension AppKitController {
                                 focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey))))
-                    case .agentLauncher:
-                        guard let launcherName = target.launcherName else { continue }
-                        let detail = configuredAgentByName[launcherName]?.command
-                        items.append(
-                            CommandPaletteItem(
-                                id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: launcherName, detail: detail, status: .none,
-                                focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName),
-                                recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
-                                    for: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName), detail: detail)))
                     case .agent:
                         guard let agentWindow = target.agentWindow else { continue }
                         let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"

@@ -24,7 +24,6 @@ public enum IPCNotification {
     public static let runWorkspaceProcess = Notification.Name("spaces.ipc.run-workspace-process")
     public static let stopWorkspaceProcess = Notification.Name("spaces.ipc.stop-workspace-process")
     public static let restartWorkspaceProcess = Notification.Name("spaces.ipc.restart-workspace-process")
-    public static let launchWorkspaceAgent = Notification.Name("spaces.ipc.launch-workspace-agent")
     public static let openTerminalSessionWindow = Notification.Name("spaces.ipc.open-terminal-session-window")
     public static let focusTerminalSessionWindow = Notification.Name("spaces.ipc.focus-terminal-session-window")
     public static let closeTerminalSessionWindow = Notification.Name("spaces.ipc.close-terminal-session-window")

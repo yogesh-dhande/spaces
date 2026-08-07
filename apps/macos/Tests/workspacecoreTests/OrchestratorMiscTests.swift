@@ -66,7 +66,6 @@ extension OrchestratorTests {
         [
             ("runConfiguredProcess", { _ = try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processKey: "api") }),
             ("restartWorkspaceProcess", { try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: "process-deleting") }),
-            ("launchAgentLauncher", { _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: "codex") }),
             ("reserveWorkspaceTerminalLaunch", { _ = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID) }),
             (
                 "createWorkspaceTerminalSession",

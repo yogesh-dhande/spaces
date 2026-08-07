@@ -5,16 +5,13 @@ public struct WorkspaceSettings: Sendable {
     public var ports: [ServiceDefinition]
     public var processes: [ProcessTemplate]
     public var browserSessions: [BrowserSession]
-    public var agentLaunchers: [AgentLauncher]
 
     public init(
-        stopScript: String? = nil, ports: [ServiceDefinition] = [], processes: [ProcessTemplate] = [], browserSessions: [BrowserSession] = [],
-        agentLaunchers: [AgentLauncher] = []
+        stopScript: String? = nil, ports: [ServiceDefinition] = [], processes: [ProcessTemplate] = [], browserSessions: [BrowserSession] = []
     ) {
         self.stopScript = stopScript
         self.ports = ports
         self.processes = processes
         self.browserSessions = browserSessions
-        self.agentLaunchers = agentLaunchers
     }
 }

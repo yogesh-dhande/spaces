@@ -632,8 +632,8 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
-    /// Renames a coding-agent row that has no configured launcher behind it. An empty title clears the
-    /// rename, restoring the name the agent reports for itself.
+    /// Renames a coding-agent row. An empty title clears the rename, restoring the name the agent reports
+    /// for itself.
     public static func renameAgentSession(
         workspaceID: String, agentID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -674,33 +674,12 @@ public enum SpacesDeviceClient {
             device: device, clientApp: clientApp, profile: profile)
     }
 
-    public static func runCodingAgent(
-        workspaceID: String, agentName: String, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .runCodingAgent(.init(workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
-
     public static func stopCodingAgent(
-        workspaceID: String, agentID: String?, agentName: String?, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
+        workspaceID: String, agentID: String, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(
-                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: agentLauncherID))),
-            device: device, clientApp: clientApp, profile: profile)
-    }
-
-    public static func restartCodingAgent(
-        workspaceID: String, agentID: String?, agentName: String?, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(
-                command: .restartCodingAgent(
-                    .init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: agentLauncherID))), device: device,
+            .init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), device: device,
             clientApp: clientApp, profile: profile)
     }
 
@@ -914,8 +893,7 @@ public enum SpacesDeviceClient {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
-            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
-            .spawnAgentSession, .killAgentSession:
+            .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent, .installAgentHooks, .spawnAgentSession, .killAgentSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds

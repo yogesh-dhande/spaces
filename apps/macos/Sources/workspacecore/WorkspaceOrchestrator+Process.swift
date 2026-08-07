@@ -12,7 +12,7 @@ extension WorkspaceOrchestrator {
         try validateProcessTemplates(normalizedProcesses)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
-            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            agentWindows: try store.agentWindows(workspaceID: workspace.id))
         if workspace.isRunning {
             try applyRunningWorkspaceProcessEdits(
                 project: project, workspace: workspace, previous: existing.processes, updated: normalizedProcesses,

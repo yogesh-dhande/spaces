@@ -95,8 +95,7 @@ extension ProcessProfileEnvironmentSuites {
             workspace(codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
                     id: Self.agentTargetKey, workspaceID: Self.workspaceID, name: Self.agentRowName, command: "codex", agentID: "agent-1",
-                    sessionID: "session-1", isConfigured: false, runState: .running, activityState: .idle, canRun: false, canStop: true,
-                    canRestart: true, liveTitle: liveTitle)
+                    sessionID: "session-1", runState: .running, activityState: .idle, canStop: true, liveTitle: liveTitle)
             ])
         }
 

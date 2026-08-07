@@ -67,8 +67,6 @@ final class StoreTests: XCTestCase {
         let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
         let workspaceBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_browser_sessions")
         let projectBrowserSessionColumns = try readTableColumns(dbURL: dbURL, table: "project_browser_sessions")
-        let workspaceAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "workspace_agent_launchers")
-        let projectAgentLauncherColumns = try readTableColumns(dbURL: dbURL, table: "project_agent_launchers")
         let runtimeTargetColumns = try readTableColumns(dbURL: dbURL, table: "runtime_targets")
         let browserTargetColumns = try readTableColumns(dbURL: dbURL, table: "browser_targets")
         let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
@@ -108,8 +106,6 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_valid"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_target_url"))
         XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
-        XCTAssertTrue(workspaceAgentLauncherColumns.contains("id"))
-        XCTAssertTrue(projectAgentLauncherColumns.contains("id"))
         XCTAssertTrue(runtimeTargetColumns.contains("type"))
         XCTAssertTrue(runtimeTargetColumns.contains("tracking_id"))
         XCTAssertTrue(runtimeTargetColumns.contains("updated_at"))
@@ -119,8 +115,9 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(agentSessionColumns.contains("runtime_target_id"))
         XCTAssertTrue(agentSessionColumns.contains("terminal_session_id"))
         XCTAssertTrue(agentSessionColumns.contains("session_key"))
-        XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_id"))
-        XCTAssertTrue(agentSessionColumns.contains("claimed_launcher_name"))
+        XCTAssertTrue(agentSessionColumns.contains("user_label"))
+        XCTAssertFalse(agentSessionColumns.contains("claimed_launcher_id"))
+        XCTAssertFalse(agentSessionColumns.contains("claimed_launcher_name"))
         XCTAssertTrue(terminalSessionColumns.contains("root_directory"))
         XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
         XCTAssertTrue(terminalSessionColumns.contains("kind"))
@@ -369,6 +366,108 @@ final class StoreTests: XCTestCase {
             XCTAssertEqual(runtimeState.childPID, 99)
             XCTAssertEqual(runtimeState.state, .running)
             XCTAssertNil(runtimeState.bellAt)
+        }
+    }
+
+    /// A v12 profile carrying configured agent launchers upgrades by dropping both launcher tables and
+    /// the two claim columns, while every agent session it holds — including a renamed one — survives with
+    /// the name it answers to. Configured coding agents no longer exist, so nothing reads that data; the
+    /// live agent rows are the whole feature now.
+    func testUpgradeDropsAgentLaunchersAndKeepsAgentSessions() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (12);
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE workspaces (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  dir TEXT NOT NULL,
+                  dirname TEXT,
+                  branch TEXT,
+                  base_branch TEXT,
+                  is_default INTEGER NOT NULL,
+                  is_hidden INTEGER NOT NULL DEFAULT 0,
+                  is_running INTEGER NOT NULL,
+                  last_launched_at TEXT,
+                  notes TEXT,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE runtime_targets (
+                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
+                  app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE project_agent_launchers (
+                  project_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, command TEXT NOT NULL, order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index)
+                );
+                CREATE TABLE workspace_agent_launchers (
+                  workspace_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, command TEXT NOT NULL, order_index INTEGER NOT NULL,
+                  PRIMARY KEY (workspace_id, order_index)
+                );
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  detected_agent_kind TEXT, user_label TEXT
+                );
+                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                  VALUES ('project', 'Project', '\(root.path)', 1, 'main', '', '');
+                INSERT INTO workspaces(id, project_id, dir, dirname, branch, base_branch, is_default, is_hidden, is_running, last_launched_at, notes)
+                  VALUES ('workspace', 'project', '\(root.path)/ws', 'ws', 'feature', 'main', 0, 0, 0, '', '');
+                INSERT INTO project_agent_launchers(project_id, id, name, command, order_index)
+                  VALUES ('project', 'launcher-codex', 'Codex', 'codex', 0);
+                INSERT INTO workspace_agent_launchers(workspace_id, id, name, command, order_index)
+                  VALUES ('workspace', 'launcher-codex', 'Codex', 'codex', 0);
+                INSERT INTO agent_sessions(
+                  id, workspace_id, provider, label, status, terminal_session_id, claimed_launcher_id, claimed_launcher_name, note,
+                  created_at, updated_at, detected_agent_kind, user_label)
+                  VALUES ('agent-claimed', 'workspace', 'spaces', 'Codex', 'spinning', 'session-1', 'launcher-codex', 'Codex', 'carried',
+                          'now', 'now', 'codex', NULL);
+                INSERT INTO agent_sessions(
+                  id, workspace_id, provider, label, status, terminal_session_id, note, created_at, updated_at, detected_agent_kind, user_label)
+                  VALUES ('agent-renamed', 'workspace', 'spaces', 'Claude Code CLI', 'waiting', 'session-2', NULL, 'now', 'now', 'claude',
+                          'Reviewer');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            let store = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            for table in ["project_agent_launchers", "workspace_agent_launchers"] {
+                XCTAssertEqual(
+                    try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '\(table)'"), 0,
+                    "the upgrade drops \(table)")
+            }
+            let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
+            XCTAssertFalse(agentSessionColumns.contains("claimed_launcher_id"))
+            XCTAssertFalse(agentSessionColumns.contains("claimed_launcher_name"))
+
+            let agents = try store.agentWindows(workspaceID: "workspace")
+            XCTAssertEqual(agents.map(\.id).sorted(), ["agent-claimed", "agent-renamed"])
+            let claimed = try XCTUnwrap(agents.first { $0.id == "agent-claimed" })
+            XCTAssertEqual(claimed.effectiveLabel, "Codex")
+            XCTAssertEqual(claimed.status, .spinning)
+            XCTAssertEqual(claimed.note, "carried")
+            XCTAssertEqual(claimed.detectedAgentKind, "codex")
+            XCTAssertEqual(claimed.terminalTrackingID, "session-1")
+            let renamed = try XCTUnwrap(agents.first { $0.id == "agent-renamed" })
+            XCTAssertEqual(renamed.effectiveLabel, "Reviewer")
+            XCTAssertEqual(renamed.label, "Claude Code CLI")
         }
     }
 
@@ -1027,11 +1126,6 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(sessions[0].name, "checkout")
         XCTAssertEqual(sessions[0].url, "https://example.com")
 
-        let codexLauncher = AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
-        let claudeLauncher = AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [codexLauncher, claudeLauncher])
-        let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        XCTAssertEqual(launchers, [codexLauncher, claudeLauncher])
         XCTAssertNil(sessions[1].name)
         XCTAssertNil(sessions[1].url)
 
@@ -1078,7 +1172,7 @@ final class StoreTests: XCTestCase {
             try store.upsert(
                 project: ProjectRecord(
                     id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                    ports: [ServiceDefinition(name: " ")], processes: [], browserSessions: [], agentLaunchers: [])))
+                    ports: [ServiceDefinition(name: " ")], processes: [], browserSessions: [])))
         XCTAssertThrowsError(try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [ServiceDefinition(name: "\n")]))
         XCTAssertThrowsError(try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["\t"]))
     }
@@ -1094,7 +1188,7 @@ final class StoreTests: XCTestCase {
             try store.upsert(
                 project: ProjectRecord(
                     id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                    ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [], browserSessions: [], agentLaunchers: [])))
+                    ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [], browserSessions: [])))
         XCTAssertThrowsError(
             try store.setWorkspaceServiceDefinitions(
                 workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")]))

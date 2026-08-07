@@ -1387,6 +1387,20 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
+    /// A workspace launch starts the runtimes a workspace configures — its processes — and nothing else.
+    /// Coding agents are not configurable, so a launch never starts one: an agent row appears only when a
+    /// user runs an agent command in a terminal.
+    func testLaunchWorkspaceStartsConfiguredProcessesAndNoCodingAgents() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api")])
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "app", url: "http://localhost:3000")])
+
+        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "a launch must not start a coding agent")
+    }
+
     // Tests restart workspace stops then launches by arranging representative inputs and asserting the expected result.
     func testRestartWorkspaceStopsThenLaunches() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()

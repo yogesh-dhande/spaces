@@ -37,8 +37,8 @@ struct AppKitControllerAlertsBuilderTests {
         -> SpacesDeviceWorkspaceCodingAgentRow
     {
         SpacesDeviceWorkspaceCodingAgentRow(
-            id: id, workspaceID: "ws", name: "Codex", command: "codex", launcherID: id, agentID: agentID, sessionID: nil, isConfigured: true,
-            runState: .running, activityState: activityState, updatedAt: updatedAt, canRun: false, canStop: true, canRestart: true)
+            id: id, workspaceID: "ws", name: "Codex", command: "codex", agentID: agentID, sessionID: nil, runState: .running,
+            activityState: activityState, updatedAt: updatedAt, canStop: true)
     }
 
     private func overview(_ workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary] = [])

@@ -7,19 +7,14 @@ import workspacecore
 
 @Suite struct SidebarRuntimeTargetItemTests {
     /// A workspace with one of everything: an open browser session, a running configured
-    /// process, a configured-but-not-running process, an ad hoc terminal, a running
-    /// coding agent claiming its launcher, and an idle launcher.
+    /// process, a configured-but-not-running process, an ad hoc terminal, and a live coding agent.
     private func fixtureDetail() -> SpacesDeviceWorkspaceDetailViewModel {
         let config = SpacesDeviceWorkspaceConfig(
             processes: [
                 SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev"),
                 SpacesDeviceProcessTemplate(id: "tpl-api", name: "api", command: "npm run api"),
             ], browserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:$PORT")],
-            resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:3000")],
-            agentLaunchers: [
-                SpacesDeviceAgentLauncher(id: "launcher-claude", name: "claude", command: "claude"),
-                SpacesDeviceAgentLauncher(id: "launcher-codex", name: "codex", command: "codex"),
-            ])
+            resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:3000")])
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
             isHidden: false, isDefault: false, sessionCount: 3, config: config,
@@ -33,9 +28,8 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude", agentID: "agent-1",
-                    sessionID: "sess-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false, canStop: true,
-                    canRestart: true)
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
+                    runState: .running, activityState: .idle, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -54,12 +48,9 @@ import workspacecore
     /// terminals. Shortcut numbering follows the same order, so ⌘1…⌘0 and the sidebar rows never disagree.
     @Test func itemsFollowShortcutTargetOrderWithStableKeys() {
         let items = fixtureItems()
-        #expect(
-            items.map(\.key) == [
-                "browser:http://localhost:3000", "process:proc-web", "missing:api", "agent:agent-1", "launcher:codex", "terminal:sess-term",
-            ])
-        #expect(items.map(\.shortcutIndex) == [1, 2, 3, 4, 5, 6])
-        #expect(items.map(\.title) == ["App", "web", "api", "claude", "codex", "zsh"])
+        #expect(items.map(\.key) == ["browser:http://localhost:3000", "process:proc-web", "missing:api", "agent:agent-1", "terminal:sess-term"])
+        #expect(items.map(\.shortcutIndex) == [1, 2, 3, 4, 5])
+        #expect(items.map(\.title) == ["App", "web", "api", "claude", "zsh"])
     }
 
     @Test func itemsCarryRunStateAndCapabilities() {
@@ -85,14 +76,13 @@ import workspacecore
         #expect(terminal?.canRun == false && terminal?.canStop == true && terminal?.canRestart == false)
         #expect(terminal?.sessionID == "sess-term")
 
+        // Stop is an agent's only lifecycle control: it exists only as a session someone started by
+        // running its command in a terminal, so there is nothing to start or restart.
         let agent = byKey["agent:agent-1"]
         #expect(agent?.runState == .running)
-        #expect(agent?.canRun == false && agent?.canStop == true && agent?.canRestart == true)
+        #expect(agent?.canRun == false && agent?.canStop == true && agent?.canRestart == false)
         #expect(agent?.sessionID == "sess-agent")
-
-        let codex = byKey["launcher:codex"]
-        #expect(codex?.runState == .notStarted)
-        #expect(codex?.canRun == true && codex?.canStop == false && codex?.canRestart == false)
+        #expect(agent?.agentID == "agent-1")
     }
 
     @Test func itemsCarryRenameIdentities() {
@@ -101,8 +91,7 @@ import workspacecore
         #expect(byKey["process:proc-web"]?.processTemplateID == "tpl-web")
         #expect(byKey["process:proc-web"]?.processKey == "web")
         #expect(byKey["missing:api"]?.processTemplateID == "tpl-api")
-        #expect(byKey["agent:agent-1"]?.launcherID == "launcher-claude")
-        #expect(byKey["launcher:codex"]?.launcherID == "launcher-codex")
+        #expect(byKey["agent:agent-1"]?.agentID == "agent-1")
     }
 
     /// A browser rename must find the configured session by its (substitution-invariant) name.
@@ -121,15 +110,13 @@ import workspacecore
     }
 
     /// Ad hoc shells and coding agents carry secondary text once their terminal reports a title, and
-    /// nothing else does: a configured process is described by the command its config entry names, and a
-    /// launcher row has no session behind it to report anything.
+    /// nothing else does: a configured process is described by the command its config entry names.
     @Test func shellAndAgentRowsWithAReportedTitleCarrySecondaryText() {
         let byKey = Dictionary(uniqueKeysWithValues: fixtureItems().map { ($0.key, $0) })
         // The fixture's shell and agent have reported no title, so they have nothing to add.
         #expect(byKey["terminal:sess-term"]?.detail == nil)
         #expect(byKey["agent:agent-1"]?.detail == nil)
         #expect(byKey["process:proc-web"]?.detail == nil)
-        #expect(byKey["launcher:codex"]?.detail == nil)
         #expect(byKey["browser:http://localhost:3000"]?.detail == nil)
 
         let summary = SpacesDeviceWorkspaceSummary(
@@ -137,9 +124,8 @@ import workspacecore
             isHidden: false, isDefault: false, sessionCount: 2,
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
-                    isConfigured: false, runState: .running, activityState: .idle, canRun: false, canStop: true, canRestart: true,
-                    liveTitle: "reviewing PR 420")
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "sess-agent",
+                    runState: .running, activityState: .idle, canStop: true, liveTitle: "reviewing PR 420")
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -156,46 +142,25 @@ import workspacecore
         #expect(busy["agent:agent-1"]?.detail == "reviewing PR 420")
     }
 
-    /// An agent the daemon reports as unconfigured is named on its session, even when it still carries a
-    /// launcher claim: the launcher it names can have been deleted or recreated while the agent kept
-    /// running, and routing such a rename into the config would edit nothing and silently drop the name.
-    @Test func unconfiguredAgentWithAStaleLauncherClaimRenamesItsSession() throws {
-        let summary = SpacesDeviceWorkspaceSummary(
-            id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,
-            isHidden: false, isDefault: false, sessionCount: 1,
-            config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex-new", name: "codex", command: "codex")]
-            ),
-            codingAgentRows: [
-                SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "agent:agent-1", workspaceID: "workspace", name: "codex", command: "codex", launcherID: "launcher-codex-deleted",
-                    agentID: "agent-1", sessionID: "sess-agent", isConfigured: false, runState: .running, activityState: .idle, canRun: false,
-                    canStop: true, canRestart: true)
-            ])
-        let items = AppKitController.sidebarRuntimeTargetItems(detail: SpacesDeviceWorkspaceDetailViewModel(workspace: summary), browserSessions: [])
-
-        let agent = items.first { $0.kind == .agent }
-        #expect(agent?.isConfigured == false)
-        #expect(agent?.launcherID == "launcher-codex-deleted", "the stale claim still rides on the row")
+    /// Nothing in the workspace config names a coding agent, so every agent row's rename is stored on
+    /// its own session, and an empty submission clears it back to the label the agent reports.
+    @Test func agentRowRenamesItsSession() throws {
+        let agent = fixtureItems().first { $0.kind == .agent }
+        #expect(agent?.agentID == "agent-1")
         #expect(
             AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer")
                 == .agentSession(agentID: "agent-1"))
-        // An empty submission clears the session rename rather than being discarded.
         #expect(
             AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "  ") == .agentSession(agentID: "agent-1"))
     }
 
-    /// A configured agent row is named by its launcher config entry, so its rename edits that entry.
-    @Test func configuredAgentRenamesItsLauncherConfigEntry() throws {
-        let items = fixtureItems()
-        let agent = items.first { $0.kind == .agent }
-        let launcher = items.first { $0.kind == .agentLauncher }
-        #expect(agent?.isConfigured == true)
-        #expect(launcher?.isConfigured == true)
-        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: "Reviewer") == .configuredAgentLauncher)
+    /// A configured process keeps the config-entry rename rule, so the agent rule above is a real fork in
+    /// routing rather than the only behavior left.
+    @Test func configuredProcessRowRenamesItsConfigEntry() throws {
+        let process = fixtureItems().first { $0.kind == .process }
+        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(process), newTitle: "API") == .configuredProcess)
         // A config entry must keep a name, so an empty submission on one is discarded.
-        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(agent), newTitle: " ") == .discard)
-        #expect(
-            AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(launcher), newTitle: "Reviewer") == .configuredAgentLauncher)
+        #expect(AppKitController.sidebarRuntimeTargetRenameDestination(item: try #require(process), newTitle: " ") == .discard)
     }
 
     @Test func shortcutIndexStopsAfterTen() {

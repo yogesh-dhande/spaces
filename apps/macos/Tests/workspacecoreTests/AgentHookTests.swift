@@ -62,50 +62,27 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
     }
 
-    func testRegisterAgentWindowReservesConfiguredLauncherNamesForLauncherOwnedAgent() throws {
+    /// A status signal is matched to a row by terminal session, never by the label it reports: a second
+    /// agent reporting an existing row's name in a different terminal gets its own, suffixed row.
+    func testUpdateAgentWindowStatusDoesNotMatchAnotherSessionsAgentByLabel() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
-        }
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-1")
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-2")
-
-        let adHoc = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "workspace-session-1", sessionKey: "thread-1",
-            status: .idle)
-        let configured = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "workspace-session-2", sessionKey: "thread-2",
-            status: .idle, claimedLauncherName: "Codex")
-
-        XCTAssertEqual(adHoc.label, "Codex-2")
-        XCTAssertEqual(configured.label, "Codex")
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
-    }
-
-    func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "configured-session")
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "first-session")
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "ad-hoc-session")
-        let configured = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "configured-session", status: .idle,
-            claimedLauncherName: "Codex")
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "first-session", status: .idle)
 
         let adHoc = try orchestrator.updateAgentWindowStatus(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "ad-hoc-session", label: "Codex", status: .spinning)
 
-        let configuredAfterUpdate = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first { $0.id == configured.id })
-        XCTAssertEqual(configuredAfterUpdate.label, "Codex")
-        XCTAssertEqual(configuredAfterUpdate.terminalTrackingID, "configured-session")
-        XCTAssertEqual(configuredAfterUpdate.status, .idle)
-        XCTAssertNotEqual(adHoc.id, configured.id)
+        let firstAfterUpdate = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first { $0.id == first.id })
+        XCTAssertEqual(firstAfterUpdate.label, "Codex")
+        XCTAssertEqual(firstAfterUpdate.terminalTrackingID, "first-session")
+        XCTAssertEqual(firstAfterUpdate.status, .idle)
+        XCTAssertNotEqual(adHoc.id, first.id)
         XCTAssertEqual(adHoc.label, "Codex-2")
         XCTAssertEqual(adHoc.terminalTrackingID, "ad-hoc-session")
-        XCTAssertNil(adHoc.claimedLauncherName)
         XCTAssertEqual(adHoc.status, .spinning)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
     }
@@ -340,7 +317,9 @@ final class AgentHookTests: XCTestCase {
         XCTAssertFalse(AgentWindowStatus.exited.leavesSubscriberIdle)
     }
 
-    func testHandleAgentExitKeepsClosedConfiguredSpacesAgentRow() throws {
+    /// An agent whose backing terminal has already ended leaves nothing addressable behind, so the exit
+    /// deletes its row and the tracked terminal row with it.
+    func testHandleAgentExitDeletesAgentRowWhoseTerminalHasEnded() throws {
         let store = try makeTemporaryStore()
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
@@ -348,34 +327,26 @@ final class AgentHookTests: XCTestCase {
             store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
 
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session", sessionKey: "thread-1",
-            status: .idle, claimedLauncherName: "Configured Agent")
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "dead-session", sessionKey: "thread-1",
+            status: .idle)
 
         let result = try orchestrator.handleAgentExit(agent)
 
-        let record = try XCTUnwrap(result)
-        XCTAssertEqual(record.status, .done)
-        XCTAssertEqual(record.terminalTrackingID, "configured-session")
-        XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
-        XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
-        XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
-        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+        XCTAssertNil(result)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(terminateCapture.sessionIDs, ["dead-session"])
+        XCTAssertEqual(closeCapture.sessionIDs, ["dead-session"])
     }
 
-    func testRecordRemoteAgentSignalUpdatesConfiguredAgentRow() throws {
+    func testRecordRemoteAgentSignalUpdatesAgentRow() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session", status: .idle,
-            claimedLauncherName: "Mock Agent")
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session", status: .idle)
 
         let blockedApplied = try orchestrator.recordRemoteAgentSignal(
             remoteSignalEvent(
@@ -386,7 +357,6 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(agent.status, .waiting)
         XCTAssertEqual(agent.label, "Mock Agent")
         XCTAssertEqual(agent.terminalTrackingID, "remote-session")
-        XCTAssertEqual(agent.claimedLauncherName, "Mock Agent")
 
         let doneApplied = try orchestrator.recordRemoteAgentSignal(
             remoteSignalEvent(id: "event-done", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "done"))
@@ -410,29 +380,6 @@ final class AgentHookTests: XCTestCase {
 
         XCTAssertTrue(didMutate)
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-    }
-
-    func testRefreshWorkspaceWindowsKeepsClosedConfiguredSpacesAgentRow() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "configured-session")
-
-        _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session", sessionKey: "thread-1",
-            status: .idle, claimedLauncherName: "Configured Agent")
-
-        let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
-
-        let record = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
-        XCTAssertTrue(didMutate)
-        XCTAssertEqual(record.label, "Configured Agent")
-        XCTAssertEqual(record.terminalTrackingID, "configured-session")
-        XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
-        XCTAssertNil(record.runtimeTargetID)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 

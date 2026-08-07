@@ -29,7 +29,7 @@ extension WorkspaceOrchestrator {
     /// agent rows — the not-yet-signaled fallback inside `killAgentSession`, which both the local
     /// `.agentKill` command and the remote `killAgentSession` Device API command route through when the
     /// session has no agent row for `stopCodingAgent` to target. Only a session launched with the
-    /// `.agent` kind (`agent spawn`, an agent launcher)
+    /// `.agent` kind (`agent spawn`)
     /// qualifies: `agent kill` addresses coding agents, and without the kind gate a mistyped or wrong
     /// session id naming an ordinary shell or process terminal would silently destroy it. Returns
     /// false for a non-agent or untracked session, which the caller surfaces as a loud error rather

@@ -130,7 +130,7 @@ import Testing
             stopScriptSection: ScriptSection(
                 title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: ""),
             portsSection: PortsSection(), processesSection: ProcessesSection(showsRuntimeControls: false),
-            browserSessionsSection: BrowserSessionsSection(), agentLaunchersSection: AgentLaunchersSection(), importButton: NSButton(),
+            browserSessionsSection: BrowserSessionsSection(), importButton: NSButton(),
             exportButton: NSButton(), discardImportedConfigButton: NSButton())
     }
 }

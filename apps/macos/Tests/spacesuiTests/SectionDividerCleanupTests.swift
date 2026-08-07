@@ -39,23 +39,6 @@ import workspacecore
         #expect(section.rowsStackArrangedSubviewCountForTesting == 3)
     }
 
-    @Test func agentLauncherReloadDoesNotAccumulateDividers() {
-        let section = AgentLaunchersSection(launchers: [
-            AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex"),
-        ])
-
-        #expect(section.rowsStackArrangedSubviewCountForTesting == 2)
-
-        section.reload(launchers: [AgentLauncher(name: "claude", command: "claude")])
-        #expect(section.rowsStackArrangedSubviewCountForTesting == 1)
-
-        section.reload(launchers: [
-            AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex"),
-            AgentLauncher(name: "reviewer", command: "reviewer"),
-        ])
-        #expect(section.rowsStackArrangedSubviewCountForTesting == 3)
-    }
-
     @Test func portsReloadDoesNotAccumulateDividers() {
         let section = PortsSection(ports: [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")])
 
@@ -74,10 +57,6 @@ extension ProcessesSection {
 }
 
 extension BrowserSessionsSection {
-    fileprivate var rowsStackArrangedSubviewCountForTesting: Int { rowsStackForDividerTesting(in: view).arrangedSubviews.count }
-}
-
-extension AgentLaunchersSection {
     fileprivate var rowsStackArrangedSubviewCountForTesting: Int { rowsStackForDividerTesting(in: view).arrangedSubviews.count }
 }
 

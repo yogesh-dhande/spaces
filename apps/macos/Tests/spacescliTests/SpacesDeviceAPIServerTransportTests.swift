@@ -645,8 +645,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let config = SpacesDeviceProjectConfig(
                 setupScript: "echo setup", stopScript: "echo stop", ports: [SpacesDeviceServiceDefinition(id: "port-api", name: "api")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-api", name: "api", command: "npm run api")],
-                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$SPACES_API_PORT")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")])
+                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$SPACES_API_PORT")])
 
             let createResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
@@ -662,7 +661,6 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(project.config.ports.first?.name, "api")
             XCTAssertEqual(project.config.processes.first?.command, "npm run api")
             XCTAssertEqual(project.config.browserSessions.first?.url, "http://localhost:$SPACES_API_PORT")
-            XCTAssertEqual(project.config.agentLaunchers.first?.name, "Codex")
 
             let hideResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
