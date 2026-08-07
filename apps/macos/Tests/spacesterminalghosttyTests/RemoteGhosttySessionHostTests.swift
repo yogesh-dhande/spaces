@@ -205,6 +205,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// never distinguishes the two, which is the point of `testCodedRejectionNeitherReportsALostLinkNorDropsInput`.
     private struct SimulatedRejectionError: Error {}
 
+    /// Stands in for a bare request timeout — the production shapes are
+    /// `SpacesDeviceAPIRequestClientError.timeout` / `SpacesPinnedTLSConnectionError.timeout`, whose
+    /// classification (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) and the resulting
+    /// `reportFailedInputSend` verdict (`false` — not conclusive proof the link is down) are pinned by
+    /// `DeviceTerminalSessionStateModelStreamConnectionTests`, not here. This host has no visibility
+    /// into that classification either way — `inputFailureHandler` is injected exactly like it is for
+    /// `SimulatedTransportFailure` and `SimulatedRejectionError` above — so this type exists only to let
+    /// `testRequestTimeoutReportsFailureButDoesNotDiscardQueuedInput` document, at this layer, that a
+    /// handler answering `false` for what is semantically a timeout must still report the failure while
+    /// leaving the backlog queued, the same way it must for a coded rejection.
+    private struct SimulatedTimeoutFailure: Error {}
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
@@ -2643,6 +2655,48 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         await fulfillment(of: [reported], timeout: 2)
         await host.drainInputQueueForTesting()
         XCTAssertEqual(sender.controlRequestTexts, ["first", "second"], "a coded rejection must not drop the next send behind it")
+    }
+
+    /// The fix for the main-thread-stall keystroke drop: a REQUEST TIMEOUT — the round trip did not
+    /// answer inside the interactive control deadline — is not by itself proof the link is down (an
+    /// app-side stall busy past the deadline looks identical to a slow network from here), so
+    /// `DeviceTerminalSessionStateModel.reportFailedInputSend` answers `false` for one, the same as a
+    /// coded rejection. The timed-out send must still reach `inputFailureHandler` — the failure itself
+    /// is reported exactly as before (Change 1's contract) — but a `false` answer must leave the queued
+    /// backlog alone, so the keystrokes typed during the stall are not silently discarded. Only the
+    /// timed-out ("first") request fails; "second" and "third" are scripted to succeed, so seeing all
+    /// three land proves they were actually attempted, not merely that the queue was not cancelled.
+    @MainActor func testRequestTimeoutReportsFailureButDoesNotDiscardQueuedInput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-request-timeout", root: root)
+        let sender = ScriptedControlRequestSender(
+            payload: fixture.payload, controlError: SimulatedTimeoutFailure(), failFirstControlRequestOnly: true)
+        let reportedFailures = FailureReportCounter()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            inputFailureHandler: { _ in
+                await reportedFailures.increment()
+                // A bare request timeout is not conclusive proof the link is gone.
+                return false
+            })
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.sendTextAsPaste("first"))
+        XCTAssertTrue(host.sendTextAsPaste("second"))
+        XCTAssertTrue(host.sendTextAsPaste("third"))
+
+        await host.drainInputQueueForTesting()
+
+        let failureCount = await reportedFailures.count
+        XCTAssertGreaterThanOrEqual(failureCount, 1, "the timed-out send itself must still reach inputFailureHandler")
+        XCTAssertEqual(
+            sender.controlRequestTexts, ["first", "second", "third"],
+            "a bare request timeout must not discard the queued backlog behind the timed-out send")
     }
 
     @MainActor func testRemoteHostRequestsDirectStateResyncAfterMissingDeltaBaseline() throws {

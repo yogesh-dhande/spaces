@@ -4,7 +4,7 @@ import XCTest
 
 final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
     /// State changes a mirroring client reacts to with a full pane refresh: runtime state,
-    /// attachments/ownership, session metadata, bootstrap, and termination.
+    /// attachments/ownership, bootstrap, and termination.
     func testStateShapedReasonsPostRuntimeStateDidChange() {
         XCTAssertEqual(
             TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.initial),
@@ -18,9 +18,17 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
         XCTAssertEqual(
             TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.attachmentState),
             [.spacesTerminalAttachmentStateDidChange, .spacesTerminalRuntimeStateDidChange])
+    }
+
+    /// `session_metadata` routes to its own notification alone. `TerminalSessionPaneViewController`
+    /// observes `.spacesTerminalSessionMetadataDidChange` and `.spacesTerminalRuntimeStateDidChange`
+    /// with the identical unconditional `refreshNow()`, so also routing to the runtime-state
+    /// notification would refresh the pane twice per title change for no second effect — costly
+    /// under a coding agent that rewrites its title many times a second.
+    func testSessionMetadataReasonPostsSessionMetadataDidChangeOnly() {
         XCTAssertEqual(
             TerminalRemoteSessionStateNotificationRouting.notifications(forReason: TerminalRemoteSessionStateReason.sessionMetadata),
-            [.spacesTerminalSessionMetadataDidChange, .spacesTerminalRuntimeStateDidChange])
+            [.spacesTerminalSessionMetadataDidChange])
     }
 
     /// Screen-content reasons arrive at interaction frequency and describe what the mirror

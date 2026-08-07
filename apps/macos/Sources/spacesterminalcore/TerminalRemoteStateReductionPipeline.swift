@@ -10,11 +10,49 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     public let reduction: TerminalRemoteStateReductionResult?
     /// How long the reduction took, reported as the receive metric's decode cost.
     public let reduceMS: Int
+    /// How many earlier outputs the apply mailbox collapsed into this one. Reported on this apply's
+    /// metrics, which is the only place the skipped payloads are accounted for.
+    public let coalescedAwayCount: Int
+    /// A resync one of the coalesced-away outputs asked for. Read through `requestsResync`.
+    public let inheritedResyncRequest: Bool
 
-    public init(incomingPayload: GhosttyRemoteSessionStatePayload, reduction: TerminalRemoteStateReductionResult?, reduceMS: Int) {
+    public init(
+        incomingPayload: GhosttyRemoteSessionStatePayload, reduction: TerminalRemoteStateReductionResult?, reduceMS: Int, coalescedAwayCount: Int = 0,
+        inheritedResyncRequest: Bool = false
+    ) {
         self.incomingPayload = incomingPayload
         self.reduction = reduction
         self.reduceMS = reduceMS
+        self.coalescedAwayCount = coalescedAwayCount
+        self.inheritedResyncRequest = inheritedResyncRequest
+    }
+
+    /// Whether applying this output must ask the session for a full frame: because its own reduction
+    /// could not apply a delta, or because an output coalesced away before it could not.
+    public var requestsResync: Bool { reduction?.didRequestResync == true || inheritedResyncRequest }
+
+    /// True when a newer output fully supersedes this one, so the mailbox may drop it.
+    ///
+    /// Derived from the notification routing rather than listed as its own table: a reason that posts
+    /// exactly the output-shaped notification describes screen content and carries no state transition
+    /// of its own (see `TerminalRemoteSessionStateNotificationRouting`), and a newer frame renders
+    /// everything an older frame would have. Every reason that *does* carry a transition (attachment,
+    /// ownership, session metadata, runtime state, termination) posts a different notification, and
+    /// `clipboard_write` posts none because its effect is a pasteboard write whose position among the
+    /// state around it matters. Both are barriers, as is a reason this build does not know, which is
+    /// the safe side to fail on.
+    var isCoalescibleOnApply: Bool {
+        TerminalRemoteSessionStateNotificationRouting.notifications(forReason: incomingPayload.reason) == [.spacesTerminalOutputDidChange]
+    }
+
+    /// This output, carrying forward the one-shot effects of the older output it replaces. Nothing
+    /// else is merged: the reduction chain already folded the skipped payload's state into this one's
+    /// `storedPayload`, and its metrics describe a frame that never reached the screen.
+    func inheritingEffects(ofCoalesced skipped: TerminalRemoteStateReductionOutput) -> TerminalRemoteStateReductionOutput {
+        TerminalRemoteStateReductionOutput(
+            incomingPayload: incomingPayload, reduction: reduction, reduceMS: reduceMS,
+            coalescedAwayCount: coalescedAwayCount + skipped.coalescedAwayCount + 1,
+            inheritedResyncRequest: inheritedResyncRequest || skipped.requestsResync)
     }
 }
 
@@ -33,10 +71,24 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 /// reduced against a baseline a queued full frame had not yet replaced, breaks that chain and costs a
 /// resync round trip. FIFO therefore has to span both routes, not just hold within one.
 ///
-/// `submit` is callable from any thread and preserves call order. The single consumer reduces one
-/// payload at a time and awaits its main-actor application before taking the next, so payload N is
-/// always applied before payload N+1 is reduced: 1:1 payload in, application out, never coalesced,
-/// dropped, or reordered.
+/// **Reduction is 1:1 and strictly ordered. Application is latest-frame-wins.**
+///
+/// `submit` is callable from any thread and preserves call order. The single consumer reduces every
+/// payload, one at a time, in submission order: reduction correctness depends only on the reducer's own
+/// chained state, so it must never skip or reorder a payload. It hands each result to an apply mailbox
+/// instead of awaiting the main actor, so a busy main actor cannot stall reduction and cannot build an
+/// unbounded backlog of frames the screen will never show. A session under steady output flushes a
+/// render update every few milliseconds while one main-actor apply drives a synchronous GPU draw, so
+/// awaiting each apply would make the main thread the pipeline's rate limiter and let every pane's
+/// backlog grow without bound.
+///
+/// The mailbox keeps the queue in order and collapses each run of consecutive coalescible outputs to
+/// its newest member (see `isCoalescibleOnApply`): a superseded frame is never drawn, and one main-actor
+/// drain task at a time applies whatever has accumulated. What survives a collapse is exactly what the
+/// screen and the session need: the newest frame, the merged state the reducer chained through every
+/// skipped payload, and the one-shot effects (`requestsResync`) of the outputs that were dropped. Their
+/// per-payload metrics do not survive; the surviving apply reports how many were folded into it
+/// (`coalescedAwayCount`).
 public final class TerminalRemoteStateReductionPipeline: Sendable {
     private let continuation: AsyncStream<GhosttyRemoteSessionStatePayload>.Continuation
     private let consumer: Task<Void, Never>
@@ -53,6 +105,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
     ) {
         let (stream, continuation) = AsyncStream<GhosttyRemoteSessionStatePayload>.makeStream(bufferingPolicy: .unbounded)
         self.continuation = continuation
+        let mailbox = ApplyMailbox(apply: apply)
         consumer = Task.detached(priority: .userInitiated) {
             var reducer = TerminalRemoteStateReducer()
             var previousPayload: GhosttyRemoteSessionStatePayload?
@@ -74,7 +127,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
                     output = TerminalRemoteStateReductionOutput(
                         incomingPayload: incomingPayload, reduction: reduction, reduceMS: TerminalPerformance.elapsedMS(since: reduceStartedAt))
                 }
-                await apply(output)
+                mailbox.submit(output)
             }
         }
     }
@@ -86,6 +139,56 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
         consumer.cancel()
     }
 
-    /// Enqueues one payload. Callable from any thread; payloads are reduced and applied in call order.
+    /// Enqueues one payload. Callable from any thread; payloads are reduced in call order.
     public func submit(_ payload: GhosttyRemoteSessionStatePayload) { continuation.yield(payload) }
+}
+
+/// The ordered, coalescing hand-off from the reduce loop to the main actor.
+///
+/// The queue is guarded by a lock rather than an actor because `submit` runs on the reduce loop and must
+/// not suspend there: suspending would restore the very coupling the mailbox removes.
+private final class ApplyMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var queued: [TerminalRemoteStateReductionOutput] = []
+    /// True while a drain task exists that has not yet found the queue empty. It is the slot that keeps
+    /// exactly one drain in flight, so a burst of submissions schedules one task rather than one each.
+    private var isDrainScheduled = false
+    private let apply: @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void
+
+    init(apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void) { self.apply = apply }
+
+    func submit(_ output: TerminalRemoteStateReductionOutput) {
+        lock.lock()
+        if output.isCoalescibleOnApply, let pending = queued.last, pending.isCoalescibleOnApply {
+            queued[queued.count - 1] = output.inheritingEffects(ofCoalesced: pending)
+        } else {
+            queued.append(output)
+        }
+        let needsDrain = !isDrainScheduled
+        isDrainScheduled = true
+        lock.unlock()
+        guard needsDrain else { return }
+        Task { @MainActor [weak self] in self?.drain() }
+    }
+
+    /// Applies one queued segment in order, then hands the main actor back and schedules the next drain
+    /// if anything arrived meanwhile. Looping in place instead would let a session that keeps producing
+    /// hold the main actor indefinitely, which is the stall this whole mailbox exists to end.
+    @MainActor private func drain() {
+        let segment = takeQueuedSegment()
+        guard !segment.isEmpty else { return }
+        for output in segment { apply(output) }
+        Task { @MainActor [weak self] in self?.drain() }
+    }
+
+    private func takeQueuedSegment() -> [TerminalRemoteStateReductionOutput] {
+        lock.lock()
+        defer { lock.unlock() }
+        let segment = queued
+        queued.removeAll(keepingCapacity: true)
+        // The drain slot is released only on an empty take, so a submission that lands while a segment
+        // is being applied is picked up by the drain this one schedules rather than by a second one.
+        if segment.isEmpty { isDrainScheduled = false }
+        return segment
+    }
 }

@@ -901,6 +901,35 @@ public enum SpacesDeviceClient {
         }
     }
 
+    /// True when a Device API transport failure (`isDeviceAPITransportFailure(error)` must already be
+    /// true) is a bare REQUEST TIMEOUT — the deadline elapsed with no answer — rather than a
+    /// connection-level failure (refused, closed, or every candidate address unreachable).
+    ///
+    /// The two look identical to most callers ("the request did not get an answer"), but they are not
+    /// the same evidence about the link. A connection-level failure means the transport itself gave up:
+    /// the daemon refused the connection, an open one was closed under it, or every known address was
+    /// raced and none answered — conclusive that the link is down right now. A timeout only means this
+    /// one round trip did not complete inside its deadline, and on the hot per-keystroke path that
+    /// deadline is tight enough (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`,
+    /// 5s) that an app-side stall — the main actor too busy to service the send or its response in
+    /// time — produces exactly the same timeout a genuinely dead link would, with the link itself never
+    /// having done anything wrong. A caller that needs to tell those two apart (see
+    /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which uses this to decide whether a failed
+    /// keystroke send also proves every other queued keystroke should be discarded) calls this in addition
+    /// to `isDeviceAPITransportFailure`.
+    ///
+    /// Only the two shapes a timeout actually arrives as qualify: `SpacesDeviceAPIRequestClientError.timeout`
+    /// and `SpacesPinnedTLSConnectionError.timeout` — the latter is what `sendLine`/`readLine` throw
+    /// directly on the production request path, since neither `SpacesDeviceAPIRequestClient` nor
+    /// `SpacesDeviceAPIRequestSessionClient` wraps it into the former. Every other transport failure
+    /// (`.emptyResponse`, `.connectionFailed`, `.connectionClosed`, `allCandidatesUnreachable`, the raw
+    /// POSIX/`NWError` codes) is connection-level and answers `false` here.
+    public static func isDeviceAPIRequestTimeout(_ error: any Error) -> Bool {
+        if case SpacesDeviceAPIRequestClientError.timeout = error { return true }
+        if case SpacesPinnedTLSConnectionError.timeout = error { return true }
+        return false
+    }
+
     public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,

@@ -74,7 +74,6 @@
         private var lastGeometry: SurfaceGeometry?
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
-        private var renderedText = ""
         private var pendingSurfacePresentationTask: Task<Void, Never>?
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
         private var pendingSearchQueryTask: Task<Void, Never>?
@@ -348,10 +347,8 @@
         }
 
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
-            if self.renderStateKey != renderStateKey { renderedText = "" }
             self.renderStateKey = renderStateKey
             latestFrame = frame
-            renderedText = frame.map { GhosttyTerminalSnapshotGrid.fullPlainText(for: $0.snapshot) } ?? ""
             ensureMirrorIfNeeded()
             applyLatestFrameIfPossible()
             restoreFirstResponderIfWindowReady()
@@ -367,9 +364,11 @@
             return latestFrame?.snapshot
         }
 
+        /// Flattens the pane's current grid to text on demand. Deliberately not precomputed when a frame
+        /// arrives: extracting a full grid allocates a string per row on a path that runs at the session's
+        /// flush rate, while its readers (the ended-pane copy buffer, debug and test dumps) ask rarely.
         func snapshotText() -> String? {
             if let surfaceText = GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()), !surfaceText.isEmpty { return surfaceText }
-            if !renderedText.isEmpty { return renderedText }
             guard let snapshot = latestFrame?.snapshot else { return nil }
             return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
         }
@@ -500,7 +499,6 @@
         func releaseSurface() {
             freeMirror()
             latestFrame = nil
-            renderedText = ""
             GhosttyMirrorSurfaceMRU.shared.forget(self)
             removeFromSuperview()
         }
@@ -841,34 +839,52 @@
             let applyStartedAt = Date()
             let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-            let attributes = GhosttyRenderFrameMetrics.attributes(
-                frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
-                targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
-            SpacesDeviceTerminalPerformanceLogger.emit(
-                .init(
-                    sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,
-                    attributes: attributes))
-            TerminalPerformance.logMetric(
-                "terminal_render_frame_mirror_apply", target: "session=\(launchConfiguration.sessionID)", elapsedMS: applyMS, success: applied,
-                detail: GhosttyRenderFrameMetrics.detailString(attributes))
+            // Built only when something is listening: this runs once per applied frame, and the
+            // dictionary plus its sorted-and-joined detail string cost more than the frame's own apply.
+            let deviceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            if deviceLoggingEnabled || TerminalPerformance.isEnabled {
+                let attributes = GhosttyRenderFrameMetrics.attributes(
+                    frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
+                    targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
+                if deviceLoggingEnabled {
+                    SpacesDeviceTerminalPerformanceLogger.emit(
+                        .init(
+                            sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,
+                            attributes: attributes))
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_render_frame_mirror_apply", target: "session=\(launchConfiguration.sessionID)", elapsedMS: applyMS, success: applied,
+                    detail: GhosttyRenderFrameMetrics.detailString(attributes))
+            }
             guard applied else {
                 fputs("spaces: ghostty mirror frame apply failed for session \(launchConfiguration.sessionID)\n", stderr)
                 return
             }
             lastAppliedRenderFrameIdentity = identity
             GhosttyMirrorAppService.shared.tick()
-            presentSurfaceNow()
-            GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
-            surfaceHostView.displayIfNeeded()
-            window?.displayIfNeeded()
             scheduleSurfacePresentationRefresh()
         }
 
+        /// Presents whatever the mirror last applied, once per display interval at most.
+        ///
+        /// A mirror surface is driven entirely from the outside: nothing in it decides when to paint, so
+        /// a frame that is applied and never drawn leaves the pane showing older content, blank on the
+        /// first frame after a surface is built. This refresh is that guarantee, and it is a *deferred*
+        /// one on purpose. `ghostty_mirror_apply_render_frame` already draws the frame it applies, and a
+        /// draw blocks on the GPU, so presenting inline as well would charge every applied frame several
+        /// serialized command-buffer waits on the main thread. A session under steady output flushes
+        /// faster than the display refreshes, so those waits accumulate into multi-second stalls.
+        ///
+        /// A pending refresh is therefore left alone rather than cancelled and rescheduled: rescheduling
+        /// per apply is what would let a steady producer push the safety net past every frame it was
+        /// meant to cover. The last frame of a burst is always presented: it either finds no pending
+        /// task and schedules one, or finds one that has not run yet and will draw the surface it just
+        /// applied to.
         private func scheduleSurfacePresentationRefresh() {
-            pendingSurfacePresentationTask?.cancel()
+            guard pendingSurfacePresentationTask == nil else { return }
             pendingSurfacePresentationTask = Task { @MainActor [weak self] in
-                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(16))
                 guard let self, !Task.isCancelled else { return }
                 self.pendingSurfacePresentationTask = nil
                 guard let surface = self.mirrorSurface() else { return }
@@ -879,12 +895,6 @@
                 self.surfaceHostView.displayIfNeeded()
                 self.window?.displayIfNeeded()
             }
-        }
-
-        private func presentSurfaceNow() {
-            guard let surface = mirrorSurface() else { return }
-            ghostty_surface_refresh(surface)
-            ghostty_surface_draw(surface)
         }
 
         private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {

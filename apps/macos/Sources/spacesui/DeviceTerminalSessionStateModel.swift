@@ -591,17 +591,33 @@
         /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
         /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
         ///
-        /// Returns whether this failure proves the link is gone — `isTransportFailureEvidenceOfLostLink`'s
-        /// verdict on `error`, unconditionally — which is also this method's own `RemoteGhosttyInputFailureHandler`
-        /// wiring contract: the render host discards its queued input backlog exactly when this is `true`.
-        /// The two early-return guards below must not change that answer:
-        ///  - a non-transport error (the daemon answered) returns `false` — the link is fine and its input must
-        ///    still be delivered;
+        /// Returns whether this failure is CONCLUSIVE proof the link is gone — which is also this method's
+        /// own `RemoteGhosttyInputFailureHandler` wiring contract: the render host discards its queued
+        /// input backlog exactly when this is `true`, and leaves it queued (to keep draining once the link
+        /// proves itself live again) when it is `false`.
+        ///
+        /// The failure-surfacing side effects below (tear down the subscription, arm the paced reconnect,
+        /// flip the disconnected notice) fire for ANY transport failure, timeout included — a 5s stall is
+        /// worth telling the user about and worth retrying regardless of which kind it turns out to be.
+        /// Only the return value, and so only whether the queued backlog survives, depends on the finer
+        /// classification:
+        ///  - a non-transport error (the daemon answered) returns `false` and does nothing else — the link
+        ///    is fine and its input must still be delivered;
+        ///  - a bare request timeout (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) returns `false` after
+        ///    doing the side effects above — the deadline elapsed, but on the hot per-keystroke path
+        ///    (`interactiveControlRequestTimeoutSeconds`, 5s) an app-side stall produces exactly the same
+        ///    timeout a dead link would, so a timeout alone is not proof the backlog would go nowhere;
+        ///    discarding it under a false alarm would drop keystrokes the link stalled but never lost;
+        ///  - a connection-level failure (refused, closed, every candidate unreachable) returns `true` —
+        ///    conclusive that the transport itself gave up, not merely that one round trip missed its clock;
         ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)
-        ///    still returns `true` — the link is still gone, so every keystroke of an ongoing outage, not
-        ///    only the first, must keep dropping its queued input rather than buffering.
+        ///    still returns `true` regardless of which shape this repeat failure is — the outage was
+        ///    already confirmed by an earlier conclusive failure or by the stream's own disconnect, so
+        ///    every keystroke of an ongoing outage, not only the first, must keep dropping its queued input
+        ///    rather than buffering behind a link that is not coming back on its own.
         @discardableResult func reportFailedInputSend(_ error: any Error) -> Bool {
             guard Self.isTransportFailureEvidenceOfLostLink(error) else { return false }
+            let isConclusiveLinkDown = !SpacesDeviceClient.isDeviceAPIRequestTimeout(error)
             // Typing produces one of these per keystroke for as long as the outage lasts. A link already
             // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
             guard !isStateStreamDisconnected else { return true }
@@ -613,11 +629,15 @@
             streamClient = nil
             deadClient?.stop()
             scheduleReconnect()
-            return true
+            return isConclusiveLinkDown
         }
 
-        /// Whether a failed request proves this session's link is gone. True only for a transport failure:
-        /// the request never reached the daemon.
+        /// Whether a failed request is evidence about this session's link at all — true for any transport
+        /// failure, timeout included: the request never demonstrably reached and was answered by the
+        /// daemon. This is the broad classification that gates `reportFailedInputSend`'s failure-surfacing
+        /// side effects (disconnect notice, paced reconnect); it does NOT by itself say the link is
+        /// conclusively down — see `reportFailedInputSend`'s own doc for the finer distinction its return
+        /// value makes between a bare timeout and a connection-level failure.
         ///
         /// A reachable daemon that answers with a coded rejection — the session is not running, another
         /// client owns it, the token was revoked — says nothing about the link, and reporting one as a
@@ -810,12 +830,16 @@
         /// sends over the tailnet relay run 0.7-1.5s, so 5s keeps well over 3x headroom while halving the
         /// worst-case stall a keystroke would otherwise wait out on a dead link.
         ///
-        /// This deadline also gates how fast `reportFailedInputSend` learns the link is gone and drops the
-        /// pane's queued input (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed into
-        /// a dead pane sits behind this timeout before that verdict lands and the backlog is discarded. Do
-        /// not tighten it toward the healthy-latency range without re-measuring actual send latency first:
-        /// too tight and a merely slow (not dead) link starts misreporting itself as gone and dropping
-        /// input a user is still waiting to land.
+        /// This deadline also gates how fast `reportFailedInputSend` reports a send as failed and surfaces
+        /// the disconnect notice (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed
+        /// into a dead pane sits behind this timeout before that surfacing lands. It does NOT by itself gate
+        /// dropping the pane's queued input backlog: `reportFailedInputSend` only discards the backlog for a
+        /// connection-level failure, never for a bare timeout, precisely because tightening this deadline
+        /// toward the healthy-latency range would otherwise make a merely slow (not dead) link misreport
+        /// itself as gone and drop input a user is still waiting to land. Still worth re-measuring actual
+        /// send latency before tightening further: a timeout this frequent would surface the disconnect
+        /// notice — and retry the subscription — on ordinary jitter, even though it can no longer discard a
+        /// keystroke over it.
         nonisolated static let interactiveControlRequestTimeoutSeconds: TimeInterval = 5
 
         /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke

@@ -18,11 +18,24 @@ import Foundation
 /// change a pane refresh actually reacts to — a runtime-state transition, an attachment or
 /// ownership change, a title or working-directory change, termination — is broadcast under
 /// its own reason, so none of the screen-content reasons carries a state change of its own.
+///
+/// `session_metadata` routes to `.spacesTerminalSessionMetadataDidChange` alone, not also to
+/// `.spacesTerminalRuntimeStateDidChange`: `TerminalSessionPaneViewController` observes both, and
+/// both observers do the identical unconditional `refreshNow()` gated only by session ID, so
+/// fanning one title change out to both would run that refresh twice for no second effect. A
+/// coding agent rewriting its terminal title can post this reason many times a second, and the
+/// duplicate used to double that refresh cost on every one of them. The in-process local host
+/// (`GhosttyEmbeddedSessionHost.postSessionMetadataDidChange`) never posted the runtime-state
+/// notification alongside its metadata one — this table's remote-mirroring path is what
+/// introduced the extra fan-out, not a second consumer that actually needs it. `attachment_state`
+/// keeps its own pairing unchanged: fixing that would be the same shape of change but is out of
+/// scope here, since ownership handoffs are rare enough that doubling their refresh is not the
+/// streaming-cadence cost this table exists to control.
 public enum TerminalRemoteSessionStateNotificationRouting {
     public static func notifications(forReason reason: String) -> [Notification.Name] {
         switch reason {
         case TerminalRemoteSessionStateReason.attachmentState: return [.spacesTerminalAttachmentStateDidChange, .spacesTerminalRuntimeStateDidChange]
-        case TerminalRemoteSessionStateReason.sessionMetadata: return [.spacesTerminalSessionMetadataDidChange, .spacesTerminalRuntimeStateDidChange]
+        case TerminalRemoteSessionStateReason.sessionMetadata: return [.spacesTerminalSessionMetadataDidChange]
         case TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.terminated:
             return [.spacesTerminalRuntimeStateDidChange]
         case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
