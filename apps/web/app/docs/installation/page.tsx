@@ -117,7 +117,7 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Linux</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Install the Spaces daemon on a Linux machine to run workspaces there and drive them from your Mac or iPhone. Ubuntu 24.04 on x86_64 or arm64 is supported. You can run the installer on the machine yourself, or let the Mac app install it over SSH for you — when you pair a Linux device that has no daemon yet, the pairing screen offers an <strong>Install Spaces over SSH</strong> action that runs this same installer on the device and pairs automatically.
+          Install the Spaces daemon on a Linux machine to run workspaces there and drive them from your Mac or iPhone. Ubuntu 24.04 on x86_64 or arm64 is supported. Pairing a Linux machine that does not have Spaces installed installs it as part of connecting: the pairing screen runs the installer over the same SSH connection, shows its progress until it finishes (usually a few minutes), and pairs automatically once it does. You can also run the installer on the machine yourself first, which pairing then uses directly.
         </p>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Install</h3>
@@ -158,10 +158,13 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Update</h3>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Re-run the same command with the new version. There is no separate update command. The installer puts the new version in place alongside the old one and hands the running daemon over to it without a full restart, so your terminal sessions, processes, and coding agents keep running across the update.
+          Re-run the same command with the new version to update in place. There is no separate update command: it hands the running daemon over to the new version without a full restart, so your terminal sessions, processes, and coding agents keep running across the update.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          A client and a daemon can only talk to each other when they speak the same protocol, and Spaces will not connect them when they don&apos;t. When that happens Spaces tells you which side is behind: update the Mac app through its built-in updater, or update the Linux daemon with the command Spaces prints for you.
+          The Mac app also keeps track of whether a machine&apos;s daemon is behind. If a newer version is already on the machine, the app puts it in place on its own, with nothing running there interrupted; if that doesn&apos;t land within a bit, the app says so and offers to try again. If nothing newer is installed yet and the machine was paired over SSH, the app offers an <strong>Update over SSH</strong> action that runs the same update over that connection for you — terminals, processes, and coding agents keep running throughout. The command above stays available if you&apos;d rather run it by hand, and it&apos;s the only option for a machine paired from a link instead of over SSH.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A client and a daemon can only talk to each other when they speak the same protocol, and Spaces will not connect them when they don&apos;t. When that happens Spaces tells you which side is behind: update the Mac app through its built-in updater, or update the Linux daemon as described above.
         </p>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Uninstall</h3>
@@ -186,7 +189,7 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Spaces on the machine</h3>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Pairing connects two Spaces installs, so the machine needs its own. A Linux machine needs the daemon on Ubuntu 24.04 (x86_64 or arm64) — run the installer there yourself, or let the pairing screen do it with <strong>Install Spaces over SSH</strong>, both covered under <strong>Linux</strong> above. A second Mac needs <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> installed and opened once, exactly like the Mac in front of you.
+          Pairing connects two Spaces installs, so the machine needs its own. A Linux machine needs the daemon on Ubuntu 24.04 (x86_64 or arm64); pairing installs it automatically over SSH if it isn&apos;t there yet, or you can run the installer yourself first — both covered under <strong>Linux</strong> above. A second Mac needs <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> installed and opened once, exactly like the Mac in front of you.
         </p>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">SSH access that needs no prompts</h3>
