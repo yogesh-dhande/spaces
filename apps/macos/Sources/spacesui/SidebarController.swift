@@ -95,6 +95,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Remote devices with an overview pull in flight, so nothing starts a second connection to a
     /// device that is still answering (or still timing out).
     private var remoteOverviewPullsInFlight: Set<String> = []
+    /// Per-device counter stamped onto each pull, bumped whenever something invalidates what an
+    /// in-flight pull can still tell us about the device; see `invalidateInFlightRemoteOverviewPulls`.
+    private var remoteOverviewPullGenerations: [String: Int] = [:]
     /// Pacing for pulls that fail. The in-flight guard above bounds how many connections a failing
     /// device carries at once but not how often it is dialed, and only a successful pull stamps the
     /// freshness window; this is what keeps a device that fails fast from being re-dialed by every
@@ -548,6 +551,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // burst of sidebar reloads — or a watchdog tick landing while a previous connect is still timing
         // out — from stacking connections on it.
         guard remoteOverviewPullsInFlight.insert(record.id).inserted else { return }
+        let generation = remoteOverviewPullGenerations[record.id] ?? 0
         Task { @MainActor [weak self] in
             let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
                 do {
@@ -570,11 +574,46 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             switch result {
             case .success: self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
             case .failure:
+                guard
+                    Self.pullFailureStillDescribesDevice(
+                        pullGeneration: generation, currentGeneration: self.remoteOverviewPullGenerations[record.id] ?? 0)
+                else {
+                    DeviceLinkTrace.log(deviceID: record.id, event: "pull_failure_superseded")
+                    return
+                }
                 let delay = self.remoteOverviewPullBackoff.recordFailure(deviceID: record.id)
                 DeviceLinkTrace.log(deviceID: record.id, event: "pull_backoff_armed", detail: "delay_ms=\(Self.milliseconds(delay))")
             }
             self.applyRemoteDeviceSection(deviceID: record.id, result: result)
         }
+    }
+
+    /// Retires whatever pull is currently in flight for `deviceID`, so its answer can no longer report
+    /// the device as offline. Called wherever the ground the in-flight attempt was dialing on has moved:
+    /// this Mac's network path changed, or the user asked for the device again.
+    ///
+    /// The in-flight attempt is deliberately not cancelled or replaced. Its connect is a blocking dial
+    /// inside a detached task, and letting a second one start alongside it is exactly the connection
+    /// stacking `remoteOverviewPullsInFlight` exists to prevent; what replaces it is the subscription
+    /// reopened in the same pass, with the watchdog's next tick behind that.
+    private func invalidateInFlightRemoteOverviewPulls(deviceID: String) {
+        remoteOverviewPullGenerations[deviceID] = (remoteOverviewPullGenerations[deviceID] ?? 0) + 1
+    }
+
+    /// Whether a completed pull's *failure* still describes the device, or belongs to a network this Mac
+    /// has already left.
+    ///
+    /// A pull that started before the path changed is dialing an address that was reachable on the old
+    /// network, and its failure arrives seconds later, by which time the reopened subscription may
+    /// already have published a healthy overview over the new one. Letting that failure through flips a
+    /// working device to offline and parks it there until the watchdog's next tick.
+    ///
+    /// Only failures are held to this. A success is evidence the device answered, which no change of
+    /// network can make untrue, and dropping it would strand a section at "loading…" after a user retry
+    /// whose own pull never started (the in-flight guard refused it). Pure so the rule is directly
+    /// testable.
+    nonisolated static func pullFailureStillDescribesDevice(pullGeneration: Int, currentGeneration: Int) -> Bool {
+        pullGeneration >= currentGeneration
     }
 
     /// Enables and opens live overview subscriptions for paired remote devices, and arms the
@@ -686,6 +725,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
             guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "network_path_changed")
+            // Anything already dialing was dialing the old network, so its answer is retired before this
+            // pass starts attempts of its own.
+            invalidateInFlightRemoteOverviewPulls(deviceID: record.id)
             if section.loadState.isOffline {
                 retryDeviceConnection(deviceID: record.id)
             } else {
@@ -961,6 +1003,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.stopRemoteBrowserForwards(deviceID: deviceID)
                 return
             }
+            // Adopted ahead of the unchanged-check below, because the record and the overview change
+            // independently: a delivery that teaches this client a new address for the device carries an
+            // overview identical to the one already shown, and this is the record every later action and
+            // resolver lookup for this device is taken from. Dropping it there would hand the endpoint
+            // resolver a narrower candidate list than the one just learned.
+            host.deviceSections[index].device = overview.device
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
@@ -972,7 +1020,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
             host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
             host.deviceSections[index].overview = overview.overview
-            host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
@@ -2344,6 +2391,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
         markDeviceSectionRetrying(deviceID: deviceID, index: index)
+        // The section has just been put back to "loading…" on the user's behalf. A pull that was already
+        // failing when they clicked must not be the thing that answers that click.
+        invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
         remoteOverviewSubscriptions.resetForUserRetry(deviceID: deviceID)?.stop()
         // Both attempts bypass their throttle deliberately: the pull skips the freshness gate and its
         // backoff, and the subscribe skips the backoff, because the user asked for this device

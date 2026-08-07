@@ -92,6 +92,33 @@ import Testing
         #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: [])) == true)
     }
 
+    /// The case no comparison can see: a Mac that sleeps on one network and wakes on another comes back
+    /// on the same interface, and two routers both being `192.168.1.1` is common enough that the gateway
+    /// does not separate them either. Every observable fact is identical, so the wake itself is the
+    /// signal.
+    @Test func wakeIsAChangeEvenWhenThePathLooksIdentical() {
+        var filter = DeviceNetworkPathChangeFilter()
+        let home = snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"])
+        _ = filter.shouldReact(to: home)
+        #expect(filter.shouldReact(to: home) == false)
+
+        #expect(filter.shouldReactToWake() == true)
+    }
+
+    /// Waking drops the baseline, so the path the monitor reports right after a wake re-baselines instead
+    /// of firing a second time for the same event.
+    @Test func thePathObservedAfterAWakeIsABaselineNotASecondTrigger() {
+        var filter = DeviceNetworkPathChangeFilter()
+        _ = filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"]))
+        _ = filter.shouldReactToWake()
+
+        // Whatever the machine comes back on, satisfied or not, the first path after the wake is only a
+        // baseline.
+        #expect(filter.shouldReact(to: snapshot(satisfied: false, interfaces: [], gateways: [])) == false)
+        // Comparison resumes from there.
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["10.0.0.1"])) == true)
+    }
+
     private func snapshot(satisfied: Bool, interfaces: Set<String>, gateways: Set<String> = []) -> DeviceNetworkPathSnapshot {
         DeviceNetworkPathSnapshot(isSatisfied: satisfied, interfaceNames: interfaces, gateways: gateways)
     }
