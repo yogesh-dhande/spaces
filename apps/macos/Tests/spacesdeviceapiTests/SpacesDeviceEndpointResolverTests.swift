@@ -200,6 +200,82 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
         XCTAssertEqual(resolver.nextStreamHost(), "lan")
     }
 
+    /// A daemon that refuses a subscription answered on this very connection, over a completed pinned
+    /// handshake: the address is demonstrably the right one. Rotating off it would send every later
+    /// reconnect to a worse candidate over something the address had nothing to do with — and because a
+    /// revoked token refuses every reconnect the same way, it would walk the stream through the whole
+    /// candidate list and drop the winner the request path shares.
+    func testADaemonRejectionDoesNotRotateTheStreamOffItsAddress() throws {
+        let connector = ConnectRecorder()
+        connector.setBehavior(host: "lan", .succeeds)
+        let resolver = makeResolver(hosts: ["lan", "tailnet"], connector: connector)
+        try resolver.connect(host: "lan", timeout: 10).cancel()
+        XCTAssertEqual(resolver.currentCachedHost(), "lan")
+
+        let reported = ErrorRecorder()
+        let onDisconnect = SpacesDeviceAPIStreamEndpoint.invalidating(reported.append, resolver: resolver, host: "lan")
+        onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: "unauthorized", code: .unauthorized))
+
+        XCTAssertEqual(resolver.currentCachedHost(), "lan")
+        XCTAssertEqual(resolver.nextStreamHost(), "lan")
+        // The disconnect itself is still delivered — only the resolver's opinion of the address is left
+        // alone, because the caller branches on the code to re-authenticate.
+        XCTAssertEqual(reported.descriptions(), ["unauthorized"])
+    }
+
+    /// A payload that will not decode arrives over the same healthy connection, and says something about
+    /// the payload rather than about the path.
+    func testADecodeFailureDoesNotRotateTheStreamOffItsAddress() throws {
+        let resolver = try provenResolver()
+
+        SpacesDeviceAPIStreamEndpoint.invalidating({ _ in }, resolver: resolver, host: "lan")(
+            DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "not a payload")))
+
+        XCTAssertEqual(resolver.currentCachedHost(), "lan")
+        XCTAssertEqual(resolver.nextStreamHost(), "lan")
+    }
+
+    /// Nil covers both endings that are not failures: the daemon closing the stream cleanly, and this
+    /// client tearing it down itself (the receive loop reports nil once `cancel()` has cleared its
+    /// connection). Neither may cost the address its standing.
+    func testACleanCloseOrLocalTeardownDoesNotRotateTheStreamOffItsAddress() throws {
+        let resolver = try provenResolver()
+
+        SpacesDeviceAPIStreamEndpoint.invalidating({ _ in }, resolver: resolver, host: "lan")(nil)
+
+        XCTAssertEqual(resolver.currentCachedHost(), "lan")
+        XCTAssertEqual(resolver.nextStreamHost(), "lan")
+    }
+
+    /// The case the invalidation exists for: the connection itself died, so the next reconnect has to try
+    /// somewhere else, and the request path must stop trusting the address too.
+    func testATransportFailureRotatesTheStreamAndDropsTheSharedWinner() throws {
+        for failure in Self.transportFailures {
+            let resolver = try provenResolver()
+
+            SpacesDeviceAPIStreamEndpoint.invalidating({ _ in }, resolver: resolver, host: "lan")(failure)
+
+            XCTAssertNil(resolver.currentCachedHost(), "\(failure) should drop the shared winner")
+            XCTAssertEqual(resolver.nextStreamHost(), "tailnet", "\(failure) should rotate the stream")
+        }
+    }
+
+    private static let transportFailures: [any Error] = [
+        SpacesDeviceAPIRequestClientError.connectionFailed("connection reset"), SpacesDeviceAPIRequestClientError.timeout("timed out"),
+        SpacesDeviceAPIRequestClientError.emptyResponse, SpacesPinnedTLSConnectionError.connectionClosed, SpacesPinnedTLSConnectionError.timeout,
+        POSIXError(.ECONNRESET),
+    ]
+
+    /// A resolver whose preferred address has been proven, so a test can show what an ending does or does
+    /// not cost it.
+    private func provenResolver() throws -> SpacesDeviceEndpointResolver {
+        let connector = ConnectRecorder()
+        connector.setBehavior(host: "lan", .succeeds)
+        let resolver = makeResolver(hosts: ["lan", "tailnet"], connector: connector)
+        try resolver.connect(host: "lan", timeout: 10).cancel()
+        return resolver
+    }
+
     /// The per-failure invalidation is evidence about one address on the network in use, so it keeps its
     /// meaning: only the wholesale network-change reset forgets it.
     func testAnOrdinaryStreamFailureStillSkipsThatCandidate() {
@@ -375,6 +451,25 @@ private final class FakeLineConnection: SpacesPinnedTLSLineConnection, @unchecke
         lock.lock()
         cancelled = true
         lock.unlock()
+    }
+}
+
+/// Collects what a wrapped disconnect handler was handed, so a test can prove the ending is still
+/// delivered to the caller even when the resolver deliberately ignores it.
+private final class ErrorRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    func append(_ error: (any Error)?) {
+        lock.lock()
+        recorded.append(error.map { $0.localizedDescription } ?? "nil")
+        lock.unlock()
+    }
+
+    func descriptions() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
     }
 }
 

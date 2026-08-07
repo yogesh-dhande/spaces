@@ -180,16 +180,55 @@ enum SpacesDeviceAPIStreamEndpoint {
         return host
     }
 
-    /// Wraps a disconnect handler so a stream that ended with an error reports the address it was on as
-    /// failed, and the next reconnect moves on to a different candidate. A nil error is a deliberate
-    /// teardown (the caller stopped the stream) and must not invalidate an address that never failed.
+    /// Wraps a disconnect handler so a stream that ended because its *address* failed reports that
+    /// address as failed, and the next reconnect moves on to a different candidate.
     static func invalidating(_ onDisconnect: @escaping @Sendable ((any Error)?) -> Void, resolver: SpacesDeviceEndpointResolver, host: String)
         -> @Sendable ((any Error)?) -> Void
     {
         { error in
-            if error != nil { resolver.noteStreamFailed(host: host) }
+            if isHostTransportFailure(error) { resolver.noteStreamFailed(host: host) }
             onDisconnect(error)
         }
+    }
+
+    /// Whether a stream's ending is evidence against the address it was on.
+    ///
+    /// "The stream ended" and "this address is bad" are different facts, and only the second may rotate
+    /// the stream off a candidate or drop the shared cached winner. Getting this wrong is expensive in
+    /// both directions: marking a good address failed sends every later reconnect to a worse candidate
+    /// and can walk a working device off the address it should be on, while missing a real failure keeps
+    /// the stream retrying an address that is gone.
+    ///
+    /// Not a failure of the address:
+    /// - `requestRejected` — the pinned handshake completed and the daemon answered on this very
+    ///   connection, choosing to refuse the subscription (a revoked token, an ended session). The address
+    ///   is demonstrably reachable and correct; the caller branches on the code to recover.
+    /// - a decode failure — again delivered over a healthy connection, and evidence about a payload
+    ///   rather than about a path.
+    /// - a nil error. `SpacesPinnedTLSConnection`'s receive loop reports nil for two different endings,
+    ///   and neither indicts the address: a clean peer EOF (`isComplete`, the daemon chose to close), and
+    ///   a local teardown, where the loop sees its connection already cleared by `cancel()` and
+    ///   deliberately reports nil rather than the cancellation error. That is what keeps `stop()` from
+    ///   ever reporting a failure here.
+    static func isHostTransportFailure(_ error: (any Error)?) -> Bool {
+        guard let error else { return false }
+        if let requestError = error as? SpacesDeviceAPIRequestClientError {
+            switch requestError {
+            case .timeout, .emptyResponse, .connectionFailed: return true
+            case .invalidPort, .requestRejected: return false
+            }
+        }
+        if let pinnedTLSError = error as? SpacesPinnedTLSConnectionError {
+            switch pinnedTLSError {
+            case .timeout, .connectionFailed, .connectionClosed: return true
+            // Neither is about the path: an invalid port never reached one, and a second receive loop on
+            // one connection is a programming error.
+            case .invalidPort, .receiveLoopActive: return false
+            }
+        }
+        // The raw drop shapes the transport surfaces without wrapping (reset, aborted, broken pipe), read
+        // through the same authority the request path replays idempotent requests on.
+        return SpacesPinnedTLSConnector.isClosedConnectionError(error)
     }
 }
 
@@ -308,9 +347,12 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
         createdConnection.startReceiveLoop(
             onLine: { [weak self] line in
                 do { onOverview(try SpacesDeviceOverviewStreamCodec.decodeLine(line)) } catch {
-                    // A non-payload line is usually a server error response; surface its message.
+                    // A non-payload line is usually a server error response; surface its message. Reported
+                    // as a rejection rather than a connection failure because that is what it is: the
+                    // daemon answered on a healthy connection, so this must not read as the address being
+                    // unreachable — the message the user sees is the same either way.
                     if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
-                        onDisconnect(SpacesDeviceAPIRequestClientError.connectionFailed(response.message))
+                        onDisconnect(SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode))
                     } else {
                         onDisconnect(error)
                     }
