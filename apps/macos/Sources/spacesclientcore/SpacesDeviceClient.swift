@@ -911,12 +911,20 @@ public enum SpacesDeviceClient {
     /// raced and none answered — conclusive that the link is down right now. A timeout only means this
     /// one round trip did not complete inside its deadline, and on the hot per-keystroke path that
     /// deadline is tight enough (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`,
-    /// 5s) that an app-side stall — the main actor too busy to service the send or its response in
-    /// time — produces exactly the same timeout a genuinely dead link would, with the link itself never
-    /// having done anything wrong. A caller that needs to tell those two apart (see
+    /// 5s) that a live, merely congested link can miss it too: the send itself never touches the main
+    /// actor (`TerminalInputSerialQueue.enqueue` hands off to a detached task that calls the pinned-TLS
+    /// connection directly), but interactive sends and the `.state` resync fetch share one per-session
+    /// request client (`SpacesDeviceAPIRequestSessionClient`) whose requests serialize behind a single
+    /// lock — under heavy streaming a keystroke queued behind a grid-sized resync fetch can miss the
+    /// deadline on wait time alone, with the link itself never having done anything wrong. A silent link
+    /// death (a connect that never reaches ready, or a request nothing answers) produces the identical
+    /// timeout, so a timeout alone does not prove the link is fine either — it is inconclusive in both
+    /// directions. A caller that needs to tell those two apart (see
     /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which uses this to decide whether a failed
     /// keystroke send also proves every other queued keystroke should be discarded) calls this in addition
-    /// to `isDeviceAPITransportFailure`.
+    /// to `isDeviceAPITransportFailure`, and gets its conclusive answer from the already-confirmed-outage
+    /// branch (a connection-level failure, or a stream disconnect whose next failure cancels the backlog),
+    /// not from the timeout itself.
     ///
     /// Only the two shapes a timeout actually arrives as qualify: `SpacesDeviceAPIRequestClientError.timeout`
     /// and `SpacesPinnedTLSConnectionError.timeout` — the latter is what `sendLine`/`readLine` throw

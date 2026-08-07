@@ -40,20 +40,24 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         }
     }
 
-    /// Counts reductions as they happen, from inside `shouldUseFrame`, which the reducer calls on the
-    /// pipeline's own thread for every payload that materializes a frame. It is what lets a test know
-    /// the reduce loop has drained without waiting on the main actor the test is deliberately holding.
-    private final class ReduceProbe: @unchecked Sendable {
+    /// Counts payloads as they reach the apply mailbox, via the pipeline's `didSubmitForTesting` hook.
+    /// It is what lets a test know every payload it submitted has been handed to the mailbox — and so
+    /// is safe to release the main thread it is deliberately holding — without waiting on the main actor
+    /// itself. `shouldUseFrame` is not a safe signal for this: it runs *during* reduction, before the
+    /// output it gates is constructed and handed to the mailbox, so counting there can see the last
+    /// payload as "reduced" while its `mailbox.submit` has not run yet, letting the release race a drain
+    /// that started one payload short.
+    private final class SubmitProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
 
-        func recordReduction() {
+        func recordSubmission() {
             lock.lock()
             count += 1
             lock.unlock()
         }
 
-        var reductions: Int {
+        var submissions: Int {
             lock.lock()
             defer { lock.unlock() }
             return count
@@ -179,16 +183,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let series = try streamingSeries(sessionID: "pipeline-burst", frameCount: 40, fetchIndex: 400, clipboardIndex: 400)
         let collector = OutputCollector()
         let target = ApplyTarget(collector: collector)
-        let probe = ReduceProbe()
+        let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in
-                probe.recordReduction()
-                return true
-            }, apply: { [weak target] output in target?.apply(output) })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for entry in series { pipeline.submit(entry.payload) }
-        try await waitUntil("every payload reduced") { probe.reductions == series.count }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == series.count }
         XCTAssertEqual(collector.recorded.count, 0, "an apply ran while the main actor was held")
         release.signal()
 
@@ -207,16 +209,14 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let series = try streamingSeries(sessionID: "pipeline-clipboard", frameCount: 10, fetchIndex: 400, clipboardIndex: 5)
         let collector = OutputCollector()
         let target = ApplyTarget(collector: collector)
-        let probe = ReduceProbe()
+        let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in
-                probe.recordReduction()
-                return true
-            }, apply: { [weak target] output in target?.apply(output) })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for entry in series { pipeline.submit(entry.payload) }
-        try await waitUntil("every frame payload reduced") { probe.reductions == 10 }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == series.count }
         release.signal()
 
         try await waitUntil("the whole series applied") { collector.recorded.count == 3 }
@@ -230,7 +230,11 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     /// A delta that cannot apply asks for a resync. That request is a one-shot the session needs even
     /// when the payload carrying it is superseded before it reaches the screen, so it rides onto the
-    /// output that replaced it.
+    /// output that replaced it — but only when that replacement carries its own frame:
+    /// `ApplyMailbox.mayCollapse` never lets the frameless, failed delta absorb the full frame ahead of
+    /// it (`alpha`), so `alpha` stays queued on its own and is applied first. The full frame behind it
+    /// (`charl`) *does* collapse the failed delta away, since `charl` carries its own frame and so loses
+    /// nothing by replacing it, and it inherits the failed delta's resync request in the process.
     func testResyncRequestFromACoalescedOutputStillArrives() async throws {
         let sessionID = "pipeline-coalesced-resync"
         let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
@@ -247,28 +251,62 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
         let collector = OutputCollector()
         let target = ApplyTarget(collector: collector)
-        let probe = ReduceProbe()
+        let probe = SubmitProbe()
         let pipeline = TerminalRemoteStateReductionPipeline(
-            shouldUseFrame: { _, _ in
-                probe.recordReduction()
-                return true
-            }, apply: { [weak target] output in target?.apply(output) })
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
 
         let release = blockMainThread()
         for payload in payloads { pipeline.submit(payload) }
-        // Only the two full frames materialize a frame to gate; the failed delta never reaches
-        // `shouldUseFrame`, so two reductions means the whole series has been reduced.
-        try await waitUntil("every payload reduced") { probe.reductions == 2 }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
         release.signal()
 
-        try await waitUntil("the burst applied") { !collector.recorded.isEmpty }
+        try await waitUntil("both surviving entries applied") { collector.recorded.count == 2 }
         try await settle()
-        XCTAssertEqual(collector.recorded.count, 1)
-        let applied = try XCTUnwrap(collector.recorded.first)
-        XCTAssertEqual(applied.frameText, "charl")
-        XCTAssertFalse(applied.didRequestResync, "the surviving full frame reduced cleanly on its own")
-        XCTAssertTrue(applied.requestsResync, "the coalesced-away delta's resync request was lost")
-        XCTAssertEqual(applied.coalescedAwayCount, 2)
+        XCTAssertEqual(collector.recorded.count, 2, "the leading full frame must survive; the frameless failed delta cannot coalesce it away")
+        XCTAssertEqual(collector.recorded.map(\.frameText), ["alpha", "charl"])
+        XCTAssertEqual(collector.recorded.map(\.didRequestResync), [false, false], "both surviving full frames reduced cleanly on their own")
+        XCTAssertEqual(
+            collector.recorded.map(\.requestsResync), [false, true], "the coalesced-away delta's resync request must still ride onto its replacement")
+        XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 1])
+    }
+
+    /// Coalescing must never let a frameless output silently absorb a pending frame-carrying one.
+    /// `input` never carries a render update at all (`TerminalRemoteSessionStatePolicy.shouldIncludeScreenState`
+    /// excludes screen state for it), yet its reason still routes to `.spacesTerminalOutputDidChange`
+    /// alone, the same as `output`, so it is coalescible-on-apply by reason. Collapsing purely on reason
+    /// would fold this frameless payload into the full frame ahead of it and inherit the *newer*
+    /// (frameless) reduction, discarding the frame with no resync requested to make up for it — the
+    /// pane would stay one frame stale until unrelated later traffic happened to resync it.
+    /// `ApplyMailbox.mayCollapse` exists to refuse exactly this collapse.
+    func testFramelessCoalescibleOutputCannotAbsorbAPendingFrame() async throws {
+        let sessionID = "pipeline-frame-safety"
+        let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "keep-me"))
+        let framePayload = payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(frame))
+        let framelessPayload = inputPayload(sessionID: sessionID, sequence: 1)
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
+
+        // Both submissions land in the mailbox while the main thread is held, which is exactly the
+        // situation `ApplyMailbox.submit` collapses runs in: without the frame check, the frameless
+        // second entry would replace the first before either is ever applied.
+        let release = blockMainThread()
+        pipeline.submit(framePayload)
+        pipeline.submit(framelessPayload)
+        try await waitUntil("both payloads submitted to the mailbox") { probe.submissions == 2 }
+        release.signal()
+
+        try await waitUntil("both payloads applied") { collector.recorded.count == 2 }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 2, "the frame-carrying output must not be coalesced away by the frameless one that followed it")
+        XCTAssertEqual(collector.recorded.map(\.reason), [TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input])
+        XCTAssertEqual(collector.recorded.map(\.frameText), ["keep-me", nil], "the pending frame must survive; it would be nil today")
+        XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 0])
     }
 
     /// A delta that cannot apply resets the baseline inside the reducer. The reset belongs to its place
@@ -314,8 +352,15 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
     /// Teardown: the pipeline goes away with its owner. Whatever was still queued is dropped rather
     /// than reduced for an owner that no longer exists, and nothing is applied to the released target.
+    ///
+    /// Built from `session_metadata` payloads deliberately, not the usual streaming series: those are
+    /// screen-content reasons that coalesce on apply, so a 200-payload burst of them collapses to at
+    /// most a handful of applies regardless of teardown — `appliedAfterRelease < series.count` would
+    /// pass trivially on coalescing alone and prove nothing about release actually stopping the drain.
+    /// `session_metadata` is a barrier reason (see `sessionMetadataPayload`): every payload queues its
+    /// own apply, so the count below can only stay small because release cut the drain off mid-queue.
     func testReleasingThePipelineStopsApplyingQueuedPayloads() async throws {
-        let series = try streamingSeries(sessionID: "pipeline-teardown", frameCount: 200, fetchIndex: 400, clipboardIndex: 400)
+        let series = (0..<200).map { sessionMetadataPayload(sessionID: "pipeline-teardown", sequence: $0) }
         let collector = OutputCollector()
         let firstApply = expectation(description: "first payload applied")
         firstApply.assertForOverFulfill = false
@@ -329,7 +374,7 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             })
         weak var weakPipeline = pipeline
 
-        for entry in series { pipeline?.submit(entry.payload) }
+        for payload in series { pipeline?.submit(payload) }
         await fulfillment(of: [firstApply], timeout: 20)
 
         pipeline = nil
@@ -390,6 +435,28 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "live",
             workingDirectory: "/tmp/live", outputByteCount: nil,
             clipboardWrite: TerminalClipboardWritePayload(targetClientID: "mac-owner", text: "copied"))
+    }
+
+    /// A `session_metadata` payload: a barrier reason (its routed notification is
+    /// `.spacesTerminalSessionMetadataDidChange` alone, never `.spacesTerminalOutputDidChange`, so
+    /// `isCoalescibleOnApply` is false), carrying no render update. A series built from these never
+    /// coalesces on apply, which is the point where a test needs every submitted payload to actually
+    /// queue an apply instead of being absorbed into a neighbor's.
+    private func sessionMetadataPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.sessionMetadata, emittedAt: emittedAt(sequence),
+            sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
+            title: "live-\(sequence)", workingDirectory: "/tmp/live", outputByteCount: nil)
+    }
+
+    /// An `input` payload: coalescible-on-apply by reason (see `TerminalRemoteSessionStateNotificationRouting`)
+    /// but never carrying a render update — `TerminalRemoteSessionStatePolicy.shouldIncludeScreenState`
+    /// excludes screen state for this reason, so a daemon never attaches one.
+    private func inputPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.input, emittedAt: emittedAt(sequence),
+            sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil,
+            title: "live", workingDirectory: "/tmp/live", outputByteCount: nil)
     }
 
     private func emittedAt(_ sequence: Int) -> String { String(format: "2026-05-20T00:%02d:%02dZ", sequence / 60, sequence % 60) }

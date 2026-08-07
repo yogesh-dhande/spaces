@@ -31,7 +31,9 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// could not apply a delta, or because an output coalesced away before it could not.
     public var requestsResync: Bool { reduction?.didRequestResync == true || inheritedResyncRequest }
 
-    /// True when a newer output fully supersedes this one, so the mailbox may drop it.
+    /// True when this output's *reason* is the coalescible kind — necessary but not sufficient for the
+    /// mailbox to actually drop it; see `ApplyMailbox.mayCollapse` for the full rule, which also checks
+    /// whether a frame would be lost.
     ///
     /// Derived from the notification routing rather than listed as its own table: a reason that posts
     /// exactly the output-shaped notification describes screen content and carries no state transition
@@ -41,6 +43,12 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// `clipboard_write` posts none because its effect is a pasteboard write whose position among the
     /// state around it matters. Both are barriers, as is a reason this build does not know, which is
     /// the safe side to fail on.
+    ///
+    /// This property alone says nothing about whether the payload actually carries a frame: `input`
+    /// routes here despite never exporting screen state, and a delta that failed to reduce against a
+    /// stale grid routes here too despite reducing to no frame at all. "A newer frame renders everything
+    /// an older frame would have" only holds when the newer output has one — `ApplyMailbox.mayCollapse`
+    /// is what checks that before actually collapsing.
     var isCoalescibleOnApply: Bool {
         TerminalRemoteSessionStateNotificationRouting.notifications(forReason: incomingPayload.reason) == [.spacesTerminalOutputDidChange]
     }
@@ -83,8 +91,10 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 /// backlog grow without bound.
 ///
 /// The mailbox keeps the queue in order and collapses each run of consecutive coalescible outputs to
-/// its newest member (see `isCoalescibleOnApply`): a superseded frame is never drawn, and one main-actor
-/// drain task at a time applies whatever has accumulated. What survives a collapse is exactly what the
+/// its newest member (see `isCoalescibleOnApply`), except where doing so would make a still-pending frame
+/// vanish rather than merely go undrawn (see `ApplyMailbox.mayCollapse`): a superseded frame is never
+/// drawn, but a frame is never silently dropped either, and one main-actor drain task at a time applies
+/// whatever has accumulated. What survives a collapse is exactly what the
 /// screen and the session need: the newest frame, the merged state the reducer chained through every
 /// skipped payload, and the one-shot effects (`requestsResync`) of the outputs that were dropped. Their
 /// per-payload metrics do not survive; the surviving apply reports how many were folded into it
@@ -99,9 +109,18 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
     ///   - apply: Applies one reduction result on the main actor. Hold the host weakly here: the
     ///     consumer task outlives nothing, but a payload already being reduced when the host is
     ///     released must apply to nothing rather than to a torn-down host.
+    ///   - didSubmitForTesting: Called synchronously, still on the consumer's own thread, immediately
+    ///     after each payload is handed to the apply mailbox. Nil in production. `shouldUseFrame` runs
+    ///     *during* reduction, before the output it gates is even constructed, so a test that needs to
+    ///     know "every payload has reached the mailbox" (to then release a main thread it is holding, and
+    ///     make a coalescing burst deterministic) cannot use `shouldUseFrame` as that signal without a
+    ///     race: the reduction of the last payload can be observed as done before its `mailbox.submit`
+    ///     actually runs, letting the release land, and a first drain, ahead of that submit — which then
+    ///     shows up as a spurious second apply once it lands. This fires after the submit that would
+    ///     otherwise race the test, closing that window.
     public init(
         shouldUseFrame: @escaping @Sendable (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool,
-        apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void
+        apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void, didSubmitForTesting: (@Sendable () -> Void)? = nil
     ) {
         let (stream, continuation) = AsyncStream<GhosttyRemoteSessionStatePayload>.makeStream(bufferingPolicy: .unbounded)
         self.continuation = continuation
@@ -128,6 +147,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
                         incomingPayload: incomingPayload, reduction: reduction, reduceMS: TerminalPerformance.elapsedMS(since: reduceStartedAt))
                 }
                 mailbox.submit(output)
+                didSubmitForTesting?()
             }
         }
     }
@@ -157,9 +177,26 @@ private final class ApplyMailbox: @unchecked Sendable {
 
     init(apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void) { self.apply = apply }
 
+    /// The collapse rule: `output` may replace the queue's last entry only when doing so cannot make a
+    /// pending frame vanish. Both entries must be coalescible-on-apply reasons (`isCoalescibleOnApply`),
+    /// AND either `output` itself carries a frame (`reduction?.frameToApply != nil`) or the pending entry
+    /// never carried one either (`pending.reduction?.frameToApply == nil`). Without that second half, a
+    /// frameless newer output — a reason that never exports a render update at all (`input`, which
+    /// `TerminalRemoteSessionStatePolicy.shouldIncludeScreenState` excludes screen state for) or a delta
+    /// that failed to reduce against a stale grid (`frameToApply == nil` with no resync requested to make
+    /// up for it) — would silently erase a still-pending frame from the queue: the collapsed entry applies
+    /// as the frameless output, and the frame the pending entry was carrying is gone with nothing left to
+    /// ask the session to resend it. Failing this check appends `output` as a new barrier instead; the
+    /// queue stays ordered and its growth is bounded by the rate of frameless payloads, which stays low
+    /// relative to full-frame output.
+    private static func mayCollapse(_ output: TerminalRemoteStateReductionOutput, onto pending: TerminalRemoteStateReductionOutput) -> Bool {
+        output.isCoalescibleOnApply && pending.isCoalescibleOnApply
+            && (output.reduction?.frameToApply != nil || pending.reduction?.frameToApply == nil)
+    }
+
     func submit(_ output: TerminalRemoteStateReductionOutput) {
         lock.lock()
-        if output.isCoalescibleOnApply, let pending = queued.last, pending.isCoalescibleOnApply {
+        if let pending = queued.last, Self.mayCollapse(output, onto: pending) {
             queued[queued.count - 1] = output.inheritingEffects(ofCoalesced: pending)
         } else {
             queued.append(output)

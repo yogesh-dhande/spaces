@@ -19,12 +19,17 @@
     /// (whatever failure surfacing the model does for it — the disconnect notice, the paced reconnect —
     /// runs the same as for any other transport failure), but the timeout alone does not prove the queued
     /// backlog would go nowhere. The interactive control deadline is tight enough
-    /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that an app-side
-    /// stall — the main actor too busy to service the send or its response in time — produces exactly the
-    /// same timeout a genuinely dead link would; discarding a live pane's backlog on that false alarm is
-    /// the bug this distinction exists to avoid. Only a connection-level failure (refused, closed, every
-    /// candidate address unreachable) — or a repeat failure during an outage a prior conclusive failure
-    /// already confirmed — answers `true`.
+    /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that a live but
+    /// congested link can miss it on its own: the send path never touches the main actor
+    /// (`TerminalInputSerialQueue.enqueue` hands off to a detached task that talks to the pinned-TLS
+    /// connection directly), but interactive sends and the `.state` resync fetch share one per-session
+    /// request client whose requests serialize behind a single lock, so under heavy streaming a keystroke
+    /// queued behind a grid-sized resync fetch can time out on wait alone. Discarding a live pane's
+    /// backlog on that false alarm is the bug this distinction exists to avoid — and a silently dead link
+    /// (nothing ever answers) produces the identical timeout, so the timeout by itself is not conclusive
+    /// either way. Only a connection-level failure (refused, closed, every candidate address unreachable)
+    /// — or a repeat failure during an outage a prior conclusive failure already confirmed — answers
+    /// `true`.
     public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (

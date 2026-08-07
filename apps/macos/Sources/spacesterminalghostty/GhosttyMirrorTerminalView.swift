@@ -868,18 +868,24 @@
 
         /// Presents whatever the mirror last applied, once per display interval at most.
         ///
-        /// A mirror surface is driven entirely from the outside: nothing in it decides when to paint, so
-        /// a frame that is applied and never drawn leaves the pane showing older content, blank on the
-        /// first frame after a surface is built. This refresh is that guarantee, and it is a *deferred*
-        /// one on purpose. `ghostty_mirror_apply_render_frame` already draws the frame it applies, and a
-        /// draw blocks on the GPU, so presenting inline as well would charge every applied frame several
-        /// serialized command-buffer waits on the main thread. A session under steady output flushes
-        /// faster than the display refreshes, so those waits accumulate into multi-second stalls.
+        /// A mirror surface is driven entirely from the outside: nothing in it decides when to paint on
+        /// its own. `ghostty_mirror_apply_render_frame`'s own draw (`core_surface.draw()`, at apply time)
+        /// presents whichever cells were last *built* — building is a separate step that runs on the
+        /// render thread only when woken by `ghostty_surface_refresh`, which the apply does not call. So
+        /// an apply with no refresh behind it draws the *previous* frame's cells again, not the one it
+        /// just applied: it is a bounded, GPU-blocking cost this app cannot remove without a fork change,
+        /// but it does not itself present the applied frame. This refresh is what does that: it is the
+        /// call that wakes the rebuild and presents its result, roughly 16&nbsp;ms after the apply that
+        /// needed it, and it is *deferred* rather than run inline for the same reason the apply's own
+        /// draw is already a cost worth minimizing — an inline refresh would add its own serialized,
+        /// GPU-blocking command-buffer wait on top of the apply's, once per applied frame, and a session
+        /// under steady output flushes faster than the display refreshes, so those waits would accumulate
+        /// into multi-second stalls.
         ///
         /// A pending refresh is therefore left alone rather than cancelled and rescheduled: rescheduling
-        /// per apply is what would let a steady producer push the safety net past every frame it was
-        /// meant to cover. The last frame of a burst is always presented: it either finds no pending
-        /// task and schedules one, or finds one that has not run yet and will draw the surface it just
+        /// per apply is what would let a steady producer push the refresh past every frame it was meant
+        /// to cover. The last frame of a burst is always presented: it either finds no pending task and
+        /// schedules one, or finds one that has not run yet and will build and draw the surface it just
         /// applied to.
         private func scheduleSurfacePresentationRefresh() {
             guard pendingSurfacePresentationTask == nil else { return }
