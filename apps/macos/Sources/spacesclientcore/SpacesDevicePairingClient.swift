@@ -229,9 +229,11 @@ public enum SpacesDevicePairingClient {
         link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
         profile: SpacesProfile? = nil
     ) throws -> SpacesRemoteDevicePairingResult {
-        // The link's hosts are already ordered most-preferred first, and all of them are stored as the
-        // record's candidates. The redemption itself races them through a throwaway resolver — one with
-        // no persistence callback, since there is no stored record to record a proven address against
+        // The link's hosts arrive ordered most-preferred first and already normalized and capped by
+        // `SpacesDevicePairingLink.parse` (a link's `host` parameter repeats, so the bound is applied
+        // once there, for every client that redeems), and all of them are stored as the record's
+        // candidates. The redemption itself races them through a throwaway resolver — one with no
+        // persistence callback, since there is no stored record to record a proven address against
         // yet — so scanning a pairing link works away from the device's LAN, not only on it.
         guard !link.hosts.isEmpty else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Pairing link is missing a Device API host.")
