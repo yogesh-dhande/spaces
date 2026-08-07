@@ -12,7 +12,8 @@ import Testing
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
-            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) })
+            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) },
+            minimumStartInterval: .zero)
 
         coordinator.request()
         while continuations.isEmpty { await Task.yield() }
@@ -44,7 +45,8 @@ import Testing
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
-            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) })
+            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) },
+            minimumStartInterval: .zero)
 
         coordinator.request()
         #expect(await eventually { continuations.count == 1 })
@@ -109,10 +111,150 @@ import Testing
         #expect(applied.map(\.bypassesBackoff) == [false])
     }
 
+    /// A streaming terminal raises `databaseDidChange` per output tick, so requests arrive far faster
+    /// than a snapshot load can run. Without spacing between starts, each finished reload immediately
+    /// starts the queued one and the sidebar reloads back to back for as long as output flows.
+    ///
+    /// The interval is set far beyond any plausible scheduling lag, so "the next reload has not started
+    /// yet" is a fact about the coordinator rather than about how loaded the machine running the test is.
+    @Test func reloadStartsAreSpacedByTheMinimumIntervalUnderARequestStorm() async {
+        var applied: [Int] = []
+        var loads = 0
+
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            },
+            applySnapshot: { snapshot, _, _ in applied.append(snapshot) },
+            handleFailure: { _, _ in },
+            minimumStartInterval: .seconds(60))
+
+        coordinator.request()
+        for _ in 0..<20 { coordinator.request() }
+        #expect(await eventuallySleeping { applied.count == 1 })
+
+        try? await ContinuousClock().sleep(for: .milliseconds(100))
+        // The storm collapsed into one run plus one start still waiting on the interval, not a run per
+        // request and not a second run started the moment the first finished.
+        #expect(loads == 1)
+        #expect(coordinator.state == .queued)
+
+        coordinator.stop()
+    }
+
+    /// The last request must always be applied: it carries state the sidebar has not shown yet, so
+    /// spacing may delay the trailing edge but must never drop it.
+    @Test func trailingRequestDuringCooldownAlwaysApplies() async {
+        var applied: [(snapshot: Int, forceRemoteRefresh: Bool, bypassesBackoff: Bool)] = []
+        var loads = 0
+
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            },
+            applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
+            handleFailure: { _, _ in },
+            minimumStartInterval: .milliseconds(60))
+
+        coordinator.request()
+        for _ in 0..<5 { coordinator.request() }
+        coordinator.request(forceRemoteRefresh: true)
+        await coordinator.drainCurrentReloadForTesting()
+
+        #expect(applied.map(\.snapshot) == [1, 2])
+        #expect(applied.map(\.forceRemoteRefresh) == [false, true])
+        #expect(applied.map(\.bypassesBackoff) == [false, true])
+        #expect(coordinator.state == .idle)
+    }
+
+    /// Spacing must never delay the first reload of all, whatever the interval is.
+    @Test func theFirstRequestStartsImmediately() async {
+        var loads = 0
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            },
+            applySnapshot: { _, _, _ in },
+            handleFailure: { _, _ in },
+            minimumStartInterval: .seconds(60))
+
+        coordinator.request()
+        #expect(coordinator.state == .loading)
+
+        coordinator.stop()
+    }
+
+    /// A user action after a quiet period is the latency-sensitive case, so a request that arrives once
+    /// the interval has elapsed starts loading synchronously instead of waiting on a schedule.
+    @Test func requestAfterAQuietPeriodStartsImmediately() async {
+        let interval = Duration.milliseconds(100)
+        var loads = 0
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            },
+            applySnapshot: { _, _, _ in },
+            handleFailure: { _, _ in },
+            minimumStartInterval: interval)
+
+        coordinator.request()
+        await coordinator.drainCurrentReloadForTesting()
+        #expect(loads == 1)
+
+        // Sleeping past the interval can only overshoot under load, which is the direction that keeps
+        // the following request outside the cooldown.
+        try? await ContinuousClock().sleep(for: interval + .milliseconds(200))
+        coordinator.request()
+        #expect(coordinator.state == .loading)
+        await coordinator.drainCurrentReloadForTesting()
+        #expect(loads == 2)
+    }
+
+    /// The interval is long enough that the scheduled start provably still exists when `stop()` runs.
+    @Test func stopCancelsAScheduledStart() async {
+        var loads = 0
+        let coordinator = SidebarReloadCoordinator<Int>(
+            loadSnapshot: {
+                loads += 1
+                return .success(loads)
+            },
+            applySnapshot: { _, _, _ in },
+            handleFailure: { _, _ in },
+            minimumStartInterval: .seconds(60))
+
+        coordinator.request()
+        await coordinator.drainCurrentReloadForTesting()
+        #expect(loads == 1)
+
+        coordinator.request()
+        #expect(coordinator.state == .queued)
+        coordinator.stop()
+        #expect(coordinator.state == .idle)
+
+        try? await ContinuousClock().sleep(for: .milliseconds(100))
+        #expect(loads == 1)
+    }
+
     private func eventually(maxYields: Int = 1_000, _ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0..<maxYields {
             if condition() { return true }
             await Task.yield()
+        }
+        return condition()
+    }
+
+    /// Polls with real sleeps, for conditions whose progress depends on elapsed time rather than on
+    /// yielding to work that is already runnable.
+    private func eventuallySleeping(timeout: Duration = .seconds(5), _ condition: @MainActor () -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await clock.sleep(for: .milliseconds(2))
         }
         return condition()
     }
