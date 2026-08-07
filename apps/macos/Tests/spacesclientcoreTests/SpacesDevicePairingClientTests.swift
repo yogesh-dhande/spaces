@@ -144,6 +144,29 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertEqual(SpacesDevicePairingClient.relayedPairingHosts(deviceAPIHost: "studio.local", advertisedHosts: []), ["studio.local"])
     }
 
+    /// A device's stored id must not move when the address it was paired on changes, and no stored id
+    /// is ever rewritten, because the id has always been decided by the certificate fingerprint alone:
+    /// the 48-character truncation lands inside the fingerprint hex, so the host and port in the old
+    /// formula could never reach the output. Pins that against the historical formula for a realistic
+    /// fingerprint.
+    func testStablePairedDeviceIDMatchesTheHistoricalHostBearingFormula() {
+        let fingerprint = "SHA256:" + String(repeating: "a1b2c3d4", count: 8)
+        XCTAssertEqual(fingerprint.count, "SHA256:".count + 64)
+
+        func historicalID(certificateFingerprint: String, host: String, port: Int) -> String {
+            let source = "\(certificateFingerprint)|\(host)|\(port)"
+            let slug = source.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
+                in: CharacterSet(charactersIn: "-"))
+            return "device-\(slug.prefix(48))"
+        }
+
+        for host in ["studio.local", "10.0.0.5", "100.64.12.34"] {
+            XCTAssertEqual(
+                SpacesDevicePairingClient.stablePairedDeviceID(certificateFingerprint: fingerprint, port: 47_847),
+                historicalID(certificateFingerprint: fingerprint, host: host, port: 47_847))
+        }
+    }
+
     func testRemotePairCommandFailureMessageIsUserFacing() {
         let message = SpacesDevicePairingClient.remotePairCommandFailureMessage(
             destination: "builder.local", command: SpacesDevicePairingClient.installedRemotePairCommand,

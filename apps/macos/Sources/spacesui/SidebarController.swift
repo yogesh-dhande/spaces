@@ -106,6 +106,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Detection for the one device that cannot report its own death: this Mac's daemon. Ticked by the
     /// watchdog while the local section claims to be loaded; see `LocalDaemonReachabilityProbe`.
     private let localDaemonReachabilityProbe = LocalDaemonReachabilityProbe()
+    /// Immediate recovery when this Mac's own network path changes, rather than waiting out the
+    /// watchdog tick and each device's backoff; see `handleNetworkPathChange`.
+    private let deviceNetworkPathWatcher = DeviceNetworkPathWatcher()
     /// State of the live device-overview subscriptions, one per paired remote device. The remote
     /// daemon pushes a fresh overview on every database change, so remote sidebar state stays
     /// current without polling (remote state has no local event). This controller performs the
@@ -581,11 +584,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         remoteOverviewSubscriptions.enable()
         refreshRemoteOverviewSubscriptions()
         startDeviceReachabilityWatchdog()
+        deviceNetworkPathWatcher.start { [weak self] in self?.handleNetworkPathChange() }
     }
 
     func stopRemoteOverviewSubscriptions() {
         deviceReachabilityWatchdogTimer?.invalidate()
         deviceReachabilityWatchdogTimer = nil
+        deviceNetworkPathWatcher.stop()
         for client in remoteOverviewSubscriptions.disable() { client.stop() }
     }
 
@@ -660,6 +665,41 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             return
         }
         probeLocalDaemonReachability(deviceID: localSection.deviceID)
+    }
+
+    /// This Mac's network path changed: it left a network, joined one, woke, or Tailscale came up or
+    /// went down. Every address any resolver has proven was proven on the path that just went away, so
+    /// each one is dropped and every paired remote is attempted again right now.
+    ///
+    /// Without this the recovery is real but slow: an offline device waits out the backoff its failures
+    /// grew (up to a minute), and a device still reading as loaded sits on a stream whose path is dead
+    /// until TCP keepalive kills it about ninety seconds later. Joining the office Wi-Fi should bring
+    /// the Mac's devices back in the time one connect takes, not in the time a schedule tuned for a
+    /// device that is genuinely down takes.
+    ///
+    /// The retry itself is exactly what the Reconnect button does for an offline device, and exactly the
+    /// pull the watchdog does for one that still looks healthy: this contributes the trigger, not a
+    /// second reconnect mechanism.
+    private func handleNetworkPathChange() {
+        SpacesDeviceEndpointRegistry.clearAllCachedWinners()
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
+            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }
+            DeviceLinkTrace.log(deviceID: record.id, event: "network_path_changed")
+            if section.loadState.isOffline {
+                retryDeviceConnection(deviceID: record.id)
+            } else {
+                // A loaded device is not told it is retrying: its rows are still the device's last word
+                // and the pull may well confirm them, so flipping the section to "loading…" on every
+                // network change would flicker the sidebar for nothing. The pull bypasses the backoff
+                // because the schedule was grown by failures on a network this Mac has now left.
+                startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: true)
+            }
+        }
+        // Opens any subscription the new path makes possible: a device whose subscribe is waiting out a
+        // retry, or one the pull above is about to bring back. `retryDeviceConnection` already reconciles
+        // for the offline devices it handled.
+        refreshRemoteOverviewSubscriptions()
     }
 
     /// Checks that a local section claiming to be loaded is still backed by a live daemon, and reloads

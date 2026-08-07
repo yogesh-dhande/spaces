@@ -57,6 +57,9 @@ public enum SpacesDeviceAPIAuthentication {
         if case TerminalServiceTLSError.certificatePinMismatch = error { return true }
         if case TerminalServiceTLSError.peerCertificateUnavailable = error { return true }
         if case TerminalServiceTLSError.missingCertificateFingerprint = error { return true }
+        // The endpoint resolver's verdict for a candidate that accepts TCP but never completes the
+        // pinned handshake: something is listening there, and it is not the daemon this client pinned.
+        if case SpacesDeviceEndpointResolverError.transportAuthenticationFailed = error { return true }
         #if canImport(Network)
             guard let networkError = error as? NWError else { return false }
             if case .tls = networkError { return true }

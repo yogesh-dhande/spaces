@@ -125,7 +125,7 @@
             certificateFingerprint = preparedCredentials.certificateFingerprint
             requestClientBox = DeviceAPIRequestClientBox(
                 try SpacesDeviceAPIRequestSessionClient(
-                    host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint),
+                    resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: preparedCredentials.certificateFingerprint)),
                 authToken: preparedCredentials.authToken)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
@@ -384,7 +384,7 @@
         /// whether to retry or schedule a reconnect from its boolean result.
         private func establishStateStreamConnection() async {
             if streamClient != nil { return }
-            if await openStateStream(port: Int(device.port)) { return }
+            if await openStateStream() { return }
             // The first connect failed. For the local device this may be a stale port or an idle-shut-down
             // daemon; ensure it is running and re-resolve its current port, then retry. The (possibly
             // rebuilt) request client now targets a running daemon, so re-run the catch-up: an ended
@@ -394,7 +394,7 @@
                 return
             }
             await reloadCatchUpState()
-            if await openStateStream(port: Int(device.port)) { return }
+            if await openStateStream() { return }
             // A transient subscribe failure on a live session would otherwise strand existing listeners
             // with only the one-shot catch-up and no live updates, because the render host has already
             // taken its `ListenerHandle` and will not ask to subscribe again. Schedule the same
@@ -414,18 +414,17 @@
         /// would block every future reconnect. A `true` result therefore does not guarantee the installed
         /// client is still current — a racing disconnect may already have cleared and rescheduled it — only
         /// that the disconnect path has taken over its lifecycle.
-        @discardableResult private func openStateStream(port: Int) async -> Bool {
+        @discardableResult private func openStateStream() async -> Bool {
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)),
                 authToken: requestClientBox.current.authToken, clientApp: clientApp)
-            let host = device.host
-            let fingerprint = certificateFingerprint
+            let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint)
             streamClientGeneration &+= 1
             let generation = streamClientGeneration
             let client: SpacesDeviceAPIStateStreamClient
             do {
                 client = try SpacesDeviceAPIStateStreamClient(
-                    request: request, host: host, port: port, certificateFingerprint: fingerprint,
+                    request: request, resolver: resolver,
                     onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.applyStreamEvent(payload, generation: generation) } },
                     onDisconnect: { [weak self] error in
                         Task { @MainActor [weak self] in self?.handleStreamDisconnect(error, generation: generation) }
@@ -493,8 +492,9 @@
         /// together), so senders already vended to the render host follow the new client and token. Returns
         /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded, so
         /// the daemon is now reachable whether or not it rebound the same port, rotated its certificate, or
-        /// rotated its token. Returns false for remote devices (stable endpoint, nothing to re-resolve) and
-        /// when the local bootstrap itself failed (the daemon could not be reached or started).
+        /// rotated its token. Returns false for remote devices — their pinned identity is stable and their
+        /// candidate addresses are already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`)
+        /// — and when the local bootstrap itself failed (the daemon could not be reached or started).
         ///
         /// Invoked from the connect-time subscribe recovery, the transcript path's local pin-mismatch/
         /// unreachable recovery, and the stream-disconnect path when the local daemon rejected a subscribe as
@@ -503,7 +503,7 @@
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
-            let previousHost = device.host
+            let previousHosts = device.hosts
             let previousPort = device.port
             let previousFingerprint = certificateFingerprint
             let previousToken = requestClientBox.current.authToken
@@ -513,12 +513,12 @@
             // read of nil is a legitimate "no token".
             let refreshedToken = outcome.persistedToken ?? previousToken
             let endpointOrIdentityChanged =
-                refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint
+                refreshed.port != previousPort || refreshed.hosts != previousHosts || refreshed.certificateFingerprint != previousFingerprint
             // Rebuild on an endpoint/identity move or a token rotation through one branch — a token-only
             // change rebuilds the client too rather than carrying a special-cased in-place token swap.
             if endpointOrIdentityChanged || refreshedToken != previousToken,
                 let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
-                    host: refreshed.host, port: refreshed.port, certificateFingerprint: refreshed.certificateFingerprint)
+                    resolver: SpacesDeviceEndpointRegistry.resolver(for: refreshed, certificateFingerprint: refreshed.certificateFingerprint))
             {
                 let previousClient = requestClientBox.replace(with: rebuiltClient, authToken: refreshedToken)
                 // `cancel()` contends with `send()`'s request lock, which an in-flight request against the

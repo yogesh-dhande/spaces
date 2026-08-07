@@ -99,7 +99,8 @@ final class DeviceTerminalSessionStateModelTranscriptTests: XCTestCase {
             installationID: "INSTALLATION-TRANSCRIPT-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
             deviceName: "Mac", appVersion: "1.0")
         let requestClient = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
         defer { requestClient.cancel() }
         try body(pairingStore, clientApp, requestClient)
     }

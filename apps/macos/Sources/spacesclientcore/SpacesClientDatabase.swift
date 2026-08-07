@@ -16,11 +16,20 @@ import spacesterminalcore
 
 public struct SpacesPairedDeviceRecord: Codable, Sendable, Equatable, Identifiable {
     public static let localDeviceID = "local"
+    /// Upper bound on the candidate addresses stored for one device, matching the iOS client's
+    /// `SpacesMobileDeviceStore.maxAdvertisedHostCandidates`.
+    public static let maxHostCandidates = 6
 
     public let id: String
     public var name: String
     public var platform: String
-    public var host: String
+    /// Ordered Device API candidate addresses, most-preferred first: a pairing link's LAN address ahead
+    /// of its tailnet address, and after a merge the daemon's own current addresses ahead of anything
+    /// only this client still remembers. Never empty for a stored record.
+    public var hosts: [String]
+    /// The candidate a connection last actually succeeded on, or nil until one is proven. Always a
+    /// member of `hosts`.
+    public var activeHost: String?
     public var port: Int
     public var certificateFingerprint: String
     public var sshHost: String?
@@ -30,14 +39,19 @@ public struct SpacesPairedDeviceRecord: Codable, Sendable, Equatable, Identifiab
     public var updatedAt: String
     public var lastSelectedAt: String?
 
+    /// The address to dial right now: the proven one when there is one, otherwise the most-preferred
+    /// candidate.
+    public var dialHost: String? { activeHost ?? hosts.first }
+
     public init(
-        id: String, name: String, platform: String, host: String, port: Int, certificateFingerprint: String, sshHost: String? = nil,
-        sshUser: String? = nil, sshPort: Int? = nil, createdAt: String, updatedAt: String, lastSelectedAt: String? = nil
+        id: String, name: String, platform: String, hosts: [String], activeHost: String? = nil, port: Int, certificateFingerprint: String,
+        sshHost: String? = nil, sshUser: String? = nil, sshPort: Int? = nil, createdAt: String, updatedAt: String, lastSelectedAt: String? = nil
     ) {
         self.id = id
         self.name = name
         self.platform = platform
-        self.host = host
+        self.hosts = hosts
+        self.activeHost = activeHost
         self.port = port
         self.certificateFingerprint = certificateFingerprint
         self.sshHost = sshHost
@@ -65,7 +79,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 2
+    public static let currentVersion = 3
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -138,8 +152,7 @@ public final class SpacesClientDatabase {
         let currentDirectoryPath = FileManager.default.currentDirectoryPath
         let executablePath = executablePathOverride ?? SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath)
         let environmentValues = [
-            databasePathEnvironmentVariable, SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
-            "HOME",
+            databasePathEnvironmentVariable, SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, "HOME",
         ].map { currentEnvironmentValue(for: $0) ?? "" }
         return (environmentValues + [currentDirectoryPath, executablePath ?? ""]).joined(separator: "\u{1f}")
     }
@@ -157,9 +170,7 @@ public final class SpacesClientDatabase {
     /// lands inside a checkout and can't exercise the repo-local dev-build path a test wants to drive) and
     /// drops its cached path/database. Lets a test count profile-resolution git spawns via
     /// `defaultDatabase()` without touching real git. Never called from product code.
-    static func resetDefaultDatabaseStorageForTesting(
-        gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe(), executablePath: String? = nil
-    ) {
+    static func resetDefaultDatabaseStorageForTesting(gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe(), executablePath: String? = nil) {
         defaultDatabaseStorage.resetForTesting(gitProbe: gitProbe, executablePathOverride: executablePath)
     }
 
@@ -191,13 +202,15 @@ public final class SpacesClientDatabase {
         try execute(
             sql: """
                 INSERT INTO paired_devices(
-                  id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
+                  id, name, platform, hosts, active_host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at,
+                  last_selected_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   platform = excluded.platform,
-                  host = excluded.host,
+                  hosts = excluded.hosts,
+                  active_host = excluded.active_host,
                   port = excluded.port,
                   certificate_fingerprint = excluded.certificate_fingerprint,
                   ssh_host = excluded.ssh_host,
@@ -207,15 +220,17 @@ public final class SpacesClientDatabase {
                   last_selected_at = excluded.last_selected_at
                 """,
             bindings: [
-                device.id, device.name, device.platform, device.host, device.port, device.certificateFingerprint, device.sshHost ?? "",
-                device.sshUser ?? "", device.sshPort.map(String.init) ?? "", device.createdAt, device.updatedAt, device.lastSelectedAt ?? "",
+                device.id, device.name, device.platform, Self.encodeHosts(device.hosts), device.activeHost ?? "", device.port,
+                device.certificateFingerprint, device.sshHost ?? "", device.sshUser ?? "", device.sshPort.map(String.init) ?? "", device.createdAt,
+                device.updatedAt, device.lastSelectedAt ?? "",
             ])
     }
 
     public func pairedDevices() throws -> [SpacesPairedDeviceRecord] {
         try queryRows(
             sql: """
-                SELECT id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
+                SELECT id, name, platform, hosts, active_host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at,
+                  last_selected_at
                 FROM paired_devices
                 ORDER BY COALESCE(NULLIF(last_selected_at, ''), updated_at) DESC, name
                 """
@@ -225,11 +240,69 @@ public final class SpacesClientDatabase {
     public func pairedDevice(id: String) throws -> SpacesPairedDeviceRecord? {
         try queryRow(
             sql: """
-                SELECT id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
+                SELECT id, name, platform, hosts, active_host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at,
+                  last_selected_at
                 FROM paired_devices
                 WHERE id = ?
                 """, bindings: [id]
         ).flatMap(decodeDevice)
+    }
+
+    /// Records the candidate a connection just succeeded on, so the next connect dials it first (see
+    /// `SpacesPairedDeviceRecord.dialHost`). Deliberately does not touch `last_selected_at`: proving an
+    /// address is not the user selecting the device, and that column orders the device list.
+    public func setActiveHost(deviceID: String, host: String) throws {
+        try execute(sql: "UPDATE paired_devices SET active_host = ?, updated_at = ? WHERE id = ?", bindings: [host, Self.timestamp(), deviceID])
+    }
+
+    /// Folds the addresses a daemon reports for itself into a device's stored candidates, so an address
+    /// this client has never seen becomes reachable without re-pairing. Returns the device's record after
+    /// the merge, or nil when no device with that id is stored.
+    ///
+    /// An empty `advertised` list means the daemon reported nothing (the contract of
+    /// `TerminalServiceDaemonStatus.deviceAPIAddresses`), not that it has no addresses, so it leaves the
+    /// stored candidates untouched.
+    @discardableResult public func mergeAdvertisedHosts(deviceID: String, advertised: [String]) throws -> SpacesPairedDeviceRecord? {
+        try withImmediateTransaction {
+            guard var record = try pairedDevice(id: deviceID) else { return nil }
+            let merged = Self.mergedHostCandidates(stored: record.hosts, advertised: advertised)
+            guard merged != record.hosts else { return record }
+            record.hosts = merged
+            // `activeHost` must stay a member of `hosts`. A proven address the daemon no longer reports
+            // is a stored leftover, so the cap can trim it away; when it does, the next connect
+            // re-evaluates from the top of the list instead of dialing an address no longer stored.
+            if let activeHost = record.activeHost, !merged.contains(activeHost) { record.activeHost = nil }
+            record.updatedAt = Self.timestamp()
+            try upsert(device: record)
+            return record
+        }
+    }
+
+    /// The union `mergeAdvertisedHosts` persists: the daemon's own advertised addresses first, in its
+    /// order (it reports LAN before tailnet, which is the dial preference we want), then whichever
+    /// previously-stored addresses it did not report, in their own order, bounded from the tail.
+    ///
+    /// Leading with the daemon's list is what makes the merge self-healing: its current view is the fresh
+    /// truth, so a stale stored address is demoted instead of sitting in front of one that works today,
+    /// and the tail trim can only ever drop stored leftovers, never one of the daemon's current
+    /// addresses. Keeping the leftovers at all still protects an address that arrived some other way and
+    /// is absent from the daemon's own interface list, notably the SSH-resolved host a Mac proves and
+    /// puts first when pairing a remote device (see `SpacesDevicePairingClient.relayedPairingHosts`).
+    /// Mirrors the iOS client's `SpacesMobileDeviceStore.mergeAdvertisedHosts`, so both clients store the
+    /// same order for the same device.
+    static func mergedHostCandidates(stored: [String], advertised: [String]) -> [String] {
+        let advertised = normalizedHostCandidates(advertised)
+        guard !advertised.isEmpty else { return stored }
+        var seen = Set<String>()
+        var merged: [String] = []
+        for host in advertised where seen.insert(host).inserted { merged.append(host) }
+        for host in normalizedHostCandidates(stored) where seen.insert(host).inserted { merged.append(host) }
+        if merged.count > SpacesPairedDeviceRecord.maxHostCandidates { merged.removeLast(merged.count - SpacesPairedDeviceRecord.maxHostCandidates) }
+        return merged
+    }
+
+    private static func normalizedHostCandidates(_ hosts: [String]) -> [String] {
+        hosts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     public func deletePairedDevice(id: String) throws {
@@ -615,10 +688,29 @@ public final class SpacesClientDatabase {
     }
 
     private func decodeDevice(row: [String]) -> SpacesPairedDeviceRecord? {
-        guard row.count >= 12, let port = Int(row[4]) else { return nil }
+        guard row.count >= 13, let port = Int(row[5]) else { return nil }
+        // A record with no usable candidate address cannot be dialed at all, so it is dropped the same
+        // way a row with an unreadable port is.
+        guard let hosts = Self.decodeHosts(row[3]), !hosts.isEmpty else { return nil }
+        let activeHost = normalized(row[4]).flatMap { hosts.contains($0) ? $0 : nil }
         return SpacesPairedDeviceRecord(
-            id: row[0], name: row[1], platform: row[2], host: row[3], port: port, certificateFingerprint: row[5], sshHost: normalized(row[6]),
-            sshUser: normalized(row[7]), sshPort: Int(row[8]), createdAt: row[9], updatedAt: row[10], lastSelectedAt: normalized(row[11]))
+            id: row[0], name: row[1], platform: row[2], hosts: hosts, activeHost: activeHost, port: port, certificateFingerprint: row[6],
+            sshHost: normalized(row[7]), sshUser: normalized(row[8]), sshPort: Int(row[9]), createdAt: row[10], updatedAt: row[11],
+            lastSelectedAt: normalized(row[12]))
+    }
+
+    /// Candidate addresses are stored as one JSON array of strings, so their order (which decides dial
+    /// preference) is part of the stored value rather than something a join has to reconstruct.
+    static func encodeHosts(_ hosts: [String]) -> String {
+        let normalized = normalizedHostCandidates(hosts)
+        guard let data = try? JSONEncoder().encode(normalized), let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json
+    }
+
+    private static func decodeHosts(_ value: String) -> [String]? {
+        guard let data = value.data(using: .utf8), let decoded = try? JSONDecoder().decode([String].self, from: data) else { return nil }
+        var seen = Set<String>()
+        return normalizedHostCandidates(decoded).filter { seen.insert($0).inserted }
     }
 
     private func normalized(_ value: String) -> String? {
@@ -627,20 +719,7 @@ public final class SpacesClientDatabase {
     }
 
     private static let schemaSQL = """
-            CREATE TABLE IF NOT EXISTS paired_devices (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              platform TEXT NOT NULL,
-              host TEXT NOT NULL,
-              port INTEGER NOT NULL,
-              certificate_fingerprint TEXT NOT NULL,
-              ssh_host TEXT,
-              ssh_user TEXT,
-              ssh_port INTEGER,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              last_selected_at TEXT
-            );
+            \(pairedDevicesSchemaSQL)
 
             \(clientStateSchemaSQL)
 
@@ -652,6 +731,26 @@ public final class SpacesClientDatabase {
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
+            );
+        """
+
+    // `hosts` holds the ordered candidate Device API addresses as a JSON array of strings (see
+    // `encodeHosts`); `active_host` holds whichever of them a connection last succeeded on.
+    private static let pairedDevicesSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS paired_devices (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              platform TEXT NOT NULL,
+              hosts TEXT NOT NULL,
+              active_host TEXT,
+              port INTEGER NOT NULL,
+              certificate_fingerprint TEXT NOT NULL,
+              ssh_host TEXT,
+              ssh_user TEXT,
+              ssh_port INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_selected_at TEXT
             );
         """
 
@@ -731,7 +830,50 @@ public final class SpacesClientDatabase {
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(
             fromVersion: 1, toVersion: 2, description: "Add terminal_owner_client_ids for stable per-device terminal owner client ids"
-        ) { db in try executeClientBatch(database: db, sql: terminalOwnerClientIDsSchemaSQL) }
+        ) { db in try executeClientBatch(database: db, sql: terminalOwnerClientIDsSchemaSQL) },
+        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Replace the paired device's single host with an ordered candidate list")
+        { db in
+            try executeClientBatch(
+                database: db,
+                sql: """
+                    CREATE TABLE paired_devices_v3 (
+                      id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      platform TEXT NOT NULL,
+                      hosts TEXT NOT NULL,
+                      active_host TEXT,
+                      port INTEGER NOT NULL,
+                      certificate_fingerprint TEXT NOT NULL,
+                      ssh_host TEXT,
+                      ssh_user TEXT,
+                      ssh_port INTEGER,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      last_selected_at TEXT
+                    );
+
+                    INSERT INTO paired_devices_v3(
+                      id, name, platform, hosts, active_host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at,
+                      last_selected_at
+                    )
+                    SELECT id, name, platform, '', NULL, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at,
+                      last_selected_at
+                    FROM paired_devices;
+                    """)
+            // The single stored host becomes the list's only candidate, JSON-encoded through the same
+            // encoder every write uses rather than assembled in SQL, so an address carrying JSON
+            // metacharacters cannot produce an unreadable value.
+            for row in try queryClientRows(database: db, sql: "SELECT id, host FROM paired_devices") where row.count >= 2 {
+                try executeClientStatement(
+                    database: db, sql: "UPDATE paired_devices_v3 SET hosts = ? WHERE id = ?", bindings: [encodeHosts([row[1]]), row[0]])
+            }
+            try executeClientBatch(
+                database: db,
+                sql: """
+                    DROP TABLE paired_devices;
+                    ALTER TABLE paired_devices_v3 RENAME TO paired_devices;
+                    """)
+        },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }
@@ -807,6 +949,38 @@ private final class TimestampFormatterStorage: @unchecked Sendable {
 }
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+/// Row reader for migration steps, which are `@Sendable` closures handed the raw connection and so
+/// cannot reach `SpacesClientDatabase`'s own instance query helpers.
+private func queryClientRows(database: OpaquePointer, sql: String) throws -> [[String]] {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+        throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(database)))
+    }
+    defer { sqlite3_finalize(statement) }
+    var rows: [[String]] = []
+    while true {
+        let result = sqlite3_step(statement)
+        if result == SQLITE_ROW {
+            rows.append(
+                (0..<sqlite3_column_count(statement)).map { index in sqlite3_column_text(statement, index).map { String(cString: $0) } ?? "" })
+        } else if result == SQLITE_DONE {
+            return rows
+        } else {
+            throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(database)))
+        }
+    }
+}
+
+private func executeClientStatement(database: OpaquePointer, sql: String, bindings: [String]) throws {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+        throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(database)))
+    }
+    defer { sqlite3_finalize(statement) }
+    for (index, value) in bindings.enumerated() { sqlite3_bind_text(statement, Int32(index + 1), value, -1, sqliteTransient) }
+    guard sqlite3_step(statement) == SQLITE_DONE else { throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(database))) }
+}
 
 private func executeClientBatch(database: OpaquePointer, sql: String) throws {
     var errorMessage: UnsafeMutablePointer<CChar>?

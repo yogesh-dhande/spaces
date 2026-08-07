@@ -430,7 +430,8 @@
                 host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
             let clientApp = SpacesDeviceClientApp(
                 installationID: "agent-orchestration-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0")
