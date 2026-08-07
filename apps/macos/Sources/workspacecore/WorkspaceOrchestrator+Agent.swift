@@ -567,8 +567,10 @@ extension WorkspaceOrchestrator {
         // the daemon and remote signal init paths (both pass the preserved `existing.status`).
         let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
+            // The default heals a row stored without a label before materialization existed, so every
+            // signal leaves the row addressable by the one name its surfaces display.
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label ?? Self.defaultAgentLabel, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
@@ -624,8 +626,10 @@ extension WorkspaceOrchestrator {
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
         if let existing {
+            // Same healing default as `registerAgentWindow`'s existing-row branch: a pre-materialization
+            // row gains its stored name on the next signal.
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label ?? Self.defaultAgentLabel, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
