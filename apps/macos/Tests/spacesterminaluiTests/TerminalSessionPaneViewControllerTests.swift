@@ -199,8 +199,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         /// fires only after the async detach has landed.
         var detachedClientIDWhenCloseHookRan: String?
         var closeHookRan = false
-        /// Whether the close hook reported the pane as the session's owner.
-        var closeHookHeldOwnership: Bool?
+        /// Whether the close hook reported the pane as the session's owner, or its session as ended.
+        var closeHookOwnedOrEnded: Bool?
     }
 
     /// Records the pane's attach/detach sends in the order they reach the daemon, and can hold the
@@ -818,8 +818,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             stateProvider: Self.ownedSessionStateProvider(sessionID: "session-owner-close", ownerClientID: "pane-owner"),
             reusableOwnerClientID: "pane-owner", attachClientAction: { client, _ in capture.attachedClientID = client.id },
             detachClientAction: { clientID in capture.detachedClientID = clientID },
-            onCloseClientDetached: { heldOwnership in
-                capture.closeHookHeldOwnership = heldOwnership
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
                 hookRan.fulfill()
             })
 
@@ -829,7 +829,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.closeEmbedded()
 
         await fulfillment(of: [hookRan], timeout: 1)
-        XCTAssertEqual(capture.closeHookHeldOwnership, true)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, true)
     }
 
     /// A viewer close must never stop the session, so the hook reports no ownership even though the pane
@@ -846,8 +846,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             stateProvider: Self.ownedSessionStateProvider(sessionID: "session-viewer-close", ownerClientID: "another-device"),
             preferredAttachmentMode: .viewer, attachClientAction: { client, _ in capture.attachedClientID = client.id },
             detachClientAction: { clientID in capture.detachedClientID = clientID },
-            onCloseClientDetached: { heldOwnership in
-                capture.closeHookHeldOwnership = heldOwnership
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
                 hookRan.fulfill()
             })
 
@@ -857,7 +857,47 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.closeEmbedded()
 
         await fulfillment(of: [hookRan], timeout: 1)
-        XCTAssertEqual(capture.closeHookHeldOwnership, false)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, false)
+    }
+
+    /// An ended session's pane holds no attachment to have owned, so ownership alone would silence the
+    /// close hook and leave the dead terminal's row behind. Closing it is the user dismissing it, and the
+    /// hook has to report that.
+    @MainActor func testCloseHookReportsRequestForEndedSessionPane() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let hookRan = expectation(description: "close hook runs")
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-ended-close", paths: .init(rootDirectory: root.path),
+            stateProvider: Self.endedSessionStateProvider(sessionID: "session-ended-close"),
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
+                hookRan.fulfill()
+            })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        controller.closeEmbedded()
+
+        await fulfillment(of: [hookRan], timeout: 1)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, true)
+    }
+
+    /// A session that has exited, with no attachments left on it.
+    @MainActor private static func endedSessionStateProvider(sessionID: String) -> FakeTerminalSessionStateProvider {
+        FakeTerminalSessionStateProvider(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-08-01T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .exited, updatedAt: "2026-08-01T00:00:02Z",
+                title: "shell", workingDirectory: "/tmp", columns: 80, rows: 24), attachmentSnapshot: TerminalSessionAttachmentSnapshot())
     }
 
     /// A live session whose owner attachment belongs to `ownerClientID`.

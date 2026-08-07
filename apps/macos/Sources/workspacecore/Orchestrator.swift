@@ -20,12 +20,13 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
-    /// Reads a live session's foreground process from its PTY at call time, by session id. Distinct from
-    /// the foreground fields on persisted runtime state, which are a periodic sample up to a second old:
-    /// the conditional stop of a user-closed ad hoc terminal decides whether to kill a shell, so it must
-    /// see a command the user started an instant before closing. Returns nil when the session is not live
-    /// in this process or its foreground cannot be resolved.
-    public typealias BuiltInTerminalForegroundProcessSampler = @Sendable (String) -> TerminalForegroundProcessSnapshot?
+    /// Reads a live session's foreground process, and whether its shell is holding any child process, from
+    /// the OS at call time, by session id. Distinct from the foreground fields on persisted runtime state,
+    /// which are a periodic sample up to a second old: the conditional stop of a user-closed ad hoc
+    /// terminal decides whether to kill a shell, so it must see a command the user started an instant
+    /// before closing. Returns nil when the session is not live in this process or its foreground cannot
+    /// be resolved.
+    public typealias BuiltInTerminalForegroundProcessSampler = @Sendable (String) -> BuiltInTerminalForegroundReading?
     /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.

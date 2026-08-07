@@ -2109,8 +2109,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
                 detachClientAction: detachClientAction,
-                onCloseClientDetached: { [weak self] heldOwnership in
-                    self?.stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: sessionID, closedPaneHeldOwnership: heldOwnership)
+                onCloseClientDetached: { [weak self] ownedOrEnded in
+                    self?.stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: sessionID, closedPaneOwnedOrEnded: ownedOrEnded)
                 },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
@@ -2340,14 +2340,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Whether closing a terminal pane should ask the daemon to stop the ad hoc session behind it.
-    /// Only an owner close does: a viewer's close leaves the session with its owner, and a quit that
-    /// keeps sessions running must leave every session alone. Whether the session is ad hoc at all, and
-    /// whether it is idle at a bare prompt, are the daemon's to decide.
-    nonisolated static func shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: Bool, isAppTerminatingAndKeepingSessions: Bool)
-        -> Bool
+    /// Only an owner close does, or the close of a pane whose session has already ended (an explicit
+    /// close is the user dismissing that terminal, and the ask is what removes its row): a viewer's close
+    /// leaves the session with its owner, and a quit that keeps sessions running must leave every session
+    /// alone. Whether the session is ad hoc at all, and whether it is idle at a bare prompt, are the
+    /// daemon's to decide.
+    nonisolated static func shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: Bool, isAppTerminatingAndKeepingSessions: Bool) -> Bool
     {
         guard !isAppTerminatingAndKeepingSessions else { return false }
-        return closedPaneHeldOwnership
+        return closedPaneOwnedOrEnded
     }
 
     /// Asks the owning daemon to stop the ad hoc terminal behind a pane the user just closed. The daemon
@@ -2355,10 +2356,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// attachment, and otherwise keeps it recoverable in the sidebar, so no session-kind gate is applied
     /// here: the client's view of a session's kind comes from overview rows, which an exited coding-agent
     /// row keeps claiming long after the agent is gone.
-    func stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: String, closedPaneHeldOwnership: Bool) {
+    func stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: String, closedPaneOwnedOrEnded: Bool) {
         guard
             Self.shouldRequestAdHocBareShellStopOnPaneClose(
-                closedPaneHeldOwnership: closedPaneHeldOwnership, isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination)
+                closedPaneOwnedOrEnded: closedPaneOwnedOrEnded, isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination)
         else { return }
         guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID), let device = deviceForWorkspaceMutation(workspaceID: workspaceID)
         else { return }
@@ -2369,7 +2370,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     workspaceID: workspaceID, sessionID: sessionID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            if case .success = result { self.requestSidebarReload() }
+            // Only a session the daemon actually terminated changed any row; a kept session leaves the
+            // sidebar exactly as it was, so reloading for it would be pure churn on every pane close.
+            guard case .success(let response) = result, response.terminatedTerminalSession == true else { return }
+            self.requestSidebarReload()
         }
     }
 

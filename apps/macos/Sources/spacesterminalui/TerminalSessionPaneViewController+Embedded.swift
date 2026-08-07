@@ -65,13 +65,15 @@ extension TerminalSessionPaneViewController {
             lastRequestedAttachmentMode = nil
         } else {
             // Ownership is read BEFORE the detach: the detach is what gives it up, so afterwards no pane
-            // could ever report having been the owner.
-            let heldOwnerAttachment = holdsOwnerAttachment
+            // could ever report having been the owner. A pane whose session has already ended holds no
+            // attachment to have owned, and closing it is the user dismissing the terminal, so it asks
+            // too: that ask is what removes the dead row.
+            let ownedOrEnded = holdsOwnerAttachment || isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState)
             // Run the close hook off the detach's completion (not synchronously here): the detach
             // only lands after a daemon round-trip, so the owner's ad hoc cleanup must wait for it to
             // read a snapshot that reflects this client leaving. A session-terminating close skips
             // it — the daemon is already stopping the session.
-            detachLocalClientIfNeeded(onDetached: { [onCloseClientDetached] in onCloseClientDetached?(heldOwnerAttachment) })
+            detachLocalClientIfNeeded(onDetached: { [onCloseClientDetached] in onCloseClientDetached?(ownedOrEnded) })
         }
         onWindowClose?(sessionID, clientID, sessionIsTerminating)
     }

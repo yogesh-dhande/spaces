@@ -213,18 +213,18 @@ extension ProcessProfileEnvironmentSuites {
         // at a bare prompt are the daemon's to answer, so these cases cover the ask itself.
         @MainActor @Test func ownerPaneCloseAsksTheDaemonToStopTheSession() {
             #expect(
-                AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: false))
+                AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
         }
 
         @MainActor @Test func viewerPaneCloseNeverAsksTheDaemonToStopTheSession() {
             #expect(
-                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(
-                    closedPaneHeldOwnership: false, isAppTerminatingAndKeepingSessions: false))
+                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: false, isAppTerminatingAndKeepingSessions: false)
+            )
         }
 
         @MainActor @Test func paneCloseDuringQuitThatKeepsSessionsAsksNothing() {
             #expect(
-                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: true))
+                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
         }
     }
 }

@@ -172,6 +172,31 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertNil(TerminalForegroundProcessInspector.workingDirectory(pid: pid))
     }
 
+    /// The child probe the conditional stop asks about a session's shell: a process holding a child
+    /// answers yes, and a leaf process answers no. Both sides are read against live processes, since the
+    /// whole point of the probe is that the OS knows what the shell's own argv cannot say.
+    func testChildProcessProbeSeesLiveChildren() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            process.terminate()
+            process.waitUntilExit()
+        }
+
+        var observed = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            observed = TerminalForegroundProcessInspector.hasChildProcesses(pid: getpid())
+            if observed { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertTrue(observed)
+        XCTAssertFalse(TerminalForegroundProcessInspector.hasChildProcesses(pid: process.processIdentifier))
+        XCTAssertFalse(TerminalForegroundProcessInspector.hasChildProcesses(pid: 0))
+    }
+
     /// Pins the executable-name semantics the inspector needs, rather than whatever `URL` happened to do
     /// with these shapes. `.` and `..` in particular must stay as they are: resolving them would name the
     /// daemon's own working directory, which has nothing to do with the process being inspected.
