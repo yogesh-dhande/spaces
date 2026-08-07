@@ -1085,13 +1085,29 @@ extension TerminalService {
             // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
             // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
             // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
-            message =
-                "The running spacesd daemon speaks an older connection protocol than this Spaces build. "
-                + "Restart the daemon to load the update, then retry."
-            if let status = response.daemonStatus,
-                status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
+            //
+            // When the device already has a newer build staged (`DaemonUpdateRemedy.remedy(for:) ==
+            // .applyStagedUpdate`), `spaces daemon apply-update` performs that same exec-in-place handoff
+            // without a full restart, so it preserves the daemon's running terminals, processes, and
+            // agents. Telling the user to "restart, which stops everything" would be wrong advice
+            // whenever that path is available, so this case recommends it instead and skips the
+            // "Restarting stops..." wording below, which only ever applies to a real restart.
+            if verdict == .daemonTooOld, let status = response.daemonStatus,
+                case .applyStagedUpdate(let installedVersion) = DaemonUpdateRemedy.remedy(for: status)
             {
-                message += " Restarting stops the daemon's running terminals, processes, and agents."
+                message =
+                    "The running spacesd daemon speaks an older connection protocol than this Spaces build. "
+                    + "Spaces \(installedVersion) is already installed on this device; run `spaces daemon apply-update` to load it in place. "
+                    + "Running terminals, processes, and agents keep running."
+            } else {
+                message =
+                    "The running spacesd daemon speaks an older connection protocol than this Spaces build. "
+                    + "Restart the daemon to load the update, then retry."
+                if let status = response.daemonStatus,
+                    status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
+                {
+                    message += " Restarting stops the daemon's running terminals, processes, and agents."
+                }
             }
         }
         return TerminalServiceDaemonWireIncompatibility(verdict: verdict, status: response.daemonStatus, message: message)

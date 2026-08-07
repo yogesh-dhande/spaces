@@ -290,6 +290,29 @@ import XCTest
             }
         }
 
+        // When the device already has a newer build staged, `spaces daemon apply-update` performs the
+        // same exec-in-place handoff without a real restart, so the message must point at that instead
+        // of the restart wording (which would wrongly claim running work gets interrupted).
+        func testDaemonWireIncompatibleWhenDaemonIsOlderWithStagedUpdateRecommendsApplyUpdate() throws {
+            let response = TerminalServiceResponse(
+                ok: true, message: "pong",
+                daemonStatus: makeDaemonStatus(
+                    protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2, installedVersion: "9.9.9"))
+            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
+            XCTAssertTrue(message.contains("older connection protocol"))
+            XCTAssertTrue(message.contains("spaces daemon apply-update"))
+            XCTAssertTrue(message.contains("9.9.9"))
+            XCTAssertFalse(message.contains("Restarting stops"))
+            XCTAssertFalse(message.contains("Restart the daemon"))
+            XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
+                guard case TerminalServiceError.daemonWireIncompatible(let incompatibility) = error else {
+                    return XCTFail("Expected daemonWireIncompatible, got \(error)")
+                }
+                XCTAssertEqual(incompatibility.verdict, .daemonTooOld)
+                XCTAssertTrue(incompatibility.canRestartDaemon)
+            }
+        }
+
         func testDaemonWireIncompatibleWhenClientIsOlder() throws {
             let response = TerminalServiceResponse(
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
@@ -311,9 +334,9 @@ import XCTest
             XCTAssertNotNil(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
         }
 
-        private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0) -> TerminalServiceDaemonStatus {
+        private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0, installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "0.1.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
+                version: "0.1.0", installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
                 protocolVersion: protocolVersion)
         }
 

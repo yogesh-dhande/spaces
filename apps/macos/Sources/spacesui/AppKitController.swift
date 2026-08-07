@@ -5485,8 +5485,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// device's own installed-vs-running comparison; never this app's build version), instead of waiting
     /// for the daemon's own next restart. Called from every path where a fresh
     /// `TerminalServiceDaemonStatus` lands for a device (local snapshot apply, remote pull, remote push
-    /// subscription). Deduped per attempt so a repeated status report never re-requests a handoff that is
-    /// already on its way; `startStagedApplyWatchdog` owns what happens if it does not arrive.
+    /// subscription) and from the cold-start path where local bootstrap fails wire-incompatible before any
+    /// snapshot can land a status (`showLocalDaemonCompatibilityBlock`). Deduped per attempt so a repeated
+    /// status report never re-requests a handoff that is already on its way; `startStagedApplyWatchdog`
+    /// owns what happens if it does not arrive.
     func maybeRequestSilentDaemonHandoff(deviceID: String, status: TerminalServiceDaemonStatus?) {
         guard let stagedVersion = Self.silentDaemonHandoffStagedVersion(status: status) else { return }
         let attempt = DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion)
@@ -9582,6 +9584,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         rebuildFlatSidebarData()
         fullReloadSidebarOutline()
+        // This is the cold-start path: local bootstrap failed wire-incompatible before any
+        // `TerminalServiceDaemonStatus` could land through a snapshot, so none of the usual
+        // silent-apply call sites (`applySidebarDataSnapshot`, remote pull/push) ever ran for
+        // this device. If a staged update is what made the daemon incompatible, launching the
+        // app must itself request the apply here, or `shouldRenderCompatibilityBlock` withholds
+        // the block for `.applyStagedUpdate` on the premise that a handoff is already under way
+        // while nothing has asked for one, leaving the loading placeholder up indefinitely.
+        maybeRequestSilentDaemonHandoff(deviceID: localDeviceID, status: incompatibility.status)
         showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
         if let window { revealTargetedHotkeyWindow(window) }
     }
