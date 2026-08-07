@@ -1281,6 +1281,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // The last thing the device said about itself during the poll, which is the only evidence this
         // run's verdict may rest on. Stays nil for a device that never answered — silence is what a
         // daemon mid-handoff and an unreachable device both look like, so it proves nothing.
+        //
+        // A failed probe clears it, so the verdict can only rest on an observation that is still current
+        // when the budget runs out. Without that, a device that answered once early in the poll and then
+        // went quiet for the rest of it — exactly what a daemon mid-handoff replaying its sessions looks
+        // like — would be judged from that first, long-superseded report and told the update did not
+        // land. A tail of failures is silence, and silence gets no verdict.
         var lastReportedStatus: TerminalServiceDaemonStatus?
         while clock.now < deadline {
             // Cancellation exits the poll rather than being swallowed like a fetch failure: a cancelled
@@ -1291,7 +1297,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // would add its whole timeout on top of the budget, on top of the sleep that just overran it.
             guard clock.now < deadline else { break }
             guard identity == overviewIdentity else { return .unresolved }
-            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else { continue }
+            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else {
+                lastReportedStatus = nil
+                continue
+            }
             guard identity == overviewIdentity else { return .unresolved }
             lastReportedStatus = status
             if case .applyStagedUpdate = DaemonUpdateRemedy.remedy(for: status) { continue }
@@ -1389,7 +1398,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the device reports about itself — never from the RPC's result, since a refused request and a
     /// daemon already mid-handoff look identical from here.
     private func applyStagedUpdateReportingFailure(attempt: DaemonStagedApplyAttempt) async {
-        guard case .stillStaged(let stagedVersion, let runningVersion) = await performDaemonUpdate(trigger: .automatic) else { return }
+        let outcome = await performDaemonUpdate(trigger: .automatic)
+        // The once-per-build rule exists to stop the status the device repeats every couple of seconds
+        // from re-requesting an apply, and it is spent by an outcome: the build landed, or the device's
+        // own report says it did not and the mark below carries that from here. An undecided run decides
+        // nothing — the connection changed under it, the run was cancelled, or the device stopped
+        // answering — so it hands the once-only back. Otherwise the attempt would stay consumed with no
+        // mark to show for it: the device would sit blocked on that same staged build with the automatic
+        // apply deduped away and nothing on screen for the user to act on, until the app was relaunched.
+        // A re-fire needs the device to report itself blocked and staged all over again, so this cannot
+        // spin; it just lets the next such report be acted on.
+        guard case .stillStaged(let stagedVersion, let runningVersion) = outcome else {
+            if case .unresolved = outcome { autoStagedApplyAttempts.remove(attempt) }
+            return
+        }
         // A device that has since staged a different build was never asked to apply this one, so what it
         // reports now says nothing about the attempt being judged. The newer build gets its own attempt.
         guard stagedVersion == attempt.stagedVersion else { return }

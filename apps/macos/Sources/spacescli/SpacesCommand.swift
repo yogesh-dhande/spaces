@@ -927,6 +927,7 @@ struct DevicePairCommand: ParsableCommand {
                 do {
                     result = try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request)
                 } catch {
+                    guard Self.isRemoteInstallRunFailure(error) else { throw error }
                     throw RemoteDeviceInstallFailure(underlyingMessage: error.localizedDescription, installCommand: installCommand)
                 }
             }
@@ -951,6 +952,20 @@ struct DevicePairCommand: ParsableCommand {
     static func automaticInstallCommand(forPairingFailure error: any Error) -> String? {
         guard case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error else { return nil }
         return linuxInstallCommand
+    }
+
+    /// Whether a failure from the combined install-and-pair path came from the installer run itself —
+    /// the only failure that re-running the installer by hand can fix.
+    /// `installSpacesOnRemoteDeviceAndPair` runs the installer and then pairs, so every other failure it
+    /// can raise (an unreachable Device API on the freshly installed daemon, a rejected pairing) happened
+    /// after Spaces was installed. Telling the user to run the installer again for those both misdirects
+    /// them and hides that the install completed, so they are reported exactly as they were thrown.
+    static func isRemoteInstallRunFailure(_ error: any Error) -> Bool {
+        guard let pairingError = error as? SpacesRemoteDevicePairingError else { return false }
+        switch pairingError {
+        case .remoteInstallFailed, .remoteInstallTimedOut: return true
+        default: return false
+        }
     }
 }
 

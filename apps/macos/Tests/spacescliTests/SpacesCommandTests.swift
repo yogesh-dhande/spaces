@@ -199,6 +199,23 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertNil(DevicePairCommand.automaticInstallCommand(forPairingFailure: SpacesRemoteDevicePairingError.sshValidationFailed("no route")))
     }
 
+    /// The install-and-pair path runs the installer and then pairs, so only the installer's own failures
+    /// may be reported as an install failure. A pairing failure raised after the installer finished (an
+    /// unreachable Device API on the freshly installed daemon, a rejected pairing) is not fixable by
+    /// re-running the installer, and dressing it up as one would also hide that the install completed.
+    func testOnlyInstallerRunFailuresAreReportedAsAnInstallFailure() {
+        XCTAssertTrue(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallFailed("exit 1: no space left on device")))
+        XCTAssertTrue(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallTimedOut("build-box")))
+        // Everything the pairing phase raises after a successful install run.
+        XCTAssertFalse(
+            DevicePairCommand.isRemoteInstallRunFailure(
+                SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: "build-box", port: 47_847, message: "Connection refused.")))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.pairingRejected("The pairing code expired.")))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remotePairCommandFailed("spaces: command not found")))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.missingAuthToken))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(CocoaError(.fileNoSuchFile)))
+    }
+
     func testRemoteDeviceInstallFailureKeepsTheUnderlyingMessageAndSpellsOutTheManualCommand() {
         let failure = RemoteDeviceInstallFailure(
             underlyingMessage: "Installing Spaces on build-box failed (exit 1): no space left on device.",

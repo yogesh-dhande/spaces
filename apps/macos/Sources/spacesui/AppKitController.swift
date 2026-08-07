@@ -5365,6 +5365,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         silentDaemonHandoffStagedVersion(status: status) == stagedVersion
     }
 
+    /// What an expiring staged-apply watchdog does about the attempt it was watching, named for the
+    /// action rather than for the device's state so the rule is the whole decision.
+    enum StagedApplyWatchdogResolution: Equatable {
+        /// The device itself reports the same build still staged and not running: mark the attempt and
+        /// tell the user, which is also what puts Try Again on a blocked device's block.
+        case reportDidNotLand
+        /// Nothing the device reports decides this attempt — it is not answering (a daemon mid-handoff
+        /// and an unreachable device look identical), or its facts have moved on to another build. The
+        /// request is left un-judged, so the once-per-build rule it spent is handed back and the device's
+        /// next report can ask for the apply again.
+        case rearmAutomaticRequest
+    }
+
+    /// The watchdog's whole decision, pure so both halves of it are directly testable.
+    nonisolated static func stagedApplyWatchdogResolution(status: TerminalServiceDaemonStatus?, stagedVersion: String)
+        -> StagedApplyWatchdogResolution
+    {
+        stagedApplyIsStillPending(status: status, stagedVersion: stagedVersion) ? .reportDidNotLand : .rearmAutomaticRequest
+    }
+
     /// Pure eligibility for the compatibility block's "Check for Updates…" action, factored out so it's
     /// testable without AppKit or a Sparkle instance. It is offered only for this Mac's own daemon — a
     /// remote device's Spaces install can't be checked/updated from here — and only when Sparkle has an
@@ -5483,18 +5503,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The watchdog's verdict, read from what the device says about itself rather than from what the RPC
     /// returned. A device that is not answering at all reports no status and gets no verdict: that is
     /// exactly what a daemon mid-handoff looks like, and an unreachable device already reads as offline.
+    /// It re-arms the automatic request instead, so the device's next report is acted on rather than
+    /// deduped away — see the `.rearmAutomaticRequest` branch.
+    ///
+    /// That rests on the section's status being dropped — not merely left stale — the moment the device
+    /// stops answering, which is what makes reading the cached value here honest rather than a verdict on
+    /// old evidence. Both classes of device this watchdog covers have a mechanism that notices well
+    /// inside the delay above: a blocked device is re-pulled on every `deviceReachabilityWatchdogInterval`
+    /// tick (`SidebarController.watchdogShouldPullSection`), and a device the app can still use holds a
+    /// live subscription whose stream drops with the daemon (`markRemoteOverviewSectionOffline`). Either
+    /// route lands in `applyRemoteDeviceSection`'s failure branch, which clears `daemonStatus` with the
+    /// offline transition. So the status read here is either absent or came from a device that was
+    /// answering, on the old build, seconds ago.
     ///
     /// Marking the attempt changes no pane. For a blocked device it is what puts Try Again on the block
     /// the user reaches through the sidebar's compatibility action; for a device the app can still use
     /// there is no block, and the dialog below is the whole surface.
     private func resolveStagedApplyWatchdog(deviceID: String, stagedVersion: String) {
-        // A watchdog left over from an earlier staged build must not judge the current attempt.
+        // A watchdog left over from an earlier staged build must not judge the current attempt. It also
+        // must not touch the once-only: the attempt it belonged to was superseded by a newer one that is
+        // still running, and handing back a mark that names a different build would re-fire that build's
+        // request underneath the attempt in flight.
         guard stagedApplyWatchdogs[deviceID]?.stagedVersion == stagedVersion else { return }
         stagedApplyWatchdogs[deviceID] = nil
         let status = deviceDaemonStatus(forDeviceID: deviceID)
-        guard let status, Self.stagedApplyIsStillPending(status: status, stagedVersion: stagedVersion) else { return }
-        stagedApplyDidNotLandAttempts.insert(DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion))
-        presentStagedApplyDidNotLandDialog(deviceID: deviceID, status: status, stagedVersion: stagedVersion)
+        let attempt = DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion)
+        switch Self.stagedApplyWatchdogResolution(status: status, stagedVersion: stagedVersion) {
+        case .rearmAutomaticRequest:
+            // The once-per-build rule exists to stop a device's repeated status reports from re-requesting
+            // a handoff already on its way, and it is spent by an outcome: the build landed, the device
+            // moved on to another one, or the report below says the apply did not happen. A wait that
+            // decided nothing — the device went quiet, which is exactly what a daemon still replaying its
+            // sessions looks like — hands it back instead. Otherwise the attempt would stay consumed with
+            // no mark to show for it: the device would come back still blocked on that same staged build
+            // with the automatic request deduped away and its block withheld (see
+            // `shouldRenderCompatibilityBlock`), leaving nothing to act on until the app was relaunched.
+            // Re-firing takes a fresh report of that device still waiting on that same build, so this
+            // cannot spin; it only lets the next such report be acted on.
+            silentDaemonHandoffRequestedAttempts.remove(attempt)
+        case .reportDidNotLand:
+            // `.reportDidNotLand` is only reached for a device that reported a status, so the dialog's
+            // facts are the device's own.
+            guard let status else { return }
+            stagedApplyDidNotLandAttempts.insert(attempt)
+            presentStagedApplyDidNotLandDialog(deviceID: deviceID, status: status, stagedVersion: stagedVersion)
+        }
     }
 
     /// The one dialog this flow raises, once per attempt: what is installed, what is still running, that

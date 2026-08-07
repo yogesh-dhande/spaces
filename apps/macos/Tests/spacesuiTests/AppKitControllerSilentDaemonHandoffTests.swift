@@ -61,4 +61,25 @@ import spacesterminalcore
         // An unreachable device reports nothing, which is also what a daemon mid-handoff looks like.
         #expect(!AppKitController.stagedApplyIsStillPending(status: nil, stagedVersion: "0.9.2"))
     }
+
+    /// The other half of the watchdog's decision: what a wait that decided nothing does about the
+    /// once-per-build rule the request spent. Only the device's own report that the build is still
+    /// staged and not running spends it; anything else hands it back, so a device that comes back still
+    /// waiting on that same build is asked again instead of being deduped into a state with no automatic
+    /// apply and no block to act on.
+    @Test func aWaitThatDecidedNothingReArmsTheAutomaticRequest() {
+        let stillStaged = Self.status(version: "0.8.7", installedVersion: "0.9.2", protocolVersion: SpacesWireProtocol.version - 1)
+        #expect(AppKitController.stagedApplyWatchdogResolution(status: stillStaged, stagedVersion: "0.9.2") == .reportDidNotLand)
+        // The device went quiet for the whole wait — a daemon still replaying its sessions and an
+        // unreachable device look the same — so nothing was decided and the request is un-made.
+        #expect(AppKitController.stagedApplyWatchdogResolution(status: nil, stagedVersion: "0.9.2") == .rearmAutomaticRequest)
+        // The apply landed: the device is on the staged build and has nothing staged any more. Re-arming
+        // here costs nothing — there is no staged build left for a report to re-request.
+        let applied = Self.status(version: "0.9.2", installedVersion: "0.9.2", protocolVersion: SpacesWireProtocol.version)
+        #expect(AppKitController.stagedApplyWatchdogResolution(status: applied, stagedVersion: "0.9.2") == .rearmAutomaticRequest)
+        // A newer build was staged while this one was waited on. This attempt is not the one to judge,
+        // and the newer build is a different attempt with its own once-only.
+        let supersededByANewerStage = Self.status(version: "0.8.7", installedVersion: "0.9.3", protocolVersion: SpacesWireProtocol.version - 1)
+        #expect(AppKitController.stagedApplyWatchdogResolution(status: supersededByANewerStage, stagedVersion: "0.9.2") == .rearmAutomaticRequest)
+    }
 }

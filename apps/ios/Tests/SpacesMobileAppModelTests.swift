@@ -2063,6 +2063,88 @@
             XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "with nothing reported there is nothing for the user to do yet")
         }
 
+        /// An apply that ended with no verdict must not spend the once-per-build rule. The device went
+        /// quiet for the whole poll — a daemon mid-handoff, a switched-away connection, and an
+        /// unreachable device all look like this — so nothing was decided and no report was raised. If
+        /// the attempt stayed consumed, the device coming back still blocked on that same staged build
+        /// would find the automatic apply deduped away with nothing on screen, and the user would be
+        /// stuck there until the app was relaunched.
+        func testAnUndecidedAutomaticApplyIsRequestedAgainWhenTheDeviceComesBack() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // The daemon says nothing for the whole poll, so the run ends with no evidence either way.
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                // The overview keeps answering: this is the device reporting itself still blocked and
+                // still waiting on the same staged build, which is what the app polls for anyway.
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+            await waitUntil("the first automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a device that said nothing about itself reported no failed apply")
+
+            // The overview poll goes on reporting the device blocked with that build staged, exactly as it
+            // does in the app; that report has to be able to re-arm the apply.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the device is still blocked on the build it has staged")
+        }
+
+        /// A verdict may only rest on evidence that is still current. A device that answers early in the
+        /// poll and then goes quiet — what a daemon mid-handoff replaying its sessions looks like — must
+        /// not be judged from that first report once the budget runs out: the apply may well have landed
+        /// while it was silent. The run ends undecided, so nothing is reported and the attempt re-arms.
+        func testAStaleStatusFromEarlyInThePollDoesNotReportThatTheApplyDidNotLand() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let statusPolls = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    // One answer at the start of the poll — the build still staged, the handoff not yet
+                    // done — and silence from then on.
+                    guard await statusPolls.increment() == 1 else { return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.") }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(80))
+
+            await model.refresh()
+            await waitUntil("the automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a report the device stopped answering for cannot be a verdict about it")
+            XCTAssertEqual(
+                model.daemonCompatibilityPresentation, .none, "nothing was decided, so the block carries no failure and no Try Again yet")
+            XCTAssertNil(model.errorMessage)
+            // Undecided, so the once-per-build rule is handed back: the device's next report re-arms it.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+        }
+
         /// The whole automatic flow on a blocked device: Spaces asks it to apply the build already
         /// installed on it, without being told to and without asking; a device that keeps reporting that
         /// same build staged gets one report and the retry, and the request is never re-sent for a build
