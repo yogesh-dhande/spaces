@@ -195,11 +195,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceName = "This Mac"
     var localPairedDevice: SpacesPairedDeviceRecord?
     var deviceSections: [DeviceSection] = []
-    /// `"deviceID|targetVersion"` keys for silent daemon-handoff requests already fired this app run
-    /// (see `maybeRequestSilentDaemonHandoff`), so a status refresh never re-requests a handoff that is
-    /// already staged or that failed/was refused — a failed handoff surfaces via the still-pending
-    /// caption and the daemon log rather than a retry loop.
-    private var silentDaemonHandoffRequestedKeys: Set<String> = []
+    /// One device's attempt to apply one staged build. Every piece of staged-apply state is keyed by
+    /// this pair rather than by device alone, so a device that later stages a different build gets a
+    /// fresh request and a fresh verdict instead of inheriting the previous build's.
+    struct DaemonStagedApplyAttempt: Hashable {
+        let deviceID: String
+        let stagedVersion: String
+    }
+    /// The attempts a silent daemon handoff has already been fired for this app run (see
+    /// `maybeRequestSilentDaemonHandoff`), so a status refresh never re-requests one that is already on
+    /// its way. The Try Again action deliberately bypasses this — the user asking again is new
+    /// information, a repeated status report is not.
+    private var silentDaemonHandoffRequestedAttempts: Set<DaemonStagedApplyAttempt> = []
+    /// The attempts whose watchdog expired with the device still reporting the same staged build not
+    /// running. A blocked device's block reads this to offer Try Again, and nothing renders an
+    /// `.applyStagedUpdate` block without it. Retired by `retireStagedApplyState` once the device stops
+    /// waiting on that build, and by `forgetDaemonUpdateProgress` on removal.
+    private var stagedApplyDidNotLandAttempts: Set<DaemonStagedApplyAttempt> = []
+    /// The in-flight staged-apply watchdog per device, carrying the staged build it is waiting for so a
+    /// later attempt replaces an earlier one instead of racing it and so an expiring watchdog can tell
+    /// its own attempt from a newer one. At most one per device: a device waits on one staged build.
+    private var stagedApplyWatchdogs: [String: (stagedVersion: String, task: Task<Void, Never>)] = [:]
     /// Devices whose compatibility-block "Update over SSH" installer run is in flight, so the block
     /// renders a spinner instead of re-offering the button. Entries are dropped by
     /// `updateRemoteDaemonOverSSH` on failure and by `reconcileCompatibilityBlock` once a fresh verdict
@@ -5177,34 +5193,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// no remedy and therefore `.clear`.
     nonisolated static func reconcileCompatibilityBlockAction(
         isVisibleBlockDevice: Bool, renderedRemedy: CompatibilityBlockView.BlockRemedy, verdict: SpacesWireCompatibility?,
-        status: TerminalServiceDaemonStatus?
+        status: TerminalServiceDaemonStatus?, stagedApplyDidNotLand: Bool
     ) -> CompatibilityBlockReconciliation {
         guard isVisibleBlockDevice else { return .leaveAlone }
         guard let verdict, let newRemedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else { return .clear }
+        // Ahead of the equality check, so clearing the failure mark (Try Again) takes the block down even
+        // though the remedy itself is unchanged.
+        guard
+            Self.shouldRenderCompatibilityBlock(
+                remedy: newRemedy, verdictIsCompatible: verdict.isCompatible, stagedApplyDidNotLand: stagedApplyDidNotLand)
+        else { return .clear }
         return newRemedy == renderedRemedy ? .leaveAlone : .rerender(newRemedy)
     }
 
+    /// Whether a device needing `remedy` gets a block at all. The block is the surface for a device the
+    /// app cannot use, so every remedy that only arises from an incompatible verdict is always shown.
+    ///
+    /// `.applyStagedUpdate` is the one remedy a compatible device can carry, and it takes both conditions
+    /// to render. Spaces applies a staged update by itself the moment it sees it
+    /// (`maybeRequestSilentDaemonHandoff`) and the device comes back on the new build seconds later, so
+    /// blocking the pane on it would report work already under way — the block appears only once that
+    /// request has demonstrably not landed. Even then it is withheld from a compatible device: everything
+    /// on that device still works, and a full-pane block is reserved for a device that is genuinely
+    /// blocked. There, the one dialog is the whole surface and the sidebar's "update pending" caption
+    /// remains, still true.
+    nonisolated static func shouldRenderCompatibilityBlock(
+        remedy: CompatibilityBlockView.BlockRemedy, verdictIsCompatible: Bool, stagedApplyDidNotLand: Bool
+    ) -> Bool {
+        if case .applyStagedUpdate = remedy { return stagedApplyDidNotLand && !verdictIsCompatible }
+        return true
+    }
+
     /// Reconciles the visible compatibility block (if any) against `deviceID`'s current verdict/status:
-    /// drops an obsolete block and re-resolves the detail pane once the device is compatible again (e.g.
-    /// after a restart updated its daemon), or re-renders the block once the device still needs one but
-    /// under a different remedy (e.g. a too-old daemon with nothing staged now reports a staged update —
-    /// the block must switch from "install it on that Mac" to "Update Daemon" without the user having to
-    /// navigate away and back). Called from every apply path after a reload updates a section's
-    /// verdict/status. See `reconcileCompatibilityBlockAction` for the pure decision.
+    /// drops an obsolete block and re-resolves the detail pane once the device needs none (it is
+    /// compatible again after a restart updated its daemon, or its staged update is one Spaces is
+    /// applying by itself), or re-renders the block once the device still needs one under a different
+    /// remedy, without the user having to navigate away and back. Called from every apply path after a
+    /// reload updates a section's verdict/status. See `reconcileCompatibilityBlockAction` for the pure
+    /// decision.
     func reconcileCompatibilityBlock(deviceID: String) {
         let verdict = deviceCompatibility(forDeviceID: deviceID)
         let status = deviceDaemonStatus(forDeviceID: deviceID)
-        // Runs ahead of the visible-block guard: an SSH update started from the block outlives whatever
-        // the detail pane is showing, so the in-progress entry has to be retired from the device's own
-        // facts rather than from the pane's. Only a verdict that resolves to something other than
-        // "install an update on that device" clears it — an absent verdict is the device being offline,
-        // which is exactly what a daemon mid-handoff looks like.
-        if let verdict, CompatibilityBlockView.blockRemedy(verdict: verdict, status: status)?.isInstallUpdateOnDevice != true {
-            daemonSSHUpdateInProgressDeviceIDs.remove(deviceID)
+        // Runs ahead of the visible-block guard: an SSH update or a staged apply started from here
+        // outlives whatever the detail pane is showing, so their state has to be retired from the
+        // device's own facts rather than from the pane's. Only a verdict clears anything — an absent
+        // verdict is the device being offline, which is exactly what a daemon mid-handoff looks like.
+        if let verdict {
+            let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status)
+            if remedy?.isInstallUpdateOnDevice != true { daemonSSHUpdateInProgressDeviceIDs.remove(deviceID) }
+            retireStagedApplyState(deviceID: deviceID, currentStagedVersion: remedy?.stagedVersion)
         }
         guard let renderedRemedy = visibleCompatibilityBlockRemedy else { return }
         let action = Self.reconcileCompatibilityBlockAction(
-            isVisibleBlockDevice: visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict, status: status)
+            isVisibleBlockDevice: visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict, status: status,
+            stagedApplyDidNotLand: stagedApplyDidNotLand(deviceID: deviceID, status: status))
         switch action {
         case .leaveAlone: return
         case .clear:
@@ -5220,13 +5262,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
-    /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
+    /// Renders the full-pane compatibility block for a device that needs one, with the guidance or
+    /// action its remedy calls for. Switching to a compatible device in the sidebar leaves it.
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility, presentation: DetailPanePresentation = .backgroundRefresh) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
-        guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else {
-            // A device with no remedy needs no block — leave the detail pane exactly as it is rather
-            // than clearing it out for a card that would have nothing to say.
+        guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status),
+            Self.shouldRenderCompatibilityBlock(
+                remedy: remedy, verdictIsCompatible: verdict.isCompatible,
+                stagedApplyDidNotLand: stagedApplyDidNotLand(deviceID: deviceID, status: status))
+        else {
+            // A device with no remedy — or one whose staged update needs no blocking surface — needs no
+            // block, so leave the detail pane exactly as it is rather than clearing it out for a card
+            // that would have nothing to say.
             return
         }
         visibleCompatibilityBlockRemedy = remedy
@@ -5260,7 +5307,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
             isLinuxDaemon: status?.isLinuxDaemon == true, canUpdateOverSSH: canUpdateOverSSH,
             isUpdatingOverSSH: daemonSSHUpdateInProgressDeviceIDs.contains(deviceID),
-            onRestart: remedy.offersDaemonUpdateAction ? { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) } : nil,
+            onRetryStagedApply: remedy.offersStagedApplyRetry ? { [weak self] in self?.retryStagedApply(deviceID: deviceID) } : nil,
             onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil,
             onUpdateOverSSH: canUpdateOverSSH ? { [weak self] in self?.updateRemoteDaemonOverSSH(deviceID: deviceID) } : nil)
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -5277,18 +5324,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Requests the device's daemon exec-in-place handoff through the `requestDaemonRestart` RPC (the
     /// daemon quiesces sessions, applies any update staged on disk, and re-execs at the same pid, so
     /// running terminals, agents, and processes survive), then reloads the sidebar after a short delay
-    /// so the app re-handshakes against the new build. Shared by the compatibility block's Restart
-    /// button, which reports RPC failures, and `maybeRequestSilentDaemonHandoff`, which stays silent —
-    /// the only two daemon-restart entry points. A remote Linux daemon too old for this app has nothing
-    /// staged to restart into, so it is updated by re-running the version-pinned installer instead:
+    /// so the app re-handshakes against the new build. Silent on both success and failure: whether the
+    /// staged build is running is a fact the device reports, so `startStagedApplyWatchdog` reads it back
+    /// from the device rather than this app reporting on its own request — a refused RPC and a daemon
+    /// that never comes back are the same outcome to the user, and a rejected request is often just a
+    /// daemon already mid-handoff. A remote Linux daemon too old for this app has nothing staged to
+    /// restart into, so it is updated by re-running the version-pinned installer instead:
     /// `updateRemoteDaemonOverSSH` runs it from here for a device whose pairing stored SSH details, and
     /// the compatibility block's copyable one-liner covers a device without them. Either way the
     /// installer pokes the live daemon for the same in-place handoff this RPC triggers.
-    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord, reportsFailure: Bool) {
+    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord) {
         Task { @MainActor [weak self] in
             do { _ = try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value } catch {
-                guard let self else { return }
-                if reportsFailure { self.showError(error) }
                 return
             }
             guard let self else { return }
@@ -5298,23 +5345,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// The compatibility block's explicit Restart button: user-initiated, so an unresolved device
-    /// record or a failed RPC is a visible error rather than a silent no-op.
-    private func requestDaemonRestart(deviceID: String) {
-        guard let device = deviceRecord(forDeviceID: deviceID) else {
-            showDeviceNotLoadedError()
-            return
-        }
-        fireDaemonRestartRequest(device: device, reportsFailure: true)
+    /// The staged build a silent daemon handoff should ask `status`'s device to apply, or `nil` when
+    /// there is nothing to ask for. Factored out so it is testable without a device record or the RPC.
+    ///
+    /// It defers entirely to `DaemonUpdateRemedy`, so what Spaces does silently and what a block would
+    /// otherwise say can never disagree. Wire compatibility is deliberately not part of the decision:
+    /// the restart RPC rides the frozen wire core, so it reaches a daemon this app cannot otherwise talk
+    /// to, and applying the staged build is precisely what closes that gap — leaving an incompatible
+    /// device to a button would make the user click through what the app can already do.
+    nonisolated static func silentDaemonHandoffStagedVersion(status: TerminalServiceDaemonStatus?) -> String? {
+        guard let status, case .applyStagedUpdate(let stagedVersion) = DaemonUpdateRemedy.remedy(for: status) else { return nil }
+        return stagedVersion
     }
 
-    /// Pure fire/skip decision for the silent daemon-handoff trigger, factored out so it is testable
-    /// without a device record or the RPC: fire only when the daemon reports a staged update, the
-    /// daemon speaks a wire protocol this app can talk to (an incompatible daemon is handled by the
-    /// compatibility block, not a silent restart), and this exact device/staged-version pair has not
-    /// already been requested.
-    nonisolated static func shouldFireSilentDaemonHandoff(updatePending: Bool, compatibilityIsCompatible: Bool, alreadyRequestedKey: Bool) -> Bool {
-        updatePending && compatibilityIsCompatible && !alreadyRequestedKey
+    /// Whether `status` still reports the exact staged build a handoff was requested for — the device
+    /// saying, in its own terms, that the apply has not happened. Reuses the fire rule so what Spaces
+    /// asks for and what it checks for cannot drift.
+    nonisolated static func stagedApplyIsStillPending(status: TerminalServiceDaemonStatus?, stagedVersion: String) -> Bool {
+        silentDaemonHandoffStagedVersion(status: status) == stagedVersion
     }
 
     /// Pure eligibility for the compatibility block's "Check for Updates…" action, factored out so it's
@@ -5382,28 +5430,127 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
     }
 
-    /// Drops any Update-over-SSH in-progress state for a device the app is about to stop tracking, so a
-    /// later pairing of the same device cannot inherit a spinner from a run that is no longer observable.
-    func forgetDaemonSSHUpdateProgress(deviceID: String) { daemonSSHUpdateInProgressDeviceIDs.remove(deviceID) }
+    /// Drops the in-app update state for a device the app is about to stop tracking, so a later pairing
+    /// of the same device cannot inherit a spinner, a failure mark, or a watchdog from work that is no
+    /// longer observable.
+    func forgetDaemonUpdateProgress(deviceID: String) {
+        daemonSSHUpdateInProgressDeviceIDs.remove(deviceID)
+        silentDaemonHandoffRequestedAttempts = silentDaemonHandoffRequestedAttempts.filter { $0.deviceID != deviceID }
+        retireStagedApplyState(deviceID: deviceID, currentStagedVersion: nil)
+    }
 
-    /// Silently requests a daemon exec-in-place handoff when a compatible daemon reports a staged
-    /// update (`isUpdatePending` — the daemon's own installed-vs-running comparison; never this app's
-    /// build version), instead of waiting for the daemon's own next restart. Called from every path
-    /// where a fresh `TerminalServiceDaemonStatus` lands for a device (local snapshot apply, remote
-    /// pull, remote push subscription). Deduped per (deviceID, staged version) for the app's lifetime
-    /// so a failed or refused handoff is not retried on every subsequent status refresh; the "update
-    /// pending" sidebar caption stays visible until the daemon actually comes back on the new build.
+    /// Silently requests a daemon exec-in-place handoff when a device reports a staged update (the
+    /// device's own installed-vs-running comparison; never this app's build version), instead of waiting
+    /// for the daemon's own next restart. Called from every path where a fresh
+    /// `TerminalServiceDaemonStatus` lands for a device (local snapshot apply, remote pull, remote push
+    /// subscription). Deduped per attempt so a repeated status report never re-requests a handoff that is
+    /// already on its way; `startStagedApplyWatchdog` owns what happens if it does not arrive.
     func maybeRequestSilentDaemonHandoff(deviceID: String, status: TerminalServiceDaemonStatus?) {
-        guard let status, let stagedVersion = status.installedVersion else { return }
-        let key = "\(deviceID)|\(stagedVersion)"
-        guard
-            Self.shouldFireSilentDaemonHandoff(
-                updatePending: status.isUpdatePending, compatibilityIsCompatible: SpacesWireCompatibility.evaluate(daemonStatus: status).isCompatible,
-                alreadyRequestedKey: silentDaemonHandoffRequestedKeys.contains(key))
-        else { return }
-        silentDaemonHandoffRequestedKeys.insert(key)
+        guard let stagedVersion = Self.silentDaemonHandoffStagedVersion(status: status) else { return }
+        let attempt = DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion)
+        guard !silentDaemonHandoffRequestedAttempts.contains(attempt) else { return }
+        silentDaemonHandoffRequestedAttempts.insert(attempt)
         guard let device = deviceRecord(forDeviceID: deviceID) else { return }
-        fireDaemonRestartRequest(device: device, reportsFailure: false)
+        fireDaemonRestartRequest(device: device)
+        startStagedApplyWatchdog(deviceID: deviceID, stagedVersion: stagedVersion)
+    }
+
+    /// How long a requested staged apply gets before Spaces tells the user it has not happened. Long
+    /// enough to cover a handoff that replays a device's session transcripts, short enough that a device
+    /// that will not come back is not left silently pending.
+    private static let stagedApplyWatchdogDelay: Duration = .seconds(30)
+
+    /// Whether the block for `deviceID` may render: true only once the staged apply this app requested
+    /// has been marked as not landed.
+    private func stagedApplyDidNotLand(deviceID: String, status: TerminalServiceDaemonStatus?) -> Bool {
+        guard let stagedVersion = Self.silentDaemonHandoffStagedVersion(status: status) else { return false }
+        return stagedApplyDidNotLandAttempts.contains(DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion))
+    }
+
+    /// Watches a requested staged apply and, if the device still reports the same build staged and not
+    /// running once the delay is up, marks the attempt and surfaces it. Replaces any watchdog already
+    /// running for the device: only the newest attempt can produce a verdict.
+    private func startStagedApplyWatchdog(deviceID: String, stagedVersion: String) {
+        stagedApplyWatchdogs[deviceID]?.task.cancel()
+        let task = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.stagedApplyWatchdogDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.resolveStagedApplyWatchdog(deviceID: deviceID, stagedVersion: stagedVersion)
+        }
+        stagedApplyWatchdogs[deviceID] = (stagedVersion, task)
+    }
+
+    /// The watchdog's verdict, read from what the device says about itself rather than from what the RPC
+    /// returned. A device that is not answering at all reports no status and gets no verdict: that is
+    /// exactly what a daemon mid-handoff looks like, and an unreachable device already reads as offline.
+    ///
+    /// Marking the attempt changes no pane. For a blocked device it is what puts Try Again on the block
+    /// the user reaches through the sidebar's compatibility action; for a device the app can still use
+    /// there is no block, and the dialog below is the whole surface.
+    private func resolveStagedApplyWatchdog(deviceID: String, stagedVersion: String) {
+        // A watchdog left over from an earlier staged build must not judge the current attempt.
+        guard stagedApplyWatchdogs[deviceID]?.stagedVersion == stagedVersion else { return }
+        stagedApplyWatchdogs[deviceID] = nil
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        guard let status, Self.stagedApplyIsStillPending(status: status, stagedVersion: stagedVersion) else { return }
+        stagedApplyDidNotLandAttempts.insert(DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion))
+        presentStagedApplyDidNotLandDialog(deviceID: deviceID, status: status, stagedVersion: stagedVersion)
+    }
+
+    /// The one dialog this flow raises, once per attempt: what is installed, what is still running, that
+    /// nothing on the device was disturbed, and how to apply the build on that device by hand. Only Try
+    /// Again acts; closing it leaves every pane as the user left it.
+    private func presentStagedApplyDidNotLandDialog(deviceID: String, status: TerminalServiceDaemonStatus, stagedVersion: String) {
+        let copy = CompatibilityBlockView.stagedApplyDidNotLandCopy(
+            deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, stagedVersion: stagedVersion, runningVersion: status.version,
+            isLocalDevice: deviceID == SpacesPairedDeviceRecord.localDeviceID, isLinuxDaemon: status.isLinuxDaemon)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = copy.title
+        alert.informativeText = copy.command.map { "\(copy.body)\n\n\(copy.instruction)\n\n\($0)" } ?? "\(copy.body)\n\n\(copy.instruction)"
+        alert.addButton(withTitle: "Try Again")
+        alert.addButton(withTitle: "Close")
+        if copy.command != nil { alert.addButton(withTitle: "Copy Command") }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: retryStagedApply(deviceID: deviceID)
+        case .alertThirdButtonReturn:
+            if let command = copy.command {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+            }
+        default: break
+        }
+    }
+
+    /// Try Again, from the dialog or from a blocked device's block: re-requests the apply for whatever
+    /// the device currently reports staged, clears the mark, and restarts the watchdog, so a second
+    /// request that also goes unanswered reports itself the same way the first did. It bypasses the
+    /// once-only rule on purpose — the user asking again is new information, a repeated status report is
+    /// not.
+    private func retryStagedApply(deviceID: String) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        guard let stagedVersion = Self.silentDaemonHandoffStagedVersion(status: status), let device = deviceRecord(forDeviceID: deviceID) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        stagedApplyDidNotLandAttempts.remove(DaemonStagedApplyAttempt(deviceID: deviceID, stagedVersion: stagedVersion))
+        fireDaemonRestartRequest(device: device)
+        startStagedApplyWatchdog(deviceID: deviceID, stagedVersion: stagedVersion)
+        // Takes a visible block back down: with the mark cleared the device is applying an update again,
+        // which is not a state the user has to look at.
+        reconcileCompatibilityBlock(deviceID: deviceID)
+    }
+
+    /// Drops staged-apply state for `deviceID` that its own facts no longer justify: everything when the
+    /// device is not waiting on a staged build at all, and everything but the current attempt when it is
+    /// waiting on a different one. Called from `reconcileCompatibilityBlock`, i.e. from every path that
+    /// lands a fresh verdict/status, so a landed or superseded apply can never pin a block or a watchdog.
+    private func retireStagedApplyState(deviceID: String, currentStagedVersion: String?) {
+        stagedApplyDidNotLandAttempts = stagedApplyDidNotLandAttempts.filter { $0.deviceID != deviceID || $0.stagedVersion == currentStagedVersion }
+        if let watchdog = stagedApplyWatchdogs[deviceID], watchdog.stagedVersion != currentStagedVersion {
+            watchdog.task.cancel()
+            stagedApplyWatchdogs[deviceID] = nil
+        }
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {

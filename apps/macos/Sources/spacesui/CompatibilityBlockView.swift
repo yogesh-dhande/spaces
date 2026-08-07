@@ -16,8 +16,9 @@ import workspacecore
 ///     on screen either way, as the fallback for a device Spaces cannot reach over SSH.
 ///   - A remote Mac: instructions to open Spaces on that device and install the update there.
 ///   - This Mac (the local daemon): a "Check for Updates…" button wired to Sparkle, when available.
-/// Only `.applyStagedUpdate` — a newer build already installed on the device — offers a restart/update
-/// button, labeled "Update Daemon" since that names the outcome.
+/// `.applyStagedUpdate` — a newer build already installed on the device — is not rendered at all while
+/// Spaces is applying that build by itself; the block appears for it only once the apply did not land
+/// (see `AppKitController.shouldRenderCompatibilityBlock`), and then offers "Try Again".
 final class CompatibilityBlockView: NSView {
     /// What the block renders, carrying exactly the version facts each case is guaranteed to have (so
     /// `content(...)` never needs to invent placeholder text for data it doesn't have). Produced by
@@ -26,8 +27,8 @@ final class CompatibilityBlockView: NSView {
         /// This client's own app build must update. `daemonVersion` is `nil` only in the no-status
         /// conservative fallback (see `blockRemedy`); once a status is known it is always present.
         case updateClient(daemonVersion: String?)
-        /// A newer build is installed on the device and a restart applies it — the only case with a
-        /// restart/update button. Both versions are guaranteed non-nil: this case is only produced from
+        /// A newer build is installed on the device and a restart applies it — the only case with an
+        /// action button. Both versions are guaranteed non-nil: this case is only produced from
         /// a status whose `isUpdatePending` is true, which by definition requires a staged
         /// `installedVersion`, and `version` (the daemon's own running build) is never optional.
         case applyStagedUpdate(daemonVersion: String, installedVersion: String)
@@ -35,11 +36,18 @@ final class CompatibilityBlockView: NSView {
         /// no-status conservative fallback.
         case installUpdateOnDevice(daemonVersion: String?)
 
-        /// The only case for which offering a restart/update action makes sense — mirrors
-        /// `DaemonUpdateRemedy.offersDaemonUpdateAction`.
-        var offersDaemonUpdateAction: Bool {
+        /// The only case whose block carries a Try Again action, because it is the only one Spaces can
+        /// resolve by asking the device to apply what is already installed on it.
+        var offersStagedApplyRetry: Bool {
             if case .applyStagedUpdate = self { return true }
             return false
+        }
+
+        /// The staged build this remedy is waiting on, so the caller can match it against the attempt it
+        /// fired; `nil` for every remedy that is not waiting on one.
+        var stagedVersion: String? {
+            if case .applyStagedUpdate(_, let installedVersion) = self { return installedVersion }
+            return nil
         }
 
         /// The only case an Update-over-SSH run is trying to resolve, so it is also the only one whose
@@ -66,7 +74,7 @@ final class CompatibilityBlockView: NSView {
 
     init(
         remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool,
-        onRestart: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?
+        onRetryStagedApply: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?
     ) {
         let content = Self.content(
             remedy: remedy, deviceName: deviceName, isLocalDevice: isLocalDevice, isLinuxDaemon: isLinuxDaemon, clientVersion: AppVersion.short,
@@ -77,7 +85,7 @@ final class CompatibilityBlockView: NSView {
         // most one is non-nil in practice. `.installUpdateOnDevice` splits by device: this Mac checks for
         // an app update, any other device runs the installer over SSH when its pairing allows it.
         switch remedy {
-        case .applyStagedUpdate: onAction = onRestart
+        case .applyStagedUpdate: onAction = onRetryStagedApply
         case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : onUpdateOverSSH
         case .updateClient: onAction = nil
         }
@@ -211,11 +219,15 @@ final class CompatibilityBlockView: NSView {
                 title: "Device version not compatible", detail: detail, installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
 
         case .applyStagedUpdate(let daemonVersion, let installedVersion):
-            let detail =
-                "\(deviceName) is running Spaces \(daemonVersion); Spaces \(installedVersion) is installed there. Update the daemon to apply "
-                + "it — running terminals, agents, and processes keep running. Other paired devices remain available."
+            // Reached only after the requested apply did not land: while Spaces is applying the staged
+            // build there is nothing for the user to do, so the caller withholds the block entirely
+            // (`AppKitController.shouldRenderCompatibilityBlock`). The copy is the dialog's, so the
+            // surface the user keeps and the one they dismissed cannot drift apart.
+            let copy = stagedApplyDidNotLandCopy(
+                deviceName: deviceName, stagedVersion: installedVersion, runningVersion: daemonVersion, isLocalDevice: isLocalDevice,
+                isLinuxDaemon: isLinuxDaemon)
             return Content(
-                title: "\(deviceName) needs a daemon update", detail: detail, installerCommand: nil, actionButtonTitle: "Update Daemon",
+                title: copy.title, detail: "\(copy.body) \(copy.instruction)", installerCommand: copy.command, actionButtonTitle: "Try Again",
                 showsProgress: false)
 
         case .installUpdateOnDevice(let daemonVersion):
@@ -255,24 +267,64 @@ final class CompatibilityBlockView: NSView {
                     showsProgress: false)
             }
             if isLocalDevice {
-                // Does not promise the daemon picks the update up by itself: the silent handoff fires
-                // only for a wire-compatible daemon, and this one is too old for that, so once the
-                // install lands this pane re-renders as `.applyStagedUpdate` and the user applies it.
                 let detail =
                     "This Mac's Spaces daemon\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is installed "
-                    + "here to restart into. Update Spaces on this Mac, then apply it to the daemon here — running terminals, agents, and "
-                    + "processes are preserved."
+                    + "here to restart into. Update Spaces on this Mac; the daemon applies it on its own once it lands — running terminals, "
+                    + "agents, and processes are preserved."
                 return Content(
                     title: "This Mac needs a Spaces update", detail: detail, installerCommand: nil,
                     actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil, showsProgress: false)
             }
             let detail =
                 "The Spaces daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is "
-                + "installed there. Open Spaces on \(deviceName) and install the update; this pane then offers to apply it to the daemon. Other "
+                + "installed there. Open Spaces on \(deviceName) and install the update; the daemon applies it on its own once it lands. Other "
                 + "paired devices remain available."
             return Content(
                 title: "\(deviceName) needs a Spaces update", detail: detail, installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
         }
+    }
+
+    /// Copy for a device that still reports a staged build its daemon is not running some time after
+    /// Spaces asked it to apply that build in place. One shape for every device: what is installed, what
+    /// is still running, that nothing on the device was disturbed, and the one instruction that applies
+    /// the build on that kind of device by hand.
+    struct StagedApplyDidNotLandCopy: Equatable {
+        let title: String
+        let body: String
+        let instruction: String
+        /// The command the user runs on the device, when the instruction is a command — Linux only.
+        let command: String?
+    }
+
+    /// The command that applies a staged build on a Linux device by hand. Loading the staged daemon in
+    /// place is what the RPC asks for too, so running it resolves the same state without disturbing the
+    /// device's sessions.
+    static let linuxApplyStagedUpdateCommand = "~/.spaces/bin/spaces daemon apply-update"
+
+    /// Builds `StagedApplyDidNotLandCopy` for one device. Shared by the dialog Spaces raises once and by
+    /// the block that stays behind it, so both report the same versions and the same instruction.
+    ///
+    /// The wording never calls the apply a failure: a daemon that is slow to restart and one that refused
+    /// look identical from here, so this reports what has not happened rather than a verdict.
+    nonisolated static func stagedApplyDidNotLandCopy(
+        deviceName: String, stagedVersion: String, runningVersion: String, isLocalDevice: Bool, isLinuxDaemon: Bool
+    ) -> StagedApplyDidNotLandCopy {
+        let body =
+            "Spaces \(stagedVersion) is installed on \(deviceName), but its daemon is still running \(runningVersion) after the update was "
+            + "requested. Nothing running on \(deviceName) was interrupted."
+        // The instruction stops at the colon for Linux: both surfaces render `command` themselves — the
+        // block as its own selectable row, the dialog under the informative text next to Copy Command.
+        if isLinuxDaemon {
+            return StagedApplyDidNotLandCopy(
+                title: "\(deviceName)'s daemon didn't pick up the update", body: body, instruction: "Run this on \(deviceName) to apply it:",
+                command: linuxApplyStagedUpdateCommand)
+        }
+        let instruction =
+            isLocalDevice
+            ? "Use Restart Local Daemon in Spaces settings to apply it here."
+            : "Open Spaces on \(deviceName); its daemon applies the update when it restarts."
+        return StagedApplyDidNotLandCopy(
+            title: "\(deviceName)'s daemon didn't pick up the update", body: body, instruction: instruction, command: nil)
     }
 
     private nonisolated static func nonEmpty(_ value: String?) -> String? {

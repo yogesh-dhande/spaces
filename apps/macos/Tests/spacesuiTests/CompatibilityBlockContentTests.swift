@@ -63,22 +63,42 @@ import spacesterminalcore
 
     // MARK: - reconcileCompatibilityBlockAction
 
-    @Test func staleInstallGuidanceRerendersOnceADeviceReportsAStagedUpdateWhileStillIncompatible() {
-        // The motivating case: the block told the user to "open Spaces on that Mac and install the
-        // update"; they did, and the daemon is still on the old build (still incompatible) but now
-        // reports the update it just staged. The block must switch to offering "Update Daemon" rather
-        // than repeating stale install-it-yourself guidance the user already acted on.
+    @Test func staleInstallGuidanceDropsTheBlockOnceADeviceReportsAStagedUpdateWhileStillIncompatible() {
+        // The block told the user to "open Spaces on that Mac and install the update"; they did, and the
+        // daemon is still on the old build (still incompatible) but now reports the update it just
+        // staged. Spaces applies that itself, so the stale install-it-yourself guidance must go and
+        // nothing must replace it.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
         let action = AppKitController.reconcileCompatibilityBlockAction(
-            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged)
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
+            stagedApplyDidNotLand: false)
+        #expect(action == .clear)
+    }
+
+    @Test func staleInstallGuidanceRerendersAsTryAgainOnceTheStagedApplyDidNotLand() {
+        let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
+            stagedApplyDidNotLand: true)
         #expect(action == .rerender(.applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0")))
+    }
+
+    @Test func aRetriedStagedApplyTakesItsOwnBlockBackDownEvenThoughTheRemedyIsUnchanged() {
+        // Try Again clears the failure mark and re-requests the apply. The device's facts have not moved
+        // yet, so the remedy is identical — the block must still come down, or the user would be left
+        // reading a failure report about a request that is in flight again.
+        let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), verdict: .daemonTooOld,
+            status: staged, stagedApplyDidNotLand: false)
+        #expect(action == .clear)
     }
 
     @Test func stagedUpdateBlockClearsOnceTheDeviceReportsCompatible() {
         let compatible = makeStatus(version: "0.2.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version)
         let action = AppKitController.reconcileCompatibilityBlockAction(
             isVisibleBlockDevice: true, renderedRemedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), verdict: .compatible,
-            status: compatible)
+            status: compatible, stagedApplyDidNotLand: true)
         #expect(action == .clear)
     }
 
@@ -87,7 +107,8 @@ import spacesterminalcore
         // in the pane (e.g. focus), so an identical remedy must not trigger a re-render.
         let nothingStaged = makeStatus(version: "0.1.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version - 1)
         let action = AppKitController.reconcileCompatibilityBlockAction(
-            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: nothingStaged)
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: nothingStaged,
+            stagedApplyDidNotLand: false)
         #expect(action == .leaveAlone)
     }
 
@@ -97,24 +118,101 @@ import spacesterminalcore
         // re-render.
         let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
         let action = AppKitController.reconcileCompatibilityBlockAction(
-            isVisibleBlockDevice: false, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged)
+            isVisibleBlockDevice: false, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged,
+            stagedApplyDidNotLand: true)
         #expect(action == .leaveAlone)
+    }
+
+    // MARK: - Whether a block is rendered at all
+
+    @Test func aStagedUpdateIsShownOnlyOnABlockedDeviceWhoseApplyDidNotLand() {
+        // The auto-applied case is the whole point: Spaces asks the device to apply the staged build the
+        // moment it sees it, so until that request has demonstrably not landed there is nothing for the
+        // user to do and no block to show.
+        let staged = CompatibilityBlockView.BlockRemedy.applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0")
+        #expect(!AppKitController.shouldRenderCompatibilityBlock(remedy: staged, verdictIsCompatible: false, stagedApplyDidNotLand: false))
+        #expect(AppKitController.shouldRenderCompatibilityBlock(remedy: staged, verdictIsCompatible: false, stagedApplyDidNotLand: true))
+        // And a full-pane block is reserved for a device the app cannot use: a compatible device whose
+        // apply did not land keeps working, so it never gets one — the dialog is its whole surface.
+        #expect(!AppKitController.shouldRenderCompatibilityBlock(remedy: staged, verdictIsCompatible: true, stagedApplyDidNotLand: true))
+        #expect(!AppKitController.shouldRenderCompatibilityBlock(remedy: staged, verdictIsCompatible: true, stagedApplyDidNotLand: false))
+
+        // Every other remedy only ever arises from an incompatible verdict and is the user's to resolve,
+        // so it is always shown.
+        for remedy in [CompatibilityBlockView.BlockRemedy.installUpdateOnDevice(daemonVersion: "0.1.0"), .updateClient(daemonVersion: "0.3.0")] {
+            #expect(AppKitController.shouldRenderCompatibilityBlock(remedy: remedy, verdictIsCompatible: false, stagedApplyDidNotLand: false))
+            #expect(AppKitController.shouldRenderCompatibilityBlock(remedy: remedy, verdictIsCompatible: false, stagedApplyDidNotLand: true))
+        }
+    }
+
+    @Test func aCompatibleDeviceNeverGetsABlockForAStagedUpdateThatDidNotLand() {
+        // Reached through the reconcile path too, not only through the render gate: a compatible device
+        // that stages an update the app then fails to apply must not have a block pushed into its pane.
+        let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .compatible, status: staged,
+            stagedApplyDidNotLand: true)
+        #expect(action == .clear)
     }
 
     // MARK: - Remedy -> copy/button table
 
-    @Test func applyStagedUpdateOffersTheUpdateDaemonButtonOnBothMacOSAndLinux() {
+    @Test func applyStagedUpdateOffersTryAgainAndNamesBothVersionsOnEveryKindOfDevice() {
+        // Rendered only after the apply did not land, so its copy reports what has not happened and hands
+        // back a retry — on Linux alongside the command that applies the build on the device by hand.
         let macContent = CompatibilityBlockView.content(
-            remedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), deviceName: "Yogesh's Mac", isLocalDevice: false,
-            isLinuxDaemon: false, clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
-        #expect(macContent.actionButtonTitle == "Update Daemon")
+            remedy: .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), deviceName: "lantern", isLocalDevice: false,
+            isLinuxDaemon: false, clientVersion: "0.9.2", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+        #expect(macContent.title == "lantern's daemon didn't pick up the update")
+        #expect(macContent.actionButtonTitle == "Try Again")
         #expect(macContent.installerCommand == nil)
+        #expect(macContent.detail.contains("Spaces 0.9.2 is installed on lantern"))
+        #expect(macContent.detail.contains("still running 0.8.7"))
+        #expect(macContent.detail.contains("Nothing running on lantern was interrupted."))
+        #expect(macContent.detail.contains("Open Spaces on lantern"))
+        #expect(!macContent.showsProgress)
 
         let linuxContent = CompatibilityBlockView.content(
-            remedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), deviceName: "build-box", isLocalDevice: false,
-            isLinuxDaemon: true, clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
-        #expect(linuxContent.actionButtonTitle == "Update Daemon")
-        #expect(linuxContent.installerCommand == nil)
+            remedy: .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), deviceName: "build-box", isLocalDevice: false,
+            isLinuxDaemon: true, clientVersion: "0.9.2", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+        #expect(linuxContent.actionButtonTitle == "Try Again")
+        #expect(linuxContent.installerCommand == CompatibilityBlockView.linuxApplyStagedUpdateCommand)
+
+        let localContent = CompatibilityBlockView.content(
+            remedy: .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), deviceName: "This Mac", isLocalDevice: true,
+            isLinuxDaemon: false, clientVersion: "0.9.2", canCheckForUpdates: true, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+        #expect(localContent.actionButtonTitle == "Try Again")
+        #expect(localContent.installerCommand == nil)
+        #expect(localContent.detail.contains("Restart Local Daemon"))
+    }
+
+    @Test func theStagedApplyReportNeverCallsTheApplyAFailure() {
+        // A daemon that is slow to restart and one that refused look identical from here, so the copy
+        // states what has not happened rather than delivering a verdict.
+        let variants: [(isLocalDevice: Bool, isLinuxDaemon: Bool)] = [(false, false), (false, true), (true, false)]
+        for variant in variants {
+            let copy = CompatibilityBlockView.stagedApplyDidNotLandCopy(
+                deviceName: "lantern", stagedVersion: "0.9.2", runningVersion: "0.8.7", isLocalDevice: variant.isLocalDevice,
+                isLinuxDaemon: variant.isLinuxDaemon)
+            let text = "\(copy.title) \(copy.body) \(copy.instruction)".lowercased()
+            #expect(!text.contains("fail"))
+            #expect(!text.contains("error"))
+        }
+    }
+
+    @Test func onlyALinuxDeviceGetsACommandToRun() {
+        #expect(
+            CompatibilityBlockView.stagedApplyDidNotLandCopy(
+                deviceName: "build-box", stagedVersion: "0.9.2", runningVersion: "0.8.7", isLocalDevice: false, isLinuxDaemon: true
+            ).command == CompatibilityBlockView.linuxApplyStagedUpdateCommand)
+        #expect(
+            CompatibilityBlockView.stagedApplyDidNotLandCopy(
+                deviceName: "lantern", stagedVersion: "0.9.2", runningVersion: "0.8.7", isLocalDevice: false, isLinuxDaemon: false
+            ).command == nil)
+        #expect(
+            CompatibilityBlockView.stagedApplyDidNotLandCopy(
+                deviceName: "This Mac", stagedVersion: "0.9.2", runningVersion: "0.8.7", isLocalDevice: true, isLinuxDaemon: false
+            ).command == nil)
     }
 
     @Test func installUpdateOnDeviceOnLinuxShowsTheInstallerCommandAndNoButton() {
