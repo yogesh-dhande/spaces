@@ -209,7 +209,7 @@ final class SpacesCommandTests: XCTestCase {
         // Everything the pairing phase raises after a successful install run.
         XCTAssertFalse(
             DevicePairCommand.isRemoteInstallRunFailure(
-                SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: "build-box", port: 47_847, message: "Connection refused.")))
+                SpacesRemoteDevicePairingError.deviceAPIUnreachable(hosts: ["build-box"], port: 47_847, message: "Connection refused.")))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.pairingRejected("The pairing code expired.")))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remotePairCommandFailed("spaces: command not found")))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.missingAuthToken))

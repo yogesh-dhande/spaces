@@ -450,7 +450,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         // refusal is a pure guard: no ssh process is launched, so this asserts against a device record
         // that names an unreachable host.
         let device = SpacesPairedDeviceRecord(
-            id: "device-linkpaired", name: "builder", platform: "remote", host: "100.64.12.34", port: 47_847, certificateFingerprint: "aa:bb",
+            id: "device-linkpaired", name: "builder", platform: "remote", hosts: ["100.64.12.34"], port: 47_847, certificateFingerprint: "aa:bb",
             sshHost: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
 
         XCTAssertThrowsError(try SpacesDevicePairingClient.updateSpacesOnRemoteDevice(device: device, appVersion: "0.1.0")) { error in
