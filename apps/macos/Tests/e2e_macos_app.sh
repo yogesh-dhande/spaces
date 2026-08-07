@@ -4806,6 +4806,11 @@ refocus_cycle_target() {
       fail "unexpected cycle target for refocus: $cycle_target"
       ;;
   esac
+  if [[ "$cycle_target" != browser:* ]]; then
+    # See seed_cycle_focus_history: a terminal-kind refocus only registers while Spaces is active,
+    # and the preceding measurement may have left Chrome frontmost.
+    activate_spaces_pid "$SPACES_PID"
+  fi
   run_spaces_logged "$TMP_ROOT/$label_slug-refocus-cycle-target.log" open "$target_name" "$workspace_dir"
   transition_pause "$label refocus cycle target"
 }
@@ -4884,6 +4889,12 @@ seed_cycle_focus_history() {
   shift
   local seed_target
   for seed_target in "$@"; do
+    if [[ "$seed_target" != "docs" ]]; then
+      # A pane focus only lands while Spaces is active (`terminal_pane_focus ... reason=app_inactive`
+      # otherwise reports focus_observed=0), and a docs seed leaves Chrome frontmost. Foreground
+      # Spaces before a terminal-kind seed so the seeded focus becomes the cycle's current position.
+      activate_spaces_pid "$SPACES_PID"
+    fi
     run_spaces_logged "/tmp/spaces-e2e-cycle-seed-${seed_label}-${seed_target// /-}.log" open "$seed_target" "$workspace_dir"
     transition_pause "$host seed $seed_target focus ($seed_label)"
     if [[ "$seed_target" == "docs" ]]; then
@@ -5243,6 +5254,10 @@ run_window_cycle_small_assertions() {
   backend_status_url="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
   ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "$docs_expected" "$backend_status_url" "$backend_expected"
 
+  # The docs step leaves Chrome frontmost, and a pane focus only lands while Spaces is active
+  # (terminal_pane_focus reports app_inactive / focus_observed=0 otherwise), so foreground Spaces
+  # before the terminal-pane opens whose focus the waits below assert.
+  activate_spaces_pid "$SPACES_PID"
   run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-frontend.log open frontend "$workspace_dir"
   transition_pause "$host open frontend for cycle profile"
   KNOWN_SPACES_FRONTEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
