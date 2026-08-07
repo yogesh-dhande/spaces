@@ -52,6 +52,15 @@ struct RootTabView: View {
             Button("OK", role: .cancel) { model.dismissDeletedWorkspaceNotice() }
         } message: {
             Text(model.deletedWorkspaceNotice ?? "")
+        }
+        // Applying a staged build to a blocked device is the one thing this app does on its own, so its
+        // one report lives at the shell: it is about the device, not about whichever tab happens to be
+        // on screen when the wait runs out.
+        .alert(stagedApplyAlertTitle, isPresented: stagedApplyDidNotLandBinding, presenting: model.stagedApplyDidNotLandAlert) { _ in
+            Button("Try Again") { Task { await model.retryStagedApply() } }
+            Button("Not Now", role: .cancel) { model.dismissStagedApplyDidNotLandAlert() }
+        } message: { alert in
+            Text(alert.message)
         }.onChange(of: model.isShowingConnectionSettings) { _, isShowing in if isShowing { model.selectedTab = .settings } }.onOpenURL { url in
             switch SpacesIncomingLinkRoute.route(for: url) {
             case .pairing(let url): model.preparePairingLink(url)
@@ -94,6 +103,14 @@ struct RootTabView: View {
     }
 
     private var errorAlertBinding: Binding<Bool> { Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.dismissError() } }) }
+
+    /// The alert's title has to be readable when the alert is absent (SwiftUI evaluates it either way),
+    /// so it collapses to empty rather than forcing the state to survive the dismissal that clears it.
+    private var stagedApplyAlertTitle: String { model.stagedApplyDidNotLandAlert?.title ?? "" }
+
+    private var stagedApplyDidNotLandBinding: Binding<Bool> {
+        Binding(get: { model.stagedApplyDidNotLandAlert != nil }, set: { if !$0 { model.dismissStagedApplyDidNotLandAlert() } })
+    }
 
     private var deletedWorkspaceNoticeBinding: Binding<Bool> {
         Binding(get: { model.deletedWorkspaceNotice != nil }, set: { if !$0 { model.dismissDeletedWorkspaceNotice() } })

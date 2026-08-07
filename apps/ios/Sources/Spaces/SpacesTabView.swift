@@ -117,9 +117,17 @@ struct SpacesTabView: View {
                         homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
                     }
                     if model.isActiveDeviceBlocked {
-                        // Fully blocked, scoped to this device: the banner in homeControls is the only
-                        // surface. Switch to another paired device or restart this device's daemon.
-                        EmptyView()
+                        // Fully blocked, scoped to this device: nothing here can be used, so the version
+                        // hero takes the whole list when there is something for the user to do or know,
+                        // and the screen stays bare while Spaces is applying a staged build by itself.
+                        // Switch to another paired device from the selector above either way.
+                        if case .hero(let hero) = model.daemonCompatibilityPresentation {
+                            Section {
+                                DaemonVersionHeroView(content: hero, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
+                                    Task { await model.retryStagedApply() }
+                                }.frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.compatibilityHero)
+                            }
+                        }
                     } else if model.isLoading && model.overview == nil {
                         Section {
                             ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.loading)
@@ -154,7 +162,9 @@ struct SpacesTabView: View {
         private var listIdentitySections: [[String]] {
             var sections: [[String]] = [["controls@\(SpacesListRowID.controls)"]]
             if model.isActiveDeviceBlocked {
-                // No rows: the compatibility banner in homeControls is the whole surface.
+                // The version hero is the whole surface, and there is none while a staged build is being
+                // applied on its own.
+                if case .hero = model.daemonCompatibilityPresentation { sections.append(["compatibilityHero@\(SpacesListRowID.compatibilityHero)"]) }
             } else if model.isLoading && model.overview == nil {
                 sections.append(["loading@\(SpacesListRowID.loading)"])
             } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
@@ -190,17 +200,20 @@ struct SpacesTabView: View {
     private var homeControls: some View {
         VStack(spacing: 8) {
             deviceSelectorRow
-            compatibilityBanner
+            pendingUpdateCard
             if !model.isActiveDeviceBlocked { searchFilterRow }
         }
     }
 
-    @ViewBuilder private var compatibilityBanner: some View {
-        if let status = model.daemonStatus, let remedy = model.daemonUpdateRemedy, remedy != .none {
+    /// The quiet card for a device that works fine and has an update waiting. A blocked device's state
+    /// is not shown here at all: it takes the whole list as the version hero, or nothing while Spaces is
+    /// applying the staged build on its own.
+    @ViewBuilder private var pendingUpdateCard: some View {
+        if case .pendingUpdate(let content) = model.daemonCompatibilityPresentation {
             // The update action fires directly: `requestDaemonUpdate()` re-execs the daemon onto
             // whatever build is staged and preserves running terminals, processes, and coding agents,
             // so there is nothing to confirm or defer.
-            CompatibilityBannerView(remedy: remedy, status: status, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
+            PendingDaemonUpdateCardView(content: content, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
                 Task { await model.requestDaemonUpdate() }
             }
         }
@@ -630,6 +643,7 @@ struct SpacesTabView: View {
 /// (a workspace id naming both a band and a loose band, say) still yields two distinct rows.
 private enum SpacesListRowID {
     static let controls = "controls"
+    static let compatibilityHero = "compatibility.hero"
     static let loading = "loading"
     static let empty = "empty"
     static let hiddenHeader = "hidden.header"
