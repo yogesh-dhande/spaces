@@ -226,13 +226,23 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     /// Renames an ad hoc workspace terminal session. The daemon rejects sessions owned by a configured
-    /// process or coding agent — those own their name through the workspace config, not the session.
+    /// process (those own their name through the workspace config) or by a coding agent (renamed through
+    /// `renameAgentSession`).
     func renameTerminalSession(workspaceID: String, sessionID: String, title: String, commandChannel: SpacesDeviceAPICommandChannel? = nil)
         async throws -> SpacesDeviceAPIResponse
     {
         try await mutation(
             .init(
                 command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    func renameAgentSession(workspaceID: String, agentID: String, title: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title)),
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
@@ -275,30 +285,12 @@ struct SpacesDeviceAPIClient: Sendable {
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
-    func runCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws -> SpacesDeviceAPIResponse
-    {
-        try await mutation(
-            .init(
-                command: .runCodingAgent(.init(workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID)),
-                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
-    }
-
-    func stopCodingAgent(workspaceID: String, agentID: String, agentName: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+    func stopCodingAgent(workspaceID: String, agentID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> SpacesDeviceAPIResponse
     {
         try await mutation(
             .init(
-                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: nil)),
-                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
-    }
-
-    func restartCodingAgent(workspaceID: String, agentID: String, agentName: String?, commandChannel: SpacesDeviceAPICommandChannel? = nil)
-        async throws -> SpacesDeviceAPIResponse
-    {
-        try await mutation(
-            .init(
-                command: .restartCodingAgent(.init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: nil)),
+                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID)),
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 

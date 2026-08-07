@@ -259,7 +259,6 @@ import workspacecore
     @Test func shortcutTargetsFollowVisibleRunSectionOrder() {
         let configuredProcesses = [ProcessTemplate(name: "web", command: "npm run dev")]
         let browserSessions = [BrowserSession(name: "frontend", url: "http://localhost:3000")]
-        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let windows = [
             WindowRecord(
                 id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web",
@@ -280,49 +279,49 @@ import workspacecore
             configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindows)
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
             browserSessions: browserSessions, processEntries: processEntries,
-            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: agentWindows)
+            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), agentWindows: agentWindows)
         let runtimeIndex = AppKitController.workspaceRuntimeTargetIndex(
             browserSessions: browserSessions, processEntries: processEntries,
-            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: agentWindows)
+            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), agentWindows: agentWindows)
 
-        #expect(shortcutTargets.map(\.kind) == [.browser, .process, .agentLauncher, .agent])
+        #expect(shortcutTargets.map(\.kind) == [.browser, .process, .agent])
         #expect(runtimeIndex.orderedTargets.map(\.kind) == shortcutTargets.map(\.kind))
         #expect(shortcutTargets.first?.targetURL == "http://localhost:3000")
         #expect(shortcutTargets[1].processID == "process-web")
-        #expect(shortcutTargets[2].launcherName == "claude")
-        #expect(shortcutTargets[3].agentWindow?.id == "agent")
+        #expect(shortcutTargets[2].agentWindow?.id == "agent")
         #expect(runtimeIndex.targetsByURL["http://localhost:3000"]?.kind == .browser)
         #expect(runtimeIndex.targetsByProcessID["process-web"]?.kind == .process)
         #expect(runtimeIndex.targetsByTerminalSessionID["session-web"]?.processID == "process-web")
         #expect(runtimeIndex.targetsByAgentID["agent"]?.kind == .agent)
     }
 
-    @Test func configuredAndAdHocAgentsShareOneVisibleShortcutRunOrder() {
-        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
+    /// Every coding-agent row is a live agent window: the run order lists exactly those, in the order
+    /// the daemon reports them, and never a not-started row.
+    @Test func runOrderingListsOnlyLiveAgents() {
         let agentWindows = [
             AgentWindowRecord(
-                id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-claude"), claimedLauncherName: "claude", status: .idle, createdAt: "now",
-                updatedAt: "now"),
+                id: "claude", workspaceID: "workspace", provider: .spaces, label: "claude",
+                terminalTarget: TerminalTargetRecord(trackingID: "session-claude"), status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
                 status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-            browserSessions: [], processEntries: [], processesByID: [:], configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: agentWindows)
+            browserSessions: [], processEntries: [], processesByID: [:], agentWindows: agentWindows)
 
         #expect(shortcutTargets.map(\.kind) == [.agent, .agent])
-        #expect(shortcutTargets.map { $0.agentWindow?.id } == ["configured", "adhoc"])
+        #expect(shortcutTargets.map { $0.agentWindow?.id } == ["claude", "adhoc"])
     }
 
     @Test func workspaceDetailShortcutIndicesFollowLiveRuntimeOrder() {
         let browserSessions = [BrowserSession(name: "docs", url: "http://localhost:3000")]
         let configuredProcesses = [ProcessTemplate(name: "web", command: "npm run dev")]
-        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
+        let agentWindows = [
+            AgentWindowRecord(
+                id: "agent-claude", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude",
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
+        ]
         let windows = [
             WindowRecord(
                 id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: "npm run dev", targetURL: nil,
@@ -340,15 +339,14 @@ import workspacecore
             configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: [])
         let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
             browserSessions: browserSessions, processEntries: processEntries,
-            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: [])
+            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), agentWindows: agentWindows)
 
         // Families are ordered browser, processes, coding agents, ad hoc terminals — so the agent takes the
         // index right after the process, and the terminal window is pushed behind it.
         #expect(shortcutIndices.browserSessionsByURL["http://localhost:3000"] == 1)
         #expect(shortcutIndices.processesByName["web"] == 2)
         #expect(shortcutIndices.codingAgentsByName["claude"] == 3)
-        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "claude")] == 3)
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "agent-claude")] == 3)
     }
 
     @Test func unlabeledAgentRowsStillReceiveShortcutIdentity() {
@@ -359,104 +357,9 @@ import workspacecore
         ]
 
         let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
-            browserSessions: [], processEntries: [], processesByID: [:], configuredAgentLaunchers: [], agentWindows: agentWindows)
+            browserSessions: [], processEntries: [], processesByID: [:], agentWindows: agentWindows)
 
         #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "agent-unlabeled")] == 1)
-    }
-
-    @Test func resolvedCodingAgentEntriesKeepConfiguredSlotsBeforeAdHocAgents() {
-        let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex")]
-        let agentWindows = [
-            AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-claude"), claimedLauncherName: "Claude", status: .idle, createdAt: "now",
-                updatedAt: "now"),
-            AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
-                status: .spinning, createdAt: "now", updatedAt: "now"),
-        ]
-
-        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        #expect(entries.map(\.kind) == [.agent, .agentLauncher, .agent])
-        #expect(entries.map(\.launcherName) == ["claude", "codex", nil])
-        #expect(entries.map { $0.agentWindow?.id } == ["matched", nil, "adhoc"])
-    }
-
-    @Test func resolvedCodingAgentEntriesMatchRenamedLaunchersByID() {
-        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "Codex Renamed", command: "codex")]
-        let agentWindows = [
-            AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
-                status: .idle, createdAt: "now", updatedAt: "now")
-        ]
-
-        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        #expect(entries.map(\.kind) == [.agent])
-        #expect(entries.map(\.launcherName) == ["Codex Renamed"])
-        #expect(entries.map { $0.agentWindow?.id } == ["matched"])
-    }
-
-    @Test func staleClaimedLauncherIDDoesNotHideLiveAgentShortcutTarget() {
-        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex-new", name: "Codex", command: "codex")]
-        let agentWindows = [
-            AgentWindowRecord(
-                id: "codex-runtime", workspaceID: "workspace", provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex-old",
-                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now")
-        ]
-
-        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-        let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
-            browserSessions: [], processEntries: [], processesByID: [:], configuredAgentLaunchers: configuredAgentLaunchers,
-            agentWindows: agentWindows)
-
-        #expect(entries.map(\.kind) == [.agentLauncher, .agent])
-        #expect(entries.map(\.launcherName) == ["Codex", nil])
-        #expect(entries.map { $0.agentWindow?.id } == [nil, "codex-runtime"])
-        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "Codex")] == 1)
-        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: "codex-runtime")] == 2)
-    }
-
-    @Test func renamedUnconfiguredAgentDoesNotClaimAMatchingLauncherSlot() {
-        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")]
-        let rows = [
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: "configured-agent:workspace:launcher-codex", workspaceID: "workspace", name: "codex", command: "codex",
-                launcherID: "launcher-codex", agentID: nil, sessionID: nil, isConfigured: true, runState: .notStarted, activityState: .idle,
-                canRun: true, canStop: false, canRestart: false),
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent:agent-renamed", workspaceID: "workspace", name: "codex", command: "", launcherID: nil, agentID: "agent-renamed",
-                sessionID: "session-renamed", isConfigured: false, runState: .running, activityState: .spinning, canRun: false, canStop: true,
-                canRestart: false),
-        ]
-
-        let agentWindows = AppKitController.agentWindows(from: rows)
-        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        #expect(agentWindows.map(\.id) == ["agent-renamed"])
-        #expect(entries.map(\.kind) == [.agentLauncher, .agent])
-        #expect(entries.map(\.launcherName) == ["codex", nil])
-        #expect(entries.map { $0.agentWindow?.id } == [nil, "agent-renamed"])
-    }
-
-    @Test func configuredAgentRowResolvesItsLauncherSlot() {
-        let configuredAgentLaunchers = [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")]
-        let rows = [
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: "configured-agent:workspace:launcher-codex", workspaceID: "workspace", name: "codex", command: "codex",
-                launcherID: "launcher-codex", agentID: "agent-codex", sessionID: "session-codex", isConfigured: true, runState: .running,
-                activityState: .spinning, canRun: false, canStop: true, canRestart: true)
-        ]
-
-        let agentWindows = AppKitController.agentWindows(from: rows)
-        let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        #expect(entries.map(\.kind) == [.agent])
-        #expect(entries.map(\.launcherName) == ["codex"])
-        #expect(entries.map { $0.agentWindow?.id } == ["agent-codex"])
     }
 
     @Test func missingConfiguredProcessShortcutTargetsRecoveryAction() {
@@ -467,7 +370,7 @@ import workspacecore
         ]
 
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-            browserSessions: [], processEntries: processEntries, processesByID: [:], configuredAgentLaunchers: [], agentWindows: [])
+            browserSessions: [], processEntries: processEntries, processesByID: [:], agentWindows: [])
 
         #expect(shortcutTargets.count == 1)
         #expect(shortcutTargets.first?.kind == .missingConfiguredProcess)
@@ -601,11 +504,14 @@ import workspacecore
         #expect(
             AppKitController.deviceWindowShortcutResolution(index: 3, selectedWorkspaceID: "workspace", overview: overview)
                 == .runProcess(workspaceID: "workspace", processKey: "api", processTemplateID: "tpl-api"))
-        // Order is browser(1), web(2), api(3), claude(4), codex(5), shell terminal(6): the idle codex launcher
-        // sits with the other coding agents, ahead of the ad hoc terminal.
+        // Order is browser(1), web(2), api(3), claude agent(4), shell terminal(5): the live agent sits after
+        // the processes and ahead of the ad hoc terminal.
         #expect(
-            AppKitController.deviceWindowShortcutResolution(index: 5, selectedWorkspaceID: "workspace", overview: overview)
-                == .runCodingAgent(workspaceID: "workspace", agentName: "codex", agentLauncherID: "launcher-codex"))
+            AppKitController.deviceWindowShortcutResolution(index: 4, selectedWorkspaceID: "workspace", overview: overview)
+                == .openTerminal(
+                    AppKitController.DeviceTerminalOpenRequest(
+                        workspaceID: "workspace", sessionID: "session-agent", title: "claude", workingDirectory: "/tmp/project-feature",
+                        kind: .agent)))
     }
 
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
@@ -631,11 +537,7 @@ import workspacecore
             processes: [
                 SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev"),
                 SpacesDeviceProcessTemplate(id: "tpl-api", name: "api", command: "npm run api"),
-            ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")],
-            agentLaunchers: [
-                SpacesDeviceAgentLauncher(id: "launcher-claude", name: "claude", command: "claude"),
-                SpacesDeviceAgentLauncher(id: "launcher-codex", name: "codex", command: "codex"),
-            ])
+            ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")])
         return SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
             isRunning: true, isHidden: false, isDefault: false, sessionCount: 3, config: config,
@@ -649,9 +551,8 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude", agentID: "agent-1",
-                    sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false, canStop: true,
-                    canRestart: true)
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1",
+                    sessionID: "session-agent", runState: .running, activityState: .idle, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

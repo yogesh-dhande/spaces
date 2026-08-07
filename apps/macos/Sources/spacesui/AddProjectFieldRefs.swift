@@ -29,7 +29,6 @@ enum AddProjectSourceKind {
     let portsSection: PortsSection
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
-    let agentLaunchersSection: AgentLaunchersSection
     let createButton: NSButton
     /// Gentle note shown on the config step when a git repo has no `spaces.yaml`.
     let spacesYAMLMissingLabel: NSTextField
@@ -46,8 +45,8 @@ enum AddProjectSourceKind {
     init(
         formTag: Int, folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
         repoURLField: NSTextField, continueButton: NSButton, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection,
-        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection,
-        agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
+        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, createButton: NSButton,
+        spacesYAMLMissingLabel: NSTextField
     ) {
         self.formTag = formTag
         self.folderRow = folderRow
@@ -62,7 +61,6 @@ enum AddProjectSourceKind {
         self.portsSection = portsSection
         self.processesSection = processesSection
         self.browserSessionsSection = browserSessionsSection
-        self.agentLaunchersSection = agentLaunchersSection
         self.createButton = createButton
         self.spacesYAMLMissingLabel = spacesYAMLMissingLabel
     }

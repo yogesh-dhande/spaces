@@ -1254,9 +1254,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload, context: context)
         case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload, context: context)
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
-        case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
-        case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
@@ -1984,13 +1982,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private static func agentSlotKey(_ record: AgentWindowRecord) -> String {
-        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
-            return "agent-id:\(claimedLauncherID)"
-        }
         // The slot name has to be the name the row displays: a rename frees the raw label for a new agent
         // to register under, and keying on it would collapse two live agents into one slot.
-        let slotName = record.claimedLauncherName ?? record.effectiveLabel ?? record.id
-        return "agent:\(normalizedSlotName(slotName))"
+        "agent:\(normalizedSlotName(record.effectiveLabel ?? record.id))"
     }
 
     private static func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -2301,7 +2295,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.ports = request.config.ports.map(workspacePort)
             config.processes = request.config.processes.map(workspaceProcess)
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
-            config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
         return try refreshedMutationResponse(context: context, message: "Updated project settings.", projectID: request.projectID)
     }
@@ -2314,7 +2307,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.ports = request.config.ports.map(workspacePort)
             config.processes = request.config.processes.map(workspaceProcess)
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
-            config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
         return try refreshedMutationResponse(context: context, message: "Updated workspace settings.", workspaceID: request.workspaceID)
     }
@@ -2418,47 +2410,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(context: context, message: "Restarted process.", workspaceID: workspaceID)
     }
 
-    private func handleRunCodingAgentRequest(_ request: SpacesDeviceRunCodingAgentRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse
-    {
-        let workspaceID = request.workspaceID
-        let agentName = request.agentName
-        let orchestrator = try context.orchestrator()
-        let record =
-            if let agentLauncherID = normalizedString(request.agentLauncherID) {
-                try orchestrator.launchAgentLauncher(workspaceID: workspaceID, launcherID: agentLauncherID)
-            } else { try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
-        return try refreshedMutationResponse(
-            context: context, message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalTrackingID))
-    }
-
     private func handleStopCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
         let workspaceID = request.workspaceID
-        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
+        guard let agentID = normalizedString(request.agentID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
         }
         try context.orchestrator().stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(context: context, message: "Stopped coding agent.", workspaceID: workspaceID)
     }
 
-    private func handleRestartCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
-        -> SpacesDeviceAPIResponse
-    {
-        let workspaceID = request.workspaceID
-        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
-        }
-        let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
-        return try refreshedMutationResponse(
-            context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
-    }
-
-    /// Renames a coding-agent row whose name is stored on its session (one with no configured launcher
-    /// behind it). An empty title clears the rename, restoring the name the agent reports for itself (see
-    /// `SpacesDeviceAgentSessionRenameRequest.title`); an id that names no agent session in the workspace
-    /// throws from the orchestrator and is reported as a failure.
+    /// Renames a coding-agent row, whose name is stored on its session. An empty title clears the rename,
+    /// restoring the name the agent reports for itself (see `SpacesDeviceAgentSessionRenameRequest.title`);
+    /// an id that names no agent session in the workspace throws from the orchestrator and is reported as a
+    /// failure.
     private func handleRenameAgentSessionRequest(_ request: SpacesDeviceAgentSessionRenameRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -2589,21 +2555,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return process.id
     }
 
-    private func resolvedAgentID(request: SpacesDeviceCodingAgentMutationRequest, store: SQLiteStore) throws -> String? {
-        let workspaceID = request.workspaceID
-        if let agentID = normalizedString(request.agentID) { return agentID }
-        if let agentLauncherID = normalizedString(request.agentLauncherID),
-            let agentID = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.claimedLauncherID == agentLauncherID })?.id
-        {
-            return agentID
-        }
-        guard let agentName = normalizedString(request.agentName) else { return nil }
-        let normalizedAgentName = normalizedRowKey(agentName)
-        return try store.agentWindows(workspaceID: workspaceID).first {
-            normalizedRowKey($0.effectiveLabel ?? $0.claimedLauncherName) == normalizedAgentName
-        }?.id
-    }
-
     private func normalizedString(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
@@ -2628,17 +2579,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         BrowserSession(name: session.name, url: session.url)
     }
 
-    private func workspaceAgentLauncher(_ launcher: SpacesDeviceAgentLauncher) -> AgentLauncher {
-        AgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
-    }
-
     private func applyProjectConfig(_ source: SpacesDeviceProjectConfig, to project: inout ProjectRecord) {
         project.setupScript = normalizedOptionalString(source.setupScript)
         project.stopScript = normalizedOptionalString(source.stopScript)
         project.ports = source.ports.map(workspacePort)
         project.processes = source.processes.map(workspaceProcess)
         project.browserSessions = source.browserSessions.map(workspaceBrowserSession)
-        project.agentLaunchers = source.agentLaunchers.map(workspaceAgentLauncher)
     }
 
     private func handleStateRequest(_ request: SpacesDeviceTerminalSessionRequest) throws -> SpacesDeviceAPIResponse {

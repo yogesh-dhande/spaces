@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 12
+    public static let currentVersion = 13
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -347,6 +347,49 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_sessions ADD COLUMN user_label TEXT;
                     """)
         },
+        // Configured coding agents (per-project and per-workspace `{id, name, command}` launcher entries)
+        // are gone: an agent exists only as a live session started by running its command in a terminal,
+        // and every agent row is renamed through `agent_sessions.user_label`. The two launcher tables and
+        // the two claim columns that bound a live row to a launcher entry therefore have no reader left.
+        //
+        // The DROPs are `IF EXISTS` because only the baseline fresh schema ever created these tables — no
+        // migration step did — so a profile whose chain started before they existed can reach this step
+        // without them.
+        //
+        // The frozen v12-shape `agent_sessions` CREATE comes first for the same load-bearing reason as the
+        // v11→v12 step: no step before v10 created the table, so a chain can reach these ALTERs with no
+        // table to alter. The shape frozen here is exactly v12 (the v11 CREATE plus `user_label`), so both
+        // arrival routes land the same v13 schema; on a database that already carries the table the CREATE
+        // is a no-op and every row is preserved.
+        DatabaseMigrationStep(fromVersion: 12, toVersion: 13, description: "Drop agent launchers", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    DROP TABLE IF EXISTS project_agent_launchers;
+                    DROP TABLE IF EXISTS workspace_agent_launchers;
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                      id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      provider TEXT NOT NULL,
+                      label TEXT,
+                      status TEXT NOT NULL DEFAULT 'idle',
+                      runtime_target_id TEXT,
+                      terminal_session_id TEXT,
+                      session_key TEXT,
+                      claimed_launcher_id TEXT,
+                      claimed_launcher_name TEXT,
+                      note TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      detected_agent_kind TEXT,
+                      user_label TEXT,
+                      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+                      FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+                    );
+                    ALTER TABLE agent_sessions DROP COLUMN claimed_launcher_id;
+                    ALTER TABLE agent_sessions DROP COLUMN claimed_launcher_name;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -506,16 +549,6 @@ public enum DatabaseSchema {
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS project_agent_launchers (
-              project_id TEXT NOT NULL,
-              id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT NOT NULL,
-              order_index INTEGER NOT NULL,
-              PRIMARY KEY (project_id, order_index),
-              FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -585,16 +618,6 @@ public enum DatabaseSchema {
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
-              workspace_id TEXT NOT NULL,
-              id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT NOT NULL,
-              order_index INTEGER NOT NULL,
-              PRIMARY KEY (workspace_id, order_index),
-              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS running_processes (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
@@ -647,8 +670,6 @@ public enum DatabaseSchema {
               runtime_target_id TEXT,
               terminal_session_id TEXT,
               session_key TEXT,
-              claimed_launcher_id TEXT,
-              claimed_launcher_name TEXT,
               note TEXT,
               detected_agent_kind TEXT,
               created_at TEXT NOT NULL,

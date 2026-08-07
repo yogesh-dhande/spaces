@@ -183,16 +183,14 @@ struct SpacesDeviceOverviewBuilder {
     static func projectConfig(from project: ProjectRecord) -> SpacesDeviceProjectConfig {
         SpacesDeviceProjectConfig(
             setupScript: project.setupScript, stopScript: project.stopScript, ports: project.ports.map(devicePort),
-            processes: project.processes.map(deviceProcess), browserSessions: project.browserSessions.map(deviceBrowserSession),
-            agentLaunchers: project.agentLaunchers.map(deviceAgentLauncher))
+            processes: project.processes.map(deviceProcess), browserSessions: project.browserSessions.map(deviceBrowserSession))
     }
 
     private static func workspaceConfig(from settings: WorkspaceSettings?, resolvedBrowserSessions: [BrowserSession]) -> SpacesDeviceWorkspaceConfig {
         SpacesDeviceWorkspaceConfig(
             stopScript: settings?.stopScript, ports: settings?.ports.map(devicePort) ?? [], processes: settings?.processes.map(deviceProcess) ?? [],
             browserSessions: settings?.browserSessions.map(deviceBrowserSession) ?? [],
-            resolvedBrowserSessions: resolvedBrowserSessions.map(deviceBrowserSession),
-            agentLaunchers: settings?.agentLaunchers.map(deviceAgentLauncher) ?? [])
+            resolvedBrowserSessions: resolvedBrowserSessions.map(deviceBrowserSession))
     }
 
     private static func devicePort(_ port: ServiceDefinition) -> SpacesDeviceServiceDefinition {
@@ -205,10 +203,6 @@ struct SpacesDeviceOverviewBuilder {
 
     private static func deviceBrowserSession(_ session: BrowserSession) -> SpacesDeviceBrowserSession {
         SpacesDeviceBrowserSession(name: session.name, url: session.url)
-    }
-
-    private static func deviceAgentLauncher(_ launcher: AgentLauncher) -> SpacesDeviceAgentLauncher {
-        SpacesDeviceAgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
     }
 
     private static func deviceWorkspaceSetupState(_ state: WorkspaceSetupState) -> SpacesDeviceWorkspaceSetupState {
@@ -320,53 +314,29 @@ struct SpacesDeviceOverviewBuilder {
     private static func codingAgentRows(for descriptor: WorkspaceDescriptor, sessionsByID: [String: TerminalSessionCatalogEntry]) -> CodingAgentRows {
         var claimedTerminalKeys = Set<String>()
         var rows: [SpacesDeviceWorkspaceCodingAgentRow] = []
-        let configuredLaunchers = descriptor.settings?.agentLaunchers ?? []
-        // Which agent belongs to which configured launcher is the one rule in `AgentLauncherClaim`, shared
-        // with the agent-session rename so the two can never disagree about which name a row answers to.
-        let claims = AgentLauncherClaim.resolve(agents: descriptor.agentWindows, launchers: configuredLaunchers)
-        let agentsByID = Dictionary(descriptor.agentWindows.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
-
-        for launcher in configuredLaunchers {
-            guard !AgentLauncherClaim.normalizedName(launcher.name).isEmpty else { continue }
-            let agent = claims.agentIDByLauncherID[launcher.id].flatMap { agentsByID[$0] }
-            if let agent, let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
-            rows.append(
-                codingAgentRow(
-                    id: "configured-agent:\(descriptor.workspace.id):\(launcher.id)", workspaceID: descriptor.workspace.id, name: launcher.name,
-                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
-        }
-
-        // A row with no configured launcher behind it is named by its session: the user's rename when one
-        // is stored, else the label the agent reports for itself. A configured row above keeps taking its
-        // name from the launcher entry, which is what a rename edits there.
-        for agent in descriptor.agentWindows where !claims.claimedAgentIDs.contains(agent.id) {
+        // Every coding-agent row is a live session: an agent exists only once its command is running in a
+        // terminal. It is named by that session — the user's rename when one is stored, else the label the
+        // agent reports for itself.
+        for agent in descriptor.agentWindows {
             if let claimedKey = terminalTrackingKey(agent) { claimedTerminalKeys.insert(claimedKey) }
             rows.append(
                 codingAgentRow(
-                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id,
-                    name: agent.effectiveLabel ?? agent.claimedLauncherName ?? "Coding Agent",
-                    command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
-                    isConfigured: false, sessionsByID: sessionsByID))
+                    id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.effectiveLabel ?? "Coding Agent",
+                    command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", agent: agent, sessionsByID: sessionsByID))
         }
         return CodingAgentRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
 
     private static func codingAgentRow(
-        id: String, workspaceID: String, name: String, command: String, launcherID: String?, agent: AgentWindowRecord?, isConfigured: Bool,
+        id: String, workspaceID: String, name: String, command: String, agent: AgentWindowRecord,
         sessionsByID: [String: TerminalSessionCatalogEntry]
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
         let session = rawSessionID.flatMap { sessionsByID[$0] }
-        let runState = agentRunState(agent: agent, session: session)
-        let canRun = isConfigured && runState != .running
-        let canStop = agent != nil
-        let hasClaimedLauncherID = agent?.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        let hasClaimedLauncherName = agent?.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        let canRestart = agent != nil && (isConfigured || hasClaimedLauncherID || hasClaimedLauncherName)
         return SpacesDeviceWorkspaceCodingAgentRow(
-            id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
-            isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), updatedAt: agent?.updatedAt, canRun: canRun,
-            canStop: canStop, canRestart: canRestart, liveTitle: session?.liveTitle)
+            id: id, workspaceID: workspaceID, name: name, command: command, agentID: agent.id, sessionID: session?.sessionID,
+            runState: agentRunState(agent: agent, session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt,
+            canStop: true, liveTitle: session?.liveTitle)
     }
 
     private static func workspaceTerminalRows(

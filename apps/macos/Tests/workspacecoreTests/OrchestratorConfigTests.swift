@@ -68,7 +68,6 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup"
             config.processes = [ProcessTemplate(name: "web", command: "echo web")]
-            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "echo codex")]
             config.browserSessions = [BrowserSession(name: "App", url: "http://localhost:3000")]
         }
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
@@ -81,7 +80,6 @@ extension OrchestratorTests {
         }
 
         assertSetupBlocked { try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web") }
-        assertSetupBlocked { _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex") }
 
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         XCTAssertFalse(reservation.sessionID.isEmpty)

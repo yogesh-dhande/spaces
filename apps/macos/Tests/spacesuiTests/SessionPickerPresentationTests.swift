@@ -11,22 +11,18 @@ import workspacecore
 /// AppKitController. Rows are the workspace's sidebar runtime targets in sidebar order,
 /// minus browsers (they can't live in a pane) and minus any target whose session already
 /// occupies a pane (`openSessionIDs`, sourced from `PanelCoordinator.openSessionIDs()` in
-/// production). Not-started configured processes and agent launchers carry a start choice and
-/// have no session, so they always list.
+/// production). Not-started configured processes carry a start choice and have no session, so they
+/// always list.
 @Suite struct SessionPickerPresentationTests {
     /// Sidebar target order for this fixture: browser(docs) → process(web) →
-    /// missingConfiguredProcess(api) → agent(claude) → agentLauncher(codex) → window(shell).
+    /// missingConfiguredProcess(api) → agent(claude) → window(shell).
     /// Every id is suffixed with the workspace id so multiple workspaces stay distinguishable.
     private func richWorkspace(id: String) -> SpacesDeviceWorkspaceSummary {
         let config = SpacesDeviceWorkspaceConfig(
             processes: [
                 SpacesDeviceProcessTemplate(id: "tpl-web-\(id)", name: "web", command: "npm run dev"),
                 SpacesDeviceProcessTemplate(id: "tpl-api-\(id)", name: "api", command: "npm run api"),
-            ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")],
-            agentLaunchers: [
-                SpacesDeviceAgentLauncher(id: "launcher-claude-\(id)", name: "claude", command: "claude"),
-                SpacesDeviceAgentLauncher(id: "launcher-codex-\(id)", name: "codex", command: "codex"),
-            ])
+            ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")])
         return SpacesDeviceWorkspaceSummary(
             id: id, projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/\(id)", isRunning: true,
             isHidden: false, isDefault: false, sessionCount: 3, config: config,
@@ -41,9 +37,8 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent-\(id)", workspaceID: id, name: "claude", command: "claude", launcherID: "launcher-claude-\(id)",
-                    agentID: "agent-\(id)", sessionID: "session-agent-\(id)", isConfigured: true, runState: .running, activityState: .idle,
-                    canRun: false, canStop: true, canRestart: true)
+                    id: "agent:agent-\(id)", workspaceID: id, name: "claude", command: "claude", agentID: "agent-\(id)",
+                    sessionID: "session-agent-\(id)", runState: .running, activityState: .idle, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -69,10 +64,9 @@ import workspacecore
         #expect(
             presentation.items.map(\.id) == [
                 "picker:new", "picker:workspace-1::1", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4",
-                "picker:workspace-1::5",
             ])
-        #expect(presentation.items.map(\.label) == ["New terminal session", "web", "api", "claude", "codex", "shell"])
-        #expect(presentation.items.map(\.kind) == [.window, .process, .missingConfiguredProcess, .agent, .agentLauncher, .window])
+        #expect(presentation.items.map(\.label) == ["New terminal session", "web", "api", "claude", "shell"])
+        #expect(presentation.items.map(\.kind) == [.window, .process, .missingConfiguredProcess, .agent, .window])
     }
 
     @Test func liveAndExitedTargetsResolveToExistingSessionRequestsBuiltLikeTheSidebar() {
@@ -92,14 +86,16 @@ import workspacecore
         #expect(webRequest.workingDirectory == "/tmp/workspace-1")
         #expect(webRequest.kind == .process)
 
-        guard case .existingSession(let shellRequest)? = presentation.choices["picker:workspace-1::5"] else {
+        guard case .existingSession(let shellRequest)? = presentation.choices["picker:workspace-1::4"] else {
             Issue.record("expected an existingSession choice for the ad hoc terminal target")
             return
         }
         #expect(shellRequest.sessionID == "session-shell-workspace-1")
     }
 
-    @Test func notStartedTargetsCarryStartChoicesAndAlwaysList() {
+    /// A not-started configured process is the only start choice the picker offers: an agent row is
+    /// always a live session, so it can only ever resolve to that session.
+    @Test func notStartedConfiguredProcessCarriesTheOnlyStartChoice() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
             newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
@@ -113,13 +109,11 @@ import workspacecore
         #expect(processKey == "api")
         #expect(processTemplateID == "tpl-api-workspace-1")
 
-        guard case .startCodingAgent(let agentWorkspaceID, let agentName, let agentLauncherID)? = presentation.choices["picker:workspace-1::4"] else {
-            Issue.record("expected a startCodingAgent choice for the not-started agent launcher")
-            return
-        }
-        #expect(agentWorkspaceID == "workspace-1")
-        #expect(agentName == "codex")
-        #expect(agentLauncherID == "launcher-codex-workspace-1")
+        let startChoiceCount = presentation.choices.values.filter {
+            if case .startProcess = $0 { return true }
+            return false
+        }.count
+        #expect(startChoiceCount == 1)
     }
 
     @Test func excludesTargetsAlreadyOpenInAPaneButKeepsNotStartedRows() {
@@ -128,9 +122,9 @@ import workspacecore
             newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
             openSessionIDs: ["session-web-workspace-1", "session-shell-workspace-1"])
 
-        // The two open sessions (web, shell) drop; the sessionless not-started rows (api, codex) and
-        // the still-closed agent stay.
-        #expect(presentation.items.map(\.label) == ["New terminal session", "api", "claude", "codex"])
+        // The two open sessions (web, shell) drop; the sessionless not-started row (api) and the
+        // still-closed agent stay.
+        #expect(presentation.items.map(\.label) == ["New terminal session", "api", "claude"])
     }
 
     @Test func everyTargetOpenLeavesOnlyTheNewTerminalRow() {
@@ -189,9 +183,9 @@ import workspacecore
         // (workspace-2) sessions drop from their respective workspaces.
         #expect(
             presentation.items.map(\.id) == [
-                "picker:new", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4", "picker:workspace-1::5",
-                "picker:workspace-2::1", "picker:workspace-2::2", "picker:workspace-2::4", "picker:workspace-2::5",
+                "picker:new", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4", "picker:workspace-2::1",
+                "picker:workspace-2::2", "picker:workspace-2::4",
             ])
-        #expect(presentation.items.map(\.label) == ["New terminal session", "api", "claude", "codex", "shell", "web", "api", "codex", "shell"])
+        #expect(presentation.items.map(\.label) == ["New terminal session", "api", "claude", "shell", "web", "api", "shell"])
     }
 }

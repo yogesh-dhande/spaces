@@ -61,37 +61,22 @@ public struct SpacesDeviceBrowserSession: Codable, Sendable, Equatable {
     }
 }
 
-public struct SpacesDeviceAgentLauncher: Codable, Sendable, Equatable, Identifiable {
-    public let id: String
-    public let name: String
-    public let command: String
-
-    public init(id: String, name: String, command: String) {
-        self.id = id
-        self.name = name
-        self.command = command
-    }
-}
-
 public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
     public let stopScript: String?
     public let ports: [SpacesDeviceServiceDefinition]
     public let processes: [SpacesDeviceProcessTemplate]
     public let browserSessions: [SpacesDeviceBrowserSession]
     public let resolvedBrowserSessions: [SpacesDeviceBrowserSession]
-    public let agentLaunchers: [SpacesDeviceAgentLauncher]
 
     public init(
         stopScript: String? = nil, ports: [SpacesDeviceServiceDefinition] = [], processes: [SpacesDeviceProcessTemplate] = [],
-        browserSessions: [SpacesDeviceBrowserSession] = [], resolvedBrowserSessions: [SpacesDeviceBrowserSession] = [],
-        agentLaunchers: [SpacesDeviceAgentLauncher] = []
+        browserSessions: [SpacesDeviceBrowserSession] = [], resolvedBrowserSessions: [SpacesDeviceBrowserSession] = []
     ) {
         self.stopScript = stopScript
         self.ports = ports
         self.processes = processes
         self.browserSessions = browserSessions
         self.resolvedBrowserSessions = resolvedBrowserSessions
-        self.agentLaunchers = agentLaunchers
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -100,7 +85,6 @@ public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
         case processes
         case browserSessions
         case resolvedBrowserSessions
-        case agentLaunchers
     }
 
     public init(from decoder: any Decoder) throws {
@@ -110,7 +94,6 @@ public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
         processes = try container.decodeIfPresent([SpacesDeviceProcessTemplate].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .browserSessions) ?? []
         resolvedBrowserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .resolvedBrowserSessions) ?? []
-        agentLaunchers = try container.decodeIfPresent([SpacesDeviceAgentLauncher].self, forKey: .agentLaunchers) ?? []
     }
 }
 
@@ -120,19 +103,16 @@ public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
     public let ports: [SpacesDeviceServiceDefinition]
     public let processes: [SpacesDeviceProcessTemplate]
     public let browserSessions: [SpacesDeviceBrowserSession]
-    public let agentLaunchers: [SpacesDeviceAgentLauncher]
 
     public init(
         setupScript: String? = nil, stopScript: String? = nil, ports: [SpacesDeviceServiceDefinition] = [],
-        processes: [SpacesDeviceProcessTemplate] = [], browserSessions: [SpacesDeviceBrowserSession] = [],
-        agentLaunchers: [SpacesDeviceAgentLauncher] = []
+        processes: [SpacesDeviceProcessTemplate] = [], browserSessions: [SpacesDeviceBrowserSession] = []
     ) {
         self.setupScript = setupScript
         self.stopScript = stopScript
         self.ports = ports
         self.processes = processes
         self.browserSessions = browserSessions
-        self.agentLaunchers = agentLaunchers
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -141,7 +121,6 @@ public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
         case ports
         case processes
         case browserSessions
-        case agentLaunchers
     }
 
     public init(from decoder: any Decoder) throws {
@@ -151,7 +130,6 @@ public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
         ports = try container.decodeIfPresent([SpacesDeviceServiceDefinition].self, forKey: .ports) ?? []
         processes = try container.decodeIfPresent([SpacesDeviceProcessTemplate].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .browserSessions) ?? []
-        agentLaunchers = try container.decodeIfPresent([SpacesDeviceAgentLauncher].self, forKey: .agentLaunchers) ?? []
     }
 }
 
@@ -315,39 +293,31 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     /// which agent this is, the live title says what it is doing.
     public let liveTitle: String?
     public let command: String
-    public let launcherID: String?
     public let agentID: String?
     public let sessionID: String?
-    public let isConfigured: Bool
     public let runState: SpacesDeviceRunState
     public let activityState: SpacesDeviceCodingAgentActivityState
     /// ISO-8601 timestamp of the agent session's last state change, when known. Drives
     /// attention-alert recency and dismissal identity without the client opening the daemon database.
     public let updatedAt: String?
-    public let canRun: Bool
     public let canStop: Bool
-    public let canRestart: Bool
 
     public init(
-        id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
-        isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil,
-        canRun: Bool, canStop: Bool, canRestart: Bool, liveTitle: String? = nil
+        id: String, workspaceID: String, name: String, command: String, agentID: String?, sessionID: String?,
+        runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil, canStop: Bool,
+        liveTitle: String? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
         self.name = name
         self.liveTitle = liveTitle
         self.command = command
-        self.launcherID = launcherID
         self.agentID = agentID
         self.sessionID = sessionID
-        self.isConfigured = isConfigured
         self.runState = runState
         self.activityState = activityState
         self.updatedAt = updatedAt
-        self.canRun = canRun
         self.canStop = canStop
-        self.canRestart = canRestart
     }
 }
 
@@ -1055,34 +1025,17 @@ public struct SpacesDeviceWorkspaceProcessMutationRequest: Codable, Sendable, Eq
     }
 }
 
-public struct SpacesDeviceRunCodingAgentRequest: Codable, Sendable, Equatable {
-    public let workspaceID: String
-    public let agentName: String
-    public let agentLauncherID: String?
-
-    public init(workspaceID: String, agentName: String, agentLauncherID: String? = nil) {
-        self.workspaceID = workspaceID
-        self.agentName = agentName
-        self.agentLauncherID = agentLauncherID
-    }
-}
-
 public struct SpacesDeviceCodingAgentMutationRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let agentID: String?
-    public let agentName: String?
-    public let agentLauncherID: String?
 
-    public init(workspaceID: String, agentID: String? = nil, agentName: String? = nil, agentLauncherID: String? = nil) {
+    public init(workspaceID: String, agentID: String? = nil) {
         self.workspaceID = workspaceID
         self.agentID = agentID
-        self.agentName = agentName
-        self.agentLauncherID = agentLauncherID
     }
 }
 
-/// Renames a coding-agent row that has no configured launcher behind it, addressed by the agent session
-/// id its overview row carries.
+/// Renames a coding-agent row, addressed by the agent session id its overview row carries.
 public struct SpacesDeviceAgentSessionRenameRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let agentID: String
@@ -1481,9 +1434,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case runWorkspaceProcess(SpacesDeviceRunWorkspaceProcessRequest)
     case stopWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest)
     case restartWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest)
-    case runCodingAgent(SpacesDeviceRunCodingAgentRequest)
     case stopCodingAgent(SpacesDeviceCodingAgentMutationRequest)
-    case restartCodingAgent(SpacesDeviceCodingAgentMutationRequest)
     /// Renames a coding-agent row whose name lives on its session rather than in the workspace config.
     case renameAgentSession(SpacesDeviceAgentSessionRenameRequest)
     case state(SpacesDeviceTerminalSessionRequest)
@@ -1550,9 +1501,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .runWorkspaceProcess: "runWorkspaceProcess"
         case .stopWorkspaceProcess: "stopWorkspaceProcess"
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
-        case .runCodingAgent: "runCodingAgent"
         case .stopCodingAgent: "stopCodingAgent"
-        case .restartCodingAgent: "restartCodingAgent"
         case .renameAgentSession: "renameAgentSession"
         case .state: "state"
         case .terminalControl(let payload): payload.action.rawValue
@@ -1670,9 +1619,7 @@ extension SpacesDeviceAPICommand: Codable {
         case runWorkspaceProcess
         case stopWorkspaceProcess
         case restartWorkspaceProcess
-        case runCodingAgent
         case stopCodingAgent
-        case restartCodingAgent
         case renameAgentSession
         case state
         case terminalControl
@@ -1739,9 +1686,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .stopWorkspaceProcess: self = .stopWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
         case .restartWorkspaceProcess:
             self = .restartWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
-        case .runCodingAgent: self = .runCodingAgent(try container.decode(SpacesDeviceRunCodingAgentRequest.self, forKey: key))
         case .stopCodingAgent: self = .stopCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
-        case .restartCodingAgent: self = .restartCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .renameAgentSession: self = .renameAgentSession(try container.decode(SpacesDeviceAgentSessionRenameRequest.self, forKey: key))
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
         case .terminalControl: self = .terminalControl(try container.decode(SpacesDeviceTerminalControlRequest.self, forKey: key))
@@ -1798,9 +1743,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .runWorkspaceProcess(let payload): try container.encode(payload, forKey: .runWorkspaceProcess)
         case .stopWorkspaceProcess(let payload): try container.encode(payload, forKey: .stopWorkspaceProcess)
         case .restartWorkspaceProcess(let payload): try container.encode(payload, forKey: .restartWorkspaceProcess)
-        case .runCodingAgent(let payload): try container.encode(payload, forKey: .runCodingAgent)
         case .stopCodingAgent(let payload): try container.encode(payload, forKey: .stopCodingAgent)
-        case .restartCodingAgent(let payload): try container.encode(payload, forKey: .restartCodingAgent)
         case .renameAgentSession(let payload): try container.encode(payload, forKey: .renameAgentSession)
         case .state(let payload): try container.encode(payload, forKey: .state)
         case .terminalControl(let payload): try container.encode(payload, forKey: .terminalControl)

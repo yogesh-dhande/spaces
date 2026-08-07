@@ -311,15 +311,20 @@ pair_remote_devices() {
 }
 
 create_remote_fixture_project() {
-  local project_root
+  local project_root remote_cli
   project_root="$(remote_expand_path "$REMOTE_WORKSPACE_ROOT/device-api-project-$RUN_ID")"
-  remote_ssh "python3 - $(shell_quote "$project_root")" <<'PY'
+  # The fixture's stand-in coding agent reports its lifecycle through the remote profile's own CLI,
+  # which resolves that profile from where it sits on disk.
+  remote_cli="$(remote_expand_path "$REMOTE_E2E_CLI")"
+  remote_ssh "python3 - $(shell_quote "$project_root") $(shell_quote "$remote_cli")" <<'PY'
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 
 project_root = pathlib.Path(sys.argv[1])
+spaces_cli = sys.argv[2]
 shutil.rmtree(project_root, ignore_errors=True)
 project_root.mkdir(parents=True, exist_ok=True)
 (project_root / "README.txt").write_text("remote device api sentinel\n")
@@ -339,19 +344,32 @@ processes:
 browser_sessions:
   - name: remote-web
     url: $SPACES_WEB_URL/README.txt
-agent_launchers:
-  - name: parity-agent
-    command: >-
-      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
 """
 )
+# A coding agent is nothing but a program that reports the Spaces agent hooks from inside a workspace
+# terminal, so the fixture ships one and commits it: every workspace worktree cut from this repo
+# carries it, which is what lets the parity flow start an agent with nothing but a terminal and a
+# command. Workspace and session ids come from the Spaces terminal environment.
+agent_script = project_root / "parity-agent"
+agent_script.write_text(
+    f"""#!/usr/bin/env bash
+set -euo pipefail
+spaces_cli="{spaces_cli}"
+trap '"$spaces_cli" agent signal exit >/dev/null 2>&1 || true; exit 0' TERM INT
+"$spaces_cli" agent signal init >/dev/null
+"$spaces_cli" agent signal working >/dev/null
+printf 'device-api-agent-ready\\n'
+while true; do sleep 5; done
+"""
+)
+agent_script.chmod(agent_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 def git(*args):
     subprocess.run(["git", "-C", str(project_root), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 git("init", "-b", "main")
 git("config", "user.email", "spaces-e2e@example.invalid")
 git("config", "user.name", "Spaces E2E")
-git("add", "README.txt", "spaces.yaml")
+git("add", "README.txt", "spaces.yaml", "parity-agent")
 git("commit", "-m", "Initial device API parity fixture")
 PY
   printf '%s\n' "$project_root"

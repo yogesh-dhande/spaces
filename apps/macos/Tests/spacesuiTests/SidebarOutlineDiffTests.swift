@@ -33,8 +33,7 @@ struct SidebarOutlineDiffTests {
     private func targetItem(key: String, title: String) -> SidebarRuntimeTargetItem {
         SidebarRuntimeTargetItem(
             key: key, title: title, detail: nil, kind: .window, runState: .running, shortcutIndex: 1, sessionID: "session-\(key)", canRun: false,
-            canStop: true, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil, launcherName: nil,
-            launcherID: nil, isConfigured: false, browserTargetURL: nil)
+            canStop: true, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil, browserTargetURL: nil)
     }
 
     private func deviceRow(_ device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {

@@ -203,10 +203,6 @@ extension AppKitController {
         /// picking it starts the process via the Device API and completes with the resulting
         /// session's open request. Mirrors `DeviceWindowShortcutResolution.runProcess`.
         case startProcess(workspaceID: String, processKey: String, processTemplateID: String?)
-        /// An agent launcher that hasn't been started: picking it launches the agent via the
-        /// Device API and completes with the resulting session's open request. Mirrors
-        /// `DeviceWindowShortcutResolution.runCodingAgent`.
-        case startCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
     }
 
     /// Presents the command palette in session-picker mode for filling a pane split or
@@ -244,19 +240,6 @@ extension AppKitController {
                         await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
                             try SpacesDeviceClient.runWorkspaceProcess(
                                 workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                        })
-                }
-            case .startCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-                guard let self else {
-                    completion(nil)
-                    return
-                }
-                Task { @MainActor in
-                    completion(
-                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
-                            try SpacesDeviceClient.runCodingAgent(
-                                workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
                                 clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                         })
                 }
@@ -317,7 +300,7 @@ extension AppKitController {
     /// Live and exited targets resolve to an open request exactly as
     /// `windowShortcutTargetResolution` does — an exited target intentionally still shows,
     /// so picking it reproduces its sidebar row's ended-state pane. Not-started configured
-    /// processes and agent launchers carry a start choice and are always listed.
+    /// processes carry a start choice and are always listed.
     /// `nonisolated static` so it's testable without a live `AppKitController`.
     nonisolated static func sessionPickerPresentation(
         newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?, scopedWorkspaces: [SessionPickerWorkspaceContext],
@@ -360,10 +343,8 @@ extension AppKitController {
                 configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindowRecords)
             let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
             let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindowRecords)
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindowRecords)
             let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindowRecords, trackedWindows: windows)
-            let configuredAgentByName = Dictionary(uniqueKeysWithValues: settings.agentLaunchers.map { ($0.name, $0) })
 
             for (offset, target) in shortcutTargets.enumerated() {
                 // Browser targets can't live in a terminal pane, so the picker never offers them.
@@ -389,11 +370,6 @@ extension AppKitController {
                     label = processKey
                     detailText = nil
                     status = .idle
-                case .agentLauncher:
-                    guard let launcherName = target.launcherName else { continue }
-                    label = launcherName
-                    detailText = configuredAgentByName[launcherName]?.command
-                    status = .none
                 case .agent:
                     guard let agentWindow = target.agentWindow else { continue }
                     label = agentWindow.label?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
@@ -409,8 +385,6 @@ extension AppKitController {
                     choice = .existingSession(request)
                 case .runProcess(let ws, let processKey, let processTemplateID):
                     choice = .startProcess(workspaceID: ws, processKey: processKey, processTemplateID: processTemplateID)
-                case .runCodingAgent(let ws, let agentName, let agentLauncherID):
-                    choice = .startCodingAgent(workspaceID: ws, agentName: agentName, agentLauncherID: agentLauncherID)
                 case .openURL, .noWorkspace, .noMatch: continue
                 }
 

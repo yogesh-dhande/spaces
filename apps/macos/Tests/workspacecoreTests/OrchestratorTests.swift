@@ -124,6 +124,9 @@ final class OrchestratorTests: XCTestCase {
         return (orchestrator, store, project, workspace, root)
     }
 
+    /// A spaces.yaml as users still have it on disk, including the retired `agent_launchers:` key. The
+    /// document decoder ignores keys it does not know, so every import path below must parse this
+    /// unchanged.
     func spacesYAMLFixture(stopScript: String) -> String {
         """
         version: 1

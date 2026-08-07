@@ -1905,7 +1905,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         switch kind {
         case .browser: return "globe"
         case .process, .window, .missingConfiguredProcess: return "terminal"
-        case .agent, .agentLauncher: return "sparkles"
+        case .agent: return "sparkles"
         }
     }
 

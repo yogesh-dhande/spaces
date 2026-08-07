@@ -4,7 +4,7 @@ import Testing
 @testable import spacesterminalcore
 
 /// `CodingAgent` is the single registry of coding agents Spaces integrates; every facet (identity,
-/// detection, launcher matching, spawn-gate matching, hooks, MCP) is an exhaustive `switch self` over
+/// detection, spawn-gate matching, hooks, MCP) is an exhaustive `switch self` over
 /// its cases. These tests are driven by `CodingAgent.allCases` rather than naming agents individually,
 /// so a half-added agent — one filled in for some facets but missed in another switch or table — fails
 /// here instead of surfacing later as a silent detection or spawn-gate gap.
@@ -23,13 +23,6 @@ import Testing
             let detected = TerminalForegroundProcessInspector.classify(process)
             #expect(detected?.detectedAgentKind.agent == agent, "detection: \(agent)")
         }
-    }
-
-    /// `CodingAgent.matching(launcherText:)` checks a fixed internal priority list
-    /// (`[.codex, .claudeCode, .opencode]`) rather than `allCases`, so an agent added to the registry
-    /// but never added to that list would fail to resolve here even though every other facet compiles.
-    @Test func launcherMatchingResolvesEveryAgentsPrimaryCommand() {
-        for agent in CodingAgent.allCases { #expect(CodingAgent.matching(launcherText: agent.primaryCommandName) == agent) }
     }
 
     /// `TerminalForegroundProcessInspector`'s definition table is `CodingAgent.allCases.flatMap(\.detectionVariants)`,

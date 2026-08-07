@@ -146,12 +146,11 @@ import workspacecore
         #expect(hasChip, "Setting shortcutsByName should rebuild rows and display the chip")
     }
 
-    @Test func shortcutChipsAlignAcrossProcessBrowserAndAgentRows() {
+    @Test func shortcutChipsAlignAcrossProcessAndBrowserRows() {
         let processRow = ProcessRowView(process: ProcessTemplate(name: "api", command: "bun run dev"), shortcut: "⌘1", status: .running)
         let browserRow = BrowserSessionRowView(session: BrowserSession(name: "docs", url: "https://example.com"), shortcut: "⌘2")
-        let agentRow = AgentLauncherRowView(launcher: AgentLauncher(name: "claude", command: "claude"), shortcut: "⌘3")
 
-        let stack = NSStackView(views: [processRow, browserRow, agentRow])
+        let stack = NSStackView(views: [processRow, browserRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
@@ -165,18 +164,14 @@ import workspacecore
         ])
         processRow.widthAnchor.constraint(equalToConstant: 640).isActive = true
         browserRow.widthAnchor.constraint(equalToConstant: 640).isActive = true
-        agentRow.widthAnchor.constraint(equalToConstant: 640).isActive = true
         host.layoutSubtreeIfNeeded()
 
         let processX = processRow.shortcutChipMinXForTesting(shortcut: "⌘1")
         let browserX = browserRow.shortcutChipMinXForTesting(shortcut: "⌘2")
-        let agentX = agentRow.shortcutChipMinXForTesting(shortcut: "⌘3")
 
         #expect(processX != nil)
         #expect(browserX != nil)
-        #expect(agentX != nil)
         #expect(abs((processX ?? 0) - (browserX ?? 0)) < 0.5)
-        #expect(abs((browserX ?? 0) - (agentX ?? 0)) < 0.5)
     }
 
     @Test func rowHoverVisibilityTogglesActionButtons() {
@@ -466,10 +461,6 @@ extension BrowserSessionsSection {
         let outer = view.subviews.compactMap({ $0 as? NSStackView }).first
         return outer?.arrangedSubviews.compactMap({ $0 as? NSStackView }).last ?? NSStackView()
     }
-}
-
-extension AgentLauncherRowView {
-    func shortcutChipMinXForTesting(shortcut: String) -> CGFloat? { shortcutChipFrameForTesting(shortcut: shortcut)?.minX }
 }
 
 extension NSView {

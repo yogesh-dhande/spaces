@@ -26,7 +26,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertGreaterThan(SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(
-                for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),
+                for: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1"))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
         XCTAssertGreaterThan(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
@@ -81,8 +81,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent-codex", workspaceID: "workspace-visible", name: "Codex", command: "codex", agentID: "running-agent",
-                            sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting, canRun: false, canStop: true,
-                            canRestart: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -116,8 +115,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             config: SpacesDeviceProjectConfig(
                 setupScript: "make setup", stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
-                browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
+                browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")]))
 
         let model = SpacesDeviceProjectSettingsViewModel(project: project)
 
@@ -127,7 +125,6 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(model.config.ports.map(\.name), ["WEB"])
         XCTAssertEqual(model.config.processes.map(\.command), ["npm run dev"])
         XCTAssertEqual(model.config.browserSessions.compactMap(\.url), ["http://localhost:$WEB"])
-        XCTAssertEqual(model.config.agentLaunchers.map(\.name), ["Codex"])
         XCTAssertTrue(model.actions.showsSettings)
         XCTAssertTrue(model.actions.showsAddWorkspace)
     }
@@ -146,7 +143,6 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(model.config.processes.map(\.name), ["web"])
         XCTAssertEqual(model.config.browserSessions.compactMap(\.name), ["web"])
         XCTAssertEqual(model.config.resolvedBrowserSessions.compactMap(\.url), ["http://localhost:3000"])
-        XCTAssertEqual(model.config.agentLaunchers.map(\.name), ["Codex"])
         XCTAssertEqual(model.processRows.map(\.id), ["process-web"])
         XCTAssertEqual(model.codingAgentRows.map(\.id), ["agent-codex"])
         XCTAssertEqual(model.terminalRows.map(\.sessionID), ["session-shell"])
@@ -176,8 +172,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                 stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                 browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
-                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]),
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")]),
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
@@ -185,9 +180,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
-                    agentID: "running-agent", sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting,
-                    canRun: false, canStop: true, canRestart: true)
+                    id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
+                    sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

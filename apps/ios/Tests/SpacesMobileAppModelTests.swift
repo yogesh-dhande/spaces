@@ -120,12 +120,19 @@
             let rows = model.workspaceGroups.flatMap(\.rows)
             let process = rows.first { $0.title == "api" }
             let terminal = rows.first { $0.title == "shell" }
+            let agent = rows.first { $0.title == "Codex" }
 
             XCTAssertEqual(process?.canStop, true)
             XCTAssertEqual(process?.canRestart, true)
             XCTAssertEqual(process?.sessionID, "session-api")
             XCTAssertEqual(terminal?.canRun, false)
             XCTAssertEqual(terminal?.runState, .exited)
+            // Stop is an agent's only lifecycle control: it exists only as a session someone started by
+            // running its command in a terminal, so there is nothing to start or restart.
+            XCTAssertEqual(agent?.canRun, false)
+            XCTAssertEqual(agent?.canRestart, false)
+            XCTAssertEqual(agent?.canRestartFromTerminalDetail, false)
+            XCTAssertEqual(agent?.canStop, true)
         }
 
         func testBrowserSessionRowsBuiltFromResolvedRoutes() {
@@ -1181,36 +1188,6 @@
 
             XCTAssertEqual(session?.id, "session-api-new")
             XCTAssertEqual(requests.map(\.commandName), ["runWorkspaceProcess", "overview"])
-            XCTAssertNil(model.errorMessage)
-            XCTAssertFalse(model.isMutating)
-        }
-
-        func testRunAgentTimeoutRequiresFreshSessionWhenRowRetainsExitedSession() async {
-            let oldRow = SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "agent-old", sessionID: "session-codex-old", isConfigured: true, runState: .exited, activityState: .idle, canRun: true,
-                canStop: false, canRestart: false)
-            let newRow = SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "agent-new", sessionID: "session-codex-new", isConfigured: true, runState: .running, activityState: .spinning, canRun: false,
-                canStop: true, canRestart: true)
-            let refreshedOverview = makeOverview(
-                sessions: [makeSession(id: "session-codex-new")], featureProcessRows: [], featureCodingAgentRows: [newRow])
-            let recorder = SpacesMobileRequestRecorder()
-            let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { request in
-                await recorder.append(request)
-                if request.commandName == "runCodingAgent" { throw SpacesDeviceAPIClientError.requestTimedOut }
-                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.overview = makeOverview(sessions: [makeSession(id: "session-codex-old")], featureProcessRows: [], featureCodingAgentRows: [oldRow])
-
-            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(oldRow)))
-            let requests = await recorder.snapshot()
-
-            XCTAssertEqual(session?.id, "session-codex-new")
-            XCTAssertEqual(requests.map(\.commandName), ["runCodingAgent", "overview"])
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isMutating)
         }
@@ -2618,23 +2595,31 @@
             XCTAssertEqual(request.config.processes.map(\.command), ["npm run dev"])
             XCTAssertEqual(request.config.stopScript, "npm stop")
             XCTAssertEqual(request.config.ports.map(\.name), ["web"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Codex"])
             XCTAssertEqual(request.config.browserSessions.map(\.name), ["Dashboard"])
         }
 
-        func testRenameConfiguredCodingAgentRowEditsItsLauncherEntry() async throws {
-            let (model, recorder) = makeRenamingModel(
-                overview: makeOverview(featureCodingAgentRows: [configuredCodingAgentRow()], featureConfig: config()))
+        /// Nothing in the workspace config names a coding agent, so every agent row renames its own
+        /// session; an empty submission clears that rename back to the label the agent reports.
+        func testRenameCodingAgentRowRenamesItsSession() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureConfig: config()))
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Codex" })
 
+            XCTAssertEqual(model.canRename(row: row), true)
             await model.rename(row: row, to: "Reviewer")
+            await model.rename(row: row, to: "  ")
 
-            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
-                return XCTFail("Expected an updateWorkspaceConfig command.")
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["renameAgentSession", "renameAgentSession"])
+            guard case .renameAgentSession(let request)? = requests.first?.command else {
+                return XCTFail("Expected a renameAgentSession command.")
             }
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Reviewer"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.command), ["codex"])
-            XCTAssertEqual(request.config.processes.map(\.name), ["api"])
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.agentID, "runtime-codex")
+            XCTAssertEqual(request.title, "Reviewer")
+            guard case .renameAgentSession(let clearing)? = requests.last?.command else {
+                return XCTFail("Expected a renameAgentSession command.")
+            }
+            XCTAssertEqual(clearing.title, "")
         }
 
         /// The configured browser session is matched by name and its raw URL is preserved: resolution expands
@@ -2664,8 +2649,7 @@
                 processes: [
                     SpacesDeviceProcessTemplate(id: "template-worker", name: "worker", command: "npm run worker"),
                     SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev"),
-                ], browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-review", name: "Review", command: "review")])
+                ], browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")])
             let latestOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: latestConfig)
             let (model, recorder) = makeRenamingModel(overview: cachedOverview, fetchedOverview: latestOverview)
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
@@ -2679,7 +2663,6 @@
             XCTAssertEqual(request.config.ports.map(\.name), ["api", "web"])
             XCTAssertEqual(request.config.processes.map(\.name), ["worker", "backend"])
             XCTAssertEqual(request.config.browserSessions.map(\.name), ["Docs"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Review"])
         }
 
         /// A process running without a configured entry takes its name from the running process, so there is
@@ -2725,28 +2708,20 @@
             return (model, recorder)
         }
 
-        /// The feature workspace's configuration, matching the configured process, launcher, and browser
-        /// session the rename tests target.
+        /// The feature workspace's configuration, matching the configured process and browser session the
+        /// rename tests target.
         private func config() -> SpacesDeviceWorkspaceConfig {
             SpacesDeviceWorkspaceConfig(
                 stopScript: "npm stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "web")],
                 processes: [SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev")],
                 browserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:${PORT_web}/dashboard")],
-                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")])
         }
 
         private func configuredProcessRow() -> SpacesDeviceWorkspaceProcessRow {
             SpacesDeviceWorkspaceProcessRow(
                 id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
                 processID: "runtime-api", sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
-        }
-
-        private func configuredCodingAgentRow() -> SpacesDeviceWorkspaceCodingAgentRow {
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "runtime-codex", sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning, canRun: false,
-                canStop: true, canRestart: true)
         }
 
         private func makeOverview(
@@ -2768,9 +2743,8 @@
             let codingAgentRows =
                 featureCodingAgentRows ?? [
                     SpacesDeviceWorkspaceCodingAgentRow(
-                        id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
-                        sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true,
-                        canRestart: true)
+                        id: "agent:runtime-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
+                        sessionID: "session-codex", runState: .running, activityState: .spinning, canStop: true)
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature", baseBranch: "main",

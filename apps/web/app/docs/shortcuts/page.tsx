@@ -57,7 +57,7 @@ export default function ShortcutsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Focus vs Cycle</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Numbered shortcuts open or focus the selected workspace&apos;s ordered targets, including configured browser sessions, stopped process rows, and agent launchers. Next/previous window shortcuts cycle only through targets that already have an open tracked Chrome tab or Spaces terminal pane.
+          Numbered shortcuts open or focus the selected workspace&apos;s ordered targets, including configured browser sessions, stopped process rows, and live coding agents. Next/previous window shortcuts cycle only through targets that already have an open tracked Chrome tab or Spaces terminal pane.
         </p>
       </article>
 
