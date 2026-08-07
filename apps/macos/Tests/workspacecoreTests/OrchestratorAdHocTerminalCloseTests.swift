@@ -20,9 +20,16 @@ extension OrchestratorTests {
 
     /// Seeds a workspace with one built-in terminal session of `kind` plus its tracked terminal window,
     /// and an orchestrator whose fresh read answers `foreground` alongside `shellHasChildProcesses`.
+    ///
+    /// `foreground: nil` with the default `readingWithUninspectableForeground: false` produces no reading
+    /// at all (the session is not hosted here, or its pid is dead) rather than a reading with a nil
+    /// process. `readingWithUninspectableForeground: true` produces a reading whose `process` is nil (the
+    /// foreground pid resolved but could not be inspected, e.g. a zombie mid-reap) while `foreground`
+    /// itself is ignored.
     private func makeAdHocCloseFixture(
-        sessionID: String, kind: TerminalSessionKind = .shell, foreground: TerminalForegroundProcessSnapshot?, shellHasChildProcesses: Bool = false,
-        state: TerminalSessionState = .running, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil
+        sessionID: String, kind: TerminalSessionKind = .shell, foreground: TerminalForegroundProcessSnapshot?,
+        readingWithUninspectableForeground: Bool = false, shellHasChildProcesses: Bool = false, state: TerminalSessionState = .running,
+        daemonHandoffInProgress: (@Sendable () -> Bool)? = nil
     ) throws -> AdHocCloseFixture {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
@@ -31,7 +38,10 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
             builtInTerminalForegroundProcessSampler: { _ in
-                foreground.map { BuiltInTerminalForegroundReading(process: $0, shellHasChildProcesses: shellHasChildProcesses) }
+                if readingWithUninspectableForeground {
+                    return BuiltInTerminalForegroundReading(process: nil, shellHasChildProcesses: shellHasChildProcesses)
+                }
+                return foreground.map { BuiltInTerminalForegroundReading(process: $0, shellHasChildProcesses: shellHasChildProcesses) }
             }, daemonHandoffInProgress: daemonHandoffInProgress)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -207,6 +217,40 @@ extension OrchestratorTests {
     /// than leaking a shell nothing can reach.
     func testConditionalCloseStopsSessionWithUnresolvableForeground() throws {
         let fixture = try makeAdHocCloseFixture(sessionID: "ad-hoc-no-foreground", foreground: nil)
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertTrue(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertEqual(fixture.terminateCapture.sessionIDs, [fixture.sessionID])
+    }
+
+    /// The foreground pid resolved but could not be inspected (a zombie process-group leader in the
+    /// instant before the shell reaps it), yet the shell is still holding a child process: the child check
+    /// survives an uninspectable foreground, so the session is kept.
+    func testConditionalCloseKeepsSessionWithUninspectableForegroundHoldingChildren() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-uninspectable-with-children", foreground: nil, readingWithUninspectableForeground: true,
+            shellHasChildProcesses: true)
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertFalse(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+        XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// An uninspectable foreground with no child process left holding anything is bare-equivalent, so the
+    /// close still stops it.
+    func testConditionalCloseStopsSessionWithUninspectableForegroundAndNoChildren() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-uninspectable-no-children", foreground: nil, readingWithUninspectableForeground: true,
+            shellHasChildProcesses: false)
 
         try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
             XCTAssertTrue(

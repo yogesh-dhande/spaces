@@ -1681,12 +1681,15 @@ enum SpacesDaemonProfileCommandRouting {
     }
 
     /// The live foreground process of a session this daemon hosts, paired with whether the session's own
-    /// shell is holding any child process. A session it does not host, or whose foreground cannot be
-    /// resolved, answers nil, which the conditional stop reads as nothing left to protect.
+    /// shell is holding any child process. A session it does not host answers nil, which the conditional
+    /// stop reads as nothing left to protect. A hosted session whose foreground pid cannot be inspected (a
+    /// zombie process-group leader in the instant before the shell reaps it) still answers with a reading
+    /// whose `process` is nil, so the child check below keeps standing on its own instead of being skipped
+    /// along with the unreadable foreground.
     @TerminalEngineActor private func currentForegroundReading(sessionID: String) -> BuiltInTerminalForegroundReading? {
-        guard let core = sessionCores[sessionID], let process = core.currentForegroundProcess() else { return nil }
+        guard let core = sessionCores[sessionID] else { return nil }
         let shellHasChildProcesses = core.childPID().map { TerminalForegroundProcessInspector.hasChildProcesses(pid: $0) } ?? false
-        return BuiltInTerminalForegroundReading(process: process, shellHasChildProcesses: shellHasChildProcesses)
+        return BuiltInTerminalForegroundReading(process: core.currentForegroundProcess(), shellHasChildProcesses: shellHasChildProcesses)
     }
 
     @TerminalEngineActor private func terminateBuiltInTerminalSession(id sessionID: String) {

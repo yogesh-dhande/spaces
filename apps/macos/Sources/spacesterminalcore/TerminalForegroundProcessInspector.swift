@@ -90,14 +90,20 @@ public enum TerminalForegroundProcessInspector {
             let found = withUnsafeMutablePointer(to: &childPID) { proc_listchildpids(pid, $0, Int32(MemoryLayout<pid_t>.size)) }
             return found > 0
         #elseif os(Linux)
-            // Children are per-thread, so every thread of the process has to be asked. Requires
-            // CONFIG_PROC_CHILDREN, which the Linux kernels Spaces daemons run on provide.
+            // Children are per-thread, so every thread of the process has to be asked. The `children` file
+            // needs CONFIG_PROC_CHILDREN; a kernel without it makes every read fail. Alive but unanswerable
+            // presumes children, so a kernel without CONFIG_PROC_CHILDREN degrades to keeping sessions,
+            // never to killing jobs; only a genuinely empty read counts as "no children".
             let taskDirectory = URL(fileURLWithPath: "/proc/\(pid)/task", isDirectory: true)
-            let taskURLs = (try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil)) ?? []
-            return taskURLs.contains { taskURL in
-                guard let children = try? String(contentsOf: taskURL.appendingPathComponent("children"), encoding: .utf8) else { return false }
-                return children.contains { !$0.isWhitespace }
+            guard let taskURLs = try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil), !taskURLs.isEmpty
+            else { return false }
+            var anyChildrenFileRead = false
+            for taskURL in taskURLs {
+                guard let children = try? String(contentsOf: taskURL.appendingPathComponent("children"), encoding: .utf8) else { continue }
+                anyChildrenFileRead = true
+                if children.contains(where: { !$0.isWhitespace }) { return true }
             }
+            return !anyChildrenFileRead
         #else
             return false
         #endif

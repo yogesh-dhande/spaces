@@ -82,7 +82,7 @@ stateDiagram-v2
 
 On termination the daemon captures the render frame **before** renderer teardown, writes a final `terminated` payload to SQLite, broadcasts it to attached clients, marks attachments detached, then closes the stream and renderer. An ended session's final render is served from that payload through the Device API `state` response — there is no local on-disk mirror.
 
-Closing a pane detaches the local client from process and coding-agent sessions while the daemon session keeps running. Closing the pane that owns an ad hoc workspace terminal asks the daemon to stop it, which it does only when a fresh foreground read shows the session's own shell at a bare prompt and no owner attachment survives the detach. A viewer's close, and a close while any program is running, only detach.
+Closing a pane detaches the local client from process and coding-agent sessions while the daemon session keeps running. Closing the pane that owns an ad hoc workspace terminal asks the daemon to stop it, which it does only when a fresh foreground read shows the session's own shell at a bare prompt and no owner attachment survives the detach. For a live session, a viewer's close, and a close while any program is running, only detach; closing any pane of an ended ad hoc terminal removes it.
 
 ## Render Pipeline
 
