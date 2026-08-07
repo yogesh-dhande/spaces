@@ -39,6 +39,16 @@
         }
     }
 
+    /// The status a fake device reports about itself, changeable mid-test from the `@Sendable` request
+    /// closure's side, so a device can be made to finally come back on its staged build.
+    private actor SpacesMobileDaemonStatusBox {
+        private var status: TerminalServiceDaemonStatus
+
+        init(_ status: TerminalServiceDaemonStatus) { self.status = status }
+        func set(_ status: TerminalServiceDaemonStatus) { self.status = status }
+        func current() -> TerminalServiceDaemonStatus { status }
+    }
+
     /// A backend whose `currentResolvedHost()` returns a fixed value instead of the default `nil`, so a
     /// test can prove `SpacesMobileAppModel.updateBrowserRoutes` prefers the client's live-resolved host
     /// over a stale paired-device record without needing a real `SpacesDeviceEndpointResolver` handshake.
@@ -2007,17 +2017,20 @@
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
-        /// A device that never comes back leaves the warning in place: the update gives up, re-enables the
-        /// action, and reports nothing. Reconciling with a refresh here would do the opposite — against a
-        /// device that is still down it clears the status the banner renders from and raises a connection
-        /// error, and it cannot run under the expected-outage suppression because that keys off the flag
-        /// this path has to release to re-enable the button.
-        func testATimedOutUpdateLeavesTheWarningInPlaceWithoutAnError() async {
+        /// A blocked device that never answers again leaves the block in place and reports nothing: an
+        /// unreachable device is the overview poll's story, not evidence about an update, and the verdict
+        /// may only rest on what the device says about itself. Reconciling with a refresh here would do
+        /// the opposite — against a device that is still down it clears the status the screen renders
+        /// from and raises a connection error, and it cannot run under the expected-outage suppression
+        /// because that keys off the flag this path has to release.
+        func testAnAutomaticApplyReportsNothingWhenTheDeviceNeverAnswersAgain() async {
             let settings = SpacesMobileConnectionSettings()
+            let recorder = SpacesMobileRequestRecorder()
             let overviewCounter = SpacesMobilePollCounter()
             let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
             let overview = makeOverview(daemonStatus: blockingStaged)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
                 switch request.commandName {
                 case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 case "overview":
@@ -2032,16 +2045,212 @@
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(10), daemonUpdateTimeout: .milliseconds(50))
 
+            // Establishing the state is all it takes: a blocked device with a build staged has its apply
+            // requested without the user asking.
             await model.refresh()
             XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+            // The request proves the apply started (the flag is claimed before it is sent), so waiting for
+            // the flag to be clear afterwards is waiting for that run to be over, not for it to begin.
+            await waitUntil("the automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
 
-            await model.requestDaemonUpdate()
-
-            XCTAssertNotNil(model.daemonStatus, "the banner must survive a daemon that never came back")
+            XCTAssertNotNil(model.daemonStatus, "the block must survive a daemon that never came back")
             XCTAssertTrue(model.isActiveDeviceBlocked, "an unreturned daemon leaves the device blocked, not silently usable")
             XCTAssertNil(model.errorMessage, "a slow restart and a refused one look the same here; neither is a reported failure")
             XCTAssertNil(model.connectionNotice)
-            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again so the user can retry")
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a silent device is not the device reporting the apply did not land")
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "with nothing reported there is nothing for the user to do yet")
+        }
+
+        /// An apply that ended with no verdict must not spend the once-per-build rule. The device went
+        /// quiet for the whole poll — a daemon mid-handoff, a switched-away connection, and an
+        /// unreachable device all look like this — so nothing was decided and no report was raised. If
+        /// the attempt stayed consumed, the device coming back still blocked on that same staged build
+        /// would find the automatic apply deduped away with nothing on screen, and the user would be
+        /// stuck there until the app was relaunched.
+        func testAnUndecidedAutomaticApplyIsRequestedAgainWhenTheDeviceComesBack() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // The daemon says nothing for the whole poll, so the run ends with no evidence either way.
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                // The overview keeps answering: this is the device reporting itself still blocked and
+                // still waiting on the same staged build, which is what the app polls for anyway.
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+            await waitUntil("the first automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a device that said nothing about itself reported no failed apply")
+
+            // The overview poll goes on reporting the device blocked with that build staged, exactly as it
+            // does in the app; that report has to be able to re-arm the apply.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the device is still blocked on the build it has staged")
+        }
+
+        /// A verdict may only rest on evidence that is still current. A device that answers early in the
+        /// poll and then goes quiet — what a daemon mid-handoff replaying its sessions looks like — must
+        /// not be judged from that first report once the budget runs out: the apply may well have landed
+        /// while it was silent. The run ends undecided, so nothing is reported and the attempt re-arms.
+        func testAStaleStatusFromEarlyInThePollDoesNotReportThatTheApplyDidNotLand() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let statusPolls = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    // One answer at the start of the poll — the build still staged, the handoff not yet
+                    // done — and silence from then on.
+                    guard await statusPolls.increment() == 1 else { return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.") }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(80))
+
+            await model.refresh()
+            await waitUntil("the automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a report the device stopped answering for cannot be a verdict about it")
+            XCTAssertEqual(
+                model.daemonCompatibilityPresentation, .none, "nothing was decided, so the block carries no failure and no Try Again yet")
+            XCTAssertNil(model.errorMessage)
+            // Undecided, so the once-per-build rule is handed back: the device's next report re-arms it.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+        }
+
+        /// The whole automatic flow on a blocked device: Spaces asks it to apply the build already
+        /// installed on it, without being told to and without asking; a device that keeps reporting that
+        /// same build staged gets one report and the retry, and the request is never re-sent for a build
+        /// already asked about, however many times the device repeats itself.
+        func testABlockedDeviceAppliesItsStagedBuildOnItsOwnAndReportsOnlyWhenItDoesNotLand() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // The device answers throughout and never applies the build: the apply did not land.
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            let alert = model.stagedApplyDidNotLandAlert
+            XCTAssertEqual(alert?.title, "Update didn't land")
+            XCTAssertEqual(
+                alert?.message,
+                "Spaces 2.0.0 is installed on \(model.connectionSummary), but its daemon is still running 1.0.0. "
+                    + "Nothing running on it was interrupted.")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "an apply that did not land leaves the device blocked")
+            XCTAssertNil(model.errorMessage, "the report is the whole surface; nothing goes through the connection error")
+            guard case .hero(let hero) = model.daemonCompatibilityPresentation else {
+                return XCTFail("A blocked device whose apply did not land shows the hero.")
+            }
+            XCTAssertEqual(hero.actionTitle, "Update Daemon", "the blocked screen carries the retry once the report is dismissed")
+
+            // The device goes on reporting the same staged build on every poll; none of that re-asks.
+            await model.refresh()
+            await model.refresh()
+            let restarts = await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count
+            XCTAssertEqual(restarts, 1, "a repeated status report is not new information and must not re-request the apply")
+        }
+
+        /// Try Again is the user asking again, which is new information: it re-sends the request the
+        /// once-per-build rule would otherwise suppress, and takes the report and the hero down while the
+        /// device is applying an update again.
+        func testTryAgainReAsksForAnApplyTheOnceOnlyRuleWouldSuppress() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            await model.retryStagedApply()
+
+            let restarts = await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count
+            XCTAssertEqual(restarts, 2, "the user asking again re-sends the request")
+            XCTAssertEqual(model.stagedApplyDidNotLandAlert?.stagedVersion, "2.0.0", "a retry that also went unanswered reports itself again")
+        }
+
+        /// Everything this flow left behind is retired by the device's own facts: once it comes back on
+        /// the staged build there is nothing staged, so the report and the hero go with it — no dismissal
+        /// and no separate cleanup path.
+        func testTheStagedApplyReportRetiresWhenTheDeviceComesBackOnTheStagedBuild() async {
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let applied = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let statusBox = SpacesMobileDaemonStatusBox(blockingStaged)
+            let blockedOverview = makeOverview(daemonStatus: blockingStaged)
+            let appliedOverview = makeOverview(daemonStatus: applied)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(await statusBox.current()))
+                default:
+                    let isApplied = await statusBox.current().version == applied.version
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(isApplied ? appliedOverview : blockedOverview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            // The device finally comes back on the staged build.
+            await statusBox.set(applied)
+            await model.refresh()
+
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "the state the report described is over")
+            XCTAssertFalse(model.isActiveDeviceBlocked)
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "an up-to-date device says nothing about its version")
+            XCTAssertEqual(model.overview, appliedOverview, "the device is usable again")
         }
 
         /// The handshake fallback clears the daemon status when it cannot reach the device, which leaves
@@ -2072,20 +2281,22 @@
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
 
+            // The first read establishes the state and, because the device is blocked with a build
+            // staged, starts the automatic apply — the update this test runs its refresh underneath.
             await model.refresh()
             XCTAssertNotNil(model.daemonStatus, "precondition: the first read establishes the device's status")
             XCTAssertTrue(model.isActiveDeviceBlocked)
-
-            let update = Task { await model.requestDaemonUpdate() }
-            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+            await waitUntil("the automatic apply to claim the update") { model.isApplyingDaemonUpdate }
 
             await model.refresh()
 
-            XCTAssertNotNil(model.daemonStatus, "the banner renders off the status; the expected outage must not erase it")
+            XCTAssertNotNil(model.daemonStatus, "the screen renders off the status; the expected outage must not erase it")
             XCTAssertTrue(model.isActiveDeviceBlocked, "the device must stay blocked while its daemon is mid-update")
 
-            update.cancel()
-            await update.value
+            // Ends the in-flight apply deterministically instead of waiting out its budget: the poll
+            // abandons a run whose connection identity moved, which is what a device switch does.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await waitUntil("the abandoned apply to release the update") { !model.isApplyingDaemonUpdate }
         }
 
         /// The deadline is re-checked after each wait, not only before it. A probe launched once the
@@ -2245,42 +2456,104 @@
             XCTAssertNil(model.overview)
         }
 
-        /// The banner renders straight off `DaemonUpdateRemedy` plus the status it came from: the action
-        /// button only ever appears for `.applyStagedUpdate`, and that one remedy still reads differently
-        /// depending on whether the daemon is also wire-incompatible (`isBlocking`).
-        func testCompatibilityBannerViewRendersExpectedTitleAndSeverityPerRemedy() {
-            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
-            let blockingStagedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
-            let installOnDeviceStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
-            let updateClientStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
+        // MARK: - What the device screen says about a daemon's version
 
-            let pendingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {}
-            )
-            XCTAssertFalse(pendingBanner.isBlocking)
-            XCTAssertEqual(pendingBanner.title, "Daemon update pending")
+        /// A device that still works keeps its explicit action: a quiet card stating the gap, and rows
+        /// that stay usable underneath it. This phone may be the only client running, so this is the one
+        /// staged-update state it does not apply on its own.
+        func testACompatibleDeviceWithAStagedBuildGetsTheQuietPendingCard() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
 
-            let blockingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, isApplyingUpdate: false,
-                onUpdate: {})
-            XCTAssertTrue(blockingBanner.isBlocking)
-            XCTAssertEqual(blockingBanner.title, "This device needs a daemon update")
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: false, stagedApplyDidNotLand: false, deviceName: "Studio",
+                clientVersion: "1.5.0")
 
-            let installBanner = CompatibilityBannerView(
-                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
-            XCTAssertTrue(installBanner.isBlocking)
-            XCTAssertEqual(installBanner.title, "Install the update on this device")
-            XCTAssertFalse(DaemonUpdateRemedy.installUpdateOnDevice.offersDaemonUpdateAction)
+            guard case .pendingUpdate(let card) = presentation else { return XCTFail("A compatible device with a build staged gets the card.") }
+            XCTAssertEqual(card.title, "Update pending")
+            XCTAssertEqual(card.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
+            XCTAssertEqual(card.body, "Spaces 2.0.0 is on Studio, ready to apply. Nothing it's running stops.")
+            XCTAssertEqual(card.actionTitle, "Update Daemon")
+        }
 
-            let updateClientBanner = CompatibilityBannerView(
-                remedy: .updateClient, status: updateClientStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
-            XCTAssertTrue(updateClientBanner.isBlocking)
-            XCTAssertEqual(updateClientBanner.title, "Update Spaces to use this device")
-            XCTAssertFalse(DaemonUpdateRemedy.updateClient.offersDaemonUpdateAction)
+        /// The blocked device Spaces is already applying a staged build to shows nothing at all: the work
+        /// is under way, and the device comes back on its own. Only once the apply has demonstrably not
+        /// landed does that state own a surface, and then it carries the retry.
+        func testABlockedStagedUpdateShowsNothingUntilTheApplyHasNotLanded() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let remedy = DaemonUpdateRemedy.remedy(for: status)
 
-            XCTAssertTrue(
-                DaemonUpdateRemedy.applyStagedUpdate(installedVersion: "2.0.0").offersDaemonUpdateAction,
-                "the only remedy that offers the Update Daemon action")
+            XCTAssertEqual(
+                DaemonCompatibilityPresentation.presentation(
+                    remedy: remedy, status: status, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio", clientVersion: "1.5.0"),
+                .none, "work already in flight is not something to look at")
+
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: remedy, status: status, isBlocked: true, stagedApplyDidNotLand: true, deviceName: "Studio", clientVersion: "1.5.0")
+
+            guard case .hero(let hero) = presentation else { return XCTFail("An apply that did not land owns the screen.") }
+            XCTAssertEqual(hero.eyebrow, "CAN'T CONNECT — UPDATE READY TO APPLY")
+            XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
+            XCTAssertEqual(hero.whoLine, "Spaces 2.0.0 is already on Studio")
+            XCTAssertEqual(hero.body, "Its daemon didn't pick the update up, and nothing running on Studio was interrupted.")
+            XCTAssertEqual(hero.actionTitle, "Update Daemon")
+        }
+
+        /// A blocked device with nothing staged cannot be fixed from here, so it gets no action — only
+        /// the one instruction that fixes it, which differs by what kind of device it is. Neither states
+        /// a target version: what lands is whatever gets installed there.
+        func testABlockedDeviceWithNothingStagedPointsAtTheDeviceAndOffersNoAction() {
+            let linux = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, operatingSystem: "Linux")
+            let mac = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
+
+            guard
+                case .hero(let linuxHero) = DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: linux), status: linux, isBlocked: true, stagedApplyDidNotLand: false,
+                    deviceName: "builder", clientVersion: "1.5.0")
+            else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(linuxHero.eyebrow, "CAN'T CONNECT — UPDATE NEEDED")
+            XCTAssertEqual(linuxHero.versionPair, DaemonVersionPair(from: "1.0.0", to: "?"), "no build is staged, so there is no target to name")
+            XCTAssertEqual(linuxHero.whoLine, "nothing newer is installed on builder")
+            XCTAssertEqual(
+                linuxHero.body,
+                "Update it from Spaces on your Mac — it installs over SSH, and everything on builder keeps running. This phone can't update a "
+                    + "Linux daemon.")
+            XCTAssertNil(linuxHero.actionTitle, "nothing this app does can update a Linux daemon")
+
+            guard
+                case .hero(let macHero) = DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: mac), status: mac, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio",
+                    clientVersion: "1.5.0")
+            else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(macHero.body, "Open Spaces on Studio and install the update; its daemon applies it on its own, and nothing running stops.")
+            XCTAssertNil(macHero.actionTitle, "the update has to be installed on that Mac")
+        }
+
+        /// When this app is the side that is behind, the pair names this app's build against the
+        /// device's. That is a statement of the two builds in play, not a comparison: which one is behind
+        /// came from the wire verdict, never from this app measuring itself against a daemon.
+        func testAnAppTooOldForItsDeviceNamesItsOwnBuildAsTheSideThatMoves() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1, version: "3.0.0")
+
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio",
+                clientVersion: "1.5.0")
+
+            guard case .hero(let hero) = presentation else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(hero.eyebrow, "CAN'T CONNECT — THIS APP NEEDS AN UPDATE")
+            XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.5.0", to: "3.0.0"))
+            XCTAssertEqual(hero.whoLine, "this app · Studio")
+            XCTAssertEqual(hero.body, "Studio speaks a newer connection protocol than this app. Update Spaces from the App Store to reconnect.")
+            XCTAssertNil(hero.actionTitle, "only the App Store can update this app")
+        }
+
+        /// A compatible, up-to-date device says nothing about versions at all.
+        func testAnUpToDateDeviceShowsNothing() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version)
+
+            XCTAssertEqual(
+                DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: false, stagedApplyDidNotLand: false,
+                    deviceName: "Studio", clientVersion: "1.5.0"), .none)
         }
 
         // MARK: - Renaming runtime rows
@@ -2515,10 +2788,26 @@
             return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions, daemonStatus: daemonStatus)
         }
 
-        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
+        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil, operatingSystem: String = "macOS")
+            -> TerminalServiceDaemonStatus
+        {
             TerminalServiceDaemonStatus(
                 version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0,
-                protocolVersion: protocolVersion)
+                protocolVersion: protocolVersion, operatingSystem: operatingSystem)
+        }
+
+        /// Waits for work the app model runs on its own — an automatic staged apply and the report it may
+        /// raise are not awaitable from a caller — instead of sleeping a fixed amount and hoping. Fails
+        /// the test rather than hanging if the condition never holds.
+        private func waitUntil(
+            _ description: String, timeout: Duration = .seconds(10), file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool
+        ) async {
+            let deadline = ContinuousClock().now + timeout
+            while ContinuousClock().now < deadline {
+                if await condition() { return }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            XCTFail("Timed out waiting for \(description).", file: file, line: line)
         }
 
         private func makeSession(

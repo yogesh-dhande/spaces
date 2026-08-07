@@ -3,19 +3,24 @@ import spacesclientcore
 import spacesterminalcore
 import workspacecore
 
-/// Full-pane block shown when a device's daemon is wire-incompatible with this app. Mirrors the iOS
-/// `CompatibilityBannerView`: title, explanation, and — only when `BlockRemedy` says a restart or an app
-/// update actually fixes something — an action button.
+/// Full-pane block shown when a device's daemon is wire-incompatible with this app. The situation is a
+/// version gap, so the block is built as a version hero: an orange eyebrow naming the state, the two
+/// versions the gap spans, a quiet line saying whose versions those are, one sentence of pitch, and at
+/// most one action.
 ///
 /// Rendering is driven by `DaemonUpdateRemedy` (via `blockRemedy(verdict:status:)`), not the raw
 /// `SpacesWireCompatibility` verdict: a too-old daemon with nothing staged on its device
 /// (`.installUpdateOnDevice`) cannot be fixed by a restart — that would just re-exec the same binary and
 /// leave the block stuck — so every OS in that state shows install guidance instead of a button:
-///   - Linux: the version-pinned `install.sh` one-liner the user runs on the device.
+///   - Linux: the version-pinned `install.sh` one-liner. When the device's pairing stored SSH details,
+///     an "Update over SSH" button runs that same installer on the device from here and the one-liner
+///     demotes to a small line under it; without SSH details the one-liner is the block's main element.
+///     Either way it stays on screen, as the fallback for a device Spaces cannot reach over SSH.
 ///   - A remote Mac: instructions to open Spaces on that device and install the update there.
 ///   - This Mac (the local daemon): a "Check for Updates…" button wired to Sparkle, when available.
-/// Only `.applyStagedUpdate` — a newer build already installed on the device — offers a restart/update
-/// button, labeled "Update Daemon" since that names the outcome.
+/// `.applyStagedUpdate` — a newer build already installed on the device — is not rendered at all while
+/// Spaces is applying that build by itself; the block appears for it only once the apply did not land
+/// (see `AppKitController.shouldRenderCompatibilityBlock`), and then offers "Try Again".
 final class CompatibilityBlockView: NSView {
     /// What the block renders, carrying exactly the version facts each case is guaranteed to have (so
     /// `content(...)` never needs to invent placeholder text for data it doesn't have). Produced by
@@ -24,8 +29,8 @@ final class CompatibilityBlockView: NSView {
         /// This client's own app build must update. `daemonVersion` is `nil` only in the no-status
         /// conservative fallback (see `blockRemedy`); once a status is known it is always present.
         case updateClient(daemonVersion: String?)
-        /// A newer build is installed on the device and a restart applies it — the only case with a
-        /// restart/update button. Both versions are guaranteed non-nil: this case is only produced from
+        /// A newer build is installed on the device and a restart applies it — the only case with an
+        /// action button. Both versions are guaranteed non-nil: this case is only produced from
         /// a status whose `isUpdatePending` is true, which by definition requires a staged
         /// `installedVersion`, and `version` (the daemon's own running build) is never optional.
         case applyStagedUpdate(daemonVersion: String, installedVersion: String)
@@ -33,83 +38,158 @@ final class CompatibilityBlockView: NSView {
         /// no-status conservative fallback.
         case installUpdateOnDevice(daemonVersion: String?)
 
-        /// The only case for which offering a restart/update action makes sense — mirrors
-        /// `DaemonUpdateRemedy.offersDaemonUpdateAction`.
-        var offersDaemonUpdateAction: Bool {
+        /// The only case whose block carries a Try Again action, because it is the only one Spaces can
+        /// resolve by asking the device to apply what is already installed on it.
+        var offersStagedApplyRetry: Bool {
             if case .applyStagedUpdate = self { return true }
             return false
         }
+
+        /// The staged build this remedy is waiting on, so the caller can match it against the attempt it
+        /// fired; `nil` for every remedy that is not waiting on one.
+        var stagedVersion: String? {
+            if case .applyStagedUpdate(_, let installedVersion) = self { return installedVersion }
+            return nil
+        }
+
+        /// The only case an Update-over-SSH run is trying to resolve, so it is also the only one whose
+        /// presence justifies keeping that run's in-progress state alive.
+        var isInstallUpdateOnDevice: Bool {
+            if case .installUpdateOnDevice = self { return true }
+            return false
+        }
+    }
+
+    /// The two versions the hero spans: the build that is running now, and the build that closes the
+    /// gap. `from` is always the side that has to move, so it renders muted and `to` carries the
+    /// emphasis; the states differ only in whose versions these are, which the who-line says.
+    struct VersionPair: Equatable {
+        let from: String
+        let to: String
+
+        /// Stands in for a version this state has no fact for: the daemon version in the no-status
+        /// fallback, and the target on a Mac, where what lands is whatever the user chooses to install.
+        /// An honest hole beats a number the app would have to invent.
+        static let unknown = "?"
     }
 
     /// Pure "what should the block show" descriptor, independent of AppKit so it is unit-testable
     /// without instantiating a view. `actionButtonTitle == nil` means no button is rendered.
     struct Content: Equatable {
-        let title: String
-        let detail: String
+        /// Orange, letter-spaced, uppercase: the one place severity is stated, so no warning icon is
+        /// needed and no other element has to carry alarm.
+        let eyebrow: String
+        /// The version gap itself, rendered as the block's largest element.
+        let versionPair: VersionPair
+        /// Quiet line under the pair saying whose versions those are and how the fix travels.
+        let whoLine: String
+        /// One sentence of pitch: what the action does, in the user's terms.
+        let body: String
+        /// Quieter line under the body, for the one state with something to say about waiting.
+        let footnote: String?
         let installerCommand: String?
         let actionButtonTitle: String?
+        /// Whether a spinner accompanies the copy, for the one state that waits on work Spaces itself
+        /// started: the Update-over-SSH installer run.
+        let showsProgress: Bool
     }
 
     private let onAction: (() -> Void)?
 
     init(
-        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, onRestart: (() -> Void)?, onCheckForUpdates: (() -> Void)?
+        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool,
+        onRetryStagedApply: (() -> Void)?, onCheckForUpdates: (() -> Void)?, onUpdateOverSSH: (() -> Void)?
     ) {
         let content = Self.content(
             remedy: remedy, deviceName: deviceName, isLocalDevice: isLocalDevice, isLinuxDaemon: isLinuxDaemon, clientVersion: AppVersion.short,
-            canCheckForUpdates: onCheckForUpdates != nil)
+            canCheckForUpdates: onCheckForUpdates != nil, canUpdateOverSSH: canUpdateOverSSH, isUpdatingOverSSH: isUpdatingOverSSH)
         // Only one of these is ever the button's target for a given remedy — see `content(...)`, which
         // decides the button's *title*, and this switch, which picks the matching closure. The caller
         // (`AppKitController`) already withholds whichever closure isn't justified for this device, so at
-        // most one is non-nil in practice.
+        // most one is non-nil in practice. `.installUpdateOnDevice` splits by device: this Mac checks for
+        // an app update, any other device runs the installer over SSH when its pairing allows it.
         switch remedy {
-        case .applyStagedUpdate: onAction = onRestart
-        case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : nil
+        case .applyStagedUpdate: onAction = onRetryStagedApply
+        case .installUpdateOnDevice: onAction = isLocalDevice ? onCheckForUpdates : onUpdateOverSSH
         case .updateClient: onAction = nil
         }
         super.init(frame: .zero)
-        wantsLayer = true
 
+        // No card: the block already owns the whole detail pane, so a border and a fill around content
+        // that has nothing to sit beside would be chrome for its own sake. The eyebrow carries the
+        // severity the old orange frame was carrying.
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 10
+        stack.spacing = 0  // every gap is set explicitly below, since the hero's rhythm is not uniform
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .firstBaseline
-        header.spacing = 8
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")
-        icon.contentTintColor = .systemOrange
-        let title = NSTextField(labelWithString: content.title)
-        title.font = Typography.sheetTitle
-        header.addArrangedSubview(icon)
-        header.addArrangedSubview(title)
-        stack.addArrangedSubview(header)
+        let eyebrow = NSTextField(labelWithAttributedString: Self.eyebrowText(content.eyebrow))
+        stack.addArrangedSubview(eyebrow)
+        stack.setCustomSpacing(14, after: eyebrow)
 
-        let detail = NSTextField(wrappingLabelWithString: content.detail)
-        detail.font = Typography.body
-        detail.textColor = .secondaryLabelColor
-        detail.alignment = .center
-        stack.addArrangedSubview(detail)
+        let pair = Self.versionPairRow(content.versionPair)
+        stack.addArrangedSubview(pair)
+        stack.setCustomSpacing(8, after: pair)
 
-        if let installerCommand = content.installerCommand {
-            let command = NSTextField(labelWithString: installerCommand)
-            command.isSelectable = true
-            command.isEditable = false
-            command.font = Typography.monoBody
-            command.lineBreakMode = .byCharWrapping
-            command.maximumNumberOfLines = 0
-            stack.addArrangedSubview(command)
+        let whoLine = NSTextField(labelWithString: content.whoLine)
+        whoLine.font = Typography.metadata
+        whoLine.textColor = Theme.mutedSecondary
+        stack.addArrangedSubview(whoLine)
+        stack.setCustomSpacing(18, after: whoLine)
+
+        let body = NSTextField(wrappingLabelWithString: content.body)
+        body.font = Typography.body
+        body.textColor = Theme.muted
+        body.alignment = .center
+        // A wrapping label's intrinsic width is its narrowest, so without a stated measure the whole
+        // hero collapses to a tall column of two-word lines. This is the sentence's line length, and
+        // it sets the block's width; the pane caps it well above this.
+        body.preferredMaxLayoutWidth = Self.bodyMeasure
+        // The spinner belongs to the sentence that says what is running, so it sits beside it rather
+        // than floating as its own row.
+        let bodyRow: NSView
+        if content.showsProgress {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
+            spinner.startAnimation(nil)
+            row.addArrangedSubview(spinner)
+            row.addArrangedSubview(body)
+            bodyRow = row
+        } else {
+            bodyRow = body
+        }
+        stack.addArrangedSubview(bodyRow)
+        stack.setCustomSpacing(content.footnote == nil ? 18 : 6, after: bodyRow)
+
+        if let footnote = content.footnote {
+            let label = NSTextField(labelWithString: footnote)
+            label.font = Typography.metadata
+            label.textColor = Theme.mutedSecondary
+            stack.addArrangedSubview(label)
+            stack.setCustomSpacing(18, after: label)
         }
 
         if let actionButtonTitle = content.actionButtonTitle, onAction != nil {
             let button = NSButton(title: actionButtonTitle, target: self, action: #selector(actionTapped))
-            button.bezelStyle = .rounded
+            Theme.applyPrimaryStyle(to: button)
             button.keyEquivalent = "\r"
             stack.addArrangedSubview(button)
+            stack.setCustomSpacing(18, after: button)
+        }
+
+        if let installerCommand = content.installerCommand {
+            // The command is the block's main element only when it is the whole fix (a Linux device
+            // Spaces cannot reach over SSH). Everywhere else something else already resolves the block,
+            // so the command demotes to a quiet fallback line the user can still copy.
+            let isPrimary = content.actionButtonTitle == nil && !content.showsProgress
+            stack.addArrangedSubview(Self.commandView(installerCommand, isPrimary: isPrimary))
         }
 
         addSubview(stack)
@@ -122,23 +202,72 @@ final class CompatibilityBlockView: NSView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    // AppKit only calls `updateLayer()` when `wantsUpdateLayer` is true; without this the card's
-    // orange border/background would never be applied.
-    override var wantsUpdateLayer: Bool { true }
-
-    override func updateLayer() {
-        layer?.cornerRadius = 10
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.5).cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true  // re-resolve the appearance-sensitive colors on light/dark switch
-    }
-
     @objc private func actionTapped() { onAction?() }
+
+    // MARK: - Hero elements
+
+    /// Line length for the block's wrapping text, in points. One measure for the body sentence and the
+    /// command, so the block reads as one column rather than as elements of differing widths.
+    private static let bodyMeasure: CGFloat = 340
+
+    /// Uppercase and letter-spaced so a 11 pt line reads as a label for what follows rather than as
+    /// another sentence. Orange is confined to this string.
+    private static func eyebrowText(_ text: String) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: Typography.metadataTitle, .foregroundColor: Theme.orange, .kern: 1.2])
+    }
+
+    /// `from → to`, at the largest role the chrome scale has. Digit-monospaced so the two versions
+    /// align on their dots instead of drifting apart, and colored rather than weighted to say which
+    /// side has to move: the scale carries one weight per size, and color separates the two more
+    /// legibly at this size anyway.
+    private static func versionPairRow(_ pair: VersionPair) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 12
+        let font = Typography.tabularDigits(Typography.pageTitle)
+        for (text, color) in [(pair.from, Theme.mutedSecondary), ("\u{2192}", Theme.accent), (pair.to, Theme.text)] {
+            let label = NSTextField(labelWithString: text)
+            label.font = font
+            label.textColor = color
+            row.addArrangedSubview(label)
+        }
+        return row
+    }
+
+    /// The copyable command. Selectable in both treatments — the point of showing it is that it can be
+    /// carried to the device by hand.
+    private static func commandView(_ command: String, isPrimary: Bool) -> NSView {
+        let label = NSTextField(labelWithString: command)
+        label.isSelectable = true
+        label.isEditable = false
+        label.lineBreakMode = .byCharWrapping
+        label.maximumNumberOfLines = 0
+        label.alignment = .center
+        label.preferredMaxLayoutWidth = bodyMeasure
+        label.translatesAutoresizingMaskIntoConstraints = false
+        guard isPrimary else {
+            label.font = Typography.monoCaption
+            label.textColor = Theme.mutedSecondary
+            return label
+        }
+        label.font = Typography.monoBody
+        label.textColor = Theme.text
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        // Binds first: it is what turns the layer on, so anything set on `layer` before it is dropped.
+        bindAppearanceReactiveLayer(box) { $0.layer?.backgroundColor = Theme.chipBg.cgColor }
+        box.layer?.cornerRadius = 5
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 8), label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+        ])
+        return box
+    }
+
+    // MARK: - Content
 
     /// Maps a device's verdict/status onto what the block should render, or `nil` when the device needs
     /// no block at all (a compatible, up-to-date daemon).
@@ -166,65 +295,124 @@ final class CompatibilityBlockView: NSView {
     }
 
     /// Builds the block's copy and button choice for `remedy`. `clientVersion` plays no part in picking
-    /// the title, detail, or button below; `remedy` already encodes every decision, and a client must
+    /// the eyebrow, body, or button below; `remedy` already encodes every decision, and a client must
     /// never re-derive one by comparing its own build against a daemon's (unrelated release trains — see
     /// `DaemonUpdateRemedy`). It survives here for two uses that are not comparisons: naming this app's
-    /// own build alongside the daemon's in `.updateClient`, and pinning the Linux installer command to
-    /// the version this app ships with.
+    /// own build as one side of the version pair, and pinning the Linux installer command — and with it
+    /// the version that installer would land — to the version this app ships with.
     nonisolated static func content(
-        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, clientVersion: String, canCheckForUpdates: Bool
+        remedy: BlockRemedy, deviceName: String, isLocalDevice: Bool, isLinuxDaemon: Bool, clientVersion: String, canCheckForUpdates: Bool,
+        canUpdateOverSSH: Bool, isUpdatingOverSSH: Bool
     ) -> Content {
         switch remedy {
         case .updateClient(let daemonVersion):
-            // Names both versions without ordering them: the verdict comes from the wire protocol, and
-            // the two marketing versions belong to unrelated release trains, so "newer" can read false.
-            let detail =
-                daemonVersion != nil
-                ? "\(deviceName) runs Spaces \(daemonVersion!) and this app is Spaces \(clientVersion). It speaks a newer connection protocol "
-                    + "than this app, so update this app to reconnect to it."
-                : "\(deviceName) speaks a newer connection protocol than this app. Update this app to reconnect to it."
-            return Content(title: "Device version not compatible", detail: detail, installerCommand: nil, actionButtonTitle: nil)
+            // The pair reads left to right as "the thing that must move, then where it must get to", so
+            // here it is this app's build against the daemon's. That is a statement of the two builds in
+            // play, not a comparison: which one is behind came from the wire verdict.
+            return Content(
+                eyebrow: "CAN'T CONNECT — THIS APP NEEDS AN UPDATE",
+                versionPair: VersionPair(from: clientVersion, to: daemonVersion ?? VersionPair.unknown), whoLine: "this app · \(deviceName)",
+                body: "\(deviceName) speaks a newer connection protocol than this app, so update this app to reconnect to it.", footnote: nil,
+                installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
 
         case .applyStagedUpdate(let daemonVersion, let installedVersion):
-            let detail =
-                "\(deviceName) is running Spaces \(daemonVersion); Spaces \(installedVersion) is installed there. Update the daemon to apply "
-                + "it — running terminals, agents, and processes keep running. Other paired devices remain available."
-            return Content(title: "\(deviceName) needs a daemon update", detail: detail, installerCommand: nil, actionButtonTitle: "Update Daemon")
+            // Reached only after the requested apply did not land: while Spaces is applying the staged
+            // build there is nothing for the user to do, so the caller withholds the block entirely
+            // (`AppKitController.shouldRenderCompatibilityBlock`). The dialog Spaces raised once carries
+            // the long form, including the by-hand instruction for a Mac; what stays behind it is the
+            // same facts short — what is installed, what is running, that nothing was interrupted —
+            // plus the retry, and on Linux the command that applies the build on the device by hand.
+            //
+            // The wording never calls the apply a failure: a daemon that is slow to restart and one that
+            // refused look identical from here, so this reports what has not happened.
+            return Content(
+                eyebrow: "CAN'T CONNECT — UPDATE READY TO APPLY", versionPair: VersionPair(from: daemonVersion, to: installedVersion),
+                whoLine: "Spaces \(installedVersion) is already on \(deviceName)",
+                body: "Its daemon didn't pick the update up, and nothing running on \(deviceName) was interrupted.", footnote: nil,
+                installerCommand: isLinuxDaemon ? linuxApplyStagedUpdateCommand : nil, actionButtonTitle: "Try Again", showsProgress: false)
 
         case .installUpdateOnDevice(let daemonVersion):
-            // The reason is always the connection protocol, never a version comparison: this app and a
-            // given device's daemon are on unrelated release trains, so "older than this app" is both
-            // meaningless and — whenever the two share a marketing version, as every dev build does —
-            // visibly absurd. The daemon's version rides along as an appositive identifying which build
-            // is behind, and drops out entirely (commas included) when the status did not carry one.
-            let daemonLabel = daemonVersion.map { ", running Spaces \($0)," } ?? ""
+            let eyebrow = "CAN'T CONNECT — DAEMON NEEDS AN UPDATE"
+            let runningVersion = daemonVersion ?? VersionPair.unknown
             if isLinuxDaemon {
-                let detail =
-                    "The daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and a restart won't change "
-                    + "that — nothing newer is installed there. Run the command below on the Linux device — running terminals, agents, and "
-                    + "processes on it are preserved — then reconnect. Other paired devices remain available."
+                // The installer is pinned to this app's version, so that is exactly what the device ends
+                // up running — the one state where the target side of the pair is a fact and not a hope.
+                let installerCommand = SpacesLinuxInstaller.installCommand(version: clientVersion)
+                let pair = VersionPair(from: runningVersion, to: clientVersion)
+                if isUpdatingOverSSH {
+                    return Content(
+                        eyebrow: eyebrow, versionPair: pair, whoLine: "\(deviceName) · over SSH",
+                        body: "Updating \(deviceName) — a few minutes, nothing stops.", footnote: "Safe to leave this screen.",
+                        installerCommand: installerCommand, actionButtonTitle: nil, showsProgress: true)
+                }
+                if canUpdateOverSSH {
+                    return Content(
+                        eyebrow: eyebrow, versionPair: pair, whoLine: "\(deviceName) · over SSH",
+                        body: "Update \(deviceName) over SSH without stopping anything it's running.", footnote: nil,
+                        installerCommand: installerCommand, actionButtonTitle: "Update over SSH", showsProgress: false)
+                }
                 return Content(
-                    title: "Update \(deviceName)'s Spaces daemon", detail: detail,
-                    installerCommand: SpacesLinuxInstaller.installCommand(version: clientVersion), actionButtonTitle: nil)
+                    eyebrow: eyebrow, versionPair: pair, whoLine: "run on \(deviceName)",
+                    body: "Run this on \(deviceName) — nothing it's running stops.", footnote: nil, installerCommand: installerCommand,
+                    actionButtonTitle: nil, showsProgress: false)
             }
+            // A Mac has no headless installer to pin a target to: what lands is whatever the user
+            // installs there, so the target side stays an honest hole.
+            let pair = VersionPair(from: runningVersion, to: VersionPair.unknown)
             if isLocalDevice {
-                // Does not promise the daemon picks the update up by itself: the silent handoff fires
-                // only for a wire-compatible daemon, and this one is too old for that, so once the
-                // install lands this pane re-renders as `.applyStagedUpdate` and the user applies it.
-                let detail =
-                    "This Mac's Spaces daemon\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is installed "
-                    + "here to restart into. Update Spaces on this Mac, then apply it to the daemon here — running terminals, agents, and "
-                    + "processes are preserved."
                 return Content(
-                    title: "This Mac needs a Spaces update", detail: detail, installerCommand: nil,
-                    actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil)
+                    eyebrow: eyebrow, versionPair: pair, whoLine: deviceName,
+                    body: "Update Spaces on this Mac; its daemon applies the update on its own, and nothing running stops.", footnote: nil,
+                    installerCommand: nil, actionButtonTitle: canCheckForUpdates ? "Check for Updates…" : nil, showsProgress: false)
             }
-            let detail =
-                "The Spaces daemon on \(deviceName)\(daemonLabel) speaks an older connection protocol than this app, and nothing newer is "
-                + "installed there. Open Spaces on \(deviceName) and install the update; this pane then offers to apply it to the daemon. Other "
-                + "paired devices remain available."
-            return Content(title: "\(deviceName) needs a Spaces update", detail: detail, installerCommand: nil, actionButtonTitle: nil)
+            return Content(
+                eyebrow: eyebrow, versionPair: pair, whoLine: deviceName,
+                body: "Open Spaces on \(deviceName) and install the update; its daemon applies it on its own, and nothing running stops.",
+                footnote: nil, installerCommand: nil, actionButtonTitle: nil, showsProgress: false)
         }
+    }
+
+    /// Copy for a device that still reports a staged build its daemon is not running some time after
+    /// Spaces asked it to apply that build in place. One shape for every device: what is installed, what
+    /// is still running, that nothing on the device was disturbed, and the one instruction that applies
+    /// the build on that kind of device by hand.
+    struct StagedApplyDidNotLandCopy: Equatable {
+        let title: String
+        let body: String
+        let instruction: String
+        /// The command the user runs on the device, when the instruction is a command — Linux only.
+        let command: String?
+    }
+
+    /// The command that applies a staged build on a Linux device by hand. Loading the staged daemon in
+    /// place is what the RPC asks for too, so running it resolves the same state without disturbing the
+    /// device's sessions.
+    static let linuxApplyStagedUpdateCommand = "~/.spaces/bin/spaces daemon apply-update"
+
+    /// Builds `StagedApplyDidNotLandCopy` for one device, for the dialog Spaces raises once when an
+    /// apply it requested has not landed.
+    ///
+    /// The wording never calls the apply a failure: a daemon that is slow to restart and one that refused
+    /// look identical from here, so this reports what has not happened rather than a verdict.
+    nonisolated static func stagedApplyDidNotLandCopy(
+        deviceName: String, stagedVersion: String, runningVersion: String, isLocalDevice: Bool, isLinuxDaemon: Bool
+    ) -> StagedApplyDidNotLandCopy {
+        let body =
+            "Spaces \(stagedVersion) is installed on \(deviceName), but its daemon is still running \(runningVersion) after the update was "
+            + "requested. Nothing running on \(deviceName) was interrupted."
+        // The instruction stops at the colon for Linux: the dialog renders `command` itself, under the
+        // informative text next to Copy Command.
+        if isLinuxDaemon {
+            return StagedApplyDidNotLandCopy(
+                title: "\(deviceName)'s daemon didn't pick up the update", body: body, instruction: "Run this on \(deviceName) to apply it:",
+                command: linuxApplyStagedUpdateCommand)
+        }
+        let instruction =
+            isLocalDevice
+            ? "Use Restart Local Daemon in Spaces settings to apply it here."
+            : "Open Spaces on \(deviceName); its daemon applies the update when it restarts."
+        return StagedApplyDidNotLandCopy(
+            title: "\(deviceName)'s daemon didn't pick up the update", body: body, instruction: instruction, command: nil)
     }
 
     private nonisolated static func nonEmpty(_ value: String?) -> String? {

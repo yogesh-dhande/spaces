@@ -445,6 +445,19 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertFalse(message.contains("line10"))
     }
 
+    func testRemoteUpdateRefusesADeviceWithoutSSHDetails() {
+        // A link-paired device carries no SSH metadata, so the update over SSH cannot run for it. The
+        // refusal is a pure guard: no ssh process is launched, so this asserts against a device record
+        // that names an unreachable host.
+        let device = SpacesPairedDeviceRecord(
+            id: "device-linkpaired", name: "builder", platform: "remote", host: "100.64.12.34", port: 47_847, certificateFingerprint: "aa:bb",
+            sshHost: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+
+        XCTAssertThrowsError(try SpacesDevicePairingClient.updateSpacesOnRemoteDevice(device: device, appVersion: "0.1.0")) { error in
+            XCTAssertEqual(error as? SpacesRemoteDevicePairingError, .missingSSHHost)
+        }
+    }
+
     func testRemoteShellCommandRunsSnippetsThroughPOSIXShell() {
         let wrapped = SpacesDevicePairingClient.remoteShellCommand("printf 'ok'\nuname -s")
 

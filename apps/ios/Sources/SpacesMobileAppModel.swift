@@ -470,8 +470,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
     /// one-shot mutations and is released as soon as their single RPC returns, but the update poll runs
     /// for up to `daemonUpdateTimeout`, and holding `isMutating` for that whole window would freeze
-    /// every other mutating control in the app. Only the Update Daemon button reads this flag.
+    /// every other mutating control in the app. Only the Update Daemon actions read this flag, and it
+    /// covers an apply this app started on its own the same way it covers one the user asked for.
     var isApplyingDaemonUpdate = false
+    /// The one thing the automatic staged-apply flow ever reports: the device is still running its old
+    /// build some time after this app asked it to apply the one installed on it. `nil` whenever there is
+    /// nothing to report, which is every other moment of that flow — a staged update that lands is shown
+    /// nowhere, because the device passes through the ordinary reconnect and comes back.
+    var stagedApplyDidNotLandAlert: StagedApplyDidNotLandAlert?
+    /// Attempts whose apply the device did not report as landed within the poll's budget. Gates the
+    /// blocked device's hero and its Try Again (see `stagedApplyDidNotLand`), and is retired the moment
+    /// the device's own facts stop justifying it.
+    private var stagedApplyDidNotLandAttempts: Set<DaemonStagedApplyAttempt> = []
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -603,6 +613,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// unreachable device would cost attempts × (interval + request timeout), several times the stated
     /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdateTimeout: Duration
+    /// Staged applies this app fired on its own, one per (device, staged build) per app run, so a status
+    /// the device keeps reporting every couple of seconds cannot re-request a handoff already on its way.
+    /// Try Again deliberately bypasses this: the user asking again is new information.
+    @ObservationIgnored private var autoStagedApplyAttempts: Set<DaemonStagedApplyAttempt> = []
     /// How long overview fetches must keep failing before the connection-error alert is raised (production
     /// default 5s). Long enough to cover a blip and the poll's retry two seconds later, short enough that
     /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
@@ -926,6 +940,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return !isActiveDeviceBlocked
     }
 
+    /// What the device screen shows about the active device's daemon version, if anything: nothing, the
+    /// quiet pending card, or the hero that replaces the screen. All of the decision lives in
+    /// `DaemonCompatibilityPresentation.presentation`, which is pure and unit-tested; this only feeds it
+    /// the facts. `nil` status means no handshake has landed yet, which is not a version state at all.
+    var daemonCompatibilityPresentation: DaemonCompatibilityPresentation {
+        guard let daemonStatus, let daemonUpdateRemedy else { return .none }
+        return DaemonCompatibilityPresentation.presentation(
+            remedy: daemonUpdateRemedy, status: daemonStatus, isBlocked: isActiveDeviceBlocked, stagedApplyDidNotLand: stagedApplyDidNotLand,
+            deviceName: connectionSummary, clientVersion: MobileAppVersion.current)
+    }
+
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
         return "\(settings.primaryHost):\(settings.port)"
@@ -1159,13 +1184,41 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// The Update Daemon action on the pending card: the user asking for a staged update to be applied
+    /// now. A refused request is reported on the spot, since the user is watching a control they just
+    /// used; nothing else about the run is, because a device offering this card still works either way.
+    func requestDaemonUpdate() async { _ = await performDaemonUpdate(trigger: .userAction) }
+
+    /// Who asked for a daemon update, which decides one thing only: who reports a refused request.
+    private enum DaemonUpdateTrigger {
+        /// The user pressed Update Daemon, so a request the device refuses is news and is surfaced.
+        case userAction
+        /// Spaces applied a staged build by itself. The request's own outcome is never the verdict here
+        /// — a refused request and a daemon already mid-handoff look identical — so the poll runs either
+        /// way and the device's own facts decide what, if anything, gets reported.
+        case automatic
+    }
+
+    /// How a daemon update ended, in terms of what the device reported about itself.
+    private enum DaemonUpdateOutcome {
+        /// The device stopped reporting a staged build: the update is on.
+        case applied
+        /// The budget ran out with the device still reporting `stagedVersion` installed and
+        /// `runningVersion` running — the device's own account of an apply that has not happened.
+        case stillStaged(stagedVersion: String, runningVersion: String)
+        /// Nothing to report: the request was refused (and reported already, for a user action), the run
+        /// was cancelled, the active connection changed under it, or the budget ran out without the
+        /// device answering at all. An unreachable device is reported the ordinary way by the overview
+        /// poll; it is not evidence about an update.
+        case unresolved
+    }
+
     /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
     /// staged update, and re-execs at the same pid, so running terminals, agents, and processes survive.
     /// Polls the device's frozen-core status afterward until it reports the update applied, so the
-    /// compatibility banner clears itself instead of sitting on "Updating…" forever if nothing else
-    /// looks back. The daemon is expected to be briefly unreachable mid-handoff, so fetch failures
-    /// during the poll are swallowed rather than surfaced as a connection error — they just mean "not
-    /// back yet."
+    /// screen clears itself instead of sitting on "Updating…" forever if nothing else looks back. The
+    /// daemon is expected to be briefly unreachable mid-handoff, so fetch failures during the poll are
+    /// swallowed rather than surfaced as a connection error — they just mean "not back yet."
     ///
     /// The poll is bounded by `daemonUpdateTimeout`, checked against a `ContinuousClock` deadline before
     /// each attempt rather than a fixed attempt count — see `daemonUpdateTimeout`'s doc comment. That
@@ -1176,8 +1229,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     ///
     /// Every step is guarded against `overviewIdentity`, captured once up front: a device switch or
     /// removal mid-poll must not publish the old device's status onto whatever is now active.
-    func requestDaemonUpdate() async {
-        guard !isMutating, !isApplyingDaemonUpdate else { return }
+    private func performDaemonUpdate(trigger: DaemonUpdateTrigger) async -> DaemonUpdateOutcome {
+        guard !isMutating, !isApplyingDaemonUpdate else { return .unresolved }
         let identity = overviewIdentity
         // The in-flight flag is released before this invocation's final refresh (see the timeout path
         // below), so a retry can legitimately start while this one is still finishing. Claim a
@@ -1211,56 +1264,199 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch { restartError = error }
         isMutating = false
         if let restartError {
-            if restartError is CancellationError { return }
-            guard identity == overviewIdentity else { return }
-            errorMessage = restartError.localizedDescription
-            return
+            if restartError is CancellationError { return .unresolved }
+            guard identity == overviewIdentity else { return .unresolved }
+            // Only a user action reports the refusal. An automatic apply falls through to the poll
+            // instead: the device's own facts, not this request's fate, decide whether anything is wrong.
+            if case .userAction = trigger {
+                errorMessage = restartError.localizedDescription
+                return .unresolved
+            }
         }
-        guard identity == overviewIdentity else { return }
+        guard identity == overviewIdentity else { return .unresolved }
         connectionNotice = "Updating the daemon…"
 
         let clock = ContinuousClock()
         let deadline = clock.now + daemonUpdateTimeout
+        // The last thing the device said about itself during the poll, which is the only evidence this
+        // run's verdict may rest on. Stays nil for a device that never answered — silence is what a
+        // daemon mid-handoff and an unreachable device both look like, so it proves nothing.
+        //
+        // A failed probe clears it, so the verdict can only rest on an observation that is still current
+        // when the budget runs out. Without that, a device that answered once early in the poll and then
+        // went quiet for the rest of it — exactly what a daemon mid-handoff replaying its sessions looks
+        // like — would be judged from that first, long-superseded report and told the update did not
+        // land. A tail of failures is silence, and silence gets no verdict.
+        var lastReportedStatus: TerminalServiceDaemonStatus?
         while clock.now < deadline {
             // Cancellation exits the poll rather than being swallowed like a fetch failure: a cancelled
             // sleep would otherwise let every remaining attempt run back-to-back with no wait, spinning
             // the whole budget in one turn of the loop.
-            do { try await Task.sleep(for: daemonUpdatePollInterval) } catch { return }
+            do { try await Task.sleep(for: daemonUpdatePollInterval) } catch { return .unresolved }
             // The deadline can pass during that sleep. Re-check before probing: launching a request here
             // would add its whole timeout on top of the budget, on top of the sleep that just overran it.
             guard clock.now < deadline else { break }
-            guard identity == overviewIdentity else { return }
-            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else { continue }
-            guard identity == overviewIdentity else { return }
+            guard identity == overviewIdentity else { return .unresolved }
+            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else {
+                lastReportedStatus = nil
+                continue
+            }
+            guard identity == overviewIdentity else { return .unresolved }
+            lastReportedStatus = status
             if case .applyStagedUpdate = DaemonUpdateRemedy.remedy(for: status) { continue }
             // The device no longer reports a staged update: publish the fresh status, then let a full
             // refresh repopulate the overview before clearing the notice.
             applyCompatibility(status)
             await refresh()
-            guard identity == overviewIdentity else { return }
+            guard identity == overviewIdentity else { return .unresolved }
             connectionNotice = nil
-            return
+            return .applied
         }
 
-        // Timed out. Drop the progress notice and re-enable the action, leaving the banner showing the
+        // Timed out. Drop the progress notice and re-enable the action, leaving the screen showing the
         // last thing the device actually said — a slow restart and a refused handoff look identical from
         // here, and neither is worth inventing a failure message for.
         //
         // Deliberately does not reconcile with a refresh. Against a device that is still down, that
-        // fetch would take the ordinary failure path — clearing the status the banner renders from and
+        // fetch would take the ordinary failure path — clearing the status the screen renders from and
         // raising a connection error — which is the opposite of leaving the warning in place. It cannot
         // run under the expected-outage suppression either, because that keys off the same flag this
         // path has to release to re-enable the button. Releasing the flag resumes the overview poll,
         // which reconciles on its own cadence and reports a genuinely unreachable device the ordinary
         // way, so nothing is left stale.
-        guard identity == overviewIdentity else { return }
+        guard identity == overviewIdentity else { return .unresolved }
         connectionNotice = nil
         isApplyingDaemonUpdate = false
+        guard let lastReportedStatus, let stagedVersion = Self.stagedApplyVersion(status: lastReportedStatus) else { return .unresolved }
+        return .stillStaged(stagedVersion: stagedVersion, runningVersion: lastReportedStatus.version)
     }
 
     private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {
         daemonStatus = status
         compatibility = SpacesWireCompatibility.evaluate(daemonStatus: status)
+        // Every path that lands a fresh status goes through here, so this is where staged-apply state is
+        // reconciled against what the device now says about itself — first retiring what its facts no
+        // longer justify, then firing an apply for a staged build that is keeping it blocked.
+        retireStagedApplyState(currentStagedVersion: Self.stagedApplyVersion(status: status))
+        maybeApplyStagedUpdateAutomatically()
+    }
+
+    // MARK: - Applying a staged update to a blocked device
+
+    /// One requested apply of one staged build on one device: the identity every staged-apply mark is
+    /// keyed on, so a status the device repeats cannot re-fire an attempt already on its way, and a mark
+    /// left by one build can never describe another. `deviceID` is nil for a connection with no paired
+    /// record of its own, which is one connection like any other device.
+    struct DaemonStagedApplyAttempt: Hashable {
+        let deviceID: String?
+        let stagedVersion: String
+    }
+
+    /// The dialog raised when an apply this app requested did not land. Holds the facts rather than a
+    /// rendered view so the copy is testable and the presentation belongs to the app shell.
+    struct StagedApplyDidNotLandAlert: Equatable {
+        /// The build the report is about, so the report retires with the state that produced it.
+        let stagedVersion: String
+        let title: String
+        let message: String
+    }
+
+    /// The staged build `status`'s device is asking to have applied, or nil when it is not waiting on
+    /// one. Defers entirely to `DaemonUpdateRemedy`, so what this app does on its own and what its
+    /// screens say can never disagree.
+    private static func stagedApplyVersion(status: TerminalServiceDaemonStatus?) -> String? {
+        guard let status, case .applyStagedUpdate(let stagedVersion) = DaemonUpdateRemedy.remedy(for: status) else { return nil }
+        return stagedVersion
+    }
+
+    /// Whether the staged apply the active device is waiting on has already been reported as not landed.
+    /// The blocked device's hero and its Try Again both hang off this: before it, the apply is under way
+    /// and there is nothing for the user to do.
+    private var stagedApplyDidNotLand: Bool {
+        guard let stagedVersion = Self.stagedApplyVersion(status: daemonStatus) else { return false }
+        return stagedApplyDidNotLandAttempts.contains(DaemonStagedApplyAttempt(deviceID: activeDeviceID, stagedVersion: stagedVersion))
+    }
+
+    /// Applies a staged build to a device this app cannot otherwise use, without asking: the restart RPC
+    /// rides the frozen wire core, so it crosses the version gap, and applying the staged build is
+    /// precisely what closes it — leaving that device to a button would make the user tap through what
+    /// the app can already do. A device that still works keeps its explicit action instead (the pending
+    /// card), since nothing about it is urgent and this phone may be the only client running.
+    ///
+    /// Fires once per (device, staged build) per app run, so the status the device repeats every couple
+    /// of seconds cannot re-request a handoff already on its way.
+    private func maybeApplyStagedUpdateAutomatically() {
+        guard isActiveDeviceBlocked, let stagedVersion = Self.stagedApplyVersion(status: daemonStatus) else { return }
+        let attempt = DaemonStagedApplyAttempt(deviceID: activeDeviceID, stagedVersion: stagedVersion)
+        guard !autoStagedApplyAttempts.contains(attempt) else { return }
+        autoStagedApplyAttempts.insert(attempt)
+        Task { await applyStagedUpdateReportingFailure(attempt: attempt) }
+    }
+
+    /// Runs an apply whose only surface is failure. Success is shown nowhere: the device passes through
+    /// the ordinary seconds-long reconnect and comes back on the new build. The verdict comes from what
+    /// the device reports about itself — never from the RPC's result, since a refused request and a
+    /// daemon already mid-handoff look identical from here.
+    private func applyStagedUpdateReportingFailure(attempt: DaemonStagedApplyAttempt) async {
+        let outcome = await performDaemonUpdate(trigger: .automatic)
+        // The once-per-build rule exists to stop the status the device repeats every couple of seconds
+        // from re-requesting an apply, and it is spent by an outcome: the build landed, or the device's
+        // own report says it did not and the mark below carries that from here. An undecided run decides
+        // nothing — the connection changed under it, the run was cancelled, or the device stopped
+        // answering — so it hands the once-only back. Otherwise the attempt would stay consumed with no
+        // mark to show for it: the device would sit blocked on that same staged build with the automatic
+        // apply deduped away and nothing on screen for the user to act on, until the app was relaunched.
+        // A re-fire needs the device to report itself blocked and staged all over again, so this cannot
+        // spin; it just lets the next such report be acted on.
+        guard case .stillStaged(let stagedVersion, let runningVersion) = outcome else {
+            if case .unresolved = outcome { autoStagedApplyAttempts.remove(attempt) }
+            return
+        }
+        // A device that has since staged a different build was never asked to apply this one, so what it
+        // reports now says nothing about the attempt being judged. The newer build gets its own attempt.
+        guard stagedVersion == attempt.stagedVersion else { return }
+        stagedApplyDidNotLandAttempts.insert(attempt)
+        stagedApplyDidNotLandAlert = StagedApplyDidNotLandAlert(
+            stagedVersion: stagedVersion, title: "Update didn't land",
+            message: "Spaces \(stagedVersion) is installed on \(connectionSummary), but its daemon is still running \(runningVersion). "
+                + "Nothing running on it was interrupted.")
+    }
+
+    /// Try Again, from the dialog or from the blocked device's hero: asks the device again for whatever
+    /// it currently reports staged and reports itself the same way if that request also goes unanswered.
+    /// It bypasses the once-per-build rule on purpose — the user asking again is new information, a
+    /// repeated status report is not — and clears the failure mark, which takes the hero down while the
+    /// device is applying an update again.
+    func retryStagedApply() async {
+        stagedApplyDidNotLandAlert = nil
+        guard let stagedVersion = Self.stagedApplyVersion(status: daemonStatus) else { return }
+        let attempt = DaemonStagedApplyAttempt(deviceID: activeDeviceID, stagedVersion: stagedVersion)
+        autoStagedApplyAttempts.insert(attempt)
+        stagedApplyDidNotLandAttempts.remove(attempt)
+        await applyStagedUpdateReportingFailure(attempt: attempt)
+    }
+
+    /// Not Now: the report is made, and the blocked device's hero carries the retry from here.
+    func dismissStagedApplyDidNotLandAlert() { stagedApplyDidNotLandAlert = nil }
+
+    /// Drops staged-apply state the active device's own facts no longer justify: everything when it is
+    /// not waiting on a staged build at all, and everything but the current attempt when it is waiting
+    /// on a different one. Called wherever a fresh status lands, so a landed or superseded apply can
+    /// never pin a hero or leave a report standing. Other devices' marks are left alone; they describe
+    /// devices this status says nothing about.
+    private func retireStagedApplyState(currentStagedVersion: String?) {
+        stagedApplyDidNotLandAttempts = stagedApplyDidNotLandAttempts.filter {
+            $0.deviceID != activeDeviceID || $0.stagedVersion == currentStagedVersion
+        }
+        if let alert = stagedApplyDidNotLandAlert, alert.stagedVersion != currentStagedVersion { stagedApplyDidNotLandAlert = nil }
+    }
+
+    /// Drops every staged-apply mark for a device the app is about to stop tracking, so a later pairing
+    /// of the same device cannot inherit a failure mark, or a suppressed re-fire, from a run nothing is
+    /// watching any more.
+    private func forgetStagedApplyState(deviceID: String) {
+        autoStagedApplyAttempts = autoStagedApplyAttempts.filter { $0.deviceID != deviceID }
+        stagedApplyDidNotLandAttempts = stagedApplyDidNotLandAttempts.filter { $0.deviceID != deviceID }
     }
 
     /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
@@ -1306,6 +1502,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+        stagedApplyDidNotLandAlert = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
@@ -1382,6 +1579,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+        // The report names the device it was raised for, so it goes with that device rather than being
+        // read as a statement about the one just switched to. Its mark survives: the device it describes
+        // still has that build staged and unapplied, and switching back must not re-fire the apply.
+        stagedApplyDidNotLandAlert = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
@@ -1411,6 +1612,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+        stagedApplyDidNotLandAlert = nil
+        forgetStagedApplyState(deviceID: id)
         workspaceCreateOptions = nil
         connectionNotice = nil
         loadDismissedAlertIDsForActiveDevice()
@@ -1490,6 +1693,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         overview = nil
         daemonStatus = nil
         compatibility = nil
+        stagedApplyDidNotLandAlert = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
