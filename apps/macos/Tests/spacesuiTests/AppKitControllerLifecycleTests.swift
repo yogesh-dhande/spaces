@@ -178,8 +178,8 @@ import workspacecore
     /// Quitting with sessions kept running must leave every session alone, including the ad hoc terminal
     /// whose pane the app tears down on the way out.
     @Test func adHocSessionStopIsNotRequestedWhenQuitKeepsSessionsRunning() {
-        #expect(AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: false))
-        #expect(!AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: true))
+        #expect(AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: false))
+        #expect(!AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: true, isAppTerminatingAndKeepingSessions: true))
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {

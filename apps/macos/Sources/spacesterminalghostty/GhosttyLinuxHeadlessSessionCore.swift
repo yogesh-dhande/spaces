@@ -331,6 +331,10 @@
             ptyDriver.foregroundPID().flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
         }
 
+        /// The session's own shell process. Platform parity with `GhosttyEmbeddedSessionCore.childPID()` on
+        /// macOS; the conditional stop asks whether that shell is holding any child process.
+        public func childPID() -> Int32? { ptyDriver.childPID() }
+
         private func handleSessionClosed() {
             guard !terminating else { return }
             terminate()

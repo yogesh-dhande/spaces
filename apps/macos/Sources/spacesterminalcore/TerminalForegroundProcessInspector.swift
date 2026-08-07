@@ -75,6 +75,34 @@ public enum TerminalForegroundProcessInspector {
         #endif
     }
 
+    /// Whether `pid` has at least one child process right now, read live from the OS.
+    ///
+    /// The conditional stop of a user-closed ad hoc terminal asks this about the session's shell: a shell
+    /// holding background or stopped jobs, or waiting on one, is the tty's foreground process with the
+    /// same argv it has at an idle prompt, so its own foreground sample cannot tell the two apart. Work
+    /// the shell holds shows up as a child.
+    public static func hasChildProcesses(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        #if os(macOS)
+            // A one-pid buffer is enough for a yes/no: the call reports what it found, and a NULL buffer
+            // would answer with a system-wide size estimate instead of this pid's children.
+            var childPID: pid_t = 0
+            let found = withUnsafeMutablePointer(to: &childPID) { proc_listchildpids(pid, $0, Int32(MemoryLayout<pid_t>.size)) }
+            return found > 0
+        #elseif os(Linux)
+            // Children are per-thread, so every thread of the process has to be asked. Requires
+            // CONFIG_PROC_CHILDREN, which the Linux kernels Spaces daemons run on provide.
+            let taskDirectory = URL(fileURLWithPath: "/proc/\(pid)/task", isDirectory: true)
+            let taskURLs = (try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil)) ?? []
+            return taskURLs.contains { taskURL in
+                guard let children = try? String(contentsOf: taskURL.appendingPathComponent("children"), encoding: .utf8) else { return false }
+                return children.contains { !$0.isWhitespace }
+            }
+        #else
+            return false
+        #endif
+    }
+
     public static func detectedAgent(pid: Int32) -> TerminalForegroundAgentSnapshot? {
         guard let process = inspect(pid: pid) else { return nil }
         return classify(process)

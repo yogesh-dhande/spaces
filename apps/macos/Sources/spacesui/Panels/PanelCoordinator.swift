@@ -499,7 +499,7 @@ import spacesterminalcore
         // daemon still keeps the session whenever another client holds a live owner attachment.
         content.close()
         if content is TerminalPanePlaceholderContentController {
-            host.stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: sessionID, closedPaneHeldOwnership: true)
+            host.stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: sessionID, closedPaneOwnedOrEnded: true)
         }
     }
 

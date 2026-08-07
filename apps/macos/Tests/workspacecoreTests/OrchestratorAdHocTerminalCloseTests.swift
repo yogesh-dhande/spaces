@@ -19,17 +19,20 @@ extension OrchestratorTests {
     }
 
     /// Seeds a workspace with one built-in terminal session of `kind` plus its tracked terminal window,
-    /// and an orchestrator whose fresh-foreground read answers `foreground`.
-    private func makeAdHocCloseFixture(sessionID: String, kind: TerminalSessionKind = .shell, foreground: TerminalForegroundProcessSnapshot?) throws
-        -> AdHocCloseFixture
-    {
+    /// and an orchestrator whose fresh read answers `foreground` alongside `shellHasChildProcesses`.
+    private func makeAdHocCloseFixture(
+        sessionID: String, kind: TerminalSessionKind = .shell, foreground: TerminalForegroundProcessSnapshot?, shellHasChildProcesses: Bool = false,
+        state: TerminalSessionState = .running, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil
+    ) throws -> AdHocCloseFixture {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
-            builtInTerminalForegroundProcessSampler: { _ in foreground })
+            builtInTerminalForegroundProcessSampler: { _ in
+                foreground.map { BuiltInTerminalForegroundReading(process: $0, shellHasChildProcesses: shellHasChildProcesses) }
+            }, daemonHandoffInProgress: daemonHandoffInProgress)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -39,7 +42,7 @@ extension OrchestratorTests {
             try writeTerminalSessionFixture(
                 sessionID: sessionID, workspace: workspace, kind: kind,
                 runtimeState: TerminalSessionRuntimeState(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: state,
                     updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
             try store.upsert(
                 window: WindowRecord(
@@ -106,6 +109,52 @@ extension OrchestratorTests {
         }
 
         XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+    }
+
+    /// A shell holding a background or stopped job is the tty's foreground process with exactly the argv
+    /// an idle prompt has, so the job only shows up as a child of the shell. That work must survive the
+    /// close.
+    func testConditionalCloseKeepsBareShellHoldingBackgroundJobs() throws {
+        let fixture = try makeAdHocCloseFixture(sessionID: "ad-hoc-background-job", foreground: bareShellForeground(), shellHasChildProcesses: true)
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertFalse(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+        XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// Closing the pane of a terminal whose session has already ended is the user dismissing it, so the
+    /// dead row goes with it rather than lingering until retention expiry.
+    func testConditionalCloseRemovesRowOfEndedSession() throws {
+        let fixture = try makeAdHocCloseFixture(sessionID: "ad-hoc-ended", foreground: nil, state: .exited)
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertTrue(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
+    }
+
+    /// During an exec handoff the terminator no-ops and sessions are carried into the successor daemon, so
+    /// deleting their rows here would orphan a live terminal.
+    func testConditionalCloseIsRefusedDuringDaemonHandoff() throws {
+        let fixture = try makeAdHocCloseFixture(
+            sessionID: "ad-hoc-during-handoff", foreground: bareShellForeground(), daemonHandoffInProgress: { true })
+
+        try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
+            XCTAssertFalse(
+                try fixture.orchestrator.stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+                    workspaceID: fixture.workspace.id, sessionID: fixture.sessionID))
+        }
+
+        XCTAssertTrue(fixture.terminateCapture.sessionIDs.isEmpty)
+        XCTAssertFalse(try fixture.store.windows(workspaceID: fixture.workspace.id).isEmpty)
     }
 
     /// Ownership transferring to another pane on detach (a local mirror, or another device) leaves a live

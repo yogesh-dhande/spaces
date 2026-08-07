@@ -151,9 +151,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
     /// Runs after a user close has detached this pane's client and the daemon has processed that
     /// detach (fired off the async detach's completion), carrying whether the pane held the session's
-    /// owner attachment when it was closed. The host uses it to ask the daemon to stop an ad hoc shell
-    /// the user closed at a bare prompt, since tearing the pane down also tears down the state stream
-    /// that would otherwise surface the detach as an attachment-state change.
+    /// owner attachment when it was closed or its session had already ended. The host uses it to ask the
+    /// daemon to stop an ad hoc shell the user closed at a bare prompt, since tearing the pane down also
+    /// tears down the state stream that would otherwise surface the detach as an attachment-state change.
     let onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)?
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
