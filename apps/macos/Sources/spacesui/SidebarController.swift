@@ -1876,6 +1876,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 editor.window?.makeFirstResponder(editor)
                 editor.selectText(nil)
             }
+            // The editor is the row's last arranged view (no trailing filler): an editable
+            // NSTextField has no intrinsic width, so with a filler present the layout is
+            // ambiguous and the editor collapses to a sliver. Alone, it stretches to the
+            // row's trailing edge.
             row.addArrangedSubview(editor)
         } else {
             let titleLabel = PressableLabel(labelWithString: item.title)
@@ -1912,9 +1916,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
                 row.addArrangedSubview(detailLabel)
             }
-        }
 
-        row.addArrangedSubview(NSView())
+            row.addArrangedSubview(NSView())
+        }
 
         cell.addSubview(row)
         NSLayoutConstraint.activate([
