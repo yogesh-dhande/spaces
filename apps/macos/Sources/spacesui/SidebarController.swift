@@ -707,8 +707,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// This Mac's network path changed: it left a network, joined one, woke, or Tailscale came up or
-    /// went down. Every address any resolver has proven was proven on the path that just went away, so
-    /// each one is dropped and every paired remote is attempted again right now.
+    /// went down. Everything any resolver learned about where its device is — the address it proved, and
+    /// the ones its stream found dead — was learned on the path that just went away, so all of it is
+    /// dropped and every paired remote is attempted again right now.
     ///
     /// Without this the recovery is real but slow: an offline device waits out the backoff its failures
     /// grew (up to a minute), and a device still reading as loaded sits on a stream whose path is dead
@@ -720,7 +721,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// offline device, and the watchdog's pull plus the same coordinator subscription reset for one that
     /// still looks healthy. This contributes the trigger, not a second reconnect mechanism.
     private func handleNetworkPathChange() {
-        SpacesDeviceEndpointRegistry.clearAllCachedWinners()
+        SpacesDeviceEndpointRegistry.resetAllForNetworkChange()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
             guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }

@@ -268,7 +268,8 @@ public enum SpacesDeviceClient {
         guard device.id != SpacesPairedDeviceRecord.localDeviceID, let advertised = status?.deviceAPIAddresses, !advertised.isEmpty else {
             return nil
         }
-        let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: device.certificateFingerprint)
+        let resolver = SpacesDeviceEndpointRegistry.resolver(
+            for: device, certificateFingerprint: device.certificateFingerprint, database: providedDatabase)
         // The steady state — the daemon reporting the addresses this client already knows — is decided
         // in memory against the live resolver's list, which the stored record's list is kept equal to.
         // A subscription delivers an overview on every daemon database change, and opening a write

@@ -175,6 +175,41 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
         XCTAssertEqual(provenHosts.hosts(), ["tailnet"])
     }
 
+    /// What a stream learned is as network-specific as what a race proved, so the network-change reset
+    /// takes both. Clearing only the cached winner leaves the LAN address marked failed from while the
+    /// client was away, and the stream walk keeps skipping it after the client comes home — converging
+    /// forever on the tailnet address while the address that is now correct is never re-tried.
+    func testNetworkChangeResetClearsTheStreamFailedSetAlongWithTheProvenAddress() throws {
+        let connector = ConnectRecorder()
+        connector.setBehavior(host: "lan", .succeeds)
+        connector.setBehavior(host: "tailnet", .succeeds)
+        let resolver = makeResolver(hosts: ["lan", "tailnet"], connector: connector)
+
+        // Away from the LAN: the stream fails there and settles on the tailnet address, which its own
+        // successful dial then proves.
+        resolver.noteStreamFailed(host: "lan")
+        let host = try XCTUnwrap(resolver.nextStreamHost())
+        XCTAssertEqual(host, "tailnet")
+        try resolver.connect(host: host, timeout: 10).cancel()
+        XCTAssertEqual(resolver.currentCachedHost(), "tailnet")
+
+        resolver.resetForNetworkChange()
+
+        XCTAssertNil(resolver.currentCachedHost())
+        // Back on the LAN, the preferred candidate is offered again rather than skipped as failed.
+        XCTAssertEqual(resolver.nextStreamHost(), "lan")
+    }
+
+    /// The per-failure invalidation is evidence about one address on the network in use, so it keeps its
+    /// meaning: only the wholesale network-change reset forgets it.
+    func testAnOrdinaryStreamFailureStillSkipsThatCandidate() {
+        let resolver = makeResolver(hosts: ["lan", "tailnet"], connector: ConnectRecorder())
+
+        resolver.noteStreamFailed(host: "lan")
+
+        XCTAssertEqual(resolver.nextStreamHost(), "tailnet")
+    }
+
     func testUpdatedCandidatesKeepAProvenAddressOnlyWhileItIsStillACandidate() {
         let resolver = makeResolver(hosts: ["lan", "tailnet"], activeHost: "tailnet", connector: ConnectRecorder())
 

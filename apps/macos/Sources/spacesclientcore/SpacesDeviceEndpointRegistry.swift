@@ -16,25 +16,42 @@ import spacesdevicecore
 public enum SpacesDeviceEndpointRegistry {
     private static let storage = Storage()
 
-    /// The shared resolver for `device`, created on first use from the record's stored candidates and
-    /// its proven address, and reconciled with the passed record's candidates on every later call.
+    /// The shared resolver for `device`, created on first use from that record's candidates and proven
+    /// address, and reconciled against the *stored* record on every later call.
+    ///
+    /// `device` names which resolver is wanted; it does not decide where that resolver dials. Callers
+    /// hold their record for wildly different spans — a CLI command reads one and uses it once, while a
+    /// terminal pane's model captures one at creation and passes the same value to every stream
+    /// reconnect for the life of the pane — so a caller's copy is not evidence of anything except that
+    /// the device existed when it was read. Trusting it would let the longest-lived holder narrow the
+    /// shared resolver back to its oldest list on every reconnect, undoing every address learned since.
+    /// The client database is the authority instead: one row, written by the merge and by pairing, read
+    /// fresh here.
+    ///
     /// `certificateFingerprint` is the identity to pin, which the caller has already resolved (the local
     /// device's fingerprint can be refreshed by a re-bootstrap, so it is not always the one still
     /// sitting in the passed record).
     public static func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String) -> SpacesDeviceEndpointResolver {
-        storage.resolver(for: device, certificateFingerprint: certificateFingerprint)
+        resolver(for: device, certificateFingerprint: certificateFingerprint, database: nil)
     }
+
+    /// The lookup above, against a specific database. `database` is nil everywhere in product code
+    /// except the advertised-host merge, which already holds the connection it just wrote through and
+    /// must reconcile against that same store rather than the process default.
+    static func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String, database: SpacesClientDatabase?)
+        -> SpacesDeviceEndpointResolver
+    { storage.resolver(for: device, certificateFingerprint: certificateFingerprint, database: database) }
 
     /// Hands the resolver the candidate list from a freshly stored record, so an address learned after
     /// the resolver was built (the advertised-host merge) is dialable without waiting for a relaunch.
     public static func refresh(record: SpacesPairedDeviceRecord) { storage.refresh(record: record) }
 
-    /// Forgets every resolver's cached winner, so the next connect re-walks that device's candidates
-    /// from the top instead of going straight back to the address it last proved. Called when this
-    /// client's own network path changes: the address proven a moment ago was proven on a network this
-    /// client may have just left, and nothing else invalidates it until a connection on it actually
-    /// breaks — which on a silently dead path costs a full connect timeout first.
-    public static func clearAllCachedWinners() { storage.clearAllCachedWinners() }
+    /// Drops what every resolver learned about where its device is — the cached winner and the
+    /// candidates its stream has recently failed on. Called when this client's own network path changes:
+    /// both facts were learned on a network this client may have just left, and nothing else invalidates
+    /// them until a connection actually breaks, which on a silently dead path costs a full connect
+    /// timeout first.
+    public static func resetAllForNetworkChange() { storage.resetAllForNetworkChange() }
 
     /// Drops every resolver, so one test's proven addresses and candidate lists cannot leak into the
     /// next. Never called from product code.
@@ -44,22 +61,27 @@ public enum SpacesDeviceEndpointRegistry {
         private let lock = NSLock()
         private var resolvers: [String: SpacesDeviceEndpointResolver] = [:]
 
-        func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String) -> SpacesDeviceEndpointResolver {
+        func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String, database: SpacesClientDatabase?)
+            -> SpacesDeviceEndpointResolver
+        {
             let key = Self.key(certificateFingerprint: certificateFingerprint, port: device.port)
             lock.lock()
             if let existing = resolvers[key] {
                 lock.unlock()
-                // The caller just read this record, so its candidates can be newer than the ones the
-                // resolver was built with: a re-pair rewrites them, and so does another process's write to
-                // the shared client database (the CLI and the app run against one profile). Without this
-                // reconcile the live resolver keeps dialing the list it was constructed with until the app
-                // relaunches. The resolver's own cached winner is deliberately not re-seeded from the
-                // record's `active_host`: that column is written *by* the resolver, so the live value is
-                // never staler than the stored one, and re-seeding it here would silently undo
-                // `clearAllCachedWinners`, whose whole point is that the proven address is now suspect.
-                // The construction-time invariant that a cached winner must be a member of the candidate
-                // list is preserved, because `updateHosts` drops one that is not.
-                existing.updateHosts(device.hosts)
+                // Reconciled against the stored row rather than the caller's copy of it, so that a
+                // long-lived holder replaying an old record cannot narrow the shared resolver (see the
+                // public entry point). A row that is genuinely gone leaves the resolver's list untouched:
+                // the device was deleted or re-paired under a new identity, so whatever this connection is
+                // about to attempt fails on its own terms and reports that, which is a far better answer
+                // than a resolver silently emptied of every address it had.
+                //
+                // The cached winner is deliberately not re-seeded from the stored `active_host`: that
+                // column is written *by* the resolver, so the live value is never staler than the stored
+                // one, and re-seeding it here would silently undo `resetAllForNetworkChange`, whose whole
+                // point is that the proven address is now suspect. The construction-time invariant that a
+                // cached winner must be a member of the candidate list is preserved, because `updateHosts`
+                // drops one that is not.
+                if let stored = Self.storedRecord(deviceID: device.id, database: database) { existing.updateHosts(stored.hosts) }
                 return existing
             }
             let deviceID = device.id
@@ -79,13 +101,21 @@ public enum SpacesDeviceEndpointRegistry {
             existing?.updateHosts(record.hosts)
         }
 
-        func clearAllCachedWinners() {
+        func resetAllForNetworkChange() {
             lock.lock()
             let current = Array(resolvers.values)
             lock.unlock()
-            // Cleared outside the registry lock: each resolver takes its own lock, and a caller already
+            // Reset outside the registry lock: each resolver takes its own lock, and a caller already
             // inside one asking for a resolver would otherwise deadlock against this.
-            for resolver in current { resolver.clearCachedWinner() }
+            for resolver in current { resolver.resetForNetworkChange() }
+        }
+
+        /// The device's row as stored, or nil when it no longer has one. A failed read is indistinguishable
+        /// from a missing row on purpose: both mean this call has nothing authoritative to reconcile
+        /// against, and the resolver keeps what it has rather than being narrowed on a guess.
+        private static func storedRecord(deviceID: String, database: SpacesClientDatabase?) -> SpacesPairedDeviceRecord? {
+            if let database { return try? database.pairedDevice(id: deviceID) }
+            return try? SpacesClientDatabase.withDefaultDatabase { try $0.pairedDevice(id: deviceID) }
         }
 
         func resetForTesting() {

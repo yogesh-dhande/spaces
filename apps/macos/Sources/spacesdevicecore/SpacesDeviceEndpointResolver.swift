@@ -171,6 +171,25 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Forgets everything this resolver learned about *where* the device is: the cached winner and the
+    /// candidates a stream has recently failed on. For when the ground the learning happened on has
+    /// moved, which today means this client's own network path changed.
+    ///
+    /// The failed set has to go too, and clearing only the winner is the bug that hides here: a stream
+    /// that failed on the LAN address while away from that network leaves it marked failed, and
+    /// `nextStreamHost()` keeps skipping it after the client comes home — so the stream converges on the
+    /// tailnet address it can still reach and never re-tries the address that is now the right one.
+    /// Both facts were learned about a network that no longer applies, so both are dropped together.
+    ///
+    /// Distinct from the per-failure invalidation (`noteStreamFailed(host:)`, `noteConnectionFailed(host:)`),
+    /// which is evidence about one address on the current network and keeps its meaning.
+    public func resetForNetworkChange() {
+        lock.lock()
+        cachedHost = nil
+        streamFailedHosts.removeAll()
+        lock.unlock()
+    }
+
     /// Records that a connection on `host` broke, so the next connect re-walks the candidates instead
     /// of going straight back to an address that may no longer be reachable (this client left the
     /// network it was on, the daemon moved). Invoked by the request transports on a send/read failure.
