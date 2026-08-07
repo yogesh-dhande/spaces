@@ -13,6 +13,13 @@ final class ClickableRowView: NSView {
 
     private var isHovered = false
 
+    /// The row's two text fields, assigned by `AppKitController.windowRow` as it builds them. Held so a
+    /// re-render that changed nothing but the strings can write into the row already on screen instead of
+    /// replacing it. Which fields the row has, their fonts, and their visibility are decided at build time
+    /// and stay fixed, so only the strings are writable here.
+    weak var labelField: NSTextField?
+    weak var detailField: NSTextField?
+
     init(isInteractive: Bool) {
         self.isInteractive = isInteractive
         super.init(frame: .zero)
@@ -24,6 +31,14 @@ final class ClickableRowView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    /// Rewrites the row's text in place, accessibility included, leaving every view instance alone.
+    func updateText(label: String, detail: String) {
+        labelField?.stringValue = label
+        detailField?.stringValue = detail
+        setAccessibilityLabel(label)
+        setAccessibilityValue(detail.isEmpty ? nil : detail)
+    }
 
     // MARK: - Background
 

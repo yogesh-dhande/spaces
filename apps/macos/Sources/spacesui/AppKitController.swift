@@ -164,6 +164,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private weak var workspaceDetailFooterRow: NSStackView?
     private weak var workspaceFooterPaneLabel: NSTextField?
     private var workspaceFooterWorkspaceID: String?
+    /// What the footer strip currently shows. Non-nil exactly while the strip holds that workspace's
+    /// controls: `clearWorkspaceDetailFooter` is the only path that empties the strip, and it clears this.
+    private var renderedWorkspaceFooterSignature: WorkspaceDetailFooterSignature?
     private var workspaceNotesPopover: NSPopover?
     private weak var workspaceNotesEditorTextView: NSTextView?
     private var workspaceNotesEditorWorkspaceID: String?
@@ -482,6 +485,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 .terminalSession(let workspaceID, _):
                 return workspaceID
             case .agentWindow(let record): return record.workspaceID
+            }
+        }
+
+        /// A stable identity for what this request focuses, so a rendered pane's signature can compare
+        /// focus targets without the request itself having to be `Equatable` (`agentWindow` carries a
+        /// whole record).
+        var signatureKey: String {
+            switch self {
+            case .workspaceBrowserSession(let workspaceID, let targetURL): "browser:\(workspaceID):\(targetURL)"
+            case .workspaceWindow(let workspaceID, let index): "window:\(workspaceID):\(index)"
+            case .workspaceProcess(let workspaceID, let processID): "process:\(workspaceID):\(processID)"
+            case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): "missing-process:\(workspaceID):\(processKey)"
+            case .workspaceAgentLauncher(let workspaceID, let name): "agent-launcher:\(workspaceID):\(name)"
+            case .agentWindow(let record): "agent-window:\(record.id)"
+            case .terminalSession(let workspaceID, let sessionID): "session:\(workspaceID):\(sessionID)"
             }
         }
     }
@@ -5071,6 +5089,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
         if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
+        // Whatever pane replaces alerts takes its views out of the detail container, so what the alerts
+        // pane was rendered from stops describing anything on screen and must not be reused to skip a
+        // later render.
+        if !pane.isAlerts { alerts.invalidateRenderedAlertsDetail() }
     }
 
     /// Whether this presentation dismisses the open New Project / New Workspace / project settings
@@ -6546,13 +6568,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         detailContainer.layoutSubtreeIfNeeded()
     }
 
+    /// Everything `populateWorkspaceDetailFooter` draws, so a refresh that would draw the same strip can
+    /// leave it alone. The focused-pane label is deliberately absent: it tracks the focused terminal's
+    /// live title, which moves on its own, and is written in place instead.
+    struct WorkspaceDetailFooterSignature: Equatable {
+        let workspaceID: String
+        let displayName: String
+        let branch: String
+        let directory: String
+        let notes: String
+        let isLifecycleRunning: Bool
+        let isRunning: Bool
+        let warningSummary: String?
+        let deviceAcceptsDaemonActions: Bool
+        let unreachableDeviceTooltip: String?
+    }
+
     /// Fills the right panel's footer strip with the selected workspace's identity and
     /// actions — status dot, name, branch, directory, notes, runtime warning, and the
     /// launch/restart, stop, and overflow controls.
     private func populateWorkspaceDetailFooter(workspace: WorkspaceSummary) {
         guard let footer = workspaceDetailFooterRow else { return }
-        clearWorkspaceDetailFooter()
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let runtimeStatus =
             workspaceRuntimeStatusByID[workspace.id]
             ?? WorkspaceRuntimeStatus(
@@ -6560,6 +6596,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+        // Git workspaces are named after their branch, so a branch label matching the
+        // name would just duplicate it.
+        let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let signature = WorkspaceDetailFooterSignature(
+            workspaceID: workspace.id, displayName: workspace.displayName, branch: branch, directory: workspace.dir, notes: notes,
+            isLifecycleRunning: isLifecycleRunning, isRunning: workspace.isRunning, warningSummary: runtimeStatus.warningSummary,
+            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspace.id),
+            unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspace.id))
+        // Overview ticks land here many times a second while a terminal streams, and the strip is rebuilt
+        // from scratch, which destroys the button under the pointer between mouse-down and mouse-up. A
+        // refresh that would draw the same strip touches no view; the focused-pane label is the one thing
+        // that moves on its own, so it is refreshed in place.
+        if signature == renderedWorkspaceFooterSignature {
+            refreshWorkspaceFooterFocusedPane(workspaceID: workspace.id)
+            return
+        }
+        clearWorkspaceDetailFooter()
+        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
 
         let statusDot = NSImageView()
         statusDot.image = NSImage(
@@ -6587,9 +6642,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             footer.addArrangedSubview(warningIcon)
         }
 
-        // Git workspaces are named after their branch, so a branch label matching the
-        // name would just duplicate it.
-        let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !branch.isEmpty, branch != workspace.displayName {
             let branchIcon = NSImageView()
             branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?.withSymbolConfiguration(
@@ -6636,7 +6688,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Everything below writes through the owning daemon, so an unreachable device's footer reads
         // its workspace but offers no action that would only raise an error dialog. The overflow button
         // stays enabled: its menu also carries the path actions, which need nothing from the daemon.
-        let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notesButton = footerActionButton(
             symbol: "note.text", tooltip: notes.isEmpty ? "Add notes" : notes, action: #selector(showWorkspaceNotesEditor(_:)))
         notesButton.contentTintColor = notes.isEmpty ? .tertiaryLabelColor : accentColor
@@ -6667,6 +6718,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         overflowButton.setAccessibilityIdentifier("workspace-detail-overflow")
         footer.addArrangedSubview(overflowButton)
+        renderedWorkspaceFooterSignature = signature
     }
 
     /// Takes a detail-pane control out of service while the workspace's device cannot reach its
@@ -6708,6 +6760,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         workspaceNotesPopover?.close()
         workspaceNotesPopover = nil
         workspaceFooterWorkspaceID = nil
+        renderedWorkspaceFooterSignature = nil
         guard let footer = workspaceDetailFooterRow else { return }
         for view in footer.arrangedSubviews {
             footer.removeArrangedSubview(view)
@@ -7274,7 +7327,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
         agentStatus: AgentWindowStatus? = nil, automationID: String? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
-    ) -> NSView {
+    ) -> ClickableRowView {
         let container = ClickableRowView(isInteractive: action != nil)
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.group)
@@ -7311,6 +7364,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         detailField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detailField.isHidden = detail == nil
+        container.labelField = labelField
+        container.detailField = detailField
 
         let badge = NSTextField(labelWithString: shortcut)
         badge.font = Typography.monoBadge
