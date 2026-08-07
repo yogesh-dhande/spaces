@@ -68,6 +68,24 @@
         /// Monospaced badge text that has to carry weight of its own: type tiles and alert counts.
         public static var monoBadgeStrong: NSFont { font(.monoBadgeStrong) }
 
+        // MARK: Variants
+
+        /// Digit-monospaced variant of a role's font, for text where numbers have to line up rather
+        /// than reflow: version numbers set side by side, counters that tick. It is a variant, not a
+        /// role — size and weight still come from the role the call site picked, and only the digit
+        /// advance changes — so the scale stays the single place a size is decided.
+        public static func tabularDigits(_ font: NSFont) -> NSFont {
+            let descriptor = font.fontDescriptor.addingAttributes([
+                .featureSettings: [
+                    [
+                        NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                        NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector,
+                    ]
+                ]
+            ])
+            return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
+        }
+
         // MARK: Helpers
 
         private static func font(_ role: TypographyRole) -> NSFont {

@@ -157,19 +157,19 @@ import spacesterminalcore
 
     // MARK: - Remedy -> copy/button table
 
-    @Test func applyStagedUpdateOffersTryAgainAndNamesBothVersionsOnEveryKindOfDevice() {
+    @Test func applyStagedUpdateOffersTryAgainAndSpansBothVersionsOnEveryKindOfDevice() {
         // Rendered only after the apply did not land, so its copy reports what has not happened and hands
         // back a retry — on Linux alongside the command that applies the build on the device by hand.
         let macContent = CompatibilityBlockView.content(
             remedy: .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), deviceName: "lantern", isLocalDevice: false,
             isLinuxDaemon: false, clientVersion: "0.9.2", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
-        #expect(macContent.title == "lantern's daemon didn't pick up the update")
+        #expect(macContent.eyebrow == "CAN'T CONNECT — UPDATE READY TO APPLY")
+        // The pair spans the device's own two builds: what its daemon runs, and what is waiting on it.
+        #expect(macContent.versionPair == CompatibilityBlockView.VersionPair(from: "0.8.7", to: "0.9.2"))
+        #expect(macContent.whoLine == "Spaces 0.9.2 is already on lantern")
         #expect(macContent.actionButtonTitle == "Try Again")
         #expect(macContent.installerCommand == nil)
-        #expect(macContent.detail.contains("Spaces 0.9.2 is installed on lantern"))
-        #expect(macContent.detail.contains("still running 0.8.7"))
-        #expect(macContent.detail.contains("Nothing running on lantern was interrupted."))
-        #expect(macContent.detail.contains("Open Spaces on lantern"))
+        #expect(macContent.body.contains("nothing running on lantern was interrupted"))
         #expect(!macContent.showsProgress)
 
         let linuxContent = CompatibilityBlockView.content(
@@ -183,7 +183,22 @@ import spacesterminalcore
             isLinuxDaemon: false, clientVersion: "0.9.2", canCheckForUpdates: true, canUpdateOverSSH: false, isUpdatingOverSSH: false)
         #expect(localContent.actionButtonTitle == "Try Again")
         #expect(localContent.installerCommand == nil)
-        #expect(localContent.detail.contains("Restart Local Daemon"))
+        #expect(localContent.versionPair == CompatibilityBlockView.VersionPair(from: "0.8.7", to: "0.9.2"))
+    }
+
+    @Test func theBlocksStagedApplyCopyNeverCallsTheApplyAFailureEither() {
+        // Same restraint as the dialog it stays behind: a daemon that is slow to restart and one that
+        // refused look identical from here.
+        let variants: [(isLocalDevice: Bool, isLinuxDaemon: Bool)] = [(false, false), (false, true), (true, false)]
+        for variant in variants {
+            let content = CompatibilityBlockView.content(
+                remedy: .applyStagedUpdate(daemonVersion: "0.8.7", installedVersion: "0.9.2"), deviceName: "lantern",
+                isLocalDevice: variant.isLocalDevice, isLinuxDaemon: variant.isLinuxDaemon, clientVersion: "0.9.2", canCheckForUpdates: false,
+                canUpdateOverSSH: false, isUpdatingOverSSH: false)
+            let text = "\(content.eyebrow) \(content.whoLine) \(content.body)".lowercased()
+            #expect(!text.contains("fail"))
+            #expect(!text.contains("error"))
+        }
     }
 
     @Test func theStagedApplyReportNeverCallsTheApplyAFailure() {
@@ -219,9 +234,22 @@ import spacesterminalcore
         let content = CompatibilityBlockView.content(
             remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "build-box", isLocalDevice: false, isLinuxDaemon: true,
             clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+        #expect(content.eyebrow == "CAN'T CONNECT — DAEMON NEEDS AN UPDATE")
         #expect(content.actionButtonTitle == nil)
         #expect(content.installerCommand != nil)
         #expect(content.installerCommand == SpacesLinuxInstaller.installCommand(version: "0.2.0"))
+        // The command is the whole fix here, so the who-line points at it rather than at a transport.
+        #expect(content.whoLine == "run on build-box")
+        #expect(content.body == "Run this on build-box — nothing it's running stops.")
+    }
+
+    @Test func aLinuxTargetVersionIsTheVersionTheInstallerPins() {
+        // The Linux installer is pinned to this app's version, so the device demonstrably lands on it —
+        // the one state where the far side of the pair is a fact rather than the user's choice.
+        let content = CompatibilityBlockView.content(
+            remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "build-box", isLocalDevice: false, isLinuxDaemon: true,
+            clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: true, isUpdatingOverSSH: false)
+        #expect(content.versionPair == CompatibilityBlockView.VersionPair(from: "0.1.0", to: "0.2.0"))
     }
 
     @Test func installUpdateOnDeviceOnLinuxOffersUpdateOverSSHWithoutDroppingTheCopyableCommand() {
@@ -233,8 +261,8 @@ import spacesterminalcore
         #expect(content.actionButtonTitle == "Update over SSH")
         #expect(content.installerCommand == SpacesLinuxInstaller.installCommand(version: "0.2.0"))
         #expect(!content.showsProgress)
-        #expect(content.detail.contains("over SSH"))
-        #expect(content.detail.contains("preserved"))
+        #expect(content.whoLine == "build-box · over SSH")
+        #expect(content.body.contains("without stopping anything it's running"))
     }
 
     @Test func aRunningUpdateOverSSHShowsProgressInsteadOfTheButton() {
@@ -244,8 +272,26 @@ import spacesterminalcore
             clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: true, isUpdatingOverSSH: true)
         #expect(content.actionButtonTitle == nil)
         #expect(content.showsProgress)
-        #expect(content.detail.contains("Updating Spaces on build-box"))
+        #expect(content.body == "Updating build-box — a few minutes, nothing stops.")
+        // The run outlives any reason to sit and watch it, so the block says so.
+        #expect(content.footnote == "Safe to leave this screen.")
         #expect(content.installerCommand == SpacesLinuxInstaller.installCommand(version: "0.2.0"))
+    }
+
+    @Test func onlyTheUpdateOverSSHRunCarriesAFootnote() {
+        // The footnote answers "can I walk away from this?", which only a run Spaces itself started
+        // raises; on every other state it would be reassurance about nothing.
+        let quiescent: [(label: String, isLocalDevice: Bool, isLinuxDaemon: Bool, canUpdateOverSSH: Bool)] = [
+            ("Linux without SSH details", false, true, false), ("Linux with SSH details", false, true, true), ("remote Mac", false, false, false),
+            ("local Mac", true, false, false),
+        ]
+        for variant in quiescent {
+            let content = CompatibilityBlockView.content(
+                remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "build-box", isLocalDevice: variant.isLocalDevice,
+                isLinuxDaemon: variant.isLinuxDaemon, clientVersion: "0.2.0", canCheckForUpdates: true, canUpdateOverSSH: variant.canUpdateOverSSH,
+                isUpdatingOverSSH: false)
+            #expect(content.footnote == nil, "\(variant.label) has nothing to wait on")
+        }
     }
 
     @Test func onlyARunningUpdateOverSSHShowsProgress() {
@@ -297,14 +343,29 @@ import spacesterminalcore
             clientVersion: "0.2.0", canCheckForUpdates: true, canUpdateOverSSH: false, isUpdatingOverSSH: false)
         #expect(content.actionButtonTitle == nil)
         #expect(content.installerCommand == nil)
+        // This app is the side that has to move, so it leads the pair and the who-line names both ends.
+        #expect(content.eyebrow == "CAN'T CONNECT — THIS APP NEEDS AN UPDATE")
+        #expect(content.versionPair == CompatibilityBlockView.VersionPair(from: "0.2.0", to: "0.3.0"))
+        #expect(content.whoLine == "this app · Yogesh's Mac")
     }
 
-    // The block explains a wire-protocol mismatch, so its copy must blame the connection protocol and
-    // never a comparison against this app's own build. The two are on unrelated release trains, which
-    // makes such a comparison meaningless in general — and plainly absurd in the common case this test
-    // pins, where both sides report the same marketing version (every development build) and the old
-    // copy read "running Spaces 0.1.0, older than this app needs (Spaces 0.1.0)".
-    @Test func installGuidanceBlamesTheConnectionProtocolNeverThisAppsVersion() {
+    @Test func aMacsTargetVersionIsUnknownBecauseWhatLandsIsWhateverTheUserInstalls() {
+        for isLocalDevice in [true, false] {
+            let content = CompatibilityBlockView.content(
+                remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "lantern", isLocalDevice: isLocalDevice, isLinuxDaemon: false,
+                clientVersion: "0.2.0", canCheckForUpdates: true, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+            #expect(content.versionPair == CompatibilityBlockView.VersionPair(from: "0.1.0", to: CompatibilityBlockView.VersionPair.unknown))
+            #expect(content.whoLine == "lantern")
+        }
+    }
+
+    // The block explains a wire-protocol mismatch, and this app's build is not a bar the daemon fails to
+    // clear: the two are on unrelated release trains, which makes such a comparison meaningless in
+    // general — and plainly absurd in the common case this test pins, where both sides report the same
+    // marketing version (every development build) and the old copy read "running Spaces 0.1.0, older
+    // than this app needs (Spaces 0.1.0)". The version pair states the two builds; the prose around it
+    // states neither.
+    @Test func installGuidanceKeepsVersionsInThePairAndNeverRanksThemInProse() {
         let variants: [(label: String, isLocalDevice: Bool, isLinuxDaemon: Bool)] = [
             ("Linux daemon", false, true), ("local Mac", true, false), ("remote Mac", false, false),
         ]
@@ -313,28 +374,31 @@ import spacesterminalcore
                 remedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), deviceName: "build-box", isLocalDevice: variant.isLocalDevice,
                 isLinuxDaemon: variant.isLinuxDaemon, clientVersion: "0.1.0", canCheckForUpdates: false, canUpdateOverSSH: false,
                 isUpdatingOverSSH: false)
-            #expect(content.detail.contains("older connection protocol than this app"), "\(variant.label) must name the protocol as the reason")
-            #expect(!content.detail.contains("than this app needs"), "\(variant.label) must not state a version requirement")
-            // The daemon's build appears once, as identifying context. A second occurrence would mean
-            // this app's version is being named as the bar the daemon fails to clear.
-            #expect(
-                content.detail.components(separatedBy: "0.1.0").count - 1 == 1,
-                "\(variant.label) must name a version only as context, never as a comparison")
+            let prose = "\(content.eyebrow) \(content.whoLine) \(content.body) \(content.footnote ?? "")".lowercased()
+            #expect(!prose.contains("0.1.0"), "\(variant.label) must leave version facts to the pair")
+            for ranking in ["than this app needs", "older", "newer", "out of date", "behind"] {
+                #expect(!prose.contains(ranking), "\(variant.label) must not rank the two builds (\(ranking))")
+            }
         }
     }
 
-    @Test func versionsAppearInCopyOnlyWhenNonEmptyAndNeverAsTheLiteralWordNil() {
-        let withVersions = CompatibilityBlockView.content(
-            remedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), deviceName: "Yogesh's Mac", isLocalDevice: false,
-            isLinuxDaemon: false, clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
-        #expect(withVersions.detail.contains("0.1.0"))
-        #expect(withVersions.detail.contains("0.2.0"))
-        #expect(!withVersions.detail.lowercased().contains("nil"))
-
-        let withoutDaemonVersion = CompatibilityBlockView.content(
+    @Test func aVersionFactTheStateDoesNotHaveRendersAsAHoleNeverAsTheLiteralWordNil() {
+        // The no-status fallback knows neither daemon version, and a Mac's target is whatever the user
+        // installs. Both render as "?" rather than an invented number or an empty gap in the pair.
+        let daemonFallback = CompatibilityBlockView.content(
             remedy: .installUpdateOnDevice(daemonVersion: nil), deviceName: "build-box", isLocalDevice: false, isLinuxDaemon: true,
             clientVersion: "0.2.0", canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
-        #expect(!withoutDaemonVersion.detail.lowercased().contains("nil"))
+        #expect(daemonFallback.versionPair == CompatibilityBlockView.VersionPair(from: CompatibilityBlockView.VersionPair.unknown, to: "0.2.0"))
+
+        let clientFallback = CompatibilityBlockView.content(
+            remedy: .updateClient(daemonVersion: nil), deviceName: "build-box", isLocalDevice: false, isLinuxDaemon: false, clientVersion: "0.2.0",
+            canCheckForUpdates: false, canUpdateOverSSH: false, isUpdatingOverSSH: false)
+        #expect(clientFallback.versionPair == CompatibilityBlockView.VersionPair(from: "0.2.0", to: CompatibilityBlockView.VersionPair.unknown))
+
+        for content in [daemonFallback, clientFallback] {
+            let text = "\(content.eyebrow) \(content.versionPair.from) \(content.versionPair.to) \(content.whoLine) \(content.body)".lowercased()
+            #expect(!text.contains("nil"))
+        }
     }
 
     private func makeStatus(version: String, installedVersion: String?, protocolVersion: Int) -> TerminalServiceDaemonStatus {

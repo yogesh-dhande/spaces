@@ -5272,8 +5272,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 stagedApplyDidNotLand: stagedApplyDidNotLand(deviceID: deviceID, status: status))
         else {
             // A device with no remedy — or one whose staged update needs no blocking surface — needs no
-            // block, so leave the detail pane exactly as it is rather than clearing it out for a card
-            // that would have nothing to say.
+            // block, so leave the detail pane exactly as it is rather than clearing it out for a
+            // surface that would have nothing to say.
             return
         }
         visibleCompatibilityBlockRemedy = remedy
@@ -5303,21 +5303,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let canUpdateOverSSH = Self.shouldOfferUpdateOverSSH(
             isLocalDevice: isLocalDevice, isLinuxDaemon: status?.isLinuxDaemon == true,
             hasSSHDetails: Self.hasSSHDetails(deviceRecord(forDeviceID: deviceID)))
-        let card = CompatibilityBlockView(
+        let block = CompatibilityBlockView(
             remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
             isLinuxDaemon: status?.isLinuxDaemon == true, canUpdateOverSSH: canUpdateOverSSH,
             isUpdatingOverSSH: daemonSSHUpdateInProgressDeviceIDs.contains(deviceID),
             onRetryStagedApply: remedy.offersStagedApplyRetry ? { [weak self] in self?.retryStagedApply(deviceID: deviceID) } : nil,
             onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil,
             onUpdateOverSSH: canUpdateOverSSH ? { [weak self] in self?.updateRemoteDaemonOverSSH(deviceID: deviceID) } : nil)
-        card.translatesAutoresizingMaskIntoConstraints = false
-        detailContainer.addSubview(card)
+        block.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(block)
         NSLayoutConstraint.activate([
-            card.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
-            card.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
-            card.leadingAnchor.constraint(greaterThanOrEqualTo: detailContainer.leadingAnchor, constant: 24),
-            card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
-            card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+            block.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            block.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+            block.leadingAnchor.constraint(greaterThanOrEqualTo: detailContainer.leadingAnchor, constant: 24),
+            block.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
+            block.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
         ])
     }
 
