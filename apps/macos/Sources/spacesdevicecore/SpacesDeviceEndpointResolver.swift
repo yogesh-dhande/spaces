@@ -209,8 +209,16 @@ public final class SpacesDeviceEndpointResolver: @unchecked Sendable {
 
     /// Opens one pinned-TLS connection to a specific candidate, without racing. Used by the stream
     /// transports, which pick their candidate through `nextStreamHost()`.
+    ///
+    /// A completed handshake here proves the address exactly as much as a race win does (the pin is what
+    /// validates the daemon, and it is the same pin), so it is recorded the same way. Without that, a
+    /// failover led by a stream would stay invisible to everything else: the next command-channel request
+    /// would re-race from a candidate the stream already knows is dead, and the persisted `active_host`
+    /// behind the Devices list and `spaces device list` would keep naming the path that stopped working.
     public func connect(host: String, timeout: TimeInterval) throws -> any SpacesPinnedTLSLineConnection {
-        try connectSeam(host, port, certificateFingerprint, timeout)
+        let connection = try connectSeam(host, port, certificateFingerprint, timeout)
+        recordProven(host: host)
+        return connection
     }
 
     /// Opens a pinned-TLS connection to the first candidate that answers, racing the preferred order

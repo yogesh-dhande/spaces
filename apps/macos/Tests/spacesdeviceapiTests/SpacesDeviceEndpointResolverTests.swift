@@ -147,6 +147,34 @@ final class SpacesDeviceEndpointResolverTests: XCTestCase {
         XCTAssertEqual(resolver.nextStreamHost(), "lan")
     }
 
+    /// A stream's failover has to steer everything else. The stream dials one candidate directly rather
+    /// than racing, and a completed pinned handshake there proves the address exactly as much as a race
+    /// win does, so it must land in the shared cache and be reported for persistence.
+    func testDirectStreamDialProvesItsAddressForTheCommandPathAndForPersistence() throws {
+        let connector = ConnectRecorder()
+        connector.setBehavior(host: "lan", .succeeds)
+        connector.setBehavior(host: "tailnet", .succeeds)
+        let provenHosts = HostRecorder()
+        let resolver = makeResolver(hosts: ["lan", "tailnet"], activeHost: "lan", connector: connector, onProvenHost: provenHosts.append)
+
+        // The stream rotates off the proven address and dials the next candidate itself.
+        resolver.noteStreamFailed(host: "lan")
+        let host = try XCTUnwrap(resolver.nextStreamHost())
+        XCTAssertEqual(host, "tailnet")
+        try resolver.connect(host: host, timeout: 10).cancel()
+
+        XCTAssertEqual(resolver.currentCachedHost(), "tailnet")
+        XCTAssertEqual(provenHosts.hosts(), ["tailnet"])
+        // The next command-channel connect goes straight to what the stream proved instead of re-racing
+        // from the candidate the stream already found dead.
+        let resolved = try resolver.connect(timeout: 10)
+        resolved.connection.cancel()
+        XCTAssertEqual(resolved.host, "tailnet")
+        XCTAssertEqual(connector.dialedHosts, ["tailnet", "tailnet"])
+        // Proven once, so a steady stream of reconnects on a settled address costs no repeated writes.
+        XCTAssertEqual(provenHosts.hosts(), ["tailnet"])
+    }
+
     func testUpdatedCandidatesKeepAProvenAddressOnlyWhileItIsStillACandidate() {
         let resolver = makeResolver(hosts: ["lan", "tailnet"], activeHost: "tailnet", connector: ConnectRecorder())
 

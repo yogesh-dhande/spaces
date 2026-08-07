@@ -677,9 +677,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// the Mac's devices back in the time one connect takes, not in the time a schedule tuned for a
     /// device that is genuinely down takes.
     ///
-    /// The retry itself is exactly what the Reconnect button does for an offline device, and exactly the
-    /// pull the watchdog does for one that still looks healthy: this contributes the trigger, not a
-    /// second reconnect mechanism.
+    /// Every attempt here is made out of the parts that already exist: the Reconnect button's flow for an
+    /// offline device, and the watchdog's pull plus the same coordinator subscription reset for one that
+    /// still looks healthy. This contributes the trigger, not a second reconnect mechanism.
     private func handleNetworkPathChange() {
         SpacesDeviceEndpointRegistry.clearAllCachedWinners()
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
@@ -693,12 +693,27 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // and the pull may well confirm them, so flipping the section to "loading…" on every
                 // network change would flicker the sidebar for nothing. The pull bypasses the backoff
                 // because the schedule was grown by failures on a network this Mac has now left.
+                //
+                // Its subscription is dropped and reopened all the same. A loaded device's stream is a
+                // long-lived socket on the path that just went away: it carries no application heartbeat,
+                // so nothing on it fails until TCP keepalive gives up about ninety seconds later, and
+                // until then the device looks healthy while every pushed change is stranded. Reopening
+                // goes through the same coordinator entry point the Reconnect button uses, so the
+                // reconcile below dials it through the resolver whose cached winner was just cleared.
+                remoteOverviewSubscriptions.resetForUserRetry(deviceID: record.id)?.stop()
                 startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: true)
             }
         }
-        // Opens any subscription the new path makes possible: a device whose subscribe is waiting out a
-        // retry, or one the pull above is about to bring back. `retryDeviceConnection` already reconciles
-        // for the offline devices it handled.
+        // Terminal-state streams are deliberately left to their own recovery. Their reconnect is armed by
+        // an observed disconnect, and a socket stranded on a dead path has not produced one yet; there is
+        // no entry point that re-dials a live stream without first tearing it down, and tearing one down
+        // raises the pane's dropped-connection banner on a terminal the user may be reading. Their backoff
+        // floors at 500 ms, so once keepalive does fail the socket they recover on their own in well under
+        // a second, over the addresses this pass has already re-proven for the device.
+        //
+        // Reopens every subscription reset above, plus any the new path makes possible: a device whose
+        // subscribe is waiting out a retry, or one the pull above is about to bring back.
+        // `retryDeviceConnection` already reconciles for the offline devices it handled.
         refreshRemoteOverviewSubscriptions()
     }
 

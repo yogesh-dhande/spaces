@@ -17,9 +17,10 @@ public enum SpacesDeviceEndpointRegistry {
     private static let storage = Storage()
 
     /// The shared resolver for `device`, created on first use from the record's stored candidates and
-    /// its proven address. `certificateFingerprint` is the identity to pin, which the caller has
-    /// already resolved (the local device's fingerprint can be refreshed by a re-bootstrap, so it is
-    /// not always the one still sitting in the passed record).
+    /// its proven address, and reconciled with the passed record's candidates on every later call.
+    /// `certificateFingerprint` is the identity to pin, which the caller has already resolved (the local
+    /// device's fingerprint can be refreshed by a re-bootstrap, so it is not always the one still
+    /// sitting in the passed record).
     public static func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String) -> SpacesDeviceEndpointResolver {
         storage.resolver(for: device, certificateFingerprint: certificateFingerprint)
     }
@@ -46,13 +47,27 @@ public enum SpacesDeviceEndpointRegistry {
         func resolver(for device: SpacesPairedDeviceRecord, certificateFingerprint: String) -> SpacesDeviceEndpointResolver {
             let key = Self.key(certificateFingerprint: certificateFingerprint, port: device.port)
             lock.lock()
-            defer { lock.unlock() }
-            if let existing = resolvers[key] { return existing }
+            if let existing = resolvers[key] {
+                lock.unlock()
+                // The caller just read this record, so its candidates can be newer than the ones the
+                // resolver was built with: a re-pair rewrites them, and so does another process's write to
+                // the shared client database (the CLI and the app run against one profile). Without this
+                // reconcile the live resolver keeps dialing the list it was constructed with until the app
+                // relaunches. The resolver's own cached winner is deliberately not re-seeded from the
+                // record's `active_host`: that column is written *by* the resolver, so the live value is
+                // never staler than the stored one, and re-seeding it here would silently undo
+                // `clearAllCachedWinners`, whose whole point is that the proven address is now suspect.
+                // The construction-time invariant that a cached winner must be a member of the candidate
+                // list is preserved, because `updateHosts` drops one that is not.
+                existing.updateHosts(device.hosts)
+                return existing
+            }
             let deviceID = device.id
             let created = SpacesDeviceEndpointResolver(
                 hosts: device.hosts, port: device.port, certificateFingerprint: certificateFingerprint, activeHost: device.activeHost,
                 onProvenHost: { host in Self.persist(deviceID: deviceID, host: host) })
             resolvers[key] = created
+            lock.unlock()
             return created
         }
 

@@ -63,7 +63,36 @@ import Testing
         #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en5"])) == true)
     }
 
-    private func snapshot(satisfied: Bool, interfaces: Set<String>) -> DeviceNetworkPathSnapshot {
-        DeviceNetworkPathSnapshot(isSatisfied: satisfied, interfaceNames: interfaces)
+    /// The case status and interfaces alone cannot see: moving between two Wi-Fi networks, or waking on a
+    /// different one, keeps the path satisfied over the same `en0` while every address on the far side
+    /// changes. A different network is reached through a different router, so the gateway is what marks it.
+    @Test func sameInterfacesReachedThroughADifferentGatewayIsChange() {
+        var filter = DeviceNetworkPathChangeFilter()
+        _ = filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"]))
+
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["10.0.0.1"])) == true)
+    }
+
+    /// Staying on the same network is not a change, however often the monitor repeats the path.
+    @Test func sameInterfacesAndSameGatewayIsNotChange() {
+        var filter = DeviceNetworkPathChangeFilter()
+        _ = filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"]))
+
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"])) == false)
+    }
+
+    /// Gaining or losing a gateway counts too, and the first path observed stays the baseline whatever
+    /// its gateways are.
+    @Test func gatewaySetGrowingOrShrinkingIsChange() {
+        var filter = DeviceNetworkPathChangeFilter()
+
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1"])) == false)
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["192.168.1.1", "fe80::1"])) == true)
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: ["fe80::1", "192.168.1.1"])) == false)
+        #expect(filter.shouldReact(to: snapshot(satisfied: true, interfaces: ["en0"], gateways: [])) == true)
+    }
+
+    private func snapshot(satisfied: Bool, interfaces: Set<String>, gateways: Set<String> = []) -> DeviceNetworkPathSnapshot {
+        DeviceNetworkPathSnapshot(isSatisfied: satisfied, interfaceNames: interfaces, gateways: gateways)
     }
 }

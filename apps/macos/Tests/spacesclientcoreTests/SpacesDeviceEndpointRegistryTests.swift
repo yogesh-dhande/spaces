@@ -25,6 +25,43 @@ final class SpacesDeviceEndpointRegistryTests: XCTestCase {
         XCTAssertFalse(first === other)
     }
 
+    /// A record read after the resolver was built can carry different candidates: a re-pair rewrites
+    /// them, and so does another process writing the shared client database. The live resolver has to
+    /// pick those up rather than keep dialing the list it was constructed with until the app relaunches.
+    func testResolverAdoptsTheCandidatesOfTheRecordItIsAskedFor() {
+        var device = Self.studio
+        let first = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: device.certificateFingerprint)
+        XCTAssertEqual(first.candidateHosts, ["192.168.1.50", "100.64.0.4"])
+
+        device.hosts = ["10.10.0.3", "100.64.0.4"]
+        let second = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: device.certificateFingerprint)
+
+        // Still the one shared resolver, so the command path and the stream paths stay converged on one
+        // cached winner, and it now dials what the record says.
+        XCTAssertTrue(first === second)
+        XCTAssertEqual(second.candidateHosts, ["10.10.0.3", "100.64.0.4"])
+        // The proven address was dropped because the new list no longer contains it, which is the same
+        // membership rule construction applies.
+        XCTAssertNil(second.currentCachedHost())
+    }
+
+    /// The resolver's own cached winner is never staler than the record's persisted `active_host`, since
+    /// that column is written by the resolver. Re-seeding it from the record on every lookup would undo
+    /// the invalidation the network-path watcher just performed.
+    func testReconcilingDoesNotResurrectAProvenAddressThatWasDeliberatelyCleared() {
+        var device = Self.studio
+        let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: device.certificateFingerprint)
+        SpacesDeviceEndpointRegistry.clearAllCachedWinners()
+
+        // The record still names the address that was proven before the network moved.
+        XCTAssertEqual(device.activeHost, "192.168.1.50")
+        device.hosts = ["192.168.1.50", "100.64.0.4", "studio.local"]
+        _ = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: device.certificateFingerprint)
+
+        XCTAssertNil(resolver.currentCachedHost())
+        XCTAssertEqual(resolver.candidateHosts, ["192.168.1.50", "100.64.0.4", "studio.local"])
+    }
+
     func testClearingAllCachedWinnersDropsEveryDevicesProvenAddress() {
         let studio = SpacesDeviceEndpointRegistry.resolver(for: Self.studio, certificateFingerprint: Self.studio.certificateFingerprint)
         let linuxBox = SpacesDeviceEndpointRegistry.resolver(for: Self.linuxBox, certificateFingerprint: Self.linuxBox.certificateFingerprint)

@@ -1,20 +1,32 @@
 import Foundation
 import Network
 
-/// One observed network path, reduced to the two facts that decide whether the addresses this Mac can
-/// reach may have changed: whether the path can carry traffic at all, and which interfaces back it.
-/// A Wi-Fi drop or join changes the status or the interface set; bringing Tailscale up or down adds or
-/// removes its tunnel interface.
+/// One observed network path, reduced to the facts that decide whether the addresses this Mac can reach
+/// may have changed: whether the path can carry traffic at all, which interfaces back it, and which
+/// routers it goes through.
+///
+/// Status and interfaces alone are not enough. Moving between two Wi-Fi networks, or waking on a
+/// different one, can leave the status satisfied and the interface set `{en0}` byte-for-byte unchanged
+/// while every address on the far side has changed. The gateways are what separate those cases: a
+/// different network is reached through a different router. They are reduced to their descriptions
+/// rather than compared as endpoints, because the value here is only ever tested for equality against
+/// the previous observation.
 struct DeviceNetworkPathSnapshot: Equatable, Sendable {
     let isSatisfied: Bool
     let interfaceNames: Set<String>
+    let gateways: Set<String>
 
-    init(isSatisfied: Bool, interfaceNames: Set<String>) {
+    init(isSatisfied: Bool, interfaceNames: Set<String>, gateways: Set<String> = []) {
         self.isSatisfied = isSatisfied
         self.interfaceNames = interfaceNames
+        self.gateways = gateways
     }
 
-    init(path: NWPath) { self.init(isSatisfied: path.status == .satisfied, interfaceNames: Set(path.availableInterfaces.map(\.name))) }
+    init(path: NWPath) {
+        self.init(
+            isSatisfied: path.status == .satisfied, interfaceNames: Set(path.availableInterfaces.map(\.name)),
+            gateways: Set(path.gateways.map(\.debugDescription)))
+    }
 }
 
 /// Decides which observed paths are a change worth re-racing every device's addresses for.
@@ -37,8 +49,8 @@ struct DeviceNetworkPathChangeFilter {
 /// Watches this Mac's own network path and reports meaningful changes on the main actor.
 ///
 /// A paired device is reachable at more than one address, and which of them works depends entirely on
-/// where this Mac currently is: leaving a network, joining one, or toggling Tailscale silently
-/// invalidates the address every resolver just proved. Nothing else notices promptly: a stream parked
+/// where this Mac currently is: leaving a network, joining a different one, or toggling Tailscale
+/// silently invalidates the address every resolver just proved. Nothing else notices promptly: a stream parked
 /// on a dead path waits out its TCP keepalive, and a device already offline waits out its reconnect
 /// backoff. This is what turns "the network moved" into an immediate re-race.
 ///
