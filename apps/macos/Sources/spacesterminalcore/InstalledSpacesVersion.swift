@@ -12,11 +12,11 @@ public enum InstalledSpacesVersion {
     /// Returns `nil` when no installed build can be identified, which means "no update is staged"
     /// rather than "unknown": a daemon running straight from a development build directory has no
     /// installed app bundle or release directory to read, and there is nothing for it to update to.
-    public static func current(homeDirectoryURL: URL = SpacesBinaryLayout.defaultHomeDirectoryURL()) -> String? {
+    public static func current() -> String? {
         #if os(macOS)
             return installedAppBundleVersion()
         #else
-            return installedReleaseVersion(homeDirectoryURL: homeDirectoryURL)
+            return installedReleaseVersion()
         #endif
     }
 
@@ -45,12 +45,21 @@ public enum InstalledSpacesVersion {
             return nil
         }
     #else
-        /// The Linux installer unpacks each build into `~/.spaces/daemon/releases/<version>/` and
-        /// repoints the `current` symlink at it, leaving the old daemon running from its own release
-        /// directory until the service restarts. Each release carries the `manifest.json` it was built
-        /// with, so `current`'s manifest names the installed version.
-        static func installedReleaseVersion(homeDirectoryURL: URL) -> String? {
-            let manifestURL = homeDirectoryURL.appendingPathComponent(".spaces/daemon/current/manifest.json", isDirectory: false)
+        /// The Linux installer unpacks each build into `<daemon root>/releases/<version>/` and repoints
+        /// the `current` symlink at it, leaving the old daemon running from its own release directory
+        /// until the service restarts. The daemon root is resolved from the running executable's own
+        /// path — `<root>/releases/<version>/bin/<name>` — because a daemon may serve any profile
+        /// (installed or development) and each profile has its own release tree: reading a fixed
+        /// home-relative path would report another profile's installed build as this daemon's staged
+        /// update. Each release carries the `manifest.json` it was built with, so `current`'s manifest
+        /// names the installed version. An executable outside a release tree is a development build
+        /// with nothing to update to.
+        static func installedReleaseVersion(executableURL: URL? = Bundle.main.executableURL) -> String? {
+            guard let executableURL else { return nil }
+            let binDir = executableURL.resolvingSymlinksInPath().deletingLastPathComponent()
+            let releasesDir = binDir.deletingLastPathComponent().deletingLastPathComponent()
+            guard binDir.lastPathComponent == "bin", releasesDir.lastPathComponent == "releases" else { return nil }
+            let manifestURL = releasesDir.deletingLastPathComponent().appendingPathComponent("current/manifest.json", isDirectory: false)
             guard let data = try? Data(contentsOf: manifestURL), let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return nil
             }
