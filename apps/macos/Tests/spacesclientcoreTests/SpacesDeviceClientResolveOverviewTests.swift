@@ -150,7 +150,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
     private static let clientApp = SpacesDeviceClientApp(installationID: "i", bundleID: "b", platform: "macos", deviceName: "Mac", appVersion: "1.0")
 
     private static let device = SpacesPairedDeviceRecord(
-        id: "device-1", name: "Studio Mac", platform: "macos", host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc",
+        id: "device-1", name: "Studio Mac", platform: "macos", hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc",
         createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z", lastSelectedAt: "2026-06-17T00:01:00Z")
 
     /// The ports from the observed failure: the daemon rebound 47925 while the client's record still
@@ -160,7 +160,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
 
     private static func localDevice(port: Int) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
-            id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", platform: "macos", host: "127.0.0.1", port: port,
+            id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", platform: "macos", hosts: ["127.0.0.1"], port: port,
             certificateFingerprint: "SHA256:local", createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
     }

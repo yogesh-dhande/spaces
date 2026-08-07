@@ -66,7 +66,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         try serverA.start()
 
         let device = SpacesPairedDeviceRecord(
-            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", host: "127.0.0.1", port: serverA.listeningPort,
+            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: serverA.listeningPort,
             certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-20T00:00:00Z", updatedAt: "2026-07-20T00:00:00Z",
             lastSelectedAt: "2026-07-20T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
@@ -86,7 +86,8 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         try serverB.start()
         defer { serverB.stop() }
         let clientB = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint))
         model.requestClientBox.replace(with: clientB, authToken: pairingStore.authToken).cancel()
 
         // The previously vended sender must now reach server B. The session does not exist there, so the
@@ -114,7 +115,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         try serverA.start()
 
         let device = SpacesPairedDeviceRecord(
-            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", host: "127.0.0.1", port: serverA.listeningPort,
+            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: serverA.listeningPort,
             certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-20T00:00:00Z", updatedAt: "2026-07-20T00:00:00Z",
             lastSelectedAt: "2026-07-20T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
@@ -136,7 +137,8 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         try serverB.start()
         defer { serverB.stop() }
         let clientB = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint))
         model.requestClientBox.replace(with: clientB, authToken: rotatedToken).cancel()
 
         // The previously vended sender routes through the box, so it presents the rotated token to server B.
@@ -155,7 +157,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
     /// Fix 3: a superseded stream client's late disconnect is ignored; a current-stream disconnect clears it.
     @MainActor func testSupersededStreamDisconnectIsIgnoredWhileCurrentDisconnectClears() throws {
         let unreachableDevice = SpacesPairedDeviceRecord(
-            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: 1,
+            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
             certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-20T00:00:00Z",
             updatedAt: "2026-07-20T00:00:00Z", lastSelectedAt: "2026-07-20T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
@@ -205,8 +207,10 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         let disconnected = expectation(description: "onDisconnect received the rejection")
         let received = DisconnectErrorBox()
         let client = try SpacesDeviceAPIStateStreamClient(
-            request: request, host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint,
-            onEvent: { _ in }, onDisconnect: { error in if received.storeFirst(error) { disconnected.fulfill() } })
+            request: request,
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint), onEvent: { _ in },
+            onDisconnect: { error in if received.storeFirst(error) { disconnected.fulfill() } })
         try client.start()
         defer { client.stop() }
         wait(for: [disconnected], timeout: 5)
@@ -233,7 +237,8 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         defer { server.stop() }
 
         let client = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
         defer { client.cancel() }
 
         // Present a token the store rejects, so the reachable daemon answers the transcript request with an

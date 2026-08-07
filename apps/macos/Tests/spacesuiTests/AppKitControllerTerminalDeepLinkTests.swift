@@ -17,7 +17,7 @@ import workspacecore
 @Suite struct AppKitControllerTerminalDeepLinkTests {
     private func device(id: String, name: String) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
-            id: id, name: name, platform: "linux", host: "10.0.0.4", port: 19000, certificateFingerprint: "fingerprint",
+            id: id, name: name, platform: "linux", hosts: ["10.0.0.4"], port: 19000, certificateFingerprint: "fingerprint",
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
     }
 

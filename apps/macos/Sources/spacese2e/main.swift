@@ -394,7 +394,7 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
 
     func run() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote-pairing-window", name: "Remote Device", platform: "remote", host: sshHost, port: SpacesDeviceAPIEndpointDefaults.port,
+            id: "remote-pairing-window", name: "Remote Device", platform: "remote", hosts: [sshHost], port: SpacesDeviceAPIEndpointDefaults.port,
             certificateFingerprint: "", sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: nowISO8601(),
             updatedAt: nowISO8601())
         let result = try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: AppVersion.short)
@@ -440,7 +440,7 @@ private struct SeedPairedDeviceCommand: ParsableCommand {
         // The only device a harness seeds this way is the Linux remote daemon under test, and its
         // seeding stands in for a pairing that already happened, so it is also the last selected one.
         let device = SpacesPairedDeviceRecord(
-            id: deviceID, name: name, platform: "linux", host: host, port: port, certificateFingerprint: certificateFingerprint,
+            id: deviceID, name: name, platform: "linux", hosts: [host], port: port, certificateFingerprint: certificateFingerprint,
             sshHost: normalizedOptional(sshHost), sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: timestamp, updatedAt: timestamp,
             lastSelectedAt: timestamp)
         try SpacesClientDatabase.withDefaultDatabase { try $0.upsert(device: device) }
@@ -1067,7 +1067,8 @@ private struct MobileRequestCommand: ParsableCommand {
     }
 
     private func sendRequestLines(host: String, port: Int, certificateFingerprint: String, pairingLink link: SpacesDevicePairingLink?) throws {
-        let client = try SpacesDeviceAPIRequestSessionClient(host: host, port: port, certificateFingerprint: certificateFingerprint)
+        let client = try SpacesDeviceAPIRequestSessionClient(
+            resolver: SpacesDeviceEndpointResolver(hosts: [host], port: port, certificateFingerprint: certificateFingerprint))
         defer { client.cancel() }
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)

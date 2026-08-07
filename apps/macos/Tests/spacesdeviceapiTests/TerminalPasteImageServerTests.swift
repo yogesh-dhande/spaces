@@ -30,7 +30,8 @@
                 try server.start()
                 defer { server.stop() }
                 let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                    host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                    resolver: SpacesDeviceEndpointResolver(
+                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
                 defer { requestClient.cancel() }
                 let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
                 let clientApp = SpacesDeviceClientApp(
@@ -84,7 +85,8 @@
                 try server.start()
                 defer { server.stop() }
                 let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                    host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                    resolver: SpacesDeviceEndpointResolver(
+                        hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
                 defer { requestClient.cancel() }
                 let clientApp = SpacesDeviceClientApp(
                     installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
@@ -165,7 +167,8 @@
             try server.start()
             defer { server.stop() }
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
             defer { requestClient.cancel() }
             let clientApp = SpacesDeviceClientApp(
                 installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",

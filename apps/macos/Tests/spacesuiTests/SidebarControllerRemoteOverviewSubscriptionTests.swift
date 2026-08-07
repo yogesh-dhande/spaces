@@ -388,6 +388,22 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(!SidebarController.watchdogShouldPullSection(loadState: .loaded, compatibility: nil))
     }
 
+    /// A pull that started before this Mac's network moved is dialing an address that belonged to the old
+    /// network. Its failure lands seconds later, by which time the subscription reopened on the new path
+    /// may already have published a healthy overview, so letting it through would flip a working device
+    /// to offline and park it there until the watchdog's next tick.
+    @Test func aFailureFromAPullThatPredatesTheNetworkChangeIsNotAllowedToReportTheDeviceOffline() {
+        #expect(!SidebarController.pullFailureStillDescribesDevice(pullGeneration: 0, currentGeneration: 1))
+        #expect(!SidebarController.pullFailureStillDescribesDevice(pullGeneration: 1, currentGeneration: 4))
+    }
+
+    /// The ordinary case, and the one the offline transition depends on: nothing has invalidated the
+    /// attempt, so its failure is the device's current truth.
+    @Test func aFailureFromTheCurrentPullStillReportsTheDeviceOffline() {
+        #expect(SidebarController.pullFailureStillDescribesDevice(pullGeneration: 0, currentGeneration: 0))
+        #expect(SidebarController.pullFailureStillDescribesDevice(pullGeneration: 3, currentGeneration: 3))
+    }
+
     /// Unchanged from the rule the watchdog always had: an offline section, and equally one left at
     /// "loading…" by an attempt whose result never arrived, are both re-probed whatever they last knew
     /// about compatibility — the offline transition drops the verdict, so it is `nil` by then anyway.

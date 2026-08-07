@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import spacesclientcore
 import spacesdevicecore
 
 @testable import spacesdeviceapi
@@ -26,14 +27,14 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
 
         let now = Date()
         let window = coordinator.openWindow(
-            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
-            now: now, duration: 10, code: "12345678", nonce: "nonce")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0", now: now,
+            duration: 10, code: "12345678", nonce: "nonce")
 
         XCTAssertThrowsError(try coordinator.validate(code: window.code, nonce: window.nonce, peerID: "peer", now: now.addingTimeInterval(11)))
 
         let fresh = coordinator.openWindow(
-            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
-            now: now, duration: 10, code: "87654321", nonce: "fresh")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0", now: now,
+            duration: 10, code: "87654321", nonce: "fresh")
         XCTAssertNoThrow(try coordinator.validate(code: fresh.code, nonce: fresh.nonce, peerID: "peer", now: now))
         XCTAssertThrowsError(try coordinator.validate(code: fresh.code, nonce: fresh.nonce, peerID: "peer", now: now))
     }
@@ -87,6 +88,36 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
         let parsed = try SpacesDevicePairingLink.parse(link)
         XCTAssertEqual(parsed.hosts, ["mac.local", "other.local"])
     }
+
+    /// A link is untrusted input and `host` is the one parameter that may repeat, so a scanned or pasted
+    /// link cannot hand a client an unbounded candidate list to race and then persist. Every address a
+    /// list carries is something a connect may have to walk — a race stages its attempts, and a stream
+    /// rotates one reconnect at a time — so an unbounded list is an unbounded connect.
+    func testPairingLinkParseNormalizesAndCapsAnAbusiveHostList() throws {
+        let parsed = try SpacesDevicePairingLink.parse(Self.abusiveHostListLink)
+
+        XCTAssertEqual(parsed.hosts, Self.abusiveHostListExpectation)
+        XCTAssertEqual(parsed.hosts.count, SpacesDeviceHostCandidates.maxCount)
+    }
+
+    /// The cap is the same number the stored record and the advertised-host merge are bounded by, so a
+    /// redeemed link can never carry more candidates than a record is allowed to keep.
+    func testTheLinkCapIsTheSameBoundTheStoredRecordUses() {
+        XCTAssertEqual(SpacesDeviceHostCandidates.maxCount, SpacesPairedDeviceRecord.maxHostCandidates)
+    }
+
+    /// A link whose `host` parameter is repeated far past what any device has, with a whitespace-padded
+    /// entry, a duplicate of it, and an empty one mixed in. Percent-encoded, because this has to be a
+    /// link a client could really be handed.
+    static let abusiveHostListLink: String = {
+        let hosts = ["%20%20192.168.1.24%20%20", "192.168.1.24", "", "100.86.197.104"] + (1...20).map { "10.0.0.\($0)" }
+        return "spaces://pair?v=4&" + hosts.map { "host=\($0)" }.joined(separator: "&")
+            + "&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+    }()
+
+    /// What `abusiveHostListLink` must reduce to: trimmed, empties dropped, duplicates removed keeping
+    /// the first occurrence, capped from the tail so the most-preferred addresses survive.
+    static let abusiveHostListExpectation = ["192.168.1.24", "100.86.197.104", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
 
     func testPairingLinkParseAcceptsSingleHost() throws {
         let link = "spaces://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"

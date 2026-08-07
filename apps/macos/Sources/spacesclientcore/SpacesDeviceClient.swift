@@ -119,7 +119,7 @@ public enum SpacesDeviceClient {
             let timestamp = ISO8601DateFormatter().string(from: now)
             let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
             let record = SpacesPairedDeviceRecord(
-                id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, host: bootstrap.host, port: bootstrap.port,
+                id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, hosts: [bootstrap.host], port: bootstrap.port,
                 certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp,
                 lastSelectedAt: timestamp)
             try database.upsert(device: record)
@@ -226,11 +226,62 @@ public enum SpacesDeviceClient {
         onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceAPIOverviewStreamClient {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        // The record this subscription publishes with, carried across deliveries. A stream outlives many
+        // overviews, and only the delivery that actually widens the candidates gets a merged record back;
+        // without carrying it, every later delivery would republish the record captured at subscribe time
+        // and walk the learned address back out of the caller's state.
+        let publishedRecord = PairedDeviceRecordBox(device)
         let client = try SpacesDeviceAPIOverviewStreamClient(
-            authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
-            onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
+            authToken: authToken, clientApp: clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
+            onOverview: { payload in
+                // Every delivery is the daemon's own current view of where it is reachable, so this is
+                // where a pushed overview widens the device's candidate addresses. Once per delivery, not
+                // per render: the sidebar repaints from the published section, not from here.
+                let current = publishedRecord.value
+                if let merged = mergeAdvertisedHosts(device: current, status: payload.daemonStatus) { publishedRecord.value = merged }
+                onOverview(SpacesDeviceOverview(device: publishedRecord.value, overview: payload))
+            }, onDisconnect: onDisconnect)
         try client.start()
         return client
+    }
+
+    /// Folds the addresses a daemon reports for itself (`TerminalServiceDaemonStatus.deviceAPIAddresses`)
+    /// into the device's stored candidates and the live resolver, so an address this client has never
+    /// seen — the tailnet address of a Mac that gained Tailscale after pairing — becomes dialable without
+    /// re-pairing. An empty list means the daemon reported nothing, so it changes nothing, and an
+    /// unchanged union writes nothing.
+    ///
+    /// Skipped for the local device: this Mac's own daemon is reached over loopback and re-resolves
+    /// itself through the control socket (`recoveredLocalResolution`), so folding in its outward-facing
+    /// LAN and tailnet addresses would make every local connect race addresses that are never the right
+    /// way to reach it.
+    ///
+    /// Returns the record as stored after the merge, or nil when nothing was written. Callers publish
+    /// that record rather than the one they passed in: the caller's copy was read before this widened
+    /// the candidates, and a client that keeps holding it hands the narrower list back to
+    /// `SpacesDeviceEndpointRegistry.resolver(for:certificateFingerprint:)`, whose reconcile would then
+    /// strip the address this merge just learned right back out of the live resolver.
+    @discardableResult static func mergeAdvertisedHosts(
+        device: SpacesPairedDeviceRecord, status: TerminalServiceDaemonStatus?, database providedDatabase: SpacesClientDatabase? = nil
+    ) -> SpacesPairedDeviceRecord? {
+        guard device.id != SpacesPairedDeviceRecord.localDeviceID, let advertised = status?.deviceAPIAddresses, !advertised.isEmpty else {
+            return nil
+        }
+        let resolver = SpacesDeviceEndpointRegistry.resolver(
+            for: device, certificateFingerprint: device.certificateFingerprint, database: providedDatabase)
+        // The steady state — the daemon reporting the addresses this client already knows — is decided
+        // in memory against the live resolver's list, which the stored record's list is kept equal to.
+        // A subscription delivers an overview on every daemon database change, and opening a write
+        // transaction on the client database that often, only to persist nothing, would put this on a
+        // path it has no business being on.
+        let candidates = resolver.candidateHosts
+        guard SpacesClientDatabase.mergedHostCandidates(stored: candidates, advertised: advertised) != candidates else { return nil }
+        guard let database = try? providedDatabase ?? SpacesClientDatabase.defaultDatabase(),
+            let merged = try? database.mergeAdvertisedHosts(deviceID: device.id, advertised: advertised)
+        else { return nil }
+        SpacesDeviceEndpointRegistry.refresh(record: merged)
+        return merged
     }
 
     /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
@@ -303,13 +354,17 @@ public enum SpacesDeviceClient {
         database providedDatabase: SpacesClientDatabase? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalRecoveryBootstrapProvider
     ) throws -> SpacesDeviceOverviewResolution {
-        do { return try resolutionFromInlineStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
+        do {
+            return try resolutionFromInlineStatus(
+                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase)
+        } catch {
             // The local daemon's Device API endpoint is not durable: it can idle-shut-down, be restarted,
             // or be relaunched on a freshly assigned port, so the port in the caller's `paired_devices`
             // record goes stale without anything invalidating it. A transport failure against the local
             // device is therefore first read as "this Mac's endpoint needs re-resolving", not "the device
-            // is gone". Only the local device — a remote device's endpoint is configured, so a transport
-            // failure there is a genuinely unreachable device with nothing to re-resolve.
+            // is gone". Only the local device needs that step: a remote device's candidate addresses are
+            // already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`), so a transport
+            // failure there means every address it knows was tried and none answered.
             guard device.id == SpacesPairedDeviceRecord.localDeviceID, isDeviceAPITransportFailure(error) else {
                 return try resolutionFromHandshake(
                     device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
@@ -368,12 +423,17 @@ public enum SpacesDeviceClient {
     /// One overview round-trip, resolved through the compatibility verdict the overview carries inline —
     /// so the compatible steady state needs no second round-trip.
     private static func resolutionFromInlineStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
+        database providedDatabase: SpacesClientDatabase? = nil
     ) throws -> SpacesDeviceOverviewResolution {
         let payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview
         let status = payload.daemonStatus
+        // The pull path's once-per-refresh point, matching the subscription's once-per-delivery point.
+        // The resolution carries the merged record, so the caller adopts the widened candidates instead
+        // of holding the copy it read before this call.
+        let resolved = mergeAdvertisedHosts(device: device, status: status, database: providedDatabase) ?? device
         let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
-        let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
+        let overview = verdict.isCompatible ? SpacesDeviceOverview(device: resolved, overview: payload) : nil
         return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
     }
 
@@ -767,7 +827,7 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesDeviceAPIResponse {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
         let client = try SpacesDeviceAPIRequestClient(
-            host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
             timeoutSeconds: requestTimeoutSeconds(for: request.command))
         let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
@@ -814,6 +874,11 @@ public enum SpacesDeviceClient {
             case .requestRejected: return false
             }
         }
+        // Every candidate address the device knows was raced and none answered, so the device is
+        // unreachable from here right now — retryable, exactly like the single-address timeout it
+        // replaces. A pinned-identity failure on one of those candidates is reported as an
+        // authentication error instead and never reaches this case.
+        if case SpacesDeviceEndpointResolverError.allCandidatesUnreachable = error { return true }
         // The pinned-TLS transport's reachability failures (timeout/refused/closed). A certificate
         // pin mismatch is deliberately not retryable: the daemon is reachable but presents the wrong
         // identity, which must surface as a real error.
@@ -859,6 +924,30 @@ public enum SpacesDeviceClient {
             .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
             .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
             defaultRequestTimeoutSeconds
+        }
+    }
+}
+
+/// The paired-device record a long-lived overview subscription publishes with, held across the
+/// stream's deliveries. Needed because the subscription's callback is `@Sendable` and outlives the
+/// call that built it, while the record it publishes has to move forward as the daemon teaches this
+/// client new addresses.
+private final class PairedDeviceRecordBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: SpacesPairedDeviceRecord
+
+    init(_ value: SpacesPairedDeviceRecord) { storage = value }
+
+    var value: SpacesPairedDeviceRecord {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
         }
     }
 }

@@ -227,7 +227,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         let sessionID = "session-\(UUID().uuidString)"
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: server.listeningPort,
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
             certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
             lastSelectedAt: "2026-07-24T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
@@ -317,7 +317,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
         let sessionID = "session-\(UUID().uuidString)"
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: server.listeningPort,
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: server.listeningPort,
             certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
             lastSelectedAt: "2026-07-24T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
@@ -500,7 +500,7 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
 
     @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
-            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: 1,
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: 1,
             certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-24T00:00:00Z",
             updatedAt: "2026-07-24T00:00:00Z", lastSelectedAt: "2026-07-24T00:00:00Z")
         return try DeviceTerminalSessionStateModel(

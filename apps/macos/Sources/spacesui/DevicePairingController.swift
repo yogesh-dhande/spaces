@@ -876,8 +876,8 @@ import workspacecore
         let remote = host.macPairedDevices().map {
             let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
-                id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
-                isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
+                id: $0.id, name: $0.name, host: $0.dialHost, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort,
+                isLocal: false, isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
         }
         return [local] + remote
     }
@@ -886,7 +886,11 @@ import workspacecore
         var parts: [String] = []
         if device.requiresReconnect { parts.append("Reconnect required") }
         if let host = device.host, let port = device.port {
-            parts.append("\(host):\(port)")
+            // A remote device is reachable at several addresses; the one shown is the address it is
+            // currently dialed at (proven, or the preferred candidate until one is proven), labeled by
+            // network path the way the iOS device list and the pairing sheet label theirs. The local
+            // device is reached over loopback and has no such choice, so it stays a bare address.
+            parts.append(device.isLocal ? "\(host):\(port)" : "\(SpacesDeviceHostAddressKind(host: host).label) · \(host):\(port)")
         } else if device.isLocal {
             parts.append(device.isAvailable ? "Local daemon" : "Local daemon unavailable")
         }

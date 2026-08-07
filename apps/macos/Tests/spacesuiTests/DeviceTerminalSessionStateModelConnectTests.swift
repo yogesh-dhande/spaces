@@ -30,7 +30,7 @@ import spacesterminalcore
         defer { stallingListener.close() }
 
         let unreachableDevice = SpacesPairedDeviceRecord(
-            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: stallingListener.port,
+            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", hosts: ["127.0.0.1"], port: stallingListener.port,
             certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-19T00:00:00Z",
             updatedAt: "2026-07-19T00:00:00Z", lastSelectedAt: "2026-07-19T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(

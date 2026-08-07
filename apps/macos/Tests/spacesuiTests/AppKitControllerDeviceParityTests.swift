@@ -858,7 +858,7 @@ import workspacecore
 
     @Test func remoteBrowserSSHArgumentsUsePairedDeviceSSHMetadata() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            id: "remote", name: "Build Host", platform: "linux", hosts: ["10.0.0.4"], port: 7443, certificateFingerprint: "fingerprint",
             sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
         let args = try BrowserSSHForwardManager.sshArguments(device: device, localPort: 41001, remotePort: 32001)
@@ -872,7 +872,7 @@ import workspacecore
 
     @Test func remoteBrowserSSHArgumentsUseOneProcessForMultipleForwardBindings() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            id: "remote", name: "Build Host", platform: "linux", hosts: ["10.0.0.4"], port: 7443, certificateFingerprint: "fingerprint",
             sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
         let args = try BrowserSSHForwardManager.sshArguments(
@@ -952,7 +952,7 @@ import workspacecore
             projects: [project], workspaces: [descriptor], workspaceRows: rows, liveSessions: [],
             daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))
         let device = SpacesPairedDeviceRecord(
-            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            id: "local", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: 19000, certificateFingerprint: "fingerprint",
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
         let clientApp = SpacesDeviceClientApp(
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
@@ -979,7 +979,7 @@ import workspacecore
     @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
         let recorder = ThreadRecorder()
         let device = SpacesPairedDeviceRecord(
-            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            id: "local", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: 19000, certificateFingerprint: "fingerprint",
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
         let clientApp = SpacesDeviceClientApp(
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
