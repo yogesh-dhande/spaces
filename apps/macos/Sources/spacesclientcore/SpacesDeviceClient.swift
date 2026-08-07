@@ -623,6 +623,18 @@ public enum SpacesDeviceClient {
             profile: profile)
     }
 
+    /// Asks the owning daemon to stop an ad hoc terminal the user closed, which it does only when the
+    /// terminal is idle at a bare shell prompt with no surviving owner attachment. The response's
+    /// `terminatedTerminalSession` reports whether it did.
+    public static func stopWorkspaceTerminalIfBareShell(
+        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func renameTerminalSession(
         workspaceID: String, sessionID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -892,8 +904,9 @@ public enum SpacesDeviceClient {
     public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
-            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
-            .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent, .installAgentHooks, .spawnAgentSession, .killAgentSession:
+            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
+            .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
+            .installAgentHooks, .spawnAgentSession, .killAgentSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds

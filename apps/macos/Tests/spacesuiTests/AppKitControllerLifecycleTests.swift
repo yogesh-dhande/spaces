@@ -175,13 +175,11 @@ import workspacecore
         #expect(browserCleanupWorkspaceIDs.isEmpty)
     }
 
-    @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() {
-        #expect(
-            AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
-        #expect(
-            !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+    /// Quitting with sessions kept running must leave every session alone, including the ad hoc terminal
+    /// whose pane the app tears down on the way out.
+    @Test func adHocSessionStopIsNotRequestedWhenQuitKeepsSessionsRunning() {
+        #expect(AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: false))
+        #expect(!AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: true))
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {

@@ -209,26 +209,22 @@ extension ProcessProfileEnvironmentSuites {
                 !AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: nil))
         }
 
-        // Ad hoc terminate-on-pane-close is a pure decision over device-owned liveness:
-        // the caller derives `hasLiveAttachments` from the device overview's attachment
-        // snapshot (the daemon prunes stale/lease-expired remote clients), so these cases
-        // validate the decision logic rather than re-test daemon pruning.
-        @MainActor @Test func adHocSessionWithLiveAttachmentIsNotTerminated() {
-            #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: true, isConfiguredProcessSession: false))
-        }
-
-        @MainActor @Test func adHocSessionWithoutLiveAttachmentsTerminates() {
-            #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: false, isConfiguredProcessSession: false))
-        }
-
-        @MainActor @Test func configuredProcessSessionIsNeverTerminatedOnPaneClose() {
-            #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: false, isConfiguredProcessSession: true))
-        }
-
-        @MainActor @Test func adHocSessionIsKeptWhileAppTerminatesAndKeepsSessions() {
+        // The client only decides WHETHER to ask; whether the session is ad hoc and whether it is idle
+        // at a bare prompt are the daemon's to answer, so these cases cover the ask itself.
+        @MainActor @Test func ownerPaneCloseAsksTheDaemonToStopTheSession() {
             #expect(
-                !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                    hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+                AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: false))
+        }
+
+        @MainActor @Test func viewerPaneCloseNeverAsksTheDaemonToStopTheSession() {
+            #expect(
+                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(
+                    closedPaneHeldOwnership: false, isAppTerminatingAndKeepingSessions: false))
+        }
+
+        @MainActor @Test func paneCloseDuringQuitThatKeepsSessionsAsksNothing() {
+            #expect(
+                !AppKitController.shouldRequestAdHocBareShellStopOnPaneClose(closedPaneHeldOwnership: true, isAppTerminatingAndKeepingSessions: true))
         }
     }
 }

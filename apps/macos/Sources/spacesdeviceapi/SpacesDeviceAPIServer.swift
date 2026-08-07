@@ -1250,6 +1250,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
+        case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
         case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
         case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload, context: context)
         case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload, context: context)
@@ -2360,6 +2361,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
     }
 
+    /// Serves the close of the pane that owned an ad hoc terminal: the daemon decides whether the
+    /// terminal is idle at a bare prompt and only then stops it (see
+    /// `stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell`). Both outcomes are a success (keeping a
+    /// busy terminal is the point of the request, not a failure of it), so the response reports which one
+    /// happened rather than an error code.
+    private func handleStopWorkspaceTerminalIfBareShellRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        let terminated = try context.orchestrator().stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+            workspaceID: workspaceID, sessionID: request.sessionID)
+        return try refreshedMutationResponse(
+            context: context, message: terminated ? "Stopped workspace terminal." : "Kept workspace terminal.", workspaceID: workspaceID,
+            terminatedTerminalSession: terminated)
+    }
+
     private func handleRenameTerminalSessionRequest(_ request: SpacesDeviceTerminalSessionRenameRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -2525,14 +2542,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func refreshedMutationResponse(
         context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        notice: String? = nil
+        notice: String? = nil, terminatedTerminalSession: Bool? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
                     overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
-                    notice: notice)))
+                    notice: notice, terminatedTerminalSession: terminatedTerminalSession)))
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {

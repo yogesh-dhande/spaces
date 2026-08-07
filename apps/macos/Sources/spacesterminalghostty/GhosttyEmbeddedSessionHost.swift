@@ -915,6 +915,12 @@
         var debugOwnerEpoch: UInt64 { ownerEpoch }
 
         public func childPID() -> Int32? { observedChildPID() }
+
+        /// The session's foreground process read from the PTY right now, not the periodic sample carried
+        /// on runtime state. The conditional stop of a user-closed ad hoc terminal decides against this so
+        /// a command started an instant before the close is seen.
+        public func currentForegroundProcess() -> TerminalForegroundProcessSnapshot? { observedForegroundPID().flatMap(foregroundProcessResolver) }
+
         public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }
         // Prefer the live cwd observed from the foreground/child process (cached by refreshRuntimeState)
         // so the working directory clients see converges on reality even when the shell never reports a

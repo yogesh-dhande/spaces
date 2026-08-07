@@ -488,6 +488,13 @@ enum SpacesDaemonProfileCommandRouting {
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
             TerminalEngineActor.runSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
         }
+        // The conditional ad-hoc stop (`stopWorkspaceTerminalIfBareShell`) reads a session's foreground
+        // through this rather than from persisted runtime state, whose foreground sample can be a second
+        // old, long enough for a command the user launched right before closing the pane to be invisible
+        // to a decision that would then kill it.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalForegroundProcessSampler { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.currentForegroundProcess(sessionID: sessionID) }
+        }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
         // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
         // through this submitter. They run on detached tasks/queues, never main, so
@@ -1667,6 +1674,12 @@ enum SpacesDaemonProfileCommandRouting {
             daemonHandoffInProgress: { [weak self] in self?.handoffInProgress ?? false })
         _ = try orchestrator.syncConfig()
         return orchestrator
+    }
+
+    /// The live foreground process of a session this daemon hosts. A session it does not host resolves to
+    /// nil, which the conditional stop reads as nothing left to protect.
+    @TerminalEngineActor private func currentForegroundProcess(sessionID: String) -> TerminalForegroundProcessSnapshot? {
+        sessionCores[sessionID]?.currentForegroundProcess()
     }
 
     @TerminalEngineActor private func terminateBuiltInTerminalSession(id sessionID: String) {

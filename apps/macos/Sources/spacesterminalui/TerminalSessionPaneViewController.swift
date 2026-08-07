@@ -150,10 +150,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let onWindowFocus: (@MainActor (String) -> Void)?
     let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
     /// Runs after a user close has detached this pane's client and the daemon has processed that
-    /// detach (fired off the async detach's completion). The owner uses it to stop an ad hoc shell
-    /// that no longer has any attached client, since tearing the pane down also tears down the state
-    /// stream that would otherwise surface the detach as an attachment-state change.
-    let onCloseClientDetached: (@MainActor @Sendable () -> Void)?
+    /// detach (fired off the async detach's completion), carrying whether the pane held the session's
+    /// owner attachment when it was closed. The host uses it to ask the daemon to stop an ad hoc shell
+    /// the user closed at a bare prompt, since tearing the pane down also tears down the state stream
+    /// that would otherwise surface the detach as an attachment-state change.
+    let onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)?
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
@@ -200,6 +201,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// unchanged blank pane.
     private var surfaceAvailabilityAtLastPresentation: Bool?
     private var lastObservedOwnerClientID: String?
+    /// Whether this pane's client holds the session's owner attachment, as of the last snapshot it
+    /// observed. Read at close time, before the detach, so the close can report an owner close: only an
+    /// owner close asks the daemon to stop an ad hoc terminal, and closing a viewer never stops one.
+    var holdsOwnerAttachment: Bool { lastObservedOwnerClientID == client.id || lastObservedAttachmentMode == .owner }
     var lastObservedRuntimeState: TerminalSessionRuntimeState?
     var shouldShowOwnerStateLabel = true
     var inputStatusIsError = false
@@ -240,7 +245,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         defersInitialOwnerClientAttach: Bool = false, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
         onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
+        onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
