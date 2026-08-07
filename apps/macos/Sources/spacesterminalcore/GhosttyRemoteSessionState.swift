@@ -121,9 +121,97 @@ public enum GhosttyRemoteSessionStateTimestamp {
 
     public static func string(from date: Date) -> String { fractionalSecondsFormatter.string(from: date) }
 
+    // `date(from:)` runs once per terminal state-stream frame on the GUI main thread (see
+    // DeviceTerminalSessionStateModel.apply), where its result only feeds a monotonic ordering
+    // guard. `fastParse` hand-scans the two canonical wire shapes below without touching
+    // ISO8601DateFormatter's ICU machinery; anything that isn't exactly one of those shapes
+    // (wrong length, a non-digit, an offset like +05:00, a fractional part that isn't exactly 3
+    // digits, an out-of-range field, ...) returns nil and falls through to the formatters
+    // unchanged. This preserves the function's existing tolerance contract exactly, it is not a
+    // new, looser fallback, just a short-circuit for the shapes the formatters already accept.
     public static func date(from string: String) -> Date? {
+        if let fast = fastParse(string) { return fast }
         if let parsed = fractionalSecondsFormatter.date(from: string) { return parsed }
         return defaultFormatter.date(from: string)
+    }
+
+    /// Hand-rolled parser for `yyyy-MM-ddTHH:mm:ss.SSSZ` (what `string(from:)` emits) and
+    /// `yyyy-MM-ddTHH:mm:ssZ` (legacy/foreign whole-second timestamps).
+    private static func fastParse(_ string: String) -> Date? {
+        guard let result = string.utf8.withContiguousStorageIfAvailable({ fastParse(bytes: $0) }) else { return nil }
+        return result
+    }
+
+    private static func fastParse(bytes: UnsafeBufferPointer<UInt8>) -> Date? {
+        let count = bytes.count
+        guard count == 20 || count == 24 else { return nil }
+
+        func digit(_ index: Int) -> Int? {
+            let byte = bytes[index]
+            guard byte >= 0x30, byte <= 0x39 else { return nil }
+            return Int(byte - 0x30)
+        }
+        func twoDigits(_ index: Int) -> Int? {
+            guard let tens = digit(index), let ones = digit(index + 1) else { return nil }
+            return tens * 10 + ones
+        }
+
+        guard bytes[4] == UInt8(ascii: "-"), bytes[7] == UInt8(ascii: "-"), bytes[10] == UInt8(ascii: "T"),
+            bytes[13] == UInt8(ascii: ":"), bytes[16] == UInt8(ascii: ":")
+        else { return nil }
+        guard let y0 = digit(0), let y1 = digit(1), let y2 = digit(2), let y3 = digit(3) else { return nil }
+        let year = y0 * 1000 + y1 * 100 + y2 * 10 + y3
+        guard let month = twoDigits(5), let day = twoDigits(8), let hour = twoDigits(11), let minute = twoDigits(14),
+            let second = twoDigits(17)
+        else { return nil }
+
+        var nanoseconds = 0
+        if count == 24 {
+            guard bytes[19] == UInt8(ascii: "."), bytes[23] == UInt8(ascii: "Z") else { return nil }
+            guard let f0 = digit(20), let f1 = digit(21), let f2 = digit(22) else { return nil }
+            nanoseconds = (f0 * 100 + f1 * 10 + f2) * 1_000_000
+        } else {
+            guard bytes[19] == UInt8(ascii: "Z") else { return nil }
+        }
+
+        // Reject anything the formatters would also reject (invalid month/day/hour/minute/second)
+        // rather than guessing at their behavior for those inputs; falling through here keeps the
+        // fast and slow paths identical by construction for every string that reaches this point.
+        // The year floor keeps the same guarantee for pre-Gregorian-reform years: `ISO8601DateFormatter`
+        // resolves years before 1583 against the historical Julian calendar rather than proleptic
+        // Gregorian, so this civil-days arithmetic would disagree with it there. Every real `emittedAt`
+        // reflects a wall-clock time near now, so the floor never affects a genuine wire timestamp.
+        guard year >= 1583, month >= 1, month <= 12, day >= 1, day <= daysInMonth(year: year, month: month),
+            hour <= 23, minute <= 59, second <= 59
+        else { return nil }
+
+        // Days-since-epoch via the proleptic-Gregorian civil-days algorithm
+        // (http://howardhinnant.github.io/date_algorithms.html#days_from_civil).
+        let days = daysFromCivil(year: year, month: month, day: day)
+        let secondsSinceEpoch = Double(days) * 86_400 + Double(hour) * 3_600 + Double(minute) * 60 + Double(second)
+        return Date(timeIntervalSince1970: secondsSinceEpoch + Double(nanoseconds) / 1_000_000_000)
+    }
+
+    private static func daysFromCivil(year: Int, month: Int, day: Int) -> Int {
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yearOfEra = y - era * 400
+        let monthOfYear = (month + 9) % 12
+        let dayOfYear = (153 * monthOfYear + 2) / 5 + day - 1
+        let dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
+        return era * 146_097 + dayOfEra - 719_468
+    }
+
+    private static func daysInMonth(year: Int, month: Int) -> Int {
+        switch month {
+        case 2: return isLeapYear(year) ? 29 : 28
+        case 4, 6, 9, 11: return 30
+        default: return 31
+        }
+    }
+
+    private static func isLeapYear(_ year: Int) -> Bool {
+        (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
     }
 }
 

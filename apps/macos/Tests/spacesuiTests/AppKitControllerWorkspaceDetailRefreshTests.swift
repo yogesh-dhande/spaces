@@ -233,6 +233,40 @@ import workspacecore
 
     // Clicking the Alerts row while Alerts is already showing, or re-selecting the selected workspace,
     // moves nothing out from under the dialog, so it stays open.
+    // The workspace pane's footer strip is rebuilt from scratch on every refresh that reaches it, and
+    // refreshes arrive many times a second while a coding agent streams, so the Launch/Stop/notes
+    // buttons were being destroyed between mouse-down and mouse-up. The signature is what decides
+    // whether a refresh redraws them, so it has to carry everything the strip shows and nothing that
+    // moves on its own.
+    private func footerSignature(
+        workspaceID: String = "workspace-1", displayName: String = "feature", branch: String = "feature", directory: String = "/tmp/feature",
+        notes: String = "", isLifecycleRunning: Bool = true, isRunning: Bool = true, warningSummary: String? = nil,
+        deviceAcceptsDaemonActions: Bool = true, unreachableDeviceTooltip: String? = nil
+    ) -> AppKitController.WorkspaceDetailFooterSignature {
+        AppKitController.WorkspaceDetailFooterSignature(
+            workspaceID: workspaceID, displayName: displayName, branch: branch, directory: directory, notes: notes,
+            isLifecycleRunning: isLifecycleRunning, isRunning: isRunning, warningSummary: warningSummary,
+            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions, unreachableDeviceTooltip: unreachableDeviceTooltip)
+    }
+
+    @Test func anUnchangedWorkspaceLeavesTheFooterStripAlone() { #expect(footerSignature() == footerSignature()) }
+
+    /// Each of these draws or removes a control, a label, or its dimming, so each has to redraw the strip.
+    @Test func everythingTheFooterDrawsIsPartOfItsSignature() {
+        let rendered = footerSignature()
+
+        #expect(footerSignature(workspaceID: "workspace-2") != rendered)
+        #expect(footerSignature(displayName: "renamed") != rendered)
+        #expect(footerSignature(branch: "other") != rendered)
+        #expect(footerSignature(directory: "/tmp/other") != rendered)
+        #expect(footerSignature(notes: "check the flake") != rendered)
+        #expect(footerSignature(isLifecycleRunning: false) != rendered, "the status dot follows the lifecycle state")
+        #expect(footerSignature(isRunning: false) != rendered, "a stopped workspace offers Launch alone, with no Stop button")
+        #expect(footerSignature(warningSummary: "1 process exited") != rendered)
+        #expect(footerSignature(deviceAcceptsDaemonActions: false) != rendered, "an unreachable device's controls are disabled and dimmed")
+        #expect(footerSignature(unreachableDeviceTooltip: "linux-box is offline") != rendered)
+    }
+
     @Test func userNavigationToTheSamePaneKeepsFormWindows() {
         #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .userNavigation))
         #expect(

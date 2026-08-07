@@ -2426,6 +2426,79 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
     }
 
+    /// A subscription's payloads reach the host on the stream's own thread and are reduced off the main
+    /// actor, so what this proves is that the whole chained series still lands, in order, on the mirror:
+    /// a full frame followed by deltas each built against the one before it renders the last frame's
+    /// text and nothing earlier. A payload reduced against the wrong baseline drops instead of
+    /// rendering, so an out-of-order apply leaves the pane showing an earlier frame.
+    @MainActor func testSubscriptionDeltaSeriesRendersTheFinalFrameInOrder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-stream-delta-series"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        var frames: [GhosttyRenderFrame] = []
+        for index in 0..<12 {
+            frames.append(GhosttyRenderFrame(sessionRevision: UInt64(index + 1), ownerEpoch: 0, snapshot: snapshot(text: "fram\(index % 10)")))
+        }
+        var updates: [GhosttyRenderUpdate] = [.full(frames[0])]
+        for index in 1..<frames.count {
+            updates.append(
+                GhosttyRenderUpdateFactory.makeUpdate(target: frames[index], baseline: GhosttyRenderUpdateBaseline(frame: frames[index - 1])))
+        }
+        // Emitted from a background thread, exactly as the device state model delivers them.
+        let emitQueue = DispatchQueue(label: "spaces.test.remote-state-emit")
+        for (index, update) in updates.enumerated() {
+            let payload = GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output,
+                emittedAt: "2026-07-24T00:01:\(String(format: "%02d", index))Z", sessionStateRevision: UInt64(index + 1), sessionStateFlags: 1,
+                screenStateRevision: UInt64(index + 1), runtimeState: fixture.payload.runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(update))
+            emitQueue.sync { subscriber.emit(payload) }
+        }
+
+        waitForCondition("host renders the last frame of the delta series") { host.snapshotText() == "fram1" }
+    }
+
+    /// Captures the host's state-stream callback so a test can emit payloads the way the device state
+    /// model does: off the main actor, in a known order.
+    private final class RecordingStateStreamSubscriber: @unchecked Sendable {
+        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+
+        private let lock = NSLock()
+        private var onEvent: (@Sendable (GhosttyRemoteSessionStatePayload) -> Void)?
+
+        var isSubscribed: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return onEvent != nil
+        }
+
+        func subscribe(
+            _: String, onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect _: @escaping @Sendable ((any Error)?) -> Void
+        ) throws -> any TerminalRemoteStateStreamClient {
+            lock.lock()
+            self.onEvent = onEvent
+            lock.unlock()
+            return Client()
+        }
+
+        func emit(_ payload: GhosttyRemoteSessionStatePayload) {
+            lock.lock()
+            let onEvent = self.onEvent
+            lock.unlock()
+            onEvent?(payload)
+        }
+    }
+
     /// Guards Change 1 (report a lost link from every interactive control path, not just typed input)
     /// and Change 2 (a link the model reports gone discards this pane's queued input rather than
     /// delivering it late) from `RemoteGhosttySessionHost`'s own send paths, using

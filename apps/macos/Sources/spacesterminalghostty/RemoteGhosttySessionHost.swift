@@ -57,8 +57,21 @@
         /// requests funnels its failure through.
         private let inputFailureHandler: RemoteGhosttyInputFailureHandler?
         private let terminalView: GhosttyMirrorTerminalView
+        /// The main actor's mirror of the payload the pipeline stored, updated as each reduction result
+        /// is applied. Every main-actor reader below (title, working directory, owner, owner epoch,
+        /// runtime grid, ended-run identity, render-state key) reads it rather than the pipeline's copy,
+        /// so none of them has to await anything. It therefore lags the pipeline by whatever is in
+        /// flight: at most the one payload being reduced, because the consumer awaits each
+        /// application before taking the next. Every reader tolerates that: they describe the session as
+        /// last rendered, which is exactly what a lagging mirror holds.
         private var latestState: GhosttyRemoteSessionStatePayload?
-        private var stateReducer = TerminalRemoteStateReducer()
+        /// Reduces incoming payloads off the main actor, in arrival order across every entry point. It
+        /// owns the reducer (and so the render-update baseline and the previous stored payload the next
+        /// reduce chains from); this host only applies what it hands back.
+        private lazy var statePipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { frame, payload in
+                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
+            }, apply: { [weak self] output in self?.applyReducedState(output) })
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
@@ -197,7 +210,7 @@
                 container.needsLayout = true
                 container.layoutSubtreeIfNeeded()
             }
-            // Same rule as applyRemoteState: while the ended-session replay is showing a scrolled
+            // Same rule as applyReducedState: while the ended-session replay is showing a scrolled
             // viewport, a re-attach must not clobber it with the daemon's final frame. But if the
             // surface was released and recreated between detach and this attach, repaint the replay
             // viewport so the recreated surface is not left blank.
@@ -257,7 +270,7 @@
 
         public func requestSurfaceRefresh() {
             requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange)
-            // Same rule as applyRemoteState: a refresh must not clobber a scrolled ended viewport, but
+            // Same rule as applyReducedState: a refresh must not clobber a scrolled ended viewport, but
             // it must repaint the replay when the surface was released and recreated underneath it.
             if !isEndedScrollbackReplayActive {
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
@@ -379,7 +392,7 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             let client = GhosttyRemoteSessionStateStreamClient(
-                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.applyRemoteState(payload) },
+                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.statePipeline.submit(payload) },
                 onDisconnect: { [weak self] in self?.handleStreamDisconnect() })
             do {
                 try client.start()
@@ -395,8 +408,12 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             do {
+                // The event callback fires off the main actor and submits from there: reduction is the
+                // expensive part and it does not need the main actor, so a payload reaches the pipeline
+                // without a main-actor hop at all. The capture is weak so a client that outlives this
+                // host cannot keep the pipeline reducing frames for an owner that is gone.
                 let client = try stateStreamSubscriber(
-                    launchConfiguration.sessionID, { [weak self] payload in Task { @MainActor [weak self] in self?.applyRemoteState(payload) } },
+                    launchConfiguration.sessionID, { [weak statePipeline = statePipeline] payload in statePipeline?.submit(payload) },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
                             self?.directStateStreamClient = nil
@@ -437,7 +454,11 @@
                 self.directStateFetchInFlight = false
                 switch result {
                 case .success(let fetchResult):
-                    self.applyRemoteState(fetchResult.payload)
+                    // Through the same pipeline as the subscription's payloads: a fetched full frame is
+                    // the head of a new render-update chain, so it must not overtake a delta already
+                    // queued behind it. The agent signals it came with are independent of the session's
+                    // screen state and are applied here rather than waiting on the reduction.
+                    self.statePipeline.submit(fetchResult.payload)
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
@@ -497,26 +518,25 @@
             }
         }
 
-        private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
+        /// Applies one payload the pipeline reduced. Everything here needs the main actor: the terminal
+        /// view, the state the clipboard one-shot reads, the resync request, the metrics, and the
+        /// notifications.
+        private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+            let incomingPayload = output.incomingPayload
             // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
             // whichever route delivered it may have done so out of order with respect to the state
-            // payloads around it (see `DeviceTerminalSessionStateModel.apply`).
+            // payloads around it (see `DeviceTerminalSessionStateModel.apply`). Running it ahead of the
+            // `latestState` move below is what keeps its ownership check reading the same state it read
+            // when the reduction was inline.
             applyClipboardWrite(from: incomingPayload)
             // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen
             // state, and its runtime/attachment snapshot is a repeat of the output turn that carried the
-            // escape sequence — so reducing it is skipped rather than risking an out-of-order payload
-            // regressing the cached title, runtime state, or ownership.
-            guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
-            let decodeStartedAt = Date()
-            let reduction = stateReducer.reduce(
-                incomingPayload: incomingPayload, previousPayload: latestState,
-                shouldUseFrame: { frame, payload in
-                    Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
-                }, requestResyncOnApplyFailure: true)
+            // escape sequence, so the pipeline reduces nothing for it.
+            guard let reduction = output.reduction else { return }
             let payload = reduction.payload
             let decodedFrame = reduction.frameToApply
             let decodedUpdate = reduction.decodedUpdate
-            let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
+            let decodeMS = output.reduceMS
             let dropReason = reduction.dropReason
             latestState = reduction.storedPayload
             if reduction.didRequestResync { requestRenderUpdateStateResync() }
@@ -575,7 +595,7 @@
                 "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
                 detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
-            if postNotifications { postLocalNotifications(for: payload) }
+            postLocalNotifications(for: payload)
         }
 
         /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
@@ -786,7 +806,7 @@
                 guard deltaRows != 0 else { return true }
                 // Arm the replay against the current ended run. Every non-idle state descends from this
                 // single idle->loading transition, so recording identity once here covers the `.loading`,
-                // `.ready`, and `.unavailable` outcomes; `applyRemoteState` compares it to later payloads
+                // `.ready`, and `.unavailable` outcomes; `applyReducedState` compares it to later payloads
                 // to discard a stale replay when a different ended run is observed.
                 endedScrollbackRunIdentity = currentEndedRunIdentity()
                 endedScrollbackState = .loading(pendingDeltaRows: deltaRows)
