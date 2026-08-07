@@ -2341,10 +2341,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Whether closing a terminal pane should ask the daemon to stop the ad hoc session behind it.
     /// Only an owner close does, or the close of a pane whose session has already ended (an explicit
-    /// close is the user dismissing that terminal, and the ask is what removes its row): a viewer's close
-    /// leaves the session with its owner, and a quit that keeps sessions running must leave every session
-    /// alone. Whether the session is ad hoc at all, and whether it is idle at a bare prompt, are the
-    /// daemon's to decide.
+    /// close is the user dismissing that terminal, and the ask is what removes its row): for a live
+    /// session, a viewer's close leaves it with its owner, but a viewer is not a distinct case once the
+    /// session has ended, since any pane of an ended session reports as ended and asks. A quit that keeps
+    /// sessions running must leave every session alone. Whether the session is ad hoc at all, and whether
+    /// it is idle at a bare prompt, are the daemon's to decide.
     nonisolated static func shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: Bool, isAppTerminatingAndKeepingSessions: Bool) -> Bool
     {
         guard !isAppTerminatingAndKeepingSessions else { return false }
