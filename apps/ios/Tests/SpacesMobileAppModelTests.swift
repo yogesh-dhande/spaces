@@ -391,13 +391,58 @@
             let workspace = makeOverview().workspaces[0]
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
 
-            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isMutating, "a delete never holds the app-wide mutation gate (#450)")
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
 
             await gate.open()
             await delete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// Before #450 was fixed, `deleteWorkspace` held the app-wide `isMutating` flag for its whole
+        /// duration, so a second workspace's delete — sent on its own private channel and with no bearing
+        /// on the first — was rejected by the same guard, silently. This proves a delete's in-flight rule
+        /// is scoped to its own workspace: starting workspace B's delete while workspace A's is still
+        /// unresolved reaches the daemon rather than returning immediately.
+        func testDeleteOfOneWorkspaceDoesNotRejectADeleteOfAnother() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                // Only workspace-feature's delete blocks; workspace-docs's must not need it to clear.
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+
+            await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"],
+                "workspace-docs's delete must reach the daemon while workspace-feature's is still unresolved")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "its own delete completed and lifted its own mark")
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "untouched by the unrelated delete")
+
+            await featureGate.open()
+            await featureDelete.value
 
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
         }
@@ -557,7 +602,7 @@
             model.overview = baseOverview
 
             let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
             // The archive has already failed with a timeout and the reconciliation refetch is parked here.
             XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the timed-out delete keeps its mark while it reconciles")
 
@@ -959,7 +1004,7 @@
             model.overview = makeOverview()
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
             // A real connection change while the delete is still parked in its request: this resets the
             // connection and bumps the overview identity, exactly as a device switch does.
             model.handleAuthenticationFailure(message: "Pair this device again.")

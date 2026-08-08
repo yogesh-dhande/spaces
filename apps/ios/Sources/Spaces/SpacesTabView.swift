@@ -365,8 +365,10 @@ struct SpacesTabView: View {
             // the structural change this deliberately avoids) but nothing under a workspace on its way out
             // is worth acting on.
             WorkspaceControlBar(
-                workspace: group.workspace, isMutating: model.isMutating || isDeleting,
-                onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                // Only this workspace's own pending-delete state, not `model.isMutating`: that flag also
+                // covers mutations against other workspaces, and this band has nothing to do with those
+                // (#450).
+                workspace: group.workspace, isBusy: isDeleting, onStart: { Task { await model.launchWorkspace(group.workspace) } },
                 onRestart: { Task { await model.restartWorkspace(group.workspace) } },
                 onStop: { Task { await model.stopWorkspace(group.workspace) } },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
@@ -442,12 +444,15 @@ struct SpacesTabView: View {
         Task { await model.rename(row: row, to: title) }
     }
 
-    /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy
-    /// and never touches the bridge client, so unlike every other row it is gated neither on
-    /// `isMutating` nor on having a session or a run action.
+    /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy and
+    /// never touches the bridge client, so unlike every other row it is gated neither on having a session
+    /// nor a run action. Deliberately not gated on `model.isMutating` either: that flag describes mutations
+    /// against other workspaces too, and this row's own deleting state is already covered by the `disabled`
+    /// the caller wraps it in (`workspaceSection`) — a mutation elsewhere has nothing to do with this row
+    /// (#450).
     private func isRuntimeRowDisabled(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
         guard !row.isBrowserSession else { return false }
-        return model.isMutating || (row.sessionID == nil && !row.canRun)
+        return row.sessionID == nil && !row.canRun
     }
 
     @ViewBuilder private func runtimeTrailingIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
@@ -622,9 +627,10 @@ struct SpacesTabView: View {
             BandRow(
                 dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""
             ) { RowChevron() }
-        }.buttonStyle(.plain).disabled(isDeleting || model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).opacity(
-            isDeleting ? 0.5 : 1
-        ).accessibilityIdentifier("terminal.row.\(session.id)")
+            // Gated on this row's own deleting state, not `model.isMutating`: that flag also covers
+            // mutations against other workspaces, which have nothing to do with this loose session (#450).
+        }.buttonStyle(.plain).disabled(isDeleting || (!session.isControlAvailable && !session.hasFinalRender)).opacity(isDeleting ? 0.5 : 1)
+            .accessibilityIdentifier("terminal.row.\(session.id)")
     }
 }
 
@@ -676,8 +682,10 @@ private struct WorkspaceBandActions: ViewModifier {
         // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
         // workspace already marked for deletion is inert by contract. Disabling would still open the swipe
         // tray and the context menu on a band whose workspace is on its way out; leaving the surfaces off
-        // entirely is what makes the row genuinely offer nothing. The mark outlives `isMutating` when a
-        // delete's outcome could not be confirmed, which is exactly when this matters.
+        // entirely is what makes the row genuinely offer nothing. This is the only in-flight gate Delete
+        // and Hide need here: a delete whose outcome could not be confirmed keeps this mark on well after
+        // the mutation itself has finished, so this is checked on its own rather than folded into a busy
+        // flag that has already cleared.
         if model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspace.id) {
             content
         } else {
@@ -701,13 +709,16 @@ private struct WorkspaceBandActions: ViewModifier {
         }.disabled(model.isMutating).accessibilityIdentifier("workspace.hide.\(workspace.id)")
     }
 
-    /// Delete in the long-press menu, where `.destructive` is only what colours it red.
+    /// Delete in the long-press menu, where `.destructive` is only what colours it red. Not gated on
+    /// `model.isMutating`: a delete against another workspace has no bearing on this one (#450), and a
+    /// delete of this workspace already in flight is caught by the outer `isWorkspacePendingDeletion`
+    /// check, which removes the whole tray rather than leaving a disabled button behind.
     private var menuDeleteButton: some View {
         Button(role: .destructive) {
             onDelete()
         } label: {
             deleteLabel
-        }.disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+        }.accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
 
     /// Delete in the swipe tray — deliberately roleless, tinted red by hand instead of carrying
@@ -726,12 +737,15 @@ private struct WorkspaceBandActions: ViewModifier {
     /// The rule: `.destructive` in `swipeActions` is only correct when the action removes the row from the
     /// data synchronously with the tap (the Alerts tab's dismiss does, and keeps its role). Any swipe
     /// action that leaves its row in place must not carry it. `.tint(Theme.red)` keeps the tray identical.
+    ///
+    /// Not gated on `model.isMutating` — see `menuDeleteButton`: a delete against another workspace runs on
+    /// its own private channel and has no bearing on whether this one can be tapped (#450).
     private var swipeDeleteButton: some View {
         Button {
             onDelete()
         } label: {
             deleteLabel
-        }.tint(Theme.red).disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+        }.tint(Theme.red).accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
 
     private var deleteLabel: some View { Label("Delete", systemImage: "trash") }

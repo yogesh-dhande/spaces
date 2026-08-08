@@ -469,6 +469,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var daemonStatus: TerminalServiceDaemonStatus?
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
+    /// In flight for every mutation that rides the shared `commandChannel` — create, rename, hide/unhide,
+    /// launch/stop/restart, run — the same connection the overview poll uses. That connection does not
+    /// serialize whole request/response round trips (issue #248), so two of these in flight at once can
+    /// interleave and consume each other's responses; this flag is the app-wide gate that keeps them one
+    /// at a time. `deleteWorkspace` does not set it: a delete runs on its own private channel created for
+    /// that one call (see the comment above `deleteChannel`), so it never shares a connection with another
+    /// mutation and needs no slot in this queue. A delete's own concurrency rule — refusing a second delete
+    /// of the *same* workspace while the first is unresolved — is `isWorkspacePendingDeletion` instead, so
+    /// one workspace's delete never blocks a mutation, including another delete, on a different one (#450).
     var isMutating = false
     /// True while a requested daemon update has been sent and this app is polling the device for the
     /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
@@ -1888,8 +1897,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving;
-        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`. The
+        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving.
+        // `performWorkspaceMutation` below still gates on `isMutating`, since Hide rides the shared
+        // `commandChannel`, but that alone would not catch this: an unresolved delete leaves `isMutating`
+        // false (see `deleteWorkspace`), so hiding needs its own check of the pending-deletion mark. The
         // marked predicate, not the local set: a delete started on another client is just as much a row
         // on its way out.
         guard !isWorkspacePendingDeletion(workspace.id) else { return }
@@ -1923,16 +1934,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
     /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
     func deleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) async {
-        // A workspace already on its way out takes no further action. `isMutating` alone does not cover
-        // this: a delete whose outcome could not be confirmed leaves the mark on with the mutation over,
-        // so without the second guard the row could be deleted a second time while the first is unresolved.
-        // The Spaces tab suppresses the actions too; this is the same rule enforced where it cannot be
-        // bypassed by a view that forgets to ask. The marked predicate, not the local set: a workspace the
-        // daemon reports it is already tearing down (a delete issued from another client) must not be
-        // deleted a second time from here either.
-        guard !isMutating, !isWorkspacePendingDeletion(workspace.id) else { return }
-        isMutating = true
-        defer { isMutating = false }
+        // A workspace already on its way out takes no further action — refused here, not only suppressed
+        // in the Spaces tab, so the rule holds even against a view that forgets to ask. The marked
+        // predicate, not the local set: a workspace the daemon reports it is already tearing down (a
+        // delete issued from another client) must not be deleted a second time from here either. This is
+        // the only in-flight check a delete needs: it does not also gate on `isMutating`, because a
+        // delete runs on its own private channel (`deleteChannel` below) rather than the shared
+        // `commandChannel`, so one workspace's delete can never collide on the wire with a mutation
+        // running against a different workspace (#450) — including another workspace's delete.
+        guard !isWorkspacePendingDeletion(workspace.id) else { return }
         let identity = overviewIdentity
         // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
         // (which no longer carries the workspace) is published, so the band never flicks back to looking
@@ -2007,8 +2017,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 // would be a verdict the client never reached — the row would go back to looking ordinary
                 // and offering Delete again, for a workspace the daemon may still finish deleting. The
                 // marking stays and the error is held until an overview can answer (see
-                // `resolveDeferredWorkspaceDeletions`). `isMutating` still clears on return, so only this
-                // row stays inert, not the whole UI.
+                // `resolveDeferredWorkspaceDeletions`). This delete never touched `isMutating`, so only
+                // this row stays inert — every other workspace's controls were never affected.
                 workspaceDeletionsAwaitingOverview[workspace.id] = DeferredWorkspaceDeletion(
                     error: error, requestedBranchDeletion: requestedBranchDeletion)
             }
