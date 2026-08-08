@@ -10349,7 +10349,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func loadShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting) -> HotkeySpec? {
-        Self.resolvedShortcutSpec(resolver, setting: setting, current: shortcutSpec(for: setting))
+        Self.resolvedShortcutSpec(resolver, setting: setting, current: shortcutSpec(for: setting), leaderModifiers: shortcutLeaderModifiers)
     }
 
     /// The chord a shortcut setting is bound to after a load pass, given the one it is bound to now.
@@ -10357,11 +10357,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// A read that throws is a transient client-database failure, not a preference, so the setting keeps
     /// `current`. Answering it with `defaultSpec` instead would drop the leader modifiers that
     /// `rawValue(for:)` applies to leader-backed settings and degrade the whole table to bare letters
-    /// until the next successful read — a stray "a" would open Alerts. `defaultSpec` still answers the
+    /// until the next successful read — a stray "a" would open Alerts. On the launch pass nothing is in
+    /// effect yet, so a throwing read installs the safe default instead of nil — composed with
+    /// `leaderModifiers` for a leader-backed setting, never the bare key — or the global summon and
+    /// palette hotkeys would go unregistered for the life of the outage. `defaultSpec` still answers the
     /// genuinely-unset setting, which `rawValue(for:)` resolves without throwing, and a stored value too
     /// malformed to parse.
-    nonisolated static func resolvedShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting, current: HotkeySpec?) -> HotkeySpec? {
-        guard let raw = try? resolver.rawValue(for: setting) else { return current }
+    nonisolated static func resolvedShortcutSpec(
+        _ resolver: ShortcutSettingResolver, setting: ShortcutSetting, current: HotkeySpec?, leaderModifiers: Set<HotkeyModifier>
+    ) -> HotkeySpec? {
+        guard let raw = try? resolver.rawValue(for: setting) else {
+            if let current { return current }
+            guard let defaultSpec = try? HotkeySpec.parse(setting.defaultSpec) else { return nil }
+            return setting.usesLeader ? defaultSpec.adding(modifiers: leaderModifiers) : defaultSpec
+        }
         if let stored = try? HotkeySpec.parse(raw) { return stored }
         return try? HotkeySpec.parse(setting.defaultSpec)
     }

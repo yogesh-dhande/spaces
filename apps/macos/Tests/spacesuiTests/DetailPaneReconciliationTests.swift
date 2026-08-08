@@ -89,9 +89,12 @@ import spacesterminalcore
         AppKitController.ShortcutSettingResolver { _ in throw ClientDatabaseUnavailable() }
     }
 
+    private static let leader: Set<HotkeyModifier> = [.cmd, .alt]
+
     /// The unset setting is not a failure: it resolves to the default chord with the leader applied.
     @Test func anUnsetShortcutResolvesToTheLeaderBackedDefault() throws {
-        let resolved = try #require(AppKitController.resolvedShortcutSpec(storedResolver([:]), setting: .guiAlertsShortcut, current: nil))
+        let resolved = try #require(
+            AppKitController.resolvedShortcutSpec(storedResolver([:]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
         #expect(resolved.modifiers == [.cmd, .alt], "the alerts shortcut is only ever the leader plus a letter")
         #expect(resolved.key == "a")
     }
@@ -101,9 +104,11 @@ import spacesterminalcore
     @Test func aFailedReadKeepsTheChordAlreadyInEffect() throws {
         let inEffect = try #require(
             AppKitController.resolvedShortcutSpec(
-                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil))
+                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil,
+                leaderModifiers: Self.leader))
 
-        let afterFailedRead = AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiAlertsShortcut, current: inEffect)
+        let afterFailedRead = AppKitController.resolvedShortcutSpec(
+            failingResolver(), setting: .guiAlertsShortcut, current: inEffect, leaderModifiers: Self.leader)
 
         #expect(afterFailedRead == inEffect)
         #expect(afterFailedRead?.modifiers.isEmpty == false, "a failed read must never leave a bare letter bound to Alerts")
@@ -112,7 +117,23 @@ import spacesterminalcore
     /// A user-chosen chord survives the same failure, including one that is not the default at all.
     @Test func aFailedReadKeepsACustomChord() throws {
         let custom = HotkeySpec(key: "j", modifiers: [.ctrl, .shift])
-        #expect(AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiSidebarNextShortcut, current: custom) == custom)
+        #expect(
+            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiSidebarNextShortcut, current: custom, leaderModifiers: Self.leader)
+                == custom)
+    }
+
+    /// The launch pass has no chord in effect yet, so a read that fails then must still install a
+    /// usable chord: the safe default, leader-composed for a leader-backed setting — never nil, which
+    /// would unregister the shortcut for the life of the outage, and never the bare stored letter.
+    @Test func aFailedFirstReadInstallsTheSafeDefault() throws {
+        let alerts = try #require(
+            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
+        #expect(alerts.modifiers == Self.leader, "a leader-backed default installed on a failed first read carries the leader")
+        #expect(alerts.key == "a")
+
+        let summon = try #require(
+            AppKitController.resolvedShortcutSpec(failingResolver(), setting: .guiHotkey, current: nil, leaderModifiers: Self.leader))
+        #expect(summon.modifiers.isEmpty == false, "the global summon hotkey stays registered on a failed first read")
     }
 }
 
