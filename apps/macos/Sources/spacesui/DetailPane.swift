@@ -39,8 +39,8 @@ enum DetailPane: Equatable {
 /// windows are dismissed. Content changing is not evidence of navigation, because a background refresh
 /// changes it too — a remote device turning wire-incompatible swaps the pane for its compatibility
 /// block, recovery swaps it back, a failed reload swaps in the error placeholder, and a selected
-/// workspace deleted elsewhere drops the pane back to alerts. Dismissing a form the user is filling in
-/// on any of those loses their input.
+/// workspace deleted elsewhere resolves the pane to the neutral placeholder. Dismissing a form the
+/// user is filling in on any of those loses their input.
 enum DetailPanePresentation {
     /// The user asked for this pane: a sidebar row selection, the Alerts row or its shortcut, arrow
     /// navigation, the compatibility caption's button. Moving the pane out from under a form window is
