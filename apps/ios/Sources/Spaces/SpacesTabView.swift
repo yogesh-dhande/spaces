@@ -449,13 +449,22 @@ struct SpacesTabView: View {
 
     /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy and
     /// never touches the bridge client, so unlike every other row it is gated neither on having a session
-    /// nor a run action. Deliberately not gated on `model.isMutating` either: that flag describes mutations
-    /// against other workspaces too, and this row's own deleting state is already covered by the `disabled`
-    /// the caller wraps it in (`workspaceSection`) — a mutation elsewhere has nothing to do with this row
-    /// (#450).
+    /// nor a run action, and never on `model.isMutating` (#450). A row with an existing session is the
+    /// same: its tap navigates to that session locally (`activateRuntimeRow`) without touching the bridge
+    /// client either, so it too stays ungated regardless of `model.isMutating`. This row's own deleting
+    /// state is covered separately by the `disabled` the caller wraps it in (`workspaceSection`).
+    ///
+    /// A session-less row with nothing to run offers nothing either way, gated or not. The one case left
+    /// is a session-less row whose tap starts a run: `activateRuntimeRow` pushes
+    /// `TerminalLaunchPendingView`, which calls `model.performPrimaryAction`/`run`, and that path shares
+    /// `commandChannel` and is refused by `performMutationReturningSession`'s own `isMutating` guard. Left
+    /// ungated, a tap during a shared-channel mutation would push that pending view only for it to resolve
+    /// to `nil` and pop itself a moment later — so this one case stays gated on `model.isMutating`
+    /// (review round 2, finding 3).
     private func isRuntimeRowDisabled(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        guard !row.isBrowserSession else { return false }
-        return row.sessionID == nil && !row.canRun
+        guard !row.isBrowserSession, row.sessionID == nil else { return false }
+        guard row.canRun else { return true }
+        return model.isMutating
     }
 
     @ViewBuilder private func runtimeTrailingIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {

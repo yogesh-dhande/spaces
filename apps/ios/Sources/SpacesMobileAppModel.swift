@@ -531,6 +531,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// first thing that can answer. In-memory and per-run like `workspaceIDsPendingDeletion`: a relaunch
     /// refetches reality rather than restoring a verdict that was never reached.
     private var workspaceDeletionsAwaitingOverview: [String: DeferredWorkspaceDeletion] = [:]
+    /// Tail of this client's delete queue: each `deleteWorkspace` call chains its work behind whatever
+    /// task is stored here, then replaces it with its own, so at most one `archiveWorkspace` request is
+    /// ever in flight from this client at a time.
+    ///
+    /// This exists for a false-failure race, not wire safety — `deleteChannel` already isolates each
+    /// delete's own connection. The daemon runs every `archiveWorkspace`/`deleteProject` request off one
+    /// serial per-daemon queue and only marks a workspace as tearing down once that request is dequeued
+    /// (`workspaceTeardownQueue` / `withTeardownRegistered` on the daemon side). Two such requests issued
+    /// back to back from this client can therefore both be waiting on that one queue at once; if the
+    /// first is still occupying it past this client's 30s request timeout, the second — still queued,
+    /// still unregistered — times out too, and `reconcileWorkspaceDeletionOutcome` sees its workspace
+    /// listed with no teardown registered, which reads as a genuine failure. The daemon then dequeues and
+    /// deletes it anyway: the row would go back to normal and vanish moments later, having been reported
+    /// as a failed delete. Chaining closes the window by construction, since this client never has two
+    /// `archiveWorkspace` requests on that queue at once to begin with (#450 review round 2).
+    @ObservationIgnored private var pendingDeleteChain: Task<Void, Never>?
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -1939,9 +1955,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // predicate, not the local set: a workspace the daemon reports it is already tearing down (a
         // delete issued from another client) must not be deleted a second time from here either. This is
         // the only in-flight check a delete needs: it does not also gate on `isMutating`, because a
-        // delete runs on its own private channel (`deleteChannel` below) rather than the shared
-        // `commandChannel`, so one workspace's delete can never collide on the wire with a mutation
-        // running against a different workspace (#450) — including another workspace's delete.
+        // delete runs on its own private channel (`deleteChannel` in `performDeleteWorkspace`) rather than
+        // the shared `commandChannel`, so one workspace's delete can never collide on the wire with a
+        // mutation running against a different workspace (#450) — including another workspace's delete,
+        // which is not rejected here either; it is chained instead (`pendingDeleteChain`).
         //
         // Accepted overlap: a delete issued while this same workspace's Start/Stop/Restart/Hide is still
         // in flight is not blocked here. The daemon's per-workspace lifecycle gate arbitrates that race
@@ -1950,13 +1967,41 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // workspace the shared-channel mutation targets would buy only an earlier copy of that message.
         guard !isWorkspacePendingDeletion(workspace.id) else { return }
         let identity = overviewIdentity
-        // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
-        // (which no longer carries the workspace) is published, so the band never flicks back to looking
-        // untouched on its way out; on a definitive failure lifting it restores the ordinary band beside
-        // the error. A timeout is neither of those — see the catch block below — so the mark's removal
-        // is handled explicitly per outcome instead of by an unconditional `defer`.
+        // Marked for the whole mutation, immediately — including whatever time this delete spends queued
+        // behind a predecessor below, so the band reads as deleting the instant this is called rather than
+        // once its request actually goes out. On success the mark is lifted only after the refreshed
+        // overview (which no longer carries the workspace) is published, so the band never flicks back to
+        // looking untouched on its way out; on a definitive failure lifting it restores the ordinary band
+        // beside the error. A timeout is neither of those — see the catch block below — so the mark's
+        // removal is handled explicitly per outcome instead of by an unconditional `defer`.
         workspaceIDsPendingDeletion.insert(workspace.id)
 
+        // Chained behind whatever delete this client already has queued or in flight — see
+        // `pendingDeleteChain`'s declaration for why. Queuing costs nothing visible: the mark above already
+        // put this workspace's band into its deleting state.
+        let predecessor = pendingDeleteChain
+        let task = Task {
+            await predecessor?.value
+            await self.performDeleteWorkspace(
+                workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, identity: identity)
+        }
+        pendingDeleteChain = task
+        await task.value
+    }
+
+    /// The body of one queued delete, run once `deleteWorkspace` has chained it behind any predecessor
+    /// (see `pendingDeleteChain`). `identity` is the caller's `overviewIdentity` snapshot from before it
+    /// queued, not from when this actually starts: a device switch during the wait is exactly the kind of
+    /// change the `identity == overviewIdentity` guard below, and every other one in this function,
+    /// exists to catch. Without it a queued delete would resume against whatever device is active by
+    /// then and send this workspace's id — which may not even exist there — to the wrong daemon.
+    private func performDeleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool, identity: Int)
+        async
+    {
+        guard identity == overviewIdentity else {
+            workspaceIDsPendingDeletion.remove(workspace.id)
+            return
+        }
         // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
         // The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own queue, so
         // it can take many seconds — far longer than the 8s the poll allows itself. The transport does
@@ -1970,6 +2015,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let deleteChannel = bridgeClient.makeCommandChannel()
         defer { Task { await deleteChannel.close() } }
 
+        // `deletedWorkspaceNotice` and `errorMessage`, set below and in `handleBridgeError`, are single
+        // slots, not queues: whichever delete's outcome lands last wins, silently replacing whatever an
+        // earlier delete left on screen if the user has not dismissed it yet. Accepted — deletes from this
+        // client are chained (`pendingDeleteChain`), so a same-client overlap here is already narrow (this
+        // one landing while a queued predecessor's notice is still up), and a lost notice for a delete that
+        // still succeeded is low stakes next to the complexity of queuing them for display.
         do {
             let response = try await bridgeClient.archiveWorkspace(
                 workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, commandChannel: deleteChannel
@@ -2381,11 +2432,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // refresh discard a perfectly current overview.
         guard identity == overviewIdentity else { return }
         // Bumped for every applied mutation, including one that carried no overview: the daemon's state
-        // changed either way, so any poll already in flight is describing the world before it.
+        // changed either way, so any poll already in flight is describing the world before it. Captured
+        // right after bumping, and re-checked once this call resumes from the await below: a delete's
+        // private channel no longer excludes a shared-channel mutation from running at the same time
+        // (#450), so two responses can now be applying concurrently, and there is no guarantee the one
+        // that started first is the one that resumes first. If some other call's response already bumped
+        // and published while this one was suspended, this one is the stale side of that race.
         mutationGeneration &+= 1
+        let mutationGenerationAtApply = mutationGeneration
         guard let overview = response.overview else { return }
         await updateBrowserRoutes(overview: overview, identity: identity)
-        guard identity == overviewIdentity else { return }
+        // Skip rather than republish: a newer mutation's response already landed and published its
+        // overview while this one was suspended above, so this one is describing a moment the app has
+        // already moved past.
+        guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtApply else { return }
         // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil

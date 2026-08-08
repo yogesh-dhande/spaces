@@ -404,9 +404,12 @@
 
         /// Before #450 was fixed, `deleteWorkspace` held the app-wide `isMutating` flag for its whole
         /// duration, so a second workspace's delete — sent on its own private channel and with no bearing
-        /// on the first — was rejected by the same guard, silently. This proves a delete's in-flight rule
-        /// is scoped to its own workspace: starting workspace B's delete while workspace A's is still
-        /// unresolved reaches the daemon rather than returning immediately.
+        /// on the first — was rejected by the same guard, silently. Neither call is rejected now: both
+        /// mark their own workspace immediately, and workspace-docs's delete is not dropped just because
+        /// workspace-feature's is still unresolved — it queues behind it (`pendingDeleteChain`, review
+        /// round 2 finding 1) and completes on its own once the queue reaches it. See
+        /// `testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests` for the queue's ordering
+        /// guarantee itself; this test's focus is that queuing is not rejection.
         func testDeleteOfOneWorkspaceDoesNotRejectADeleteOfAnother() async {
             let featureGate = SpacesMobileAsyncGate()
             let recorder = SpacesMobileRequestRecorder()
@@ -417,7 +420,6 @@
                 guard case .archiveWorkspace(let payload) = request.command else {
                     return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
                 }
-                // Only workspace-feature's delete blocks; workspace-docs's must not need it to clear.
                 if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
                 return SpacesDeviceAPIResponse(
                     ok: true, message: "Deleted workspace.",
@@ -432,19 +434,91 @@
             let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
             while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
 
-            await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false)
+            // Deletes are chained now, so a call that would otherwise block until its predecessor resolves
+            // has to run on its own task rather than be awaited directly here.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
 
-            let requests = await recorder.snapshot()
-            XCTAssertEqual(
-                requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"],
-                "workspace-docs's delete must reach the daemon while workspace-feature's is still unresolved")
-            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "its own delete completed and lifted its own mark")
-            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "untouched by the unrelated delete")
+            // Neither call was refused: both rows read as deleting even though workspace-docs's request has
+            // not been sent yet (it is queued behind workspace-feature's, still held open by the gate).
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-docs"))
 
             await featureGate.open()
             await featureDelete.value
+            await docsDelete.value
 
+            // workspace-docs's delete reached the daemon and completed on its own once the queue got to
+            // it, proving it was queued rather than dropped.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// The daemon runs every `archiveWorkspace`/`deleteProject` request off one serial per-daemon
+        /// queue and only marks a workspace as tearing down once that request is dequeued. Two requests
+        /// issued back to back from this client could therefore both sit on that queue at once; if the
+        /// first is still occupying it past this client's 30s request timeout, the second — still queued,
+        /// still unregistered — would time out too and reconcile to a false failure, even though the
+        /// daemon goes on to delete it anyway (review round 2, finding 1). `pendingDeleteChain` closes the
+        /// window by construction: this proves this client never has two `archiveWorkspace` requests on
+        /// the wire at once, regardless of which workspaces they target.
+        func testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests() async {
+            let gate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                // Blocks every archiveWorkspace request, regardless of which workspace it targets, so the
+                // recorder can prove the second is never even sent while the first is unresolved.
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // The mark is set synchronously, before the chained task that actually sends the request even
+            // starts running, so waiting for it is not enough to prove the request reached the daemon.
+            // Wait for the recorder to see it directly.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request cannot appear here no matter how long this waits: `pendingDeleteChain`
+            // makes it wait on workspace-feature's whole call, which is parked on the still-closed gate.
+            var requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace"], "the second delete's request must not be sent while the first is still unresolved")
+
+            await gate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            guard case .archiveWorkspace(let firstPayload)? = requests.first?.command,
+                case .archiveWorkspace(let secondPayload)? = requests.last?.command
+            else {
+                XCTFail("Expected two archiveWorkspace requests.")
+                return
+            }
+            XCTAssertEqual(firstPayload.workspaceID, "workspace-feature", "the first request sent must be whichever delete was issued first")
+            XCTAssertEqual(secondPayload.workspaceID, "workspace-docs")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
         }
 
         /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
