@@ -2067,6 +2067,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // a device switch to land mid-queue. Cancelling audibly, instead, means a confirmed
             // destructive action the user asked for is never silently skipped: they see it did not
             // happen and can repeat it from the device that owns the workspace.
+            //
+            // Accepted overlap: the mark removed here is keyed by workspace id alone, so if the user
+            // switched away AND back (a fresh identity) and re-confirmed this same workspace's delete
+            // before this cancelled task ran, this removal clears the retry's mark and the error below
+            // misreports it. That needs a queued delete, two device switches, and a same-workspace
+            // retry inside one chain's lifetime; the retry itself still runs, and its own outcome (or
+            // the next overview reporting the daemon-side teardown) restores the row's true state.
+            // Per-attempt mark ownership is what fixing it would take, and it is not worth carrying
+            // for that window.
             workspaceIDsPendingDeletion.remove(workspace.id)
             errorMessage =
                 "\"\(workspace.displayName)\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device."
@@ -2533,6 +2542,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // Skip rather than republish: a newer mutation's response already landed and published its
         // overview while this one was suspended above, so this one is describing a moment the app has
         // already moved past.
+        //
+        // Accepted bound of this ordering: "newer" is apply-start order on this client, not daemon
+        // snapshot order. Responses arriving on independent connections can invert — an older lifecycle
+        // response bumping the generation after a newer delete response started applying discards the
+        // delete's overview — because nothing in the wire carries a daemon-side revision to totally
+        // order snapshots by. A misordered pair leaves stale rows for at most one poll interval and the
+        // next overview corrects it; a daemon revision (a wire change) is what fixing it would take.
         guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtApply) else { return }
         // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
