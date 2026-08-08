@@ -579,6 +579,66 @@
             await docsDelete.value
         }
 
+        /// A delete still waiting in the per-daemon queue when the active device switches is cancelled,
+        /// not carried out in the background against the device the app no longer shows (#450 review
+        /// round 4, finding 1): `performDeleteWorkspace`'s identity guard clears the pending mark and now
+        /// also surfaces `errorMessage` naming the workspace, since a confirmed destructive action the
+        /// user asked for must not go silently unperformed. Driven with the same
+        /// `handleAuthenticationFailure` identity-bump seam as the other device-switch tests: the switch
+        /// has to land while workspace-docs's delete is still queued behind workspace-feature's (both
+        /// issued against the same, still-current device), not after, or `pendingDeleteChains` would key
+        /// workspace-docs's delete under the new identity instead and it would never reach this guard at
+        /// all — see `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete`.
+        func testQueuedDeleteCancelledByADeviceSwitchSurfacesAnErrorAndClearsItsMark() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Queued behind workspace-feature's still-unresolved delete, on the same (still-current)
+            // device, so it shares its chain key and has to wait its turn.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+            XCTAssertNil(model.errorMessage, "not surfaced yet: workspace-docs's delete has not reached its guard")
+
+            // The active device changes while workspace-docs's delete is still parked in the queue.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            // Releases workspace-feature's delete; workspace-docs's turn comes right after and finds the
+            // identity it queued under no longer current.
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "cancelled, not left marked forever")
+            XCTAssertEqual(
+                model.errorMessage,
+                "\"docs\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device.")
+            // Only one archiveWorkspace request was ever sent: workspace-docs's delete was cancelled
+            // before it reached the network, not executed against the device it queued against.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"])
+        }
+
         /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
         /// band goes back to normal beside the error.
         func testFailedDeleteClearsThePendingDeletionMark() async {

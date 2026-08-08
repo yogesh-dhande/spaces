@@ -2030,7 +2030,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         async
     {
         guard identity == overviewIdentity else {
+            // This delete was never sent to any daemon: the request below is the first thing that talks
+            // to the network, and the identity mismatch means the active device changed while this was
+            // still queued. A delete is only ever issued against the active device — running it in the
+            // background against the device the user switched away from would mean suppressing that
+            // device's reconciliation and publishes against whatever is now active, for a case that needs
+            // a device switch to land mid-queue. Cancelling audibly, instead, means a confirmed
+            // destructive action the user asked for is never silently skipped: they see it did not
+            // happen and can repeat it from the device that owns the workspace.
             workspaceIDsPendingDeletion.remove(workspace.id)
+            errorMessage =
+                "\"\(workspace.displayName)\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device."
             return
         }
         // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
@@ -2168,7 +2178,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the workspace to stop being listed. Returns whether the workspace is still present once the
     /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
-    /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
+    /// throughout: a device switch mid-reconciliation must not publish the old backend's state. Each
+    /// fetch is also guarded by `mutationGeneration`, the same way `applyMutationResponse` guards its own
+    /// publish: a concurrent shared-channel mutation's response can land and publish first, and this
+    /// fetch — already superseded — must not overwrite it.
     ///
     /// A refetch that still lists the workspace is not automatically evidence of failure: the daemon runs
     /// the delete's teardown on its own queue and reports which workspaces are still on it via
@@ -2191,9 +2204,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 continue
             }
             guard identity == overviewIdentity else { return .unknown }
+            // Captured right before the one await below, and re-checked after it: a concurrent
+            // shared-channel mutation's response can land and publish while this suspends — the same
+            // race `applyMutationResponse` guards against (#450 review round 4), reachable here too now
+            // that reconciling a delete no longer excludes a shared-channel mutation from running
+            // alongside it. When it happens, this fetch's overview is already superseded and must not
+            // overwrite the fresher one already published; the fetch itself stays valid evidence for this
+            // attempt's own verdict below regardless.
+            let mutationGenerationAtFetch = mutationGeneration
             await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
             guard identity == overviewIdentity else { return .unknown }
-            publishOverview(refreshedOverview)
+            if mutationGeneration == mutationGenerationAtFetch { publishOverview(refreshedOverview) }
             guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
                 errorMessage = nil
                 connectionNotice = nil
