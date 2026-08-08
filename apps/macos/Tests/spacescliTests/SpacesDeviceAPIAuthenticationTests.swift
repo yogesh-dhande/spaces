@@ -21,12 +21,14 @@ final class SpacesDeviceAPIAuthenticationTests: XCTestCase {
             "This Mac no longer recognizes this device. Open Devices and pair this device again.")
     }
 
-    func testRecoveryMessageMatchesTransportAuthenticationFailure() {
-        let error = NWError.tls(-9800)
-
-        XCTAssertEqual(
-            SpacesDeviceAPIAuthentication.recoveryMessage(for: error),
-            "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+    /// A TLS-layer transport failure is not evidence that the daemon stopped recognizing this device: it
+    /// is equally what a handshake aborted under a suspended process, a captive portal, or an interface
+    /// still coming up on foreground resume produces. Sending those into re-pair recovery is what
+    /// stranded the iOS app on the pairing screen after a resume, so the classification is reserved for
+    /// the pinned verify block's own rejection (covered by the pin-mismatch case below).
+    func testRecoveryMessageIgnoresGenericTLSTransportFailure() {
+        XCTAssertNil(SpacesDeviceAPIAuthentication.recoveryMessage(for: NWError.tls(-9800)))
+        XCTAssertFalse(SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(NWError.tls(-9800)))
     }
 
     func testRecoveryMessageMatchesCertificatePinMismatch() {

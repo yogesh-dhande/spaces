@@ -242,8 +242,8 @@ struct SpacesDeviceAPIClient: Sendable {
     {
         try await mutation(
             .init(
-                command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title)),
-                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+                command: .renameAgentSession(.init(workspaceID: workspaceID, agentID: agentID, title: title)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
     /// Replaces the workspace's whole configuration. The daemon overwrites every configured field from the
@@ -290,8 +290,8 @@ struct SpacesDeviceAPIClient: Sendable {
     {
         try await mutation(
             .init(
-                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID)),
-                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID)), authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
     func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
@@ -604,7 +604,8 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
         guard let nwPort = UInt16(exactly: settings.port).flatMap(NWEndpoint.Port.init(rawValue:)), !host.isEmpty else {
             throw SpacesDeviceAPIClientError.invalidEndpoint
         }
-        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
+        let pinRejection = SpacesPinnedTLSPinRejection()
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint, pinRejection: pinRejection)
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         // A stream that ends with an error means the address it was on may no longer be good (the device
         // left the network it was reachable on, the daemon restarted somewhere else, etc.) — report the
@@ -619,7 +620,7 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             onDisconnect(error)
         }
         StreamSubscription(
-            connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
+            connection: connection, pinRejection: pinRejection, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect
         ).start(on: queue)
         return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
@@ -775,29 +776,38 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
 }
 
 /// Not file-private: `SpacesDeviceEndpointResolver` (a separate file) also walks candidate connects
-/// through `waitUntilReady`/`canOpenPlainTCPConnection`/`isRequestTimedOut`.
+/// through `waitUntilReady`.
 enum SpacesDeviceAPIConnectionSupport {
-    static func waitUntilReady(_ connection: NWConnection, queue: DispatchQueue, timeout: Duration) async throws {
+    /// Drives `connection` to `.ready`, capped at `timeout`.
+    ///
+    /// `pinRejection` is the box the connection's pinned-TLS parameters were built with, when the
+    /// caller needs to tell a rejected pin apart from any other handshake failure. Its verdict, not
+    /// the `NWError` shape, decides identity: a failure is rethrown as the verify block's own
+    /// `TerminalServiceTLSError` whenever one was recorded, so the single authority
+    /// `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure` recognizes it.
+    static func waitUntilReady(_ connection: NWConnection, queue: DispatchQueue, timeout: Duration, pinRejection: SpacesPinnedTLSPinRejection? = nil)
+        async throws
+    {
         try await withTimeout(timeout) {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 let resume = OneShotContinuation(continuation)
                 connection.stateUpdateHandler = { state in
                     switch state {
                     case .ready: resume.resume(returning: ())
-                    case .failed(let error): resume.resume(throwing: error)
-                    case .waiting(let error) where SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error):
+                    case .failed(let error): resume.resume(throwing: pinRejection?.error ?? error)
+                    case .waiting:
                         // Network.framework treats a rejected pinned certificate as a retryable
                         // condition and parks the connection in `.waiting` rather than failing it
                         // outright, so left alone this would silently keep redialing the same rejected
                         // handshake for the rest of the timeout budget instead of surfacing the failure
                         // (the "silently retries forever" symptom a rotated daemon identity produces).
-                        // Unlike other `.waiting` causes — a momentarily unreachable route, a network
-                        // interface still coming up — a rejected pin is not going to resolve itself on
-                        // the next retry, so this classifies it immediately instead of waiting out the
-                        // budget. Every other `.waiting` cause falls through to `default` unchanged, so a
-                        // connection with a genuine chance of recovering within the timeout still gets
-                        // that chance.
-                        resume.resume(throwing: error)
+                        // A rejected pin is not going to resolve itself on the next retry, so it
+                        // resolves the wait immediately. Every other `.waiting` cause (a momentarily
+                        // unreachable route, an interface still coming up as the app returns to the
+                        // foreground) is genuinely retryable and keeps its chance at the remaining
+                        // budget, which is why only the verify block's own verdict ends the wait here.
+                        guard let rejection = pinRejection?.error else { return }
+                        resume.resume(throwing: rejection)
                     case .cancelled: resume.resume(throwing: SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled."))
                     default: break
                     }
@@ -805,33 +815,6 @@ enum SpacesDeviceAPIConnectionSupport {
                 connection.start(queue: queue)
             }
         }
-    }
-
-    static func canOpenPlainTCPConnection(host: String, port: NWEndpoint.Port, timeout: Duration) async -> Bool {
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
-        do {
-            try await waitUntilReady(connection, queue: DispatchQueue(label: "spaces.device.api.tcp-probe"), timeout: timeout)
-            connection.cancel()
-            return true
-        } catch {
-            connection.cancel()
-            return false
-        }
-    }
-
-    static func isRequestTimedOut(_ error: Error) -> Bool {
-        if case SpacesDeviceAPIClientError.requestTimedOut = error { return true }
-        return false
-    }
-
-    /// Classifies a stream that never produced its first payload. An open TCP port behind a TLS
-    /// handshake that never completed means the daemon's certificate did not match the pinned
-    /// fingerprint, which has to reach the re-pair recovery flow rather than read as a stalled stream.
-    static func pendingSecureConnectionTimeoutError(host: String, port: NWEndpoint.Port) async -> Error {
-        if await canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750)) {
-            return SpacesDeviceAPIClientError.transportAuthenticationFailed
-        }
-        return SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state.")
     }
 
     static func withTimeout<T: Sendable>(_ timeout: Duration, operation: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -958,8 +941,7 @@ private final class StreamSubscription: @unchecked Sendable {
     private static let initialEventTimeout: Duration = .seconds(12)
 
     private let connection: NWConnection
-    private let host: String
-    private let port: NWEndpoint.Port
+    private let pinRejection: SpacesPinnedTLSPinRejection
     private let request: SpacesDeviceAPIRequest
     private let lifecycle: StreamLifecycle
     private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
@@ -968,12 +950,11 @@ private final class StreamSubscription: @unchecked Sendable {
     private var connectionReady = false
 
     init(
-        connection: NWConnection, host: String, port: NWEndpoint.Port, request: SpacesDeviceAPIRequest,
+        connection: NWConnection, pinRejection: SpacesPinnedTLSPinRejection, request: SpacesDeviceAPIRequest,
         onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
-        self.host = host
-        self.port = port
+        self.pinRejection = pinRejection
         self.request = request
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
@@ -985,38 +966,25 @@ private final class StreamSubscription: @unchecked Sendable {
     /// still runs (and can surface an authentication failure promptly) even when the endpoint accepts
     /// TCP but never completes TLS.
     ///
-    /// `host`/`port` exist only for that timeout's classification: an endpoint whose TCP port is open
-    /// while TLS never completed is a certificate-pin mismatch, which must route into re-pair recovery
-    /// rather than read as a stalled stream.
+    /// `pinRejection` carries the connection's own pinned-TLS verdict, so a handshake that failed
+    /// because the daemon's identity did not match reaches the re-pair recovery flow, while a handshake
+    /// that merely stalled or dropped reads as the stalled stream it is and gets retried.
     func start(on queue: DispatchQueue) {
         queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
             guard let self, !decodedState else { return }
-            guard !connectionReady else {
+            if !connectionReady, let rejection = pinRejection.error {
+                lifecycle.finish(error: rejection)
+            } else {
                 lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
-                connection.cancel()
-                return
             }
-            let host = host
-            let port = port
-            Task { [weak self] in
-                let error = await SpacesDeviceAPIConnectionSupport.pendingSecureConnectionTimeoutError(host: host, port: port)
-                queue.async { [weak self] in
-                    guard let self, !decodedState else { return }
-                    if connectionReady {
-                        lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
-                    } else {
-                        lifecycle.finish(error: error)
-                    }
-                    connection.cancel()
-                }
-            }
+            connection.cancel()
         }
         connection.stateUpdateHandler = { [self] state in
             switch state {
             case .ready:
                 connectionReady = true
                 sendInitialRequest()
-            case .failed(let error): lifecycle.finish(error: error)
+            case .failed(let error): lifecycle.finish(error: pinRejection.error ?? error)
             case .cancelled: lifecycle.finish(error: nil)
             default: break
             }

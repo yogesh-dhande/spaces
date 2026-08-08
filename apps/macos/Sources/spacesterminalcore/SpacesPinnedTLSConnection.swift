@@ -80,14 +80,15 @@ public enum SpacesPinnedTLSConnector {
 #if canImport(Network) && canImport(Security)
     extension SpacesPinnedTLSConnector {
         /// The same pin policy as `connect`, packaged as NWParameters for Apple-platform callers
-        /// that manage their own NWConnections (the iOS Device API client). Deliberately no
-        /// pin-failure reason plumbing: these callers classify a pin failure as a failed or
-        /// stalled handshake on their own state handler (the iOS client distinguishes it from an
-        /// unreachable host with a plain-TCP probe). The shared factory still traces the specific
-        /// reason for diagnostics.
-        public static func tlsParameters(certificateFingerprint: String) -> NWParameters {
+        /// that manage their own NWConnections (the iOS Device API client). `pinRejection` captures
+        /// the verify block's own verdict, which is what lets those callers tell a rejected pin apart
+        /// from any other handshake failure their state handler sees; callers that never make that
+        /// distinction (the browser proxy tunnel, e2e probes) omit it. The shared factory still traces
+        /// the specific reason for diagnostics.
+        public static func tlsParameters(certificateFingerprint: String, pinRejection: SpacesPinnedTLSPinRejection? = nil) -> NWParameters {
             let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-            return TerminalServicePinnedTLS.makePinnedTLSParameters(expectedFingerprint: expectedFingerprint, pinFailure: { _ in })
+            return TerminalServicePinnedTLS.makePinnedTLSParameters(
+                expectedFingerprint: expectedFingerprint, pinFailure: { error in pinRejection?.record(error) })
         }
     }
 

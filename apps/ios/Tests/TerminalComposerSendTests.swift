@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import Network
     import SwiftUI
     import UIKit
     import UniformTypeIdentifiers
@@ -65,6 +66,22 @@
             func append(_ message: String) { messages.append(message) }
 
             func firstMessage() -> String? { messages.first }
+        }
+
+        /// A bridge whose every request fails with one transport error, counting the attempts so a test
+        /// asserting that nothing was prompted can still prove the request actually ran.
+        private actor FailingTransportRecorder {
+            private let error: any Error
+            private var attemptCount = 0
+
+            init(error: any Error) { self.error = error }
+
+            func handle() throws -> SpacesDeviceAPIResponse {
+                attemptCount += 1
+                throw error
+            }
+
+            func attempts() -> Int { attemptCount }
         }
 
         private func settings() -> SpacesMobileConnectionSettings {
@@ -432,6 +449,51 @@
             XCTAssertNil(model.composerErrorMessage)
             XCTAssertEqual(model.composerDraftText, "hello")
             XCTAssertEqual(model.composerAttachments.count, 1)
+        }
+
+        /// A TLS-layer transport failure is not a revoked pairing. A connection the OS tore down while the
+        /// app was suspended fails in exactly this shape on the first send after a resume, and routing it
+        /// into re-pair recovery is what sent the app to the pairing screen for something the next
+        /// attempt fixes on its own.
+        func testGenericTLSTransportFailureOnSendDoesNotPromptToRePair() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let transport = FailingTransportRecorder(error: NWError.tls(-9806))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { _ in try await transport.handle() }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let attempts = await transport.attempts()
+            XCTAssertGreaterThan(attempts, 0, "sanity: the send has to have actually reached the transport")
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertNil(authenticationMessage, "a dropped TLS connection is a retry, not proof the Mac stopped recognizing this device")
+        }
+
+        /// The signal that does mean the pairing is gone: the pinned verify block compared the daemon's
+        /// certificate against the pin and rejected it. That still has to reach the re-pair flow.
+        func testCertificatePinRejectionOnSendPromptsToRePair() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let transport = FailingTransportRecorder(
+                error: TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { _ in try await transport.handle() }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
         }
 
         private func withPasteboard(_ body: (UIPasteboard) -> Void) {

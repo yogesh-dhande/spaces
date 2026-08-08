@@ -960,8 +960,8 @@
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
             while !model.isMutating { await Task.yield() }
-            // A real connection change while the delete is still parked in its request: this rebuilds the
-            // client and channel and bumps the overview identity, exactly as a device switch does.
+            // A real connection change while the delete is still parked in its request: this resets the
+            // connection and bumps the overview identity, exactly as a device switch does.
             model.handleAuthenticationFailure(message: "Pair this device again.")
 
             await gate.open()
@@ -1823,9 +1823,9 @@
         /// Failures gathered against one connection say nothing about the next one, so a connection change
         /// mid-run starts the clock over rather than letting the new connection inherit it.
         func testFailureRunDoesNotCarryAcrossAConnectionChange() async {
-            // Resetting authentication rebuilds the client from `settings`, so the refresh after it runs
-            // against the real network transport rather than the fake. An empty candidate list makes that
-            // refresh fail on the spot (`invalidEndpoint`) instead of dialing anything.
+            // The failure run is keyed by connection identity, and raising the recovery surface bumps it,
+            // so the refresh after it starts a fresh run rather than inheriting the one already past the
+            // alert delay. An empty candidate list keeps the fake's own transport out of the picture.
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = []
             let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
@@ -1855,6 +1855,66 @@
             XCTAssertNotNil(model.connectionNotice)
             XCTAssertTrue(model.isShowingConnectionSettings)
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// Raising the re-pair surface must not unpair the app. The token in `settings` is a copy of one
+        /// the Keychain still holds, and the overview poll only runs while `settings.isPaired`, so
+        /// clearing it in memory ended every retry that could have proven the failure transient: the app
+        /// stayed on the pairing screen for the rest of the process even once the network recovered.
+        func testAuthenticationFailureKeepsThePairingSoAPollCanStillRun() {
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(), bridgeClient: pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") })
+
+            model.handleAuthenticationFailure(message: "Pair this device again.")
+
+            XCTAssertEqual(model.settings.trimmedAuthToken, "paired-token", "the credential is still on disk; the in-memory copy must survive")
+            XCTAssertTrue(model.settings.isPaired, "the poll is gated on isPaired, so unpairing here stops every retry")
+            XCTAssertEqual(model.connectionNotice, "Pair this device again.", "the recovery notice is still the user-facing consequence")
+            XCTAssertTrue(model.isShowingConnectionSettings)
+        }
+
+        /// What keeping the credential buys: a device that rejects one request and answers the next comes
+        /// back on its own, with no re-pair and nothing for the user to tap.
+        func testRefreshAfterATransientAuthenticationFailureRecoversOnItsOwn() async {
+            let overview = makeOverview()
+            let counter = SpacesMobilePollCounter()
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(),
+                bridgeClient: pairedClient { _ in
+                    if await counter.increment() == 1 {
+                        return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                })
+
+            await model.refresh()
+            XCTAssertNotNil(model.connectionNotice, "the rejected request raises the recovery notice")
+            XCTAssertTrue(model.settings.isPaired)
+
+            await model.refresh()
+
+            XCTAssertNil(model.connectionNotice, "the device answered: the recovery episode is over")
+            XCTAssertEqual(model.overview?.workspaces.map(\.id), overview.workspaces.map(\.id))
+        }
+
+        /// A genuinely revoked device rejects every poll, two seconds apart. The recovery surface is
+        /// raised once for that episode, not re-raised on every rejection: a user who has navigated away
+        /// from Paired Devices must not be pulled back to it every two seconds.
+        func testRepeatedAuthenticationFailuresRaiseTheRecoverySurfaceOnlyOnce() async {
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(),
+                bridgeClient: pairedClient { _ in SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                })
+
+            await model.refresh()
+            XCTAssertTrue(model.isShowingConnectionSettings)
+            // The user read the notice and navigated away, which is what clears the request flag.
+            model.isShowingConnectionSettings = false
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isShowingConnectionSettings, "the same failing credential must not keep pulling the user back")
+            XCTAssertNotNil(model.connectionNotice, "the notice stays: the device is still rejecting this device")
         }
 
         /// A mutation is something the user just asked for, so its failure is reported immediately rather
@@ -2112,8 +2172,7 @@
             }
 
             XCTAssertNil(model.stagedApplyDidNotLandAlert, "a report the device stopped answering for cannot be a verdict about it")
-            XCTAssertEqual(
-                model.daemonCompatibilityPresentation, .none, "nothing was decided, so the block carries no failure and no Try Again yet")
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "nothing was decided, so the block carries no failure and no Try Again yet")
             XCTAssertNil(model.errorMessage)
             // Undecided, so the once-per-build rule is handed back: the device's next report re-arms it.
             await waitUntil("the automatic apply to be requested again") {
@@ -2610,15 +2669,11 @@
 
             let requests = await recorder.snapshot()
             XCTAssertEqual(requests.map(\.commandName), ["renameAgentSession", "renameAgentSession"])
-            guard case .renameAgentSession(let request)? = requests.first?.command else {
-                return XCTFail("Expected a renameAgentSession command.")
-            }
+            guard case .renameAgentSession(let request)? = requests.first?.command else { return XCTFail("Expected a renameAgentSession command.") }
             XCTAssertEqual(request.workspaceID, "workspace-feature")
             XCTAssertEqual(request.agentID, "runtime-codex")
             XCTAssertEqual(request.title, "Reviewer")
-            guard case .renameAgentSession(let clearing)? = requests.last?.command else {
-                return XCTFail("Expected a renameAgentSession command.")
-            }
+            guard case .renameAgentSession(let clearing)? = requests.last?.command else { return XCTFail("Expected a renameAgentSession command.") }
             XCTAssertEqual(clearing.title, "")
         }
 
@@ -2800,6 +2855,20 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
         }
+
+        /// Settings that actually read as paired (`isPaired`), which the default `SpacesMobileConnectionSettings()`
+        /// does not: the authentication-recovery tests turn on whether the pairing survives a failure.
+        private func pairedSettings() -> SpacesMobileConnectionSettings {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.authToken = "paired-token"
+            settings.certificateFingerprint = "SHA256:" + String(repeating: "a", count: 64)
+            return settings
+        }
+
+        private func pairedClient(_ handler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)
+            -> SpacesDeviceAPIClient
+        { SpacesDeviceAPIClient(settings: pairedSettings(), requestHandler: handler) }
 
         /// A model whose device is unreachable: every request — the overview fetch and the frozen-core
         /// handshake it falls back to — throws.

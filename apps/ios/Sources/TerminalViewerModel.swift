@@ -1422,7 +1422,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return
         }
         if let error {
-            if handleAuthenticationFailure(error) { return }
+            let isTransient = Self.isTransientReconnectError(error)
+            // Transient first: a stream the OS tore down while the app was suspended comes back dead and
+            // reconnects immediately, so it must never be read as a revoked pairing and sent to the
+            // re-pair screen. Only a failure that is not already known-retryable is offered to the
+            // authentication classification.
+            if !isTransient, handleAuthenticationFailure(error) { return }
             if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") { return }
             if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") { return }
             if let unavailableMessage = unavailableMessage(for: error) {
@@ -1430,14 +1435,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 errorMessage = unavailableMessage
                 return
             }
-            if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
+            if isTransient, latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         }
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
     private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
-        if handleAuthenticationFailure(error) { return }
+        let isTransient = Self.isTransientReconnectError(error)
+        // Transient first, for the same reason as `handleDisconnect`: a connect that failed on a network
+        // still settling after a foreground resume is retried, not read as revocation.
+        if !isTransient, handleAuthenticationFailure(error) { return }
         if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") { return }
         if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") { return }
         if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") { return }
@@ -1446,7 +1454,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             errorMessage = unavailableMessage
             return
         }
-        if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
+        if isTransient, latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 

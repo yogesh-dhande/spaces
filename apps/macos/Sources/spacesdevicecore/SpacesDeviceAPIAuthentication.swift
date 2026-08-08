@@ -1,10 +1,6 @@
 import Foundation
 import spacesterminalcore
 
-#if canImport(Network)
-    import Network
-#endif
-
 /// An error that carries a machine-readable Spaces failure category. Auth-failure classification
 /// branches on the code when present instead of substring-matching the message; errors without a
 /// code (raw transport failures) fall through to the message heuristics.
@@ -60,10 +56,13 @@ public enum SpacesDeviceAPIAuthentication {
         // The endpoint resolver's verdict for a candidate that accepts TCP but never completes the
         // pinned handshake: something is listening there, and it is not the daemon this client pinned.
         if case SpacesDeviceEndpointResolverError.transportAuthenticationFailed = error { return true }
-        #if canImport(Network)
-            guard let networkError = error as? NWError else { return false }
-            if case .tls = networkError { return true }
-        #endif
+        // Deliberately no `NWError.tls` catch-all. That case covers every TLS-layer transport failure,
+        // including a handshake aborted or reset under a suspended process, a captive portal cutting the
+        // connection, and an interface still coming up on foreground resume. Treating those as a
+        // rejected pin sent the app into re-pair recovery for failures the next request recovers from on
+        // its own. Identity is decided by the pinned verify block: callers that drive their own
+        // connections carry its verdict in a `SpacesPinnedTLSPinRejection` and rethrow the
+        // `TerminalServiceTLSError` recognized above, so a genuine pin rejection still lands here.
         return false
     }
 }
