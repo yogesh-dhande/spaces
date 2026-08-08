@@ -1080,11 +1080,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,
     /// but the proxy needs its own copy of the host->target mapping to route requests independently of
     /// the SwiftUI refresh cycle.
-    /// `identity` is the caller's `overviewIdentity` snapshot, captured before its own await chain
-    /// started — the same guard every caller already re-checks right after this returns, needed here
-    /// too because this method can itself publish into `pairedDevices` (see below) before that
-    /// downstream guard runs.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int) async {
+    ///
+    /// `identity` and `mutationGeneration` are the caller's `overviewIdentity`/`mutationGeneration`
+    /// snapshot from immediately before its own fetch (or, for a caller with no separate fetch, from
+    /// immediately before this call) — not a courtesy for the caller's own later guard, but this
+    /// method's own precondition: it mutates `browserRoutingTable`, the browser proxy, and potentially
+    /// `pairedDevices` itself, every one of them before the caller's downstream guard ever runs, so it
+    /// has to hold the invariant on its own. Re-checked before each of those mutations, not only once on
+    /// entry: this method awaits twice (the resolver read below, then the proxy update), and either the
+    /// active connection or a fresher overview-derived operation (another mutation response, a
+    /// reconciliation fetch, a session-timeout recovery) can land during either wait (#450 review round
+    /// 5) — applying this call's now-stale data at that point would mean overwriting a fresher fact with
+    /// an older one.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int, mutationGeneration fetchGeneration: Int) async {
         guard let activeDeviceID else { return }
         // The raw-byte service tunnel has to reach the daemon over the path the command channel that just
         // fetched `overview` actually proved reachable, so ask the live client's resolver directly rather
@@ -1096,11 +1104,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // address yet (freshly paired, no request issued through this client).
         let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
         let liveResolvedHost = await bridgeClient.currentResolvedHost()
-        // The user can switch or remove the active device while that await is suspended. Everything
-        // captured above belongs to the previous connection, while `settings` and `activeDeviceName` below
-        // already read the new one — merging that mixture would register routes keyed to the old device
-        // carrying the new device's port and fingerprint, or resurrect routes for a device just removed.
-        guard identity == overviewIdentity else { return }
+        // The user can switch or remove the active device while that await is suspended, or a fresher
+        // overview-derived fact can land and publish. Everything captured above belongs to the previous
+        // moment, while `settings` and `activeDeviceName` below already read the current one — merging
+        // that mixture would register routes keyed to the old device carrying the new device's port and
+        // fingerprint, resurrect routes for a device just removed, or overwrite a fresher route table
+        // with this now-stale one.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration) else { return }
         let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
             deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
@@ -1115,11 +1125,28 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // a real, resolver-confirmed address (`liveResolvedHost`, not the `resolvedHost` fallback chain
         // above) counts as a change worth reloading for; cheap in the common case since a reload only
         // happens when that address actually differs from what `pairedDevices` currently holds, and the
-        // identity re-check keeps a stale refresh from publishing into a connection the user has since
-        // switched away from.
-        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost, identity == overviewIdentity {
+        // re-check keeps a stale refresh from publishing into a connection — or over a fresher fact — the
+        // app has since moved past.
+        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost,
+            isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration)
+        {
             pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
         }
+    }
+
+    /// Whether an overview-derived fetch or mutation application that began against `identity` when
+    /// `mutationGeneration` was `fetchGeneration` is still safe to act on. Both halves are hard-bail
+    /// invalidations of equal weight here: a changed connection identity means a different daemon
+    /// entirely, and a moved `mutationGeneration` means some other overview-derived operation (a
+    /// mutation response, a reconciliation fetch, a session-timeout recovery) already landed and is
+    /// fresher — either way, whatever this fetch produced must not be published, merged into the
+    /// browser routing table, or used to restore session state. Some callers instead need to treat the
+    /// two halves differently (`reconcileWorkspaceDeletionOutcome` keeps evaluating a stale fetch's own
+    /// evidence about its delete rather than discarding a whole reconciliation attempt over an unrelated
+    /// mutation) and check `mutationGeneration` on its own for that narrower "skip this one side effect"
+    /// case instead of using this.
+    private func isOverviewFetchCurrent(identity: Int, mutationGeneration fetchGeneration: Int) -> Bool {
+        identity == overviewIdentity && mutationGeneration == fetchGeneration
     }
 
     /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
@@ -1162,7 +1189,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             applyCompatibility(overview.daemonStatus)
             // The daemon reports the addresses it is currently reachable at on every connection. This is
             // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
@@ -1172,10 +1199,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
+            if let acceptedOverview {
+                await updateBrowserRoutes(overview: acceptedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
+            }
             // Re-checked after the await above, not just at fetch return: a mutation applying while the
             // route update was suspended makes this poll's payload pre-mutation state.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             // Cleared before publishing, not after: the device answered, so any stale connection error is
             // over — but publishing is also what settles a deferred delete, and that may raise an error of
             // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
@@ -1192,7 +1221,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch is CancellationError { return } catch {
             // A mutation that landed while this poll was failing has already published the device's real
             // state and cleared any error; a stale failure must not overwrite that with an outage report.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
@@ -1200,7 +1229,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The user may have switched or removed the active device — or a mutation may have published
             // fresher state — while the fallback handshake was in flight; a stale verdict must not
             // overwrite either.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             if isActiveDeviceBlocked {
                 overview = nil
                 connectionNotice = nil
@@ -2199,21 +2228,28 @@ private enum SpacesMobileMutationTimeoutRecovery {
         var resolvedAtLeastOnce = false
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
             guard identity == overviewIdentity else { return .unknown }
+            // Captured immediately before the fetch below, not after it returns: a concurrent
+            // overview-derived operation (another mutation response, a different reconciliation, a
+            // session-timeout recovery) that bumps `mutationGeneration` while the fetch itself is still
+            // in flight must still be caught. Capturing after the fetch returns would already reflect
+            // that bump as if it were this attempt's own baseline, passing a staleness check it should
+            // fail (#450 review round 5).
+            let mutationGenerationAtFetch = mutationGeneration
             guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
                 if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
                 continue
             }
             guard identity == overviewIdentity else { return .unknown }
-            // Captured right before the one await below, and re-checked after it: a concurrent
-            // shared-channel mutation's response can land and publish while this suspends — the same
-            // race `applyMutationResponse` guards against (#450 review round 4), reachable here too now
-            // that reconciling a delete no longer excludes a shared-channel mutation from running
-            // alongside it. When it happens, this fetch's overview is already superseded and must not
-            // overwrite the fresher one already published; the fetch itself stays valid evidence for this
-            // attempt's own verdict below regardless.
-            let mutationGenerationAtFetch = mutationGeneration
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            // `updateBrowserRoutes` re-checks this same generation itself before it merges routes or
+            // updates the proxy, so a fresher fact landing during either of its own awaits skips those
+            // mutations too, not only the publish below.
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
             guard identity == overviewIdentity else { return .unknown }
+            // A generation mismatch here means a fresher overview-derived fact landed while this
+            // attempt's fetch or route update was suspended — not that this attempt's own read of the
+            // delete's outcome is wrong. Skip the publish, but keep evaluating this fetch's evidence
+            // below regardless, so an unrelated mutation racing this reconciliation does not cost it a
+            // whole attempt.
             if mutationGeneration == mutationGenerationAtFetch { publishOverview(refreshedOverview) }
             guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
                 errorMessage = nil
@@ -2493,11 +2529,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         mutationGeneration &+= 1
         let mutationGenerationAtApply = mutationGeneration
         guard let overview = response.overview else { return }
-        await updateBrowserRoutes(overview: overview, identity: identity)
+        await updateBrowserRoutes(overview: overview, identity: identity, mutationGeneration: mutationGenerationAtApply)
         // Skip rather than republish: a newer mutation's response already landed and published its
         // overview while this one was suspended above, so this one is describing a moment the app has
         // already moved past.
-        guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtApply else { return }
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtApply) else { return }
         // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil
@@ -2562,6 +2598,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
+    /// Reconciles a row's session after `run`/`restart` timed out, by refetching the overview and
+    /// looking for a fresh session in it. Guarded exactly like every other overview-derived fetch (#450
+    /// review round 5): `identity` catches a connection change, and `mutationGenerationAtFetch` — bumped
+    /// and captured immediately before the fetch, the same order `applyMutationResponse` uses — catches
+    /// a fresher overview-derived fact (another mutation response, a reconciliation fetch) landing while
+    /// this fetch or its route update is in flight. A generation mismatch alone skips only the publish
+    /// (and `updateBrowserRoutes` skips its own route-table merge and proxy update the same way); the
+    /// session lookup below still runs against whatever is currently published either way, which is the
+    /// fresher of the two overviews regardless of which one this call fetched.
     private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
         -> SpacesDeviceTerminalSessionSummary?
     {
@@ -2571,18 +2616,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
-            // Fetched after the mutation was sent, so it supersedes any poll already in flight.
+            // Fetched after the mutation was sent, so it supersedes any poll already in flight. Captured
+            // right after bumping, before the fetch — not after it returns, or a fresher fact landing
+            // during the fetch itself would already be reflected in the "baseline" this compares against.
             mutationGeneration &+= 1
+            let mutationGenerationAtFetch = mutationGeneration
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.
             guard identity == overviewIdentity else { return nil }
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
             guard identity == overviewIdentity else { return nil }
-            errorMessage = nil
-            connectionNotice = nil
-            refreshFailureStreak = nil
-            publishOverview(refreshedOverview)
+            if mutationGeneration == mutationGenerationAtFetch {
+                errorMessage = nil
+                connectionNotice = nil
+                refreshFailureStreak = nil
+                publishOverview(refreshedOverview)
+            }
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

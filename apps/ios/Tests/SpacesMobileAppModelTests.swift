@@ -688,6 +688,60 @@
             XCTAssertNil(model.deletedWorkspaceNotice, "no branch deletion was requested, so a reconciled delete stays silent")
         }
 
+        /// Before #450 review round 5, `reconcileWorkspaceDeletionOutcome` captured its staleness snapshot
+        /// after `fetchOverview` returned rather than before it was even sent, so a concurrent mutation
+        /// that landed and published while this fetch was still in flight bumped `mutationGeneration`
+        /// before the capture ever ran; the capture then trivially matched the already-bumped value and
+        /// this now-stale fetch overwrote the fresher published overview. Gating reconciliation's own
+        /// overview fetch and letting an unrelated mutation land and publish while it is still gated
+        /// reproduces that ordering directly.
+        func testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            // Distinct from both `baseOverview` (feature running) and `overviewWithoutFeature` (feature
+            // absent), so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "archiveWorkspace": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
+
+            let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
+            // Waits for reconciliation's own overview fetch to actually be sent and gated, not merely for
+            // the archiveWorkspace timeout: the mark alone does not prove the request reached the daemon.
+            while (await recorder.snapshot()).map(\.commandName) != ["archiveWorkspace", "overview"] { await Task.yield() }
+
+            // An unrelated mutation against a different workspace lands and publishes while reconciliation's
+            // own fetch is still gated.
+            await model.stopWorkspace(docsWorkspace)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            await delete.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
+        }
+
         /// The branch-deletion report exists only in the archive response, so when that response is lost
         /// and reconciliation proves only that the workspace is gone, a delete that asked for branch
         /// deletion says the result is unknown instead of silently succeeding.
@@ -1427,6 +1481,62 @@
             XCTAssertEqual(requests.map(\.commandName), ["runWorkspaceProcess", "overview"])
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isMutating)
+        }
+
+        /// Before #450 review round 5, `reconciledSessionAfterMutationTimeout` published its refetched
+        /// overview unconditionally — no generation check at all, only the identity guard. A concurrent
+        /// mutation that landed and published a fresher overview while this recovery fetch was still in
+        /// flight was silently overwritten by this now-stale one once it resumed. Gating the recovery
+        /// fetch and letting an unrelated mutation land and publish while it is still gated reproduces
+        /// that ordering directly, the same technique as
+        /// `testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch`.
+        func testMutationTimeoutRecoveryDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-old", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            let staleOverview = makeOverview(sessions: [makeSession(id: "session-api-stale")], featureProcessRows: [oldRow])
+            // Distinct from `staleOverview`, so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "runWorkspaceProcess": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let baseOverview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
+
+            let run = Task { await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow))) }
+            // Waits for the recovery's own overview fetch to actually be sent and gated, not merely for
+            // the runWorkspaceProcess timeout.
+            while (await recorder.snapshot()).map(\.commandName) != ["runWorkspaceProcess", "overview"] { await Task.yield() }
+
+            // An unrelated mutation against a different workspace lands and publishes while the recovery
+            // fetch is still gated. Deletes, not a shared-channel action like Stop: `run` above is still
+            // holding `isMutating` for its whole reconciliation, and a shared-channel mutation would be
+            // silently refused by that same gate rather than actually racing this fetch.
+            await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            _ = await run.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
         }
 
         func testRefreshedSessionLookupIgnoresVisibleFilters() {
