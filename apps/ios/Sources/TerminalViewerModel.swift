@@ -2098,7 +2098,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 resyncCount: output.requestsResync ? 1 : nil)
             renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
             renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
-            renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
             renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
             renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
             // The payloads this apply superseded report nothing of their own; this is their trace.

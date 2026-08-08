@@ -66,13 +66,12 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 
 /// One session's remote-state payloads, reduced off the main actor in arrival order.
 ///
-/// Reducing a payload (decoding the incoming render-update blob, applying it to the render-update
-/// baseline, and re-encoding the materialized full frame) is pure compute, it dominates the cost of a
-/// session under steady output, and none of it touches UI state. So the pipeline, not the main actor,
-/// owns the reducer: the render-update baseline and the previous stored payload the next reduce chains
-/// from live here. The main actor is left with only the work that needs it (the terminal-view frame
-/// application, the metrics, the notifications, and the clipboard one-shot), which it does from
-/// `TerminalRemoteStateReductionOutput`.
+/// Reducing a payload (decoding the incoming render-update blob and applying it to the render-update
+/// baseline) is pure compute, it dominates the cost of a session under steady output, and none of it
+/// touches UI state. So the pipeline, not the main actor, owns the reducer: the render-update baseline
+/// and the previous stored payload the next reduce chains from live here. The main actor is left with
+/// only the work that needs it (the terminal-view frame application, the metrics, the notifications,
+/// and the clipboard one-shot), which it does from `TerminalRemoteStateReductionOutput`.
 ///
 /// Every entry point submits here, the state subscription and the direct `.state` fetch alike,
 /// because a render update is a chain. A fetched full frame that overtook a queued delta, or a delta

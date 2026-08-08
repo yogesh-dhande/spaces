@@ -143,7 +143,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(reduction.storedPayload.renderSnapshot)
     }
 
-    func testDecodedRenderUpdateReturnsEqualValueAcrossRepeatedAndSeededAccess() throws {
+    func testDecodedRenderUpdateReturnsEqualValueAcrossRepeatedAccess() throws {
         let data = try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
         let payload = GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
@@ -153,12 +153,66 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(payload.decodedRenderUpdate, payload.decodedRenderUpdate)
         XCTAssertEqual(payload.decodedRenderUpdate?.fullFrame?.snapshot, snapshot(text: "alpha"))
 
-        // A materialized full frame stored back into a payload resolves to the seeded value.
+        // A materialized full frame stored back into a payload resolves to that frame.
         var reducer = TerminalRemoteStateReducer()
         let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil)
         let stored = reduction.storedPayload
         XCTAssertEqual(stored.decodedRenderUpdate, stored.decodedRenderUpdate)
         XCTAssertEqual(stored.decodedRenderUpdate?.fullFrame?.snapshot, snapshot(text: "alpha"))
+    }
+
+    /// A reduced payload carries the materialized frame rather than a re-encoded blob, and every read a
+    /// client makes of it agrees with the blob it still produces on demand.
+    func testReducedPayloadYieldsTheSameBytesItReportsAsState() throws {
+        let data = try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: data)
+
+        var reducer = TerminalRemoteStateReducer()
+        let stored = reducer.reduce(incomingPayload: payload, previousPayload: nil).storedPayload
+
+        XCTAssertTrue(stored.hasRenderUpdate)
+        let bytes = try XCTUnwrap(stored.renderUpdate)
+        XCTAssertEqual(
+            bytes, try GhosttyRenderUpdateBinaryCodec.encode(.full(.init(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha")))))
+        XCTAssertEqual(try GhosttyRenderUpdateBinaryCodec.decode(bytes), stored.decodedRenderUpdate)
+        XCTAssertEqual(stored.renderUpdate, bytes, "encoding a materialized update twice must produce the same blob")
+        XCTAssertEqual(stored.renderSnapshot, snapshot(text: "alpha"))
+        XCTAssertEqual(stored.renderText, "alpha")
+        XCTAssertEqual(stored.renderOwnerEpoch, 4)
+    }
+
+    /// A metadata-only update inherits the stored screen state, and inherits it as the same render
+    /// update: the merge carries the body, so the bytes a subscriber would be handed do not change.
+    func testMergedPayloadCarriesTheMaterializedRenderUpdateUnchanged() throws {
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot(ownerID: "mac-window"),
+            title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+        var reducer = TerminalRemoteStateReducer()
+        let stored = reducer.reduce(incomingPayload: payload, previousPayload: nil).storedPayload
+
+        let metadataOnly = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: 5)
+        let merged = stored.merged(with: metadataOnly)
+        XCTAssertEqual(merged.renderUpdate, stored.renderUpdate)
+        XCTAssertEqual(merged.decodedRenderUpdate, stored.decodedRenderUpdate)
+        XCTAssertTrue(merged.hasRenderUpdate)
+
+        // An owner change with no fresh screen state drops it, materialized or not.
+        let ownerChange = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: "2026-05-20T00:00:02Z",
+            sessionStateRevision: 3, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil,
+            attachmentSnapshot: attachmentSnapshot(ownerID: "ios-viewer"), title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil)
+        let afterOwnerChange = stored.merged(with: ownerChange)
+        XCTAssertFalse(afterOwnerChange.hasRenderUpdate)
+        XCTAssertNil(afterOwnerChange.renderUpdate)
+        XCTAssertNil(afterOwnerChange.renderSnapshot)
     }
 
     func testReducerRequestsResyncForDeltaWithoutBaseline() throws {

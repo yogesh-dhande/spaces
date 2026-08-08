@@ -2,11 +2,11 @@ import Foundation
 
 /// Memoizes `GhosttyRenderUpdateBinaryCodec.decode` for a small set of recent render-update
 /// blobs. The decoded update is exposed through `GhosttyRemoteSessionStatePayload`'s computed
-/// accessors (`decodedRenderUpdate`, `renderSnapshot`, `renderOwnerEpoch`, …) that sit on hot
-/// per-keystroke and per-state-event paths across the macOS and iOS mirror clients; every send
-/// path reads one field off the stored payload and would otherwise re-run a full O(grid) binary
-/// decode of the terminal grid. Caching by blob identity collapses those repeated reads to one
-/// decode per distinct payload.
+/// accessors (`decodedRenderUpdate`, `renderSnapshot`, `renderOwnerEpoch`, …), and a payload that
+/// arrived over a wire or came off disk is read through them repeatedly: a bootstrap payload's grid,
+/// owner epoch, and text are separate reads of one blob. Caching by blob identity collapses those to
+/// one decode per distinct payload. A payload a client materialized carries the decoded update
+/// directly and never reaches this cache.
 ///
 /// `NSCache` is thread-safe and available in swift-corelibs-foundation, so this stays
 /// Foundation-only for the Linux build. Keys are `Data as NSData`: CFData's hash covers the
@@ -33,12 +33,5 @@ public enum GhosttyRenderUpdateDecodeCache {
         guard let update = try? GhosttyRenderUpdateBinaryCodec.decode(data) else { return nil }
         cache.setObject(Box(update), forKey: key)
         return update
-    }
-
-    /// Seeds the cache with an already-decoded update so the first accessor read on a freshly
-    /// materialized payload is a hit. Callers that just encoded `update` to `data` avoid paying to
-    /// decode what they already hold.
-    public static func seed(_ update: GhosttyRenderUpdate, for data: Data) {
-        cache.setObject(Box(update), forKey: data as NSData)
     }
 }

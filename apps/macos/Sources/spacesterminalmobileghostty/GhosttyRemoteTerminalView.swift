@@ -174,7 +174,7 @@ import Foundation
             let scale: Double
         }
 
-        /// Everything that decides what `ghostty_mirror_apply_render_frame` would write into the surface.
+        /// Everything that decides what a mirror render-frame apply would write into the surface.
         /// `acceptsTerminalInput` belongs here because the applied frame's mouse-capture flags are derived
         /// from it, so the same snapshot applies differently to an interactive owner and a read-only pane.
         private struct AppliedRenderFrameIdentity: Equatable {
@@ -244,8 +244,8 @@ import Foundation
         /// `layoutSubviews` for reasons that have nothing to do with the terminal's content — a title
         /// change, a keyboard frame, a sibling view's update — and each of those reaches
         /// `applyLatestRenderFrameIfPossible`. Applying a frame the surface already shows costs a
-        /// full-grid cell copy and a GPU-blocking `ghostty_mirror_apply_render_frame`, so a byte-identical
-        /// frame is skipped instead. Cleared wherever the surface this describes goes away or is rebound, so
+        /// full-grid cell copy and a full-grid surface write, so a byte-identical frame is skipped
+        /// instead. Cleared wherever the surface this describes goes away or is rebound, so
         /// a fresh surface always re-applies, and also in `setTerminalFontSize(_:)`: a font retune changes
         /// what the surface should show without changing anything this identity tracks (a font decrease
         /// leaves the cropped frame byte-identical), so it is cleared there too rather than skipped as a
@@ -627,8 +627,8 @@ import Foundation
             ]
         }
 
-        /// How many frames have actually reached `ghostty_mirror_apply_render_frame`. The skip that the
-        /// applied-frame identity performs is invisible from the outside — the surface shows the same
+        /// How many frames have actually reached the mirror apply. The skip that the applied-frame
+        /// identity performs is invisible from the outside — the surface shows the same
         /// pixels either way — so this is what lets a test see that a repeat layout or a title-only
         /// payload costs no apply.
         public private(set) var renderFrameApplyCountForTesting = 0
@@ -1022,7 +1022,10 @@ import Foundation
             let identity = appliedRenderFrameIdentity(for: frame)
             guard identity != lastAppliedRenderFrameIdentity else { return }
             let applyStartedAt = Date()
-            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
+            // The draw-free apply: the `ghostty_surface_refresh` below is what wakes the render thread
+            // to build and present this frame, so a synchronous draw here would only block on the swap
+            // chain to re-present the cells built for the previous one.
+            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame_no_draw(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             renderFrameApplyCountForTesting += 1
             // Built only when something is listening: this runs once per applied frame, and the dictionary

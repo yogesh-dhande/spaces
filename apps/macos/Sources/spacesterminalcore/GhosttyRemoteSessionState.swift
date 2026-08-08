@@ -13,7 +13,11 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
     public let workingDirectory: String
     public let outputByteCount: Int?
     public let outputEndByteOffset: Int?
-    public let renderUpdate: Data?
+    /// The render update, in whichever form its producer holds it: wire bytes for a payload that arrived
+    /// over a wire or came off disk, the decoded update for one a client materialized (see
+    /// `GhosttyRenderUpdateBody`). `renderUpdate` and `decodedRenderUpdate` read whichever side the
+    /// caller needs; only `renderUpdate` can cost an encode.
+    private let renderUpdateBody: GhosttyRenderUpdateBody?
     /// A one-shot OSC 52 clipboard write for the session's owner, present only on a
     /// `clipboard_write` payload. Every carry-forward below drops it on purpose (see `merged(with:)`),
     /// so a client applies it exactly once, on the payload that announced it.
@@ -23,6 +27,19 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
         runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
         outputByteCount: Int?, outputEndByteOffset: Int? = nil, renderUpdate: Data? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+    ) {
+        self.init(
+            sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
+            sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision, runtimeState: runtimeState,
+            attachmentSnapshot: attachmentSnapshot, title: title, workingDirectory: workingDirectory, outputByteCount: outputByteCount,
+            outputEndByteOffset: outputEndByteOffset, renderUpdateBody: renderUpdate.map(GhosttyRenderUpdateBody.init(encoded:)),
+            clipboardWrite: clipboardWrite)
+    }
+
+    private init(
+        sessionID: String, reason: String, emittedAt: String, sessionStateRevision: UInt64?, sessionStateFlags: UInt32?, screenStateRevision: UInt64?,
+        runtimeState: TerminalSessionRuntimeState?, attachmentSnapshot: TerminalSessionAttachmentSnapshot?, title: String, workingDirectory: String,
+        outputByteCount: Int?, outputEndByteOffset: Int?, renderUpdateBody: GhosttyRenderUpdateBody?, clipboardWrite: TerminalClipboardWritePayload?
     ) {
         self.sessionID = sessionID
         self.reason = reason
@@ -36,9 +53,16 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         self.workingDirectory = workingDirectory
         self.outputByteCount = outputByteCount
         self.outputEndByteOffset = outputEndByteOffset
-        self.renderUpdate = renderUpdate
+        self.renderUpdateBody = renderUpdateBody
         self.clipboardWrite = clipboardWrite
     }
+
+    /// The render update's wire bytes. A payload carrying a materialized update encodes here, so read
+    /// `hasRenderUpdate` when only presence matters and `decodedRenderUpdate` when the value does.
+    public var renderUpdate: Data? { renderUpdateBody?.encodedData }
+
+    /// Whether the payload carries a render update, without decoding or encoding one.
+    public var hasRenderUpdate: Bool { renderUpdateBody != nil }
 
     /// Folds an incoming payload onto the client's stored state. Every field here is carried forward
     /// when the update omits it — EXCEPT `clipboardWrite`, which is deliberately absent from the
@@ -49,22 +73,78 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
         let previousOwnerClientID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: attachmentSnapshot)
         let nextOwnerClientID = TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: update.attachmentSnapshot ?? attachmentSnapshot)
         let ownerChanged = update.attachmentSnapshot != nil && previousOwnerClientID != nextOwnerClientID
-        let mergedRenderUpdate = update.renderUpdate ?? (ownerChanged ? nil : renderUpdate)
+        // The body is carried by reference, so a metadata-only update inherits the stored screen state
+        // without re-encoding or re-decoding it.
+        let mergedRenderUpdateBody = update.renderUpdateBody ?? (ownerChanged ? nil : renderUpdateBody)
         return .init(
             sessionID: update.sessionID, reason: update.reason, emittedAt: update.emittedAt,
             sessionStateRevision: update.sessionStateRevision ?? sessionStateRevision,
             sessionStateFlags: update.sessionStateFlags ?? sessionStateFlags, screenStateRevision: update.screenStateRevision ?? screenStateRevision,
             runtimeState: update.runtimeState ?? runtimeState, attachmentSnapshot: update.attachmentSnapshot ?? attachmentSnapshot,
             title: update.title, workingDirectory: update.workingDirectory, outputByteCount: update.outputByteCount,
-            outputEndByteOffset: update.outputEndByteOffset, renderUpdate: mergedRenderUpdate, clipboardWrite: nil)
+            outputEndByteOffset: update.outputEndByteOffset, renderUpdateBody: mergedRenderUpdateBody, clipboardWrite: nil)
     }
 }
 
 extension GhosttyRemoteSessionStatePayload {
-    public var decodedRenderUpdate: GhosttyRenderUpdate? {
-        guard let renderUpdate else { return nil }
-        return GhosttyRenderUpdateDecodeCache.decodedUpdate(for: renderUpdate)
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case reason
+        case emittedAt
+        case sessionStateRevision
+        case sessionStateFlags
+        case screenStateRevision
+        case runtimeState
+        case attachmentSnapshot
+        case title
+        case workingDirectory
+        case outputByteCount
+        case outputEndByteOffset
+        case renderUpdate
+        case clipboardWrite
     }
+
+    /// Written by hand only because the render update is stored as a body rather than as `Data`. The
+    /// wire shape is unchanged: the same keys, optionals omitted when nil, the render update as the
+    /// base64 blob under `renderUpdate` (which a schema migration matches on by name).
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            sessionID: try container.decode(String.self, forKey: .sessionID), reason: try container.decode(String.self, forKey: .reason),
+            emittedAt: try container.decode(String.self, forKey: .emittedAt),
+            sessionStateRevision: try container.decodeIfPresent(UInt64.self, forKey: .sessionStateRevision),
+            sessionStateFlags: try container.decodeIfPresent(UInt32.self, forKey: .sessionStateFlags),
+            screenStateRevision: try container.decodeIfPresent(UInt64.self, forKey: .screenStateRevision),
+            runtimeState: try container.decodeIfPresent(TerminalSessionRuntimeState.self, forKey: .runtimeState),
+            attachmentSnapshot: try container.decodeIfPresent(TerminalSessionAttachmentSnapshot.self, forKey: .attachmentSnapshot),
+            title: try container.decode(String.self, forKey: .title), workingDirectory: try container.decode(String.self, forKey: .workingDirectory),
+            outputByteCount: try container.decodeIfPresent(Int.self, forKey: .outputByteCount),
+            outputEndByteOffset: try container.decodeIfPresent(Int.self, forKey: .outputEndByteOffset),
+            renderUpdate: try container.decodeIfPresent(Data.self, forKey: .renderUpdate),
+            clipboardWrite: try container.decodeIfPresent(TerminalClipboardWritePayload.self, forKey: .clipboardWrite))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(reason, forKey: .reason)
+        try container.encode(emittedAt, forKey: .emittedAt)
+        try container.encodeIfPresent(sessionStateRevision, forKey: .sessionStateRevision)
+        try container.encodeIfPresent(sessionStateFlags, forKey: .sessionStateFlags)
+        try container.encodeIfPresent(screenStateRevision, forKey: .screenStateRevision)
+        try container.encodeIfPresent(runtimeState, forKey: .runtimeState)
+        try container.encodeIfPresent(attachmentSnapshot, forKey: .attachmentSnapshot)
+        try container.encode(title, forKey: .title)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encodeIfPresent(outputByteCount, forKey: .outputByteCount)
+        try container.encodeIfPresent(outputEndByteOffset, forKey: .outputEndByteOffset)
+        try container.encodeIfPresent(renderUpdate, forKey: .renderUpdate)
+        try container.encodeIfPresent(clipboardWrite, forKey: .clipboardWrite)
+    }
+}
+
+extension GhosttyRemoteSessionStatePayload {
+    public var decodedRenderUpdate: GhosttyRenderUpdate? { renderUpdateBody?.decodedUpdate }
 
     public var renderSnapshot: GhosttyTerminalSnapshot? { decodedRenderUpdate?.fullFrame?.snapshot }
 
@@ -81,11 +161,22 @@ extension GhosttyRemoteSessionStatePayload {
     /// `clipboard_write` payload never carries a render update (the reason exports no screen state),
     /// so nothing reaches a client through this path with the field to lose.
     public func replacingRenderUpdate(_ renderUpdate: Data?, screenStateRevision: UInt64? = nil) -> Self {
+        replacingRenderUpdateBody(renderUpdate.map(GhosttyRenderUpdateBody.init(encoded:)), screenStateRevision: screenStateRevision)
+    }
+
+    /// Rebuilds the payload around a render update the caller already holds decoded, which is what a
+    /// client's reducer produces for every applied update. The update is encoded only if the payload is
+    /// later serialized; see `GhosttyRenderUpdateBody`.
+    public func replacingRenderUpdate(materialized update: GhosttyRenderUpdate) -> Self {
+        replacingRenderUpdateBody(GhosttyRenderUpdateBody(materialized: update), screenStateRevision: nil)
+    }
+
+    private func replacingRenderUpdateBody(_ body: GhosttyRenderUpdateBody?, screenStateRevision: UInt64?) -> Self {
         .init(
             sessionID: sessionID, reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionStateRevision,
             sessionStateFlags: sessionStateFlags, screenStateRevision: screenStateRevision ?? self.screenStateRevision, runtimeState: runtimeState,
             attachmentSnapshot: attachmentSnapshot, title: title, workingDirectory: workingDirectory, outputByteCount: outputByteCount,
-            outputEndByteOffset: outputEndByteOffset, renderUpdate: renderUpdate, clipboardWrite: nil)
+            outputEndByteOffset: outputEndByteOffset, renderUpdateBody: body, clipboardWrite: nil)
     }
 }
 
