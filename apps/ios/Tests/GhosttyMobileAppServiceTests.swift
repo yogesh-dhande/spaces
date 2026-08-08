@@ -81,6 +81,16 @@
             }
         }
 
+        /// Lets a test install the response its bridge client should serve after the model that owns that
+        /// client exists — the response has to be built from the model's own client identity.
+        private actor TerminalStateResponseHolder {
+            private var response = SpacesDeviceAPIResponse(ok: false, message: "no state installed")
+
+            func set(_ response: SpacesDeviceAPIResponse) { self.response = response }
+
+            func current() -> SpacesDeviceAPIResponse { response }
+        }
+
         private actor DeviceAPIRequestRecorder {
             private var requests: [SpacesDeviceAPIRequest] = []
 
@@ -1214,6 +1224,96 @@
             XCTAssertEqual(try Data(contentsOf: secondURL), secondPayload)
         }
 
+        /// Reduction runs off the main actor, so a payload is not installed by the time the call that
+        /// submitted it returns. The routes that read this model's own state immediately afterwards
+        /// — takeover asking whether it became the owner, the connect bootstrap asking whether it is
+        /// still connecting — have to wait for their payload, and everything the stream submitted before
+        /// it has to be applied first: reduction is one chain across both routes.
+        func testAnAwaitedApplyLandsAfterEverythingSubmittedBeforeIt() async {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+
+            model.submitLatestState(Self.outputState(title: "first", emittedAt: "2026-06-04T14:23:31Z"))
+            model.submitLatestState(Self.outputState(title: "second", emittedAt: "2026-06-04T14:23:32Z"))
+            await model.applyLatestState(Self.outputState(title: "third", emittedAt: "2026-06-04T14:23:33Z"))
+
+            XCTAssertEqual(model.latestState?.title, "third")
+            XCTAssertEqual(model.latestState?.emittedAt, "2026-06-04T14:23:33Z")
+            XCTAssertEqual(model.title, "third")
+        }
+
+        /// The apply mailbox collapses a run of screen-content payloads to its newest member, so what
+        /// reaches the model is the newest state plus what the payloads it replaced asked for. The
+        /// inherited resync is the one that matters: a delta that failed against a stale baseline can be
+        /// coalesced away, and if the model read its own reduction's resync flag instead of the apply's,
+        /// the full frame that failed delta needed would never be requested and the pane would sit on a
+        /// stale grid.
+        func testACoalescedApplyInstallsTheNewestStateAndRequestsTheResyncItInherited() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resyncResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await resyncResponse.current()
+            }
+            // An owner-interactive model, so the only `.state` request this test can produce is the resync
+            // itself: the viewer already owns the session, so nothing takes it over or synchronizes it.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let newest = Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:35Z")
+            let stored = try XCTUnwrap(model.latestState).merged(with: newest)
+            await resyncResponse.set(Self.terminalStateResponse(stored))
+
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: newest,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: newest, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0, coalescedAwayCount: 2, inheritedResyncRequest: true))
+
+            XCTAssertEqual(model.latestState?.title, "newest")
+            XCTAssertTrue(model.isOwner)
+            let requestedResync = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(requestedResync, "an inherited resync must ask the daemon for a full frame")
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1)
+        }
+
+        /// A viewer that has been stopped has already released its stream, its queued input, and its
+        /// attachment. A payload the pipeline was still reducing when that happened must land nowhere:
+        /// installing it would put the session's attachment back and leave the next visit believing it is
+        /// still attached.
+        func testAStoppedViewerDropsAnApplyThatWasStillInTheReducer() async {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "before-stop", emittedAt: "2026-06-04T14:23:36Z"))
+
+            model.stop()
+            let afterStop = Self.outputState(title: "after-stop", emittedAt: "2026-06-04T14:23:37Z")
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: afterStop,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: afterStop, storedPayload: afterStop, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0))
+
+            XCTAssertEqual(model.latestState?.title, "before-stop")
+        }
+
+        private nonisolated static func outputState(title: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
+                sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+                workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
         private nonisolated static func previewMetadata(id: String, originalLink: String, displayName: String, byteCount: Int)
             -> SpacesDeviceAPIResponse
         {
@@ -2317,6 +2417,61 @@
             wait(for: [freeCompleted], timeout: 30)
 
             window.isHidden = true
+        }
+
+        /// Applying a frame to the mirror copies the whole grid and blocks on the GPU, and the calls that
+        /// reach it are mostly not about terminal content at all: SwiftUI re-runs `updateUIView` for any
+        /// observed change (a title a coding agent rewrites many times a second is enough), and UIKit
+        /// re-runs `layoutSubviews` for keyboard and layout reasons of its own. A frame the surface
+        /// already holds must therefore cost nothing, while a frame that actually differs must still be
+        /// applied.
+        func testTheMirrorSkipsAFrameItAlreadyHoldsAndAppliesAChangedOne() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let renderStateKey = "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=identity"
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "identity")
+            defer { hostView.removeFromSuperview() }
+            let appliesAfterMount = hostView.debugRenderFrameApplyCount
+            XCTAssertGreaterThan(appliesAfterMount, 0, "mounting has to put the first frame on the surface")
+
+            // A layout pass carries no new frame.
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+            XCTAssertEqual(hostView.debugRenderFrameApplyCount, appliesAfterMount)
+
+            // A title-only payload leaves the owner epoch's snapshot untouched, so the viewer re-pushes
+            // exactly what it pushed before.
+            hostView.update(snapshot: sampleSnapshot(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
+            XCTAssertEqual(hostView.debugRenderFrameApplyCount, appliesAfterMount, "a repeated frame must not be re-applied")
+
+            hostView.update(snapshot: sampleSnapshotWithExclamation(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
+            XCTAssertGreaterThan(hostView.debugRenderFrameApplyCount, appliesAfterMount, "changed content must reach the surface")
+        }
+
+        /// The shared mirror moves between terminal views, and an acquired surface still holds the cells
+        /// the previous holder applied. A view that takes it back must re-apply its own frame even though
+        /// nothing about that frame changed, or it renders the other session's pixels.
+        func testAReacquiredMirrorReAppliesTheFrameTheViewAlreadyHeld() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reapply")
+            defer { hostView.removeFromSuperview() }
+            let appliesBeforeSurrender = hostView.debugRenderFrameApplyCount
+
+            hostView.surrenderSharedMirror()
+            XCTAssertTrue(hostView.reclaimSurrenderedSharedMirror())
+
+            XCTAssertGreaterThan(hostView.debugRenderFrameApplyCount, appliesBeforeSurrender)
         }
 
         func testRemoteTerminalHostViewTeardownParksTheSharedMirrorWithoutBlocking() throws {

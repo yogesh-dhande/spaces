@@ -174,6 +174,18 @@ import Foundation
             let scale: Double
         }
 
+        /// Everything that decides what `ghostty_mirror_apply_render_frame` would write into the surface.
+        /// `acceptsTerminalInput` belongs here because the applied frame's mouse-capture flags are derived
+        /// from it, so the same snapshot applies differently to an interactive owner and a read-only pane.
+        private struct AppliedRenderFrameIdentity: Equatable {
+            let renderKey: String
+            let version: Int
+            let sessionRevision: UInt64?
+            let ownerEpoch: UInt64
+            let acceptsTerminalInput: Bool
+            let snapshot: GhosttyTerminalSnapshot
+        }
+
         private enum AccessoryModifier: String, CaseIterable {
             case shift
             case control = "ctrl"
@@ -228,6 +240,14 @@ import Foundation
         private var latestSnapshot: GhosttyTerminalSnapshot?
         private var currentRenderedSnapshot: GhosttyTerminalSnapshot?
         private var lastRenderKey = ""
+        /// What the mirror surface currently holds. SwiftUI re-runs `updateUIView` and UIKit re-runs
+        /// `layoutSubviews` for reasons that have nothing to do with the terminal's content — a title
+        /// change, a keyboard frame, a sibling view's update — and each of those reaches
+        /// `applyLatestRenderFrameIfPossible`. Applying a frame the surface already shows costs a
+        /// full-grid cell copy and a GPU-blocking `ghostty_mirror_apply_render_frame`, so a byte-identical
+        /// frame is skipped instead. Cleared wherever the surface this describes goes away or is rebound,
+        /// so a fresh surface always re-applies.
+        private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastSurfaceGeometry: SurfaceGeometry?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
@@ -405,6 +425,7 @@ import Foundation
         private func releaseSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
+            lastAppliedRenderFrameIdentity = nil
             GhosttySharedTerminalMirror.shared.release(from: self)
         }
 
@@ -423,6 +444,7 @@ import Foundation
         func surrenderSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
+            lastAppliedRenderFrameIdentity = nil
             didSurrenderSharedMirror = true
             setNeedsDisplay()
             reportInputReadinessIfNeeded()
@@ -595,6 +617,12 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(sendEscape)),
             ]
         }
+
+        /// How many frames have actually reached `ghostty_mirror_apply_render_frame`. The skip that the
+        /// applied-frame identity performs is invisible from the outside — the surface shows the same
+        /// pixels either way — so this is what lets a test see that a repeat layout or a title-only
+        /// payload costs no apply.
+        public private(set) var debugRenderFrameApplyCount = 0
 
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
@@ -861,8 +889,11 @@ import Foundation
                 mirror = acquired
                 // A rebind reuses a surface that is already sized and occluded from its previous
                 // holder, so the cached geometry has to be dropped for `updateSurfaceGeometry()` to
-                // re-apply this view's size, scale, and occlusion rather than skip as unchanged.
+                // re-apply this view's size, scale, and occlusion rather than skip as unchanged. The
+                // applied-frame identity goes with it: the acquired surface holds the previous holder's
+                // cells, so this view's next frame has to be applied even if it matches its own last one.
                 lastSurfaceGeometry = nil
+                lastAppliedRenderFrameIdentity = nil
                 updateSurfaceGeometry()
                 if let surface = mirrorSurface() {
                     GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
@@ -975,13 +1006,19 @@ import Foundation
 
         private func applyLatestRenderFrameIfPossible() {
             guard let mirror, let frame = mirrorRenderFrame() else {
+                lastAppliedRenderFrameIdentity = nil
                 setNeedsDisplay()
                 return
             }
+            let identity = appliedRenderFrameIdentity(for: frame)
+            guard identity != lastAppliedRenderFrameIdentity else { return }
             let applyStartedAt = Date()
             let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-            if let sessionID = activeOwnerEpoch?.sessionID {
+            debugRenderFrameApplyCount += 1
+            // Built only when something is listening: this runs once per applied frame, and the dictionary
+            // costs more than the apply it describes.
+            if SpacesDeviceTerminalPerformanceLogger.isEnabled(), let sessionID = activeOwnerEpoch?.sessionID {
                 let attributes = GhosttyRenderFrameMetrics.attributes(
                     frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
                     targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
@@ -989,6 +1026,7 @@ import Foundation
                     .init(sessionID: sessionID, source: "ios-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS, attributes: attributes))
             }
             if applied {
+                lastAppliedRenderFrameIdentity = identity
                 if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
                 // The shared surface stays hidden from the moment it is handed over until a frame of
                 // this view's own session has landed on it, so a rebind never shows the previous
@@ -998,6 +1036,12 @@ import Foundation
                 ghosttyRemoteTerminalTrace("mirror_apply_failed")
                 setNeedsDisplay()
             }
+        }
+
+        private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {
+            AppliedRenderFrameIdentity(
+                renderKey: lastRenderKey, version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch,
+                acceptsTerminalInput: acceptsTerminalInput, snapshot: frame.snapshot)
         }
 
         private func mirrorRenderFrame() -> GhosttyRenderFrame? {

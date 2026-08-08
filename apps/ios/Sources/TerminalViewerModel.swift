@@ -186,7 +186,28 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
-    private var stateReducer = TerminalRemoteStateReducer()
+    /// Reduces incoming payloads off the main actor, in arrival order across every route into this
+    /// model: the live subscription, the direct `.state` fetch, and the state a takeover returns. It
+    /// owns the reducer, so the render-update baseline and the previous stored payload the next reduce
+    /// chains from live there rather than here, and this model only applies what it hands back.
+    ///
+    /// One instance for the model's whole life, including across `beginStop()`/`start()`: the chain it
+    /// holds describes the same session either way, and a reconnect's `initial`/`.state` full frame
+    /// reseeds the baseline. `applyReducedState` is what makes a stopped model's pending applies inert.
+    @ObservationIgnored private lazy var statePipeline = TerminalRemoteStateReductionPipeline(
+        // Every materialized frame is rendered. The mac mirror gates frames against the surface it is
+        // resizing underneath; this viewer has no such local surface race — it renders whatever grid the
+        // daemon exports and re-measures its own viewport from the frame that arrives.
+        shouldUseFrame: { _, _ in true }, apply: { [weak self] output in self?.applyReducedState(output) })
+    /// Payloads handed to the pipeline, and how many of those the main actor has accounted for. The
+    /// apply mailbox collapses runs of consecutive frames, so one apply stands for itself plus every
+    /// submission it superseded; counting that way is what lets `applyLatestState` wait on a payload
+    /// that may never apply under its own name. Unobserved on purpose: they change on every payload and
+    /// nothing on screen reads them, so observing them would rebuild the terminal's body at the
+    /// session's flush rate.
+    @ObservationIgnored private var submittedStateCount: UInt64 = 0
+    @ObservationIgnored private var appliedStateCount: UInt64 = 0
+    @ObservationIgnored private var stateApplyWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
@@ -456,7 +477,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
-        stateReducer.resetRenderUpdateBaseline()
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
@@ -515,7 +535,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("takeover_begin")
         do {
             let takeoverState = try await takeOverTerminal(timeout: Self.inputRequestTimeout)
-            if let takeoverState { applyLatestState(takeoverState) }
+            if let takeoverState { await applyLatestState(takeoverState) }
             if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
             errorMessage = nil
             if !isOwner {
@@ -1294,7 +1314,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             }
             let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
                 guard let self else { return }
-                applyLatestState(payload)
+                // Hand off and return. This is the session's flush rate — up to a few hundred payloads a
+                // second under a streaming agent — and everything expensive about a payload (decoding the
+                // render update, applying it to the baseline, re-encoding the full frame) happens in the
+                // pipeline, off this actor.
+                submitLatestState(payload)
             } onDisconnect: { [weak self] error in
                 Task { @MainActor [weak self] in await self?.handleDisconnect(error) }
             }
@@ -1331,7 +1355,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             logPerformanceEvent(
                 name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
                 attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
-            if applyToLatestState { applyLatestState(fetchedState) }
+            if applyToLatestState { await applyLatestState(fetchedState) }
             return fetchedState
         } catch {
             trace(
@@ -1884,26 +1908,72 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             outputByteCount: payload.outputByteCount, outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: nil)
     }
 
-    func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
+    /// Hands one payload to the reduction pipeline without waiting for it to be applied. The live
+    /// subscription's callback uses this: it runs at the session's flush rate, and nothing it does next
+    /// depends on the payload having landed.
+    func submitLatestState(_ payload: GhosttyRemoteSessionStatePayload) {
+        submittedStateCount += 1
+        statePipeline.submit(payload)
+    }
+
+    /// Submits `payload` and returns once the pipeline has applied it (or folded it into a later apply).
+    /// The routes that read this model's own state immediately afterwards use this rather than
+    /// `submitLatestState`: takeover asks whether it actually became the owner, and the connect
+    /// bootstrap asks whether it is still connecting, and an apply that had not landed yet would answer
+    /// both from the state the payload was meant to replace.
+    func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload) async {
+        let target = submittedStateCount + 1
+        submitLatestState(payload)
+        await withCheckedContinuation { continuation in
+            // Checked inside the body, not before the `await`: the apply can land in the gap, and a waiter
+            // registered after the apply it was waiting for would never be released.
+            guard appliedStateCount < target else {
+                continuation.resume()
+                return
+            }
+            stateApplyWaiters.append((target: target, continuation: continuation))
+        }
+    }
+
+    /// Accounts one apply against every submission it stands for, and releases whoever was waiting on
+    /// those submissions. Runs for every output the pipeline hands back, including the ones a stopped
+    /// model drops, so a stop can never strand an `applyLatestState` caller.
+    private func noteStateApplied(coalescedAwayCount: Int) {
+        appliedStateCount += UInt64(coalescedAwayCount) + 1
+        guard !stateApplyWaiters.isEmpty else { return }
+        let applied = appliedStateCount
+        let released = stateApplyWaiters.filter { $0.target <= applied }
+        stateApplyWaiters.removeAll { $0.target <= applied }
+        for waiter in released { waiter.continuation.resume() }
+    }
+
+    /// Applies one payload the pipeline reduced. Everything left here needs the main actor: the model's
+    /// observable state, the clipboard one-shot, the resync request, and the metrics.
+    private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+        defer { noteStateApplied(coalescedAwayCount: output.coalescedAwayCount) }
+        // A stopped model has already released the stream, the queued input, and the ownership state this
+        // would touch; a payload the pipeline was still reducing when `beginStop` ran must land nowhere
+        // rather than resurrect an attachment the stop tore down. Ordering is unaffected: the pipeline
+        // keeps chaining, so a later `start()` resumes from the same reduction chain.
+        guard !isStopping else { return }
+        let incomingPayload = output.incomingPayload
         // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and the
         // direct `.state` refresh runs alongside the live subscription, so a refresh can install newer
-        // state before an older stream event carrying the copy arrives.
+        // state before an older stream event carrying the copy arrives. It reads ownership from the state
+        // installed so far, which is why it runs ahead of the `latestState` move below.
         applyClipboardWrite(from: incomingPayload)
         // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen state,
         // and its runtime/attachment snapshot is a repeat of the output turn that carried the escape
-        // sequence — so it is never reduced or installed. Reducing an out-of-order one would rewind
+        // sequence — so the pipeline reduces nothing for it. Reducing an out-of-order one would rewind
         // `latestState` to the event's timestamp and could hand ownership back to whoever held it then.
-        guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
+        guard let reduction = output.reduction else { return }
         let applyStartedAt = Date()
-        let decodeStartedAt = Date()
-        let reduction = stateReducer.reduce(incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
         let payload = reduction.payload
-        let decodedFrame = reduction.frameToApply
-        let decodedUpdate = reduction.decodedUpdate
-        let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
-        requestRenderUpdateResyncIfNeeded(reduction)
+        // Covers a resync inherited from an output the apply mailbox coalesced away: the superseded frame
+        // is not worth drawing, but the full frame its failed delta could not build is.
+        if output.requestsResync { requestRenderUpdateResync() }
         latestState = reduction.storedPayload
         if payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
@@ -1947,8 +2017,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
+            // The frame this model holds was exported for the ownership it just lost, so drop it from the
+            // state the viewer presents. Only this main-actor mirror is cleared; the pipeline's reduction
+            // chain is left alone, because `merged(with:)` already refuses to carry a render update across
+            // an ownership change and a delta stamped with the new owner epoch fails the applier's own
+            // epoch check and resyncs.
             if wasOwner, !isEndedState, let latestState { self.latestState = payloadByClearingScreenState(latestState) }
-            if wasOwner { stateReducer.resetRenderUpdateBaseline() }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil
@@ -1963,27 +2037,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isSessionUnavailable = false
         errorMessage = nil
         isConnecting = false
-        let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-        var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
-            outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
-            dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
-            renderMode: renderMode, frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
-            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
-            appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
-            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt), operationCount: decodedUpdate?.operationCount,
-            changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
-            fullFrameFallbackReason: decodedUpdate?.fallbackReason, droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
-            resyncCount: reduction.didRequestResync ? 1 : nil)
-        renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
-        renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
-        renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-        renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
-        renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
-        logPerformanceEvent(
-            name: "render_frame_payload_receive", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-            count: incomingPayload.renderUpdate?.count, attributes: renderUpdateAttributes)
+        // ~20 string conversions per payload on a path that runs at the session's flush rate, so the
+        // dictionary is built only when something is listening. `emittedAt` is parsed inside the same
+        // gate for the same reason: it feeds nothing but these metrics.
+        if SpacesDeviceTerminalPerformanceLogger.isEnabled() {
+            let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+            let decodedFrame = reduction.frameToApply
+            let decodedUpdate = reduction.decodedUpdate
+            var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
+                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: output.reduceMS,
+                outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+                dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
+                dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
+                renderMode: renderMode, frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
+                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
+                applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt), operationCount: decodedUpdate?.operationCount,
+                changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
+                fullFrameFallbackReason: decodedUpdate?.fallbackReason, droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
+                resyncCount: output.requestsResync ? 1 : nil)
+            renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
+            renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
+            renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+            renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+            renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
+            // The payloads this apply superseded report nothing of their own; this is their trace.
+            renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
+            logPerformanceEvent(
+                name: "render_frame_payload_receive", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
+                count: incomingPayload.renderUpdate?.count, attributes: renderUpdateAttributes)
+        }
         trace(
             "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderSnapshot?.columns, rows: latestState?.renderSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))"
         )
@@ -1994,8 +2077,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         attemptAutomaticTakeoverIfNeeded()
     }
 
-    private func requestRenderUpdateResyncIfNeeded(_ reduction: TerminalRemoteStateReductionResult) {
-        guard reduction.didRequestResync else { return }
+    /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
+    /// The fetched payload re-enters through the same pipeline, so it cannot overtake a delta already
+    /// queued behind it.
+    private func requestRenderUpdateResync() {
         Task { [weak self] in
             await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
         }
@@ -2111,6 +2196,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let screenRevision = latestState?.screenStateRevision ?? 0
         return "ended|\(screenRevision)|\(snapshot.columns)x\(snapshot.rows)|\(latestState?.emittedAt ?? "unknown")"
     }
+
+    /// Applies one reduction output exactly as the pipeline's mailbox would, so the consumption rules —
+    /// which payload's state is installed, whose resync request is honored, what a stopped model drops —
+    /// can be asserted against a constructed output instead of against a reduce task's timing.
+    func applyReducedStateForTesting(_ output: TerminalRemoteStateReductionOutput) { applyReducedState(output) }
 
     /// Injects an owner-interactive state so composer/input send sequencing can be exercised without a
     /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).

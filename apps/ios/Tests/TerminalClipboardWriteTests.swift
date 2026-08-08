@@ -67,17 +67,17 @@
                 clipboardWrite: TerminalClipboardWritePayload(targetClientID: targetClientID, text: text))
         }
 
-        private func withPasteboard(_ body: (UIPasteboard) throws -> Void) rethrows {
+        private func withPasteboard(_ body: (UIPasteboard) async throws -> Void) async rethrows {
             let pasteboard = UIPasteboard.withUniqueName()
             defer { UIPasteboard.remove(withName: pasteboard.name) }
-            try body(pasteboard)
+            try await body(pasteboard)
         }
 
-        func testOwnerWritesTheCopiedTextToItsClipboard() throws {
-            try withPasteboard { pasteboard in
+        func testOwnerWritesTheCopiedTextToItsClipboard() async throws {
+            try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try makeOwnerModel(pasteboard)
 
-                model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied text"))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied text"))
 
                 XCTAssertEqual(pasteboard.string, "copied text")
             }
@@ -85,12 +85,12 @@
 
         /// A write addressed to another device is still delivered here — the state stream fans out — so
         /// the target check is what keeps a copy made on one device off every other device's clipboard.
-        func testNonTargetClientLeavesItsClipboardAlone() throws {
-            try withPasteboard { pasteboard in
+        func testNonTargetClientLeavesItsClipboardAlone() async throws {
+            try await withPasteboard { pasteboard in
                 let (model, _) = try makeOwnerModel(pasteboard)
                 pasteboard.string = "what the user had"
 
-                model.applyLatestState(clipboardPayload(targetClientID: "someone-elses-client", text: "not for this device"))
+                await model.applyLatestState(clipboardPayload(targetClientID: "someone-elses-client", text: "not for this device"))
 
                 XCTAssertEqual(pasteboard.string, "what the user had")
             }
@@ -98,12 +98,12 @@
 
         /// A program that empties the terminal's clipboard travels as an empty write, which empties the
         /// owner's clipboard rather than leaving behind the content the program asked to remove.
-        func testEmptyWriteClearsTheOwnersClipboard() throws {
-            try withPasteboard { pasteboard in
+        func testEmptyWriteClearsTheOwnersClipboard() async throws {
+            try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try makeOwnerModel(pasteboard)
                 pasteboard.string = "stale copy"
 
-                model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: ""))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: ""))
 
                 XCTAssertNil(pasteboard.string)
             }
@@ -114,13 +114,13 @@
         /// and installing what it carries would rewind the session to the moment the copy was made,
         /// handing ownership back to whoever held it then and blanking the viewer this device owns.
         /// Nothing it carries is applied, and the copy is judged against ownership as it stands now.
-        func testClipboardWritePayloadDoesNotBecomeSessionState() throws {
-            try withPasteboard { pasteboard in
+        func testClipboardWritePayloadDoesNotBecomeSessionState() async throws {
+            try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try makeOwnerModel(pasteboard)
                 let installedEmittedAt = model.latestState?.emittedAt
                 let installedTitle = model.latestState?.title
 
-                model.applyLatestState(staleSnapshotClipboardPayload(targetClientID: ownerClientID, text: "copied text"))
+                await model.applyLatestState(staleSnapshotClipboardPayload(targetClientID: ownerClientID, text: "copied text"))
 
                 XCTAssertEqual(pasteboard.string, "copied text")
                 XCTAssertTrue(model.isOwner, "an event's stale snapshot must not take ownership away from this device")
@@ -132,14 +132,14 @@
         /// The write is a one-shot that rides exactly the payload announcing it. The client's stored state
         /// drops the field on merge, so the payloads that follow must not re-paste over whatever the user
         /// has copied since.
-        func testALaterPayloadDoesNotRepeatTheWrite() throws {
-            try withPasteboard { pasteboard in
+        func testALaterPayloadDoesNotRepeatTheWrite() async throws {
+            try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try makeOwnerModel(pasteboard)
-                model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied once"))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied once"))
                 XCTAssertEqual(pasteboard.string, "copied once")
 
                 pasteboard.string = "what the user copied next"
-                model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output))
+                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output))
 
                 XCTAssertEqual(pasteboard.string, "what the user copied next")
             }

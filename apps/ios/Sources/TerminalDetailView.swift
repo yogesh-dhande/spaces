@@ -340,15 +340,20 @@ struct TerminalDetailView: View {
             .accessibilityIdentifier("terminal.previewStatus")
     }
 
+    /// Change identity for the e2e dump task, and nothing else. Building it reads seventeen model
+    /// properties and joins them, on every body evaluation of a view that re-evaluates at the session's
+    /// flush rate; `writeE2EDumpIfNeeded` is gated on the same condition, so outside an e2e run the key
+    /// collapses to a constant and the task never re-runs.
     private var e2eDumpStateKey: String {
-        [
+        guard shouldCaptureRenderedText else { return "" }
+        return [
             model.title, model.renderStateKey, model.isOwner ? "owner" : "viewer", model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady", model.isBusy ? "busy" : "idle",
             model.isOwnershipSynchronizationScheduled ? "syncScheduled" : "syncNotScheduled", model.isSynchronizingOwnership ? "syncing" : "synced",
             model.isPreparingInput ? "preparing" : "prepared", model.isInputSurfaceReady ? "inputReady" : "inputPending", model.errorMessage ?? "",
             model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle", model.linkPreview?.title ?? "",
             model.linkPreview?.kind?.rawValue ?? "", model.linkPreview?.content.caseName ?? "", model.linkPreviewErrorMessage ?? "",
-            model.linkNotice ?? "", shouldCaptureRenderedText ? renderedText : "",
+            model.linkNotice ?? "", renderedText,
         ].joined(separator: "|")
     }
 
