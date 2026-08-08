@@ -6,8 +6,11 @@
 /// and coexists with any of these panes.
 enum DetailPane: Equatable {
     case none
-    /// A workspace's panel (its terminal panes) with the action footer.
-    case workspace(id: String)
+    /// A workspace's panel (its terminal panes) with the action footer. The owning device is carried on
+    /// the pane rather than looked up from the sidebar data, so it stays known after the workspace drops
+    /// out of that data: an offline or wire-incompatible daemon answers with an empty overview, and
+    /// telling that apart from a deletion is what decides whether the pane survives a reload.
+    case workspace(id: String, deviceID: String)
     /// The full-pane alerts list.
     case alerts
     /// The full-pane compatibility block for an incompatible device's daemon. Held here (rather than
@@ -16,7 +19,10 @@ enum DetailPane: Equatable {
     case compatibilityBlock(deviceID: String)
 
     /// Workspace whose detail is shown, or `nil` for any other pane.
-    var workspaceID: String? { if case .workspace(let id) = self { id } else { nil } }
+    var workspaceID: String? { if case .workspace(let id, _) = self { id } else { nil } }
+
+    /// Device owning the workspace whose detail is shown, or `nil` for any other pane.
+    var workspaceDeviceID: String? { if case .workspace(_, let deviceID) = self { deviceID } else { nil } }
 
     /// Whether the alerts list is the current pane.
     var isAlerts: Bool { if case .alerts = self { true } else { false } }

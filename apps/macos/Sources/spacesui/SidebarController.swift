@@ -253,6 +253,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .success(let snapshot):
             host.logStartupProfile("sidebar_snapshot_received")
             applySidebarDataSnapshot(snapshot)
+            // Alerts is where the app opens when the snapshot resolved no pane of its own — the launch
+            // placeholder's spinner is what would otherwise be left on screen. This is the only place
+            // that choice is made: the reconcile paths never navigate to Alerts, and this one runs once,
+            // off the initial load. `.userNavigation` because it is a landing, not a refresh, so it
+            // renders rather than being skipped as an unchanged repaint.
+            if host.detailPane == .none { host.showAlertsDetail(presentation: .userNavigation) }
             host.logStartupProfile("sidebar_snapshot_applied")
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
@@ -391,6 +397,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // The preserve verdict was computed against the pre-reload data; this reload removed what the
             // detail pane was preserving — e.g. the local daemon went offline and its selected workspace
             // vanished. Reconcile the pane instead of leaving stale workspace detail/actions visible.
+            // Whether the pane actually comes down is `refreshSelection`'s call: a daemon that went
+            // offline takes its rows with it for the outage, which is not the same as the workspace
+            // being gone, and the pane stays for the terminal in it.
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_reconciled_ready")
         } else if AppKitController.shouldRefreshVisibleWorkspaceDetail(
