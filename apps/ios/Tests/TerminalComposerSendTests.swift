@@ -157,7 +157,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
 
@@ -185,13 +185,50 @@
             try await waitUntilSendCompletes(model)
         }
 
+        /// The session ending is what discards the queued input, not the user leaving: a composed message
+        /// waiting behind a slow send would otherwise drain into a terminal whose process is gone. That
+        /// teardown runs from the state-apply path the reduction pipeline drives, so it has to fire for a
+        /// payload the model never saw arrive itself.
+        func testASessionEndingCancelsInputQueuedBehindASlowSend() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+
+            await model.sendText("blocking", asPaste: true)
+            try await waitUntilRecorderContains("send:blocking", recorder: recorder)
+            model.composerDraftText = "queued"
+            model.attachComposerImage(attachment("Screenshot"))
+            await model.sendComposedMessage()
+            XCTAssertTrue(model.isSendingComposedMessage)
+
+            await model.applyLatestState(terminatedState())
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertEqual(model.phase, .ended)
+            XCTAssertFalse(model.isSendingComposedMessage)
+            let tokens = await recorder.tokens()
+            XCTAssertFalse(tokens.contains("paste"), "the queued composed send must not reach a session that has ended")
+        }
+
+        private func terminatedState() -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:24:00Z",
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:24:00Z"),
+                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
         func testCancelingQueuedComposedSendClearsSendingState() async throws {
             let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
 
             await model.sendText("blocking", asPaste: true)
             try await waitUntilRecorderContains("send:blocking", recorder: recorder)
@@ -218,7 +255,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -242,7 +279,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "original"
             model.attachComposerImage(attachment("Screenshot"))
             let sentAttachmentID = try XCTUnwrap(model.composerAttachments.first?.id)
@@ -269,7 +306,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -291,7 +328,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 3)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 3)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -314,7 +351,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -335,7 +372,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -360,7 +397,7 @@
                 session: session(), settings: settings(),
                 onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -381,7 +418,7 @@
                 session: session(), settings: settings(),
                 onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
 
