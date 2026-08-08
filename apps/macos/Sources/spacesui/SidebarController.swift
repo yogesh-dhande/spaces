@@ -256,9 +256,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Alerts is where the app opens when the snapshot resolved no pane of its own — the launch
             // placeholder's spinner is what would otherwise be left on screen. This is the only place
             // that choice is made: the reconcile paths never navigate to Alerts, and this one runs once,
-            // off the initial load. `.userNavigation` because it is a landing, not a refresh, so it
-            // renders rather than being skipped as an unchanged repaint.
-            if host.detailPane == .none { host.showAlertsDetail(presentation: .userNavigation) }
+            // off the initial load. A background presentation on purpose: nothing has rendered an
+            // alerts pane yet, so the render cannot be skipped as an unchanged repaint, and a landing
+            // that raced a New Project / New Workspace form opened during loading must not dismiss it
+            // the way `.userNavigation` would.
+            if host.detailPane == .none { host.showAlertsDetail() }
             host.logStartupProfile("sidebar_snapshot_applied")
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):

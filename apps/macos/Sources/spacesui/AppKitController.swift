@@ -5117,10 +5117,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch action {
         case .leaveAlone: return
         case .clear:
-            // The block was established above to be this device's, so clearing it leaves the pane empty
-            // until `refreshSelection` re-resolves it.
+            // The block was established above to be this device's; `refreshSelection` re-resolves the
+            // pane from the selection. When it resolves nothing it renders nothing — reconciliation
+            // never navigates — and `presentDetailPane(.none)` records the pane without touching the
+            // container, so a recovery with no selection to return to has to paint the neutral
+            // placeholder itself or the retired block's views would stay on screen behind an empty
+            // pane record.
             presentDetailPane(.none)
             refreshSelection()
+            if detailPane == .none { showPlaceholder() }
         case .rerender:
             // `verdict` is guaranteed non-nil here: `.rerender` only comes from `blockRemedy` returning a
             // remedy, which itself requires a non-optional verdict.
