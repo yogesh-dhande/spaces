@@ -29,10 +29,10 @@
 
         /// An owner-interactive model plus a uniquely-named pasteboard, so no test touches the device's
         /// real clipboard. Returns the id the daemon would address a write for this session to.
-        private func makeOwnerModel(_ pasteboard: UIPasteboard) throws -> (model: TerminalViewerModel, ownerClientID: String) {
+        private func makeOwnerModel(_ pasteboard: UIPasteboard) async throws -> (model: TerminalViewerModel, ownerClientID: String) {
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
             model.pasteboardOverrideForTesting = pasteboard
             let ownerClientID = try XCTUnwrap(model.latestState?.attachmentSnapshot?.attachments.first(where: { $0.mode == .owner })?.clientID)
             return (model, ownerClientID)
@@ -75,7 +75,7 @@
 
         func testOwnerWritesTheCopiedTextToItsClipboard() async throws {
             try await withPasteboard { pasteboard in
-                let (model, ownerClientID) = try makeOwnerModel(pasteboard)
+                let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
 
                 await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied text"))
 
@@ -87,7 +87,7 @@
         /// the target check is what keeps a copy made on one device off every other device's clipboard.
         func testNonTargetClientLeavesItsClipboardAlone() async throws {
             try await withPasteboard { pasteboard in
-                let (model, _) = try makeOwnerModel(pasteboard)
+                let (model, _) = try await makeOwnerModel(pasteboard)
                 pasteboard.string = "what the user had"
 
                 await model.applyLatestState(clipboardPayload(targetClientID: "someone-elses-client", text: "not for this device"))
@@ -100,7 +100,7 @@
         /// owner's clipboard rather than leaving behind the content the program asked to remove.
         func testEmptyWriteClearsTheOwnersClipboard() async throws {
             try await withPasteboard { pasteboard in
-                let (model, ownerClientID) = try makeOwnerModel(pasteboard)
+                let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
                 pasteboard.string = "stale copy"
 
                 await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: ""))
@@ -116,7 +116,7 @@
         /// Nothing it carries is applied, and the copy is judged against ownership as it stands now.
         func testClipboardWritePayloadDoesNotBecomeSessionState() async throws {
             try await withPasteboard { pasteboard in
-                let (model, ownerClientID) = try makeOwnerModel(pasteboard)
+                let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
                 let installedEmittedAt = model.latestState?.emittedAt
                 let installedTitle = model.latestState?.title
 
@@ -134,7 +134,7 @@
         /// has copied since.
         func testALaterPayloadDoesNotRepeatTheWrite() async throws {
             try await withPasteboard { pasteboard in
-                let (model, ownerClientID) = try makeOwnerModel(pasteboard)
+                let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
                 await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied once"))
                 XCTAssertEqual(pasteboard.string, "copied once")
 
@@ -142,6 +142,11 @@
                 await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output))
 
                 XCTAssertEqual(pasteboard.string, "what the user copied next")
+                // The second payload carries no attachment snapshot of its own, so this must come from
+                // the reduction chain carrying the owner attachment forward, not from this payload
+                // replacing it outright — the failure mode an unseeded chain produces silently, with
+                // nothing above failing to point at it.
+                XCTAssertTrue(model.isOwner, "a later frameless payload must not drop ownership the chain was seeded with")
             }
         }
     }

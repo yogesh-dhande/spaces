@@ -535,6 +535,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("takeover_begin")
         do {
             let takeoverState = try await takeOverTerminal(timeout: Self.inputRequestTimeout)
+            // This await sits behind the reduction pipeline's strict FIFO: whatever the live subscription
+            // already submitted ahead of this response reduces first, and only then does the takeover
+            // response reduce and apply. That is accepted rather than worked around: reduction is off the
+            // main actor and keeps up with a single subscription's flush rate, so the backlog it can be
+            // behind is small and draining, and the alternative — jumping this response to the front of the
+            // queue — would apply it against a reduction chain that has not yet seen everything submitted
+            // before it, corrupting the delta baseline the chain depends on staying in submission order.
+            // `isBusy` and `isAwaitingTakeoverConfirmation` are held across the wait by design, so the UI
+            // stays in its "taking over" state for the whole ride rather than settling early on stale state.
             if let takeoverState { await applyLatestState(takeoverState) }
             if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
             errorMessage = nil
@@ -1355,6 +1364,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             logPerformanceEvent(
                 name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
                 attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
+            // Same trade as the takeover apply: this await rides the reduction pipeline's strict FIFO
+            // behind whatever the live subscription queued ahead of it — for the connect bootstrap fetch,
+            // behind whatever the subscription flushed while the fetch was in flight — rather than jumping
+            // the queue, because reduction is off-main, keeps up with a single subscription's rate, and
+            // depends on seeing every payload in submission order to keep its delta baseline valid. Callers
+            // hold their own transitional flag across the wait by design (`isConnecting` for the connect
+            // bootstrap, `isBusy` for takeover confirmation), so the UI does not settle out of that state
+            // until the fetched payload has actually landed.
             if applyToLatestState { await applyLatestState(fetchedState) }
             return fetchedState
         } catch {
@@ -1951,17 +1968,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// observable state, the clipboard one-shot, the resync request, and the metrics.
     private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
         defer { noteStateApplied(coalescedAwayCount: output.coalescedAwayCount) }
+        let incomingPayload = output.incomingPayload
+        // The one-shot runs first and unconditionally, ahead of the stop guard below: a clipboard write is
+        // an event, not state, and the direct `.state` refresh runs alongside the live subscription, so a
+        // refresh can install newer state before an older stream event carrying the copy arrives. It reads
+        // ownership from the state installed so far, which is why it runs ahead of the `latestState` move
+        // further down. A payload reduced after `beginStop` still carries a copy the user made before the
+        // stop, so the write must land even though everything past the guard below will not.
+        applyClipboardWrite(from: incomingPayload)
         // A stopped model has already released the stream, the queued input, and the ownership state this
         // would touch; a payload the pipeline was still reducing when `beginStop` ran must land nowhere
         // rather than resurrect an attachment the stop tore down. Ordering is unaffected: the pipeline
         // keeps chaining, so a later `start()` resumes from the same reduction chain.
         guard !isStopping else { return }
-        let incomingPayload = output.incomingPayload
-        // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and the
-        // direct `.state` refresh runs alongside the live subscription, so a refresh can install newer
-        // state before an older stream event carrying the copy arrives. It reads ownership from the state
-        // installed so far, which is why it runs ahead of the `latestState` move below.
-        applyClipboardWrite(from: incomingPayload)
         // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen state,
         // and its runtime/attachment snapshot is a repeat of the output turn that carried the escape
         // sequence — so the pipeline reduces nothing for it. Reducing an out-of-order one would rewind
@@ -2019,9 +2038,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         if !isOwnerAfterMerge {
             // The frame this model holds was exported for the ownership it just lost, so drop it from the
             // state the viewer presents. Only this main-actor mirror is cleared; the pipeline's reduction
-            // chain is left alone, because `merged(with:)` already refuses to carry a render update across
-            // an ownership change and a delta stamped with the new owner epoch fails the applier's own
-            // epoch check and resyncs.
+            // chain is left alone. That is not because `merged(with:)` scrubs the render update out of the
+            // chain across the handoff — it does not: `ownerChanged` only gates the one merge where the
+            // incoming payload itself carries the new attachment snapshot, so the pipeline's own
+            // `previousPayload` can still be carrying a render update stamped with the old owner epoch, and
+            // the very next frameless payload merges that value straight back in (`ownerChanged` reads
+            // false on every merge afterwards, since the attachment snapshot no longer changes). What
+            // actually keeps a stale frame off the screen is the owner-epoch gate on both ends of the wire:
+            // the daemon's `GhosttyRenderUpdateFactory.canDelta` refuses to build a delta once the export
+            // baseline's `ownerEpoch` no longer matches the frame's, forcing the first export after a
+            // handoff to a full frame (GhosttyRenderUpdate.swift:326-329), and `GhosttyRenderUpdateApplier`
+            // enforces the same equality when applying a delta on this client, so a delta stamped for an
+            // epoch this client's baseline never saw throws `ownerEpochMismatch` and drives a resync
+            // instead of drawing it.
             if wasOwner, !isEndedState, let latestState { self.latestState = payloadByClearingScreenState(latestState) }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
@@ -2206,21 +2235,42 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).
     /// Sets the same preconditions the real owner-bootstrap path establishes: this client owns the
     /// session, input readiness is confirmed, and an owner render epoch carries `ownerEpoch`.
-    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) {
+    ///
+    /// Submitted through `applyLatestState` rather than assigned to `latestState` directly, so the
+    /// reduction pipeline's own chain is seeded with this payload. An unseeded chain has no
+    /// `previousPayload` to merge the next real submission against, so that submission would replace
+    /// this owner attachment outright instead of carrying it forward — silently dropping ownership out
+    /// from under whatever the test does next, rather than raising anything a caller would notice.
+    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) async {
         let ownerAttachment = TerminalAttachment(sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
         let runtime = TerminalSessionRuntimeState(
             sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
-        latestState = GhosttyRemoteSessionStatePayload(
+        let payload = GhosttyRemoteSessionStatePayload(
             sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-01-01T00:00:00Z", sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
             workingDirectory: session.workingDirectory, outputByteCount: 0)
+        await applyLatestState(payload)
+        // A real apply that turns this client into the owner (`wasOwner` false going in) schedules the
+        // live ownership-synchronization round trip the owner-bootstrap path always runs after taking
+        // over — see the `scheduleOwnershipSynchronization()` call in `applyReducedState`. That round
+        // trip needs a subscribe stream and daemon responses this helper does not set up, and while it
+        // is pending, `phase` reads `.ownerSynchronizing` rather than `.ownerInteractive`, so
+        // `acceptsInput` is false and every send silently no-ops. This helper's whole point is handing
+        // the caller an owner that is already past that handshake, so the scheduled work is cancelled
+        // immediately behind it rather than left to race whatever the test does next.
+        ownershipSynchronizationTask?.cancel()
+        ownershipSynchronizationTask = nil
+        isOwnershipSynchronizationScheduled = false
+        isSynchronizingOwnership = false
+        needsOwnershipSynchronizationAfterCurrentRun = false
+        // The payload above carries no render update, so the apply above never sets an owner render
+        // epoch on its own; that piece is still injected directly, same as before.
         let bootstrapSnapshot = GhosttyTerminalSnapshot(
             columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0,
             cells: [])
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: session.id, id: "owner|test", ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
-        hasAttachedToSession = true
         hasAttemptedAutomaticTakeover = true
         hasConfirmedOwnerInputReadiness = true
         isInputSurfaceReady = true
