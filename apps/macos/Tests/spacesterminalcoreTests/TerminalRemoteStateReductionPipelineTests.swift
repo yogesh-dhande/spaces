@@ -309,6 +309,41 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertEqual(collector.recorded.map(\.coalescedAwayCount), [0, 0])
     }
 
+    /// The other leg of `ApplyMailbox.mayCollapse`'s frame check: a frameless run collapses onto itself
+    /// exactly like a frame-carrying one. `input` never carries a render update
+    /// (`TerminalRemoteSessionStatePolicy.shouldIncludeScreenState` excludes screen state for it), so
+    /// `pending.reduction?.frameToApply == nil` holds on every entry, satisfying `mayCollapse`'s
+    /// "the pending entry never carried one either" branch — nothing is lost by collapsing, unlike
+    /// `testFramelessCoalescibleOutputCannotAbsorbAPendingFrame` where a frame-carrying entry sat ahead
+    /// of the frameless one. This is the leg that keeps a pure input storm (rapid keystrokes with no
+    /// accompanying screen content) from rebuilding an unbounded backlog the way a frame-losing collapse
+    /// would have to be refused for.
+    func testFramelessCoalescibleOutputCollapsesOntoAnotherFramelessOutput() async throws {
+        let sessionID = "pipeline-frameless-collapse"
+        let payloads = (0..<5).map { inputPayload(sessionID: sessionID, sequence: $0) }
+
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let probe = SubmitProbe()
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) },
+            didSubmitForTesting: { probe.recordSubmission() })
+
+        // All five land in the mailbox while the main thread is held, so nothing can apply until the
+        // release below — exactly the burst a pure input storm produces when the main actor is busy.
+        let release = blockMainThread()
+        for payload in payloads { pipeline.submit(payload) }
+        try await waitUntil("every payload submitted to the mailbox") { probe.submissions == payloads.count }
+        release.signal()
+
+        try await waitUntil("the burst applied") { !collector.recorded.isEmpty }
+        try await settle()
+        XCTAssertEqual(collector.recorded.count, 1, "a frameless run must collapse to a single apply")
+        XCTAssertEqual(collector.recorded.first?.reason, TerminalRemoteSessionStateReason.input)
+        XCTAssertEqual(collector.recorded.first?.frameText, nil)
+        XCTAssertEqual(collector.recorded.first?.coalescedAwayCount, 4)
+    }
+
     /// A delta that cannot apply resets the baseline inside the reducer. The reset belongs to its place
     /// in the series: the payloads after it must see the cleared baseline, and the full frame that
     /// follows must re-seed it, all without any of them overtaking the others. Submissions are paced so
@@ -350,21 +385,37 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertEqual(collector.recorded.map(\.frameText), ["alpha", nil, nil, "charl"])
     }
 
-    /// Teardown: the pipeline goes away with its owner. Whatever was still queued is dropped rather
-    /// than reduced for an owner that no longer exists, and nothing is applied to the released target.
+    /// Teardown: the pipeline goes away with its owner, and application must not keep running against
+    /// a released target. `ApplyMailbox.drain()` copies whatever is queued into one segment
+    /// (`takeQueuedSegment`) before applying any of it, so release cannot cut a segment off mid-flight
+    /// once `drain()` has captured it — what actually stops applies is the `[weak target]` capture
+    /// below going nil: every remaining call in an already-captured segment still runs, but finds
+    /// `target` nil and does nothing.
     ///
     /// Built from `session_metadata` payloads deliberately, not the usual streaming series: those are
-    /// screen-content reasons that coalesce on apply, so a 200-payload burst of them collapses to at
-    /// most a handful of applies regardless of teardown — `appliedAfterRelease < series.count` would
-    /// pass trivially on coalescing alone and prove nothing about release actually stopping the drain.
-    /// `session_metadata` is a barrier reason (see `sessionMetadataPayload`): every payload queues its
-    /// own apply, so the count below can only stay small because release cut the drain off mid-queue.
+    /// screen-content reasons that coalesce on apply, so a burst of them collapses to at most a handful
+    /// of applies regardless of teardown, proving nothing about release. `session_metadata` is a
+    /// barrier reason (see `sessionMetadataPayload`): every payload queues its own apply.
+    ///
+    /// The series is short and `applyDelay` deliberately large: reduction has no meaningful cost for
+    /// this reason, so a burst can land in the mailbox as a single segment before the first drain even
+    /// runs, and from then on `applyDelay` is the only thing pacing how many entries actually apply
+    /// before this test releases the target. `drain()`'s loop over that segment is tight and
+    /// synchronous, so the entry right after the one that fulfills `firstApply` almost always has its
+    /// `target?` already evaluated as non-nil before this test's `await fulfillment` even resumes on
+    /// its own thread — one further apply beyond the first is normal and this test waits for it to
+    /// finish, rather than racing to sample the count before it lands. A short `applyDelay` (as this
+    /// test used to use) shrinks that already-tight window further, so under scheduling jitter (worse
+    /// under parallel test load) more than one extra entry could start before release ever lands, up to
+    /// the whole segment in the worst case — which is what made this test flake; a delay measured in
+    /// hundreds of milliseconds keeps that a non-issue on any machine this test plausibly runs on.
     func testReleasingThePipelineStopsApplyingQueuedPayloads() async throws {
-        let series = (0..<200).map { sessionMetadataPayload(sessionID: "pipeline-teardown", sequence: $0) }
+        let applyDelay = 0.3
+        let series = (0..<5).map { sessionMetadataPayload(sessionID: "pipeline-teardown", sequence: $0) }
         let collector = OutputCollector()
         let firstApply = expectation(description: "first payload applied")
         firstApply.assertForOverFulfill = false
-        var target: ApplyTarget? = ApplyTarget(collector: collector, applyDelay: 0.002)
+        var target: ApplyTarget? = ApplyTarget(collector: collector, applyDelay: applyDelay)
         weak var weakTarget = target
         var pipeline: TerminalRemoteStateReductionPipeline? = TerminalRemoteStateReductionPipeline(
             shouldUseFrame: { _, _ in true },
@@ -379,12 +430,15 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
 
         pipeline = nil
         target = nil
-        try await Task.sleep(for: .milliseconds(300))
+        // Give the one apply that is almost certainly already in flight (see the doc comment above)
+        // a full `applyDelay` of headroom to finish before sampling, so the sample below reflects a
+        // settled count rather than racing an apply that simply had not returned yet.
+        try await Task.sleep(for: .seconds(applyDelay * 3))
         let appliedAfterRelease = collector.recorded.count
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(collector.recorded.count, appliedAfterRelease, "the pipeline applied a payload after its owner was released")
-        XCTAssertLessThan(appliedAfterRelease, series.count, "the pipeline drained its queue instead of stopping with its owner")
+        XCTAssertLessThan(appliedAfterRelease, series.count, "an apply ran against a released target instead of finding it nil")
         XCTAssertNil(weakPipeline, "the consumer task outlived the pipeline")
         XCTAssertNil(weakTarget, "the pipeline held its apply target strongly")
     }

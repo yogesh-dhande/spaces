@@ -35,14 +35,14 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// mailbox to actually drop it; see `ApplyMailbox.mayCollapse` for the full rule, which also checks
     /// whether a frame would be lost.
     ///
-    /// Derived from the notification routing rather than listed as its own table: a reason that posts
-    /// exactly the output-shaped notification describes screen content and carries no state transition
-    /// of its own (see `TerminalRemoteSessionStateNotificationRouting`), and a newer frame renders
-    /// everything an older frame would have. Every reason that *does* carry a transition (attachment,
-    /// ownership, session metadata, runtime state, termination) posts a different notification, and
-    /// `clipboard_write` posts none because its effect is a pasteboard write whose position among the
-    /// state around it matters. Both are barriers, as is a reason this build does not know, which is
-    /// the safe side to fail on.
+    /// Derived from the notification routing rather than listed as its own table:
+    /// `TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason:)` is true for a reason that
+    /// posts exactly the output-shaped notification, describing screen content with no state transition
+    /// of its own, and a newer frame renders everything an older frame would have. Every reason that
+    /// *does* carry a transition (attachment, ownership, session metadata, runtime state, termination)
+    /// posts a different notification, and `clipboard_write` posts none because its effect is a
+    /// pasteboard write whose position among the state around it matters. Both are barriers, as is a
+    /// reason this build does not know, which is the safe side to fail on.
     ///
     /// This property alone says nothing about whether the payload actually carries a frame: `input`
     /// routes here despite never exporting screen state, and a delta that failed to reduce against a
@@ -50,7 +50,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// an older frame would have" only holds when the newer output has one — `ApplyMailbox.mayCollapse`
     /// is what checks that before actually collapsing.
     var isCoalescibleOnApply: Bool {
-        TerminalRemoteSessionStateNotificationRouting.notifications(forReason: incomingPayload.reason) == [.spacesTerminalOutputDidChange]
+        TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason: incomingPayload.reason)
     }
 
     /// This output, carrying forward the one-shot effects of the older output it replaces. Nothing

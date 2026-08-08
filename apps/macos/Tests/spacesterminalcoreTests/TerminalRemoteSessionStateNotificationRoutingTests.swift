@@ -58,4 +58,29 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
         XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: "not_a_reason"), [])
         XCTAssertEqual(TerminalRemoteSessionStateNotificationRouting.notifications(forReason: ""), [])
     }
+
+    /// `isOutputShaped(reason:)` is an allocation-free stand-in for
+    /// `notifications(forReason:) == [.spacesTerminalOutputDidChange]`, used on the reduce loop's hot
+    /// path (`TerminalRemoteStateReductionOutput.isCoalescibleOnApply`) instead of building the two
+    /// `[Notification.Name]` arrays that comparison allocates on every call. The two must never drift:
+    /// this checks the predicate against the array comparison it stands in for, across every reason this
+    /// table declares plus an unknown one, so a reason added to one side without the other fails here
+    /// instead of silently changing what coalesces.
+    func testIsOutputShapedStaysConsistentWithNotificationsForReason() {
+        let declaredReasons = [
+            TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.attachmentState,
+            TerminalRemoteSessionStateReason.sessionMetadata, TerminalRemoteSessionStateReason.input,
+            TerminalRemoteSessionStateReason.inputOutput, TerminalRemoteSessionStateReason.output,
+            TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll,
+            TerminalRemoteSessionStateReason.clearScreen, TerminalRemoteSessionStateReason.runtimeState,
+            TerminalRemoteSessionStateReason.resize, TerminalRemoteSessionStateReason.terminated,
+            TerminalRemoteSessionStateReason.clipboardWrite,
+        ]
+        for reason in declaredReasons + ["not_a_reason", ""] {
+            let expected = TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason) == [.spacesTerminalOutputDidChange]
+            XCTAssertEqual(
+                TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason: reason), expected,
+                "isOutputShaped(reason: \(reason)) must agree with notifications(forReason:) == [.spacesTerminalOutputDidChange]")
+        }
+    }
 }

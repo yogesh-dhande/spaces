@@ -913,13 +913,17 @@ public enum SpacesDeviceClient {
     /// deadline is tight enough (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`,
     /// 5s) that a live, merely congested link can miss it too: the send itself never touches the main
     /// actor (`TerminalInputSerialQueue.enqueue` hands off to a detached task that calls the pinned-TLS
-    /// connection directly), but interactive sends and the `.state` resync fetch share one per-session
-    /// request client (`SpacesDeviceAPIRequestSessionClient`) whose requests serialize behind a single
-    /// lock — under heavy streaming a keystroke queued behind a grid-sized resync fetch can miss the
-    /// deadline on wait time alone, with the link itself never having done anything wrong. A silent link
-    /// death (a connect that never reaches ready, or a request nothing answers) produces the identical
-    /// timeout, so a timeout alone does not prove the link is fine either — it is inconclusive in both
-    /// directions. A caller that needs to tell those two apart (see
+    /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
+    /// request client (`SpacesDeviceAPIRequestSessionClient`), and `send` acquires that client's request
+    /// lock before starting the per-operation deadline inside `sendOnceLocked` — so a keystroke queued
+    /// behind a grid-sized resync fetch is not charged for the wait, it gets a fresh 5s window the moment
+    /// its turn comes. What actually costs it that window: `SpacesPinnedTLSConnection.readLine(timeout:)`
+    /// throws `.timeout` whenever the ANSWER itself is late, and under heavy streaming the daemon's own
+    /// serial terminal-engine queue — effectively one core wide — is saturated, so a keystroke's response
+    /// can genuinely run behind schedule with the link itself never having done anything wrong. A silent
+    /// link death (a connect that never reaches ready, or a request nothing answers) produces the
+    /// identical timeout, so a timeout alone does not prove the link is fine either — it is inconclusive
+    /// in both directions. A caller that needs to tell those two apart (see
     /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which uses this to decide whether a failed
     /// keystroke send also proves every other queued keystroke should be discarded) calls this in addition
     /// to `isDeviceAPITransportFailure`, and gets its conclusive answer from the already-confirmed-outage

@@ -606,13 +606,16 @@
         ///  - a bare request timeout (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) returns `false` after
         ///    doing the side effects above — the deadline elapsed, but on the hot per-keystroke path
         ///    (`interactiveControlRequestTimeoutSeconds`, 5s) a live link can miss it too: interactive
-        ///    sends and the `.state` resync fetch share one per-session request client whose requests
-        ///    serialize behind a single lock, so under heavy streaming a keystroke queued behind a
-        ///    grid-sized resync fetch can time out on wait alone, with nothing wrong with the link. A
-        ///    silently dead link (nothing ever answers) produces the identical timeout, so a timeout alone
-        ///    is not proof either way — conclusive discard comes only from the branches below, never from
-        ///    a bare timeout; discarding on the timeout alone would drop keystrokes the link stalled but
-        ///    never lost;
+        ///    sends and the `.state` resync fetch share one per-session request client, which acquires its
+        ///    request lock before starting the per-operation deadline, so a keystroke queued behind a
+        ///    grid-sized resync fetch is not charged for that wait — it gets a fresh 5s window once its
+        ///    turn comes. What actually burns that window is the daemon's own answer running late: under
+        ///    heavy streaming the daemon's serial terminal-engine queue is saturated, so a keystroke's
+        ///    response can genuinely miss the deadline with nothing wrong with the link. A silently dead
+        ///    link (nothing ever answers) produces the identical timeout, so a timeout alone is not proof
+        ///    either way — conclusive discard comes only from the branches below, never from a bare
+        ///    timeout; discarding on the timeout alone would drop keystrokes the link stalled but never
+        ///    lost;
         ///  - a connection-level failure (refused, closed, every candidate unreachable) returns `true` —
         ///    conclusive that the transport itself gave up, not merely that one round trip missed its clock;
         ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)

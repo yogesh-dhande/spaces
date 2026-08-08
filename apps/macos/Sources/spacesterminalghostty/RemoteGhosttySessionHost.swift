@@ -22,14 +22,17 @@
     /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that a live but
     /// congested link can miss it on its own: the send path never touches the main actor
     /// (`TerminalInputSerialQueue.enqueue` hands off to a detached task that talks to the pinned-TLS
-    /// connection directly), but interactive sends and the `.state` resync fetch share one per-session
-    /// request client whose requests serialize behind a single lock, so under heavy streaming a keystroke
-    /// queued behind a grid-sized resync fetch can time out on wait alone. Discarding a live pane's
-    /// backlog on that false alarm is the bug this distinction exists to avoid — and a silently dead link
-    /// (nothing ever answers) produces the identical timeout, so the timeout by itself is not conclusive
-    /// either way. Only a connection-level failure (refused, closed, every candidate address unreachable)
-    /// — or a repeat failure during an outage a prior conclusive failure already confirmed — answers
-    /// `true`.
+    /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
+    /// request client, which acquires its request lock before starting the per-operation deadline, so a
+    /// keystroke queued behind a grid-sized resync fetch is not charged for that wait — it gets a fresh
+    /// 5s window once its turn comes. What actually burns that window is the daemon's own answer running
+    /// late: under heavy streaming the daemon's serial terminal-engine queue is saturated, so a
+    /// keystroke's response can genuinely time out with nothing wrong with the link. Discarding a live
+    /// pane's backlog on that false alarm is the bug this distinction exists to avoid — and a silently
+    /// dead link (nothing ever answers) produces the identical timeout, so the timeout by itself is not
+    /// conclusive either way. Only a connection-level failure (refused, closed, every candidate address
+    /// unreachable) — or a repeat failure during an outage a prior conclusive failure already confirmed —
+    /// answers `true`.
     public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (

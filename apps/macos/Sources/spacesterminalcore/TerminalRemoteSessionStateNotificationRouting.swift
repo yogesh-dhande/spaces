@@ -65,4 +65,26 @@ public enum TerminalRemoteSessionStateNotificationRouting {
             return []
         }
     }
+
+    /// Whether `reason` routes to exactly `[.spacesTerminalOutputDidChange]` — the same test
+    /// `TerminalRemoteStateReductionOutput.isCoalescibleOnApply` needs on every mailbox submit, but
+    /// answered without building the two `[Notification.Name]` arrays `notifications(forReason:)`
+    /// allocates to make that comparison. A switch over the same reasons costs nothing per call, which
+    /// matters here: the reduce loop calls this once per payload on a session under steady output,
+    /// several times a second for as long as the session streams.
+    ///
+    /// This must stay consistent with `notifications(forReason:) == [.spacesTerminalOutputDidChange]`
+    /// for every reason — enforced by `TerminalRemoteSessionStateNotificationRoutingTests`, which checks
+    /// this predicate against that comparison for every declared reason plus an unknown one, so the two
+    /// cannot drift apart as reasons are added.
+    public static func isOutputShaped(reason: String) -> Bool {
+        switch reason {
+        case TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
+            TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
+            TerminalRemoteSessionStateReason.resize:
+            return true
+        default:
+            return false
+        }
+    }
 }
