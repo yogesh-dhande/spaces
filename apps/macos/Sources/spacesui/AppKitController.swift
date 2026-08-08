@@ -4883,7 +4883,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let previousWorkspaceID = selectedWorkspaceID
         selectedProjectID = nil
         selectedWorkspaceID = nil
+        // Suppressed so the outline delegate does not classify this programmatic deselection as the user
+        // clicking empty space — its no-selection branch presents as `.userNavigation`, which would close
+        // an open form window over a background reload.
+        suppressOutlineSelectionChanges = true
         outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         showPlaceholder()
