@@ -391,15 +391,252 @@
             let workspace = makeOverview().workspaces[0]
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
 
-            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isMutating, "a delete never holds the app-wide mutation gate (#450)")
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
 
             await gate.open()
             await delete.value
 
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// Before #450 was fixed, `deleteWorkspace` held the app-wide `isMutating` flag for its whole
+        /// duration, so a second workspace's delete — sent on its own private channel and with no bearing
+        /// on the first — was rejected by the same guard, silently. Neither call is rejected now: both
+        /// mark their own workspace immediately, and workspace-docs's delete is not dropped just because
+        /// workspace-feature's is still unresolved — it queues behind it (`pendingDeleteChains`, review
+        /// round 2 finding 1) and completes on its own once the queue reaches it. See
+        /// `testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests` for the queue's ordering
+        /// guarantee itself; this test's focus is that queuing is not rejection.
+        func testDeleteOfOneWorkspaceDoesNotRejectADeleteOfAnother() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+
+            // Deletes are chained now, so a call that would otherwise block until its predecessor resolves
+            // has to run on its own task rather than be awaited directly here.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // Neither call was refused: both rows read as deleting even though workspace-docs's request has
+            // not been sent yet (it is queued behind workspace-feature's, still held open by the gate).
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-docs"))
+
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            // workspace-docs's delete reached the daemon and completed on its own once the queue got to
+            // it, proving it was queued rather than dropped.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// The daemon runs every `archiveWorkspace`/`deleteProject` request off one serial per-daemon
+        /// queue and only marks a workspace as tearing down once that request is dequeued. Two requests
+        /// issued back to back from this client could therefore both sit on that queue at once; if the
+        /// first is still occupying it past this client's 30s request timeout, the second — still queued,
+        /// still unregistered — would time out too and reconcile to a false failure, even though the
+        /// daemon goes on to delete it anyway (review round 2, finding 1). `pendingDeleteChains` closes the
+        /// window by construction: this proves this client never has two `archiveWorkspace` requests on
+        /// the same daemon's wire at once, regardless of which workspaces they target. Both deletes here
+        /// target the same device (no identity change), so they share one chain key; see
+        /// `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete` for proof that a
+        /// *different* device's delete gets its own key and is not serialized against this one.
+        func testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests() async {
+            let gate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                // Blocks every archiveWorkspace request, regardless of which workspace it targets, so the
+                // recorder can prove the second is never even sent while the first is unresolved.
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // The mark is set synchronously, before the chained task that actually sends the request even
+            // starts running, so waiting for it is not enough to prove the request reached the daemon.
+            // Wait for the recorder to see it directly.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request cannot appear here no matter how long this waits: `pendingDeleteChains`
+            // makes it wait on workspace-feature's whole call (same device, same chain key), which is
+            // parked on the still-closed gate.
+            var requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace"], "the second delete's request must not be sent while the first is still unresolved")
+
+            await gate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            guard case .archiveWorkspace(let firstPayload)? = requests.first?.command,
+                case .archiveWorkspace(let secondPayload)? = requests.last?.command
+            else {
+                XCTFail("Expected two archiveWorkspace requests.")
+                return
+            }
+            XCTAssertEqual(firstPayload.workspaceID, "workspace-feature", "the first request sent must be whichever delete was issued first")
+            XCTAssertEqual(secondPayload.workspaceID, "workspace-docs")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// `pendingDeleteChains` keys its tail by `overviewIdentity`, not one shared tail, because two
+        /// different devices have two independent daemon teardown queues: a delete against device B has
+        /// no business waiting out a delete against device A (review round 3, finding 1). There is no
+        /// second real paired device/backend in this harness, so this reuses the same seam the earlier
+        /// device-switch delete tests already rely on (`handleAuthenticationFailure`, which bumps
+        /// `overviewIdentity` exactly as a real device switch does) rather than standing up a second
+        /// `SpacesDeviceAPIClient`; that is enough to exercise the keying itself, since the chain keys on
+        /// the identity value alone.
+        func testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // Confirms workspace-feature's request is actually parked on the gate (its chain entry is a
+            // still-unresolved task) before switching, so the test proves independence rather than luck.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Stands in for switching to a different paired device: bumps `overviewIdentity`, the value
+            // `pendingDeleteChains` keys on, the same way `SpacesMobileAppModel.selectDevice` does.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request reaches the daemon without waiting for workspace-feature's gate to
+            // open: different `overviewIdentity` at call time means a different chain entry.
+            while await recorder.snapshot().count < 2 { await Task.yield() }
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "still unresolved, untouched by the device switch")
+
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+        }
+
+        /// A delete still waiting in the per-daemon queue when the active device switches is cancelled,
+        /// not carried out in the background against the device the app no longer shows (#450 review
+        /// round 4, finding 1): `performDeleteWorkspace`'s identity guard clears the pending mark and now
+        /// also surfaces `errorMessage` naming the workspace, since a confirmed destructive action the
+        /// user asked for must not go silently unperformed. Driven with the same
+        /// `handleAuthenticationFailure` identity-bump seam as the other device-switch tests: the switch
+        /// has to land while workspace-docs's delete is still queued behind workspace-feature's (both
+        /// issued against the same, still-current device), not after, or `pendingDeleteChains` would key
+        /// workspace-docs's delete under the new identity instead and it would never reach this guard at
+        /// all — see `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete`.
+        func testQueuedDeleteCancelledByADeviceSwitchSurfacesAnErrorAndClearsItsMark() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Queued behind workspace-feature's still-unresolved delete, on the same (still-current)
+            // device, so it shares its chain key and has to wait its turn.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+            XCTAssertNil(model.errorMessage, "not surfaced yet: workspace-docs's delete has not reached its guard")
+
+            // The active device changes while workspace-docs's delete is still parked in the queue.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            // Releases workspace-feature's delete; workspace-docs's turn comes right after and finds the
+            // identity it queued under no longer current.
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "cancelled, not left marked forever")
+            XCTAssertEqual(
+                model.errorMessage,
+                "\"docs\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device.")
+            // Only one archiveWorkspace request was ever sent: workspace-docs's delete was cancelled
+            // before it reached the network, not executed against the device it queued against.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"])
         }
 
         /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
@@ -449,6 +686,60 @@
             XCTAssertEqual(model.overview, overviewWithoutFeature)
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
             XCTAssertNil(model.deletedWorkspaceNotice, "no branch deletion was requested, so a reconciled delete stays silent")
+        }
+
+        /// Before #450 review round 5, `reconcileWorkspaceDeletionOutcome` captured its staleness snapshot
+        /// after `fetchOverview` returned rather than before it was even sent, so a concurrent mutation
+        /// that landed and published while this fetch was still in flight bumped `mutationGeneration`
+        /// before the capture ever ran; the capture then trivially matched the already-bumped value and
+        /// this now-stale fetch overwrote the fresher published overview. Gating reconciliation's own
+        /// overview fetch and letting an unrelated mutation land and publish while it is still gated
+        /// reproduces that ordering directly.
+        func testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            // Distinct from both `baseOverview` (feature running) and `overviewWithoutFeature` (feature
+            // absent), so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "archiveWorkspace": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
+
+            let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
+            // Waits for reconciliation's own overview fetch to actually be sent and gated, not merely for
+            // the archiveWorkspace timeout: the mark alone does not prove the request reached the daemon.
+            while (await recorder.snapshot()).map(\.commandName) != ["archiveWorkspace", "overview"] { await Task.yield() }
+
+            // An unrelated mutation against a different workspace lands and publishes while reconciliation's
+            // own fetch is still gated.
+            await model.stopWorkspace(docsWorkspace)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            await delete.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
         }
 
         /// The branch-deletion report exists only in the archive response, so when that response is lost
@@ -557,7 +848,7 @@
             model.overview = baseOverview
 
             let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
             // The archive has already failed with a timeout and the reconciliation refetch is parked here.
             XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the timed-out delete keeps its mark while it reconciles")
 
@@ -959,7 +1250,7 @@
             model.overview = makeOverview()
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
             // A real connection change while the delete is still parked in its request: this resets the
             // connection and bumps the overview identity, exactly as a device switch does.
             model.handleAuthenticationFailure(message: "Pair this device again.")
@@ -1192,6 +1483,62 @@
             XCTAssertFalse(model.isMutating)
         }
 
+        /// Before #450 review round 5, `reconciledSessionAfterMutationTimeout` published its refetched
+        /// overview unconditionally — no generation check at all, only the identity guard. A concurrent
+        /// mutation that landed and published a fresher overview while this recovery fetch was still in
+        /// flight was silently overwritten by this now-stale one once it resumed. Gating the recovery
+        /// fetch and letting an unrelated mutation land and publish while it is still gated reproduces
+        /// that ordering directly, the same technique as
+        /// `testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch`.
+        func testMutationTimeoutRecoveryDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-old", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            let staleOverview = makeOverview(sessions: [makeSession(id: "session-api-stale")], featureProcessRows: [oldRow])
+            // Distinct from `staleOverview`, so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "runWorkspaceProcess": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let baseOverview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
+
+            let run = Task { await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow))) }
+            // Waits for the recovery's own overview fetch to actually be sent and gated, not merely for
+            // the runWorkspaceProcess timeout.
+            while (await recorder.snapshot()).map(\.commandName) != ["runWorkspaceProcess", "overview"] { await Task.yield() }
+
+            // An unrelated mutation against a different workspace lands and publishes while the recovery
+            // fetch is still gated. Deletes, not a shared-channel action like Stop: `run` above is still
+            // holding `isMutating` for its whole reconciliation, and a shared-channel mutation would be
+            // silently refused by that same gate rather than actually racing this fetch.
+            await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            _ = await run.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
+        }
+
         func testRefreshedSessionLookupIgnoresVisibleFilters() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
@@ -1199,6 +1546,48 @@
 
             XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).isEmpty)
             XCTAssertEqual(model.refreshedSession(forRowID: "process:process-api")?.id, "session-api")
+        }
+
+        /// `terminalSession(for:in:)` and `refreshedSession(forRowID:in:)` are what
+        /// `performMutationReturningSession` and `reconciledSessionAfterMutationTimeout` read from to
+        /// answer whether their own action produced a session (#450 review round 7): both take the
+        /// overview to search explicitly, defaulting to the model's published one for every other,
+        /// UI-facing caller, so a caller instead holding a specific mutation response or reconciliation
+        /// fetch reads that data's own verdict regardless of whether the same overview also won its
+        /// publish race against a fresher, unrelated one.
+        ///
+        /// The genuine race this protects against has no test-reachable suspension point in this harness
+        /// to reproduce deterministically: it requires another overview-derived operation to bump
+        /// `mutationGeneration` between a response's own bump and its own publish check, and
+        /// `updateBrowserRoutes` — the only await in between — returns before reaching any await of its
+        /// own once `activeDeviceID` is nil (the same seam gap already reported for its internal
+        /// generation guard in review round 5). This tests the mechanism the fix relies on directly
+        /// instead: that the explicit overview wins over the published one, not that a race can be staged.
+        func testTerminalSessionForRowReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            // The model's published overview knows nothing about the new session yet — as it would not,
+            // had this mutation's publish lost its ordering race against a fresher, unrelated one.
+            model.overview = makeOverview()
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(newRow))
+
+            XCTAssertNil(model.terminalSession(for: row), "the published overview has no matching session")
+            XCTAssertEqual(model.terminalSession(for: row, in: responseOverview)?.id, "session-api-new")
+        }
+
+        func testRefreshedSessionForRowIDReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            model.overview = makeOverview()
+
+            XCTAssertNil(model.refreshedSession(forRowID: "process:template-api"), "the published overview has no matching row")
+            XCTAssertEqual(model.refreshedSession(forRowID: "process:template-api", in: responseOverview)?.id, "session-api-new")
         }
 
         func testRuntimeRowLookupBySessionIgnoresVisibleFilters() {

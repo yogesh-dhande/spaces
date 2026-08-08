@@ -469,6 +469,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var daemonStatus: TerminalServiceDaemonStatus?
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
+    /// In flight for every mutation that rides the shared `commandChannel` — create, rename, hide/unhide,
+    /// launch/stop/restart, run — the same connection the overview poll uses. That connection does not
+    /// serialize whole request/response round trips (issue #248), so two of these in flight at once can
+    /// interleave and consume each other's responses; this flag is the app-wide gate that keeps them one
+    /// at a time. `deleteWorkspace` does not set it: a delete runs on its own private channel created for
+    /// that one call (see the comment above `deleteChannel`), so it never shares a connection with another
+    /// mutation and needs no slot in this queue. A delete's own concurrency rule — refusing a second delete
+    /// of the *same* workspace while the first is unresolved — is `isWorkspacePendingDeletion` instead, so
+    /// one workspace's delete never blocks a mutation, including another delete, on a different one (#450).
     var isMutating = false
     /// True while a requested daemon update has been sent and this app is polling the device for the
     /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
@@ -522,6 +531,52 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// first thing that can answer. In-memory and per-run like `workspaceIDsPendingDeletion`: a relaunch
     /// refetches reality rather than restoring a verdict that was never reached.
     private var workspaceDeletionsAwaitingOverview: [String: DeferredWorkspaceDeletion] = [:]
+    /// Tails of this client's per-daemon delete queues, keyed by the `overviewIdentity` snapshot the
+    /// delete was issued against: each `deleteWorkspace` call chains its work behind whatever task is
+    /// stored under its own key, then replaces that entry with its own, so at most one `archiveWorkspace`
+    /// request is ever in flight from this client to a given daemon at a time.
+    ///
+    /// This exists for a false-failure race, not wire safety — `deleteChannel` already isolates each
+    /// delete's own connection. The daemon runs every `archiveWorkspace`/`deleteProject` request off one
+    /// serial per-daemon queue and only marks a workspace as tearing down once that request is dequeued
+    /// (`workspaceTeardownQueue` / `withTeardownRegistered` on the daemon side). Two such requests issued
+    /// back to back from this client can therefore both be waiting on that one queue at once; if the
+    /// first is still occupying it past this client's 30s request timeout, the second — still queued,
+    /// still unregistered — times out too, and `reconcileWorkspaceDeletionOutcome` sees its workspace
+    /// listed with no teardown registered, which reads as a genuine failure. The daemon then dequeues and
+    /// deletes it anyway: the row would go back to normal and vanish moments later, having been reported
+    /// as a failed delete. Chaining closes the window by construction, since this client never has two
+    /// `archiveWorkspace` requests on the same daemon's queue at once to begin with (#450 review round 2).
+    ///
+    /// Keyed rather than a single tail (#450 review round 3): daemons are independent, each with its own
+    /// teardown queue, so a delete against device B has no business waiting out a delete against device
+    /// A's still-running reconciliation. `overviewIdentity` already is this model's notion of "which
+    /// connection a caller was talking to when it started," bumped on every device switch and reused
+    /// as-is here rather than introducing a second one; it is not quite "device" (switching away from and
+    /// back to the same device mid-delete mints two different keys for what is really one daemon), but
+    /// that narrower case is a rarer version of the same residual race already accepted below, not a new
+    /// one this keying introduces.
+    ///
+    /// A chain's own entry is not removed once its task completes — the dictionary is small (one entry
+    /// per device switch this run, not per delete) and, like `workspaceIDsPendingDeletion`, is in-memory
+    /// and per-run.
+    ///
+    /// Release on `.unknown`, and the residual race that leaves open: when a timed-out delete's
+    /// reconciliation (see `reconcileWorkspaceDeletionOutcome`) lands on `.unknown` — the daemon still
+    /// working, no verdict reached — this chain's task for it completes anyway, releasing the next queued
+    /// delete to send its own request even though the first workspace's teardown may still be occupying
+    /// the daemon's queue. A successor queued behind it can then hit the identical false-failure shape
+    /// this chain otherwise closes. This is deliberate, not an oversight: waiting the successor out until
+    /// the deferred delete resolves (`workspaceDeletionsAwaitingOverview`, itself unbounded) would block
+    /// every later delete on this daemon for as long as the daemon takes, which is worse than the race it
+    /// would close. The window it leaves needs a single teardown to run past two stacked 30s request
+    /// timeouts — one client-side hop over 60s wall-clock — plus a second delete queued right behind the
+    /// first, and even then it converges on its own: the workspace's teardown finishes either way, and the
+    /// row's false failure report corrects itself the moment the next overview stops listing it. It is the
+    /// same shape the daemon-side `withTeardownRegistered` comment already accepts for a delete issued
+    /// from a *different* client — no client can exclude another from its daemon's one queue either — just
+    /// reachable here from this client's own queued successor instead of a stranger's.
+    @ObservationIgnored private var pendingDeleteChains: [Int: Task<Void, Never>] = [:]
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -915,7 +970,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// workspace terminal rows that are not in the overview's session list.
     func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
-        return runtimeRow(forSessionID: sessionID).flatMap(terminalSession(for:))
+        return runtimeRow(forSessionID: sessionID).flatMap { terminalSession(for: $0) }
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
@@ -1025,11 +1080,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,
     /// but the proxy needs its own copy of the host->target mapping to route requests independently of
     /// the SwiftUI refresh cycle.
-    /// `identity` is the caller's `overviewIdentity` snapshot, captured before its own await chain
-    /// started — the same guard every caller already re-checks right after this returns, needed here
-    /// too because this method can itself publish into `pairedDevices` (see below) before that
-    /// downstream guard runs.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int) async {
+    ///
+    /// `identity` and `mutationGeneration` are the caller's `overviewIdentity`/`mutationGeneration`
+    /// snapshot from immediately before its own fetch (or, for a caller with no separate fetch, from
+    /// immediately before this call) — not a courtesy for the caller's own later guard, but this
+    /// method's own precondition: it mutates `browserRoutingTable`, the browser proxy, and potentially
+    /// `pairedDevices` itself, every one of them before the caller's downstream guard ever runs, so it
+    /// has to hold the invariant on its own. Re-checked before each of those mutations, not only once on
+    /// entry: this method awaits twice (the resolver read below, then the proxy update), and either the
+    /// active connection or a fresher overview-derived operation (another mutation response, a
+    /// reconciliation fetch, a session-timeout recovery) can land during either wait (#450 review round
+    /// 5) — applying this call's now-stale data at that point would mean overwriting a fresher fact with
+    /// an older one.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int, mutationGeneration fetchGeneration: Int) async {
         guard let activeDeviceID else { return }
         // The raw-byte service tunnel has to reach the daemon over the path the command channel that just
         // fetched `overview` actually proved reachable, so ask the live client's resolver directly rather
@@ -1041,11 +1104,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // address yet (freshly paired, no request issued through this client).
         let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
         let liveResolvedHost = await bridgeClient.currentResolvedHost()
-        // The user can switch or remove the active device while that await is suspended. Everything
-        // captured above belongs to the previous connection, while `settings` and `activeDeviceName` below
-        // already read the new one — merging that mixture would register routes keyed to the old device
-        // carrying the new device's port and fingerprint, or resurrect routes for a device just removed.
-        guard identity == overviewIdentity else { return }
+        // The user can switch or remove the active device while that await is suspended, or a fresher
+        // overview-derived fact can land and publish. Everything captured above belongs to the previous
+        // moment, while `settings` and `activeDeviceName` below already read the current one — merging
+        // that mixture would register routes keyed to the old device carrying the new device's port and
+        // fingerprint, resurrect routes for a device just removed, or overwrite a fresher route table
+        // with this now-stale one.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration) else { return }
         let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
             deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
@@ -1060,11 +1125,28 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // a real, resolver-confirmed address (`liveResolvedHost`, not the `resolvedHost` fallback chain
         // above) counts as a change worth reloading for; cheap in the common case since a reload only
         // happens when that address actually differs from what `pairedDevices` currently holds, and the
-        // identity re-check keeps a stale refresh from publishing into a connection the user has since
-        // switched away from.
-        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost, identity == overviewIdentity {
+        // re-check keeps a stale refresh from publishing into a connection — or over a fresher fact — the
+        // app has since moved past.
+        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost,
+            isOverviewFetchCurrent(identity: identity, mutationGeneration: fetchGeneration)
+        {
             pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
         }
+    }
+
+    /// Whether an overview-derived fetch or mutation application that began against `identity` when
+    /// `mutationGeneration` was `fetchGeneration` is still safe to act on. Both halves are hard-bail
+    /// invalidations of equal weight here: a changed connection identity means a different daemon
+    /// entirely, and a moved `mutationGeneration` means some other overview-derived operation (a
+    /// mutation response, a reconciliation fetch, a session-timeout recovery) already landed and is
+    /// fresher — either way, whatever this fetch produced must not be published, merged into the
+    /// browser routing table, or used to restore session state. Some callers instead need to treat the
+    /// two halves differently (`reconcileWorkspaceDeletionOutcome` keeps evaluating a stale fetch's own
+    /// evidence about its delete rather than discarding a whole reconciliation attempt over an unrelated
+    /// mutation) and check `mutationGeneration` on its own for that narrower "skip this one side effect"
+    /// case instead of using this.
+    private func isOverviewFetchCurrent(identity: Int, mutationGeneration fetchGeneration: Int) -> Bool {
+        identity == overviewIdentity && mutationGeneration == fetchGeneration
     }
 
     /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
@@ -1107,7 +1189,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             applyCompatibility(overview.daemonStatus)
             // The daemon reports the addresses it is currently reachable at on every connection. This is
             // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
@@ -1117,10 +1199,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
+            if let acceptedOverview {
+                await updateBrowserRoutes(overview: acceptedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
+            }
             // Re-checked after the await above, not just at fetch return: a mutation applying while the
             // route update was suspended makes this poll's payload pre-mutation state.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             // Cleared before publishing, not after: the device answered, so any stale connection error is
             // over — but publishing is also what settles a deferred delete, and that may raise an error of
             // its own (`resolveDeferredWorkspaceDeletions`). Clearing afterwards would wipe it.
@@ -1137,7 +1221,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch is CancellationError { return } catch {
             // A mutation that landed while this poll was failing has already published the device's real
             // state and cleared any error; a stale failure must not overwrite that with an outage report.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
@@ -1145,7 +1229,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The user may have switched or removed the active device — or a mutation may have published
             // fresher state — while the fallback handshake was in flight; a stale verdict must not
             // overwrite either.
-            guard identity == overviewIdentity, mutationGeneration == mutationGenerationAtFetch else { return }
+            guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtFetch) else { return }
             if isActiveDeviceBlocked {
                 overview = nil
                 connectionNotice = nil
@@ -1888,8 +1972,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving;
-        // see `deleteWorkspace` for why the pending mark has to be checked alongside `isMutating`. The
+        // Hiding a workspace whose delete is still unresolved would act on a row that is already leaving.
+        // `performWorkspaceMutation` below still gates on `isMutating`, since Hide rides the shared
+        // `commandChannel`, but that alone would not catch this: an unresolved delete leaves `isMutating`
+        // false (see `deleteWorkspace`), so hiding needs its own check of the pending-deletion mark. The
         // marked predicate, not the local set: a delete started on another client is just as much a row
         // on its way out.
         guard !isWorkspacePendingDeletion(workspace.id) else { return }
@@ -1923,24 +2009,78 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// remote. The daemon stops the workspace, removes its worktree, and drops the record and its
     /// settings; branch deletion is the one part that can partly fail, so its report is surfaced.
     func deleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) async {
-        // A workspace already on its way out takes no further action. `isMutating` alone does not cover
-        // this: a delete whose outcome could not be confirmed leaves the mark on with the mutation over,
-        // so without the second guard the row could be deleted a second time while the first is unresolved.
-        // The Spaces tab suppresses the actions too; this is the same rule enforced where it cannot be
-        // bypassed by a view that forgets to ask. The marked predicate, not the local set: a workspace the
-        // daemon reports it is already tearing down (a delete issued from another client) must not be
-        // deleted a second time from here either.
-        guard !isMutating, !isWorkspacePendingDeletion(workspace.id) else { return }
-        isMutating = true
-        defer { isMutating = false }
+        // A workspace already on its way out takes no further action — refused here, not only suppressed
+        // in the Spaces tab, so the rule holds even against a view that forgets to ask. The marked
+        // predicate, not the local set: a workspace the daemon reports it is already tearing down (a
+        // delete issued from another client) must not be deleted a second time from here either. This is
+        // the only in-flight check a delete needs: it does not also gate on `isMutating`, because a
+        // delete runs on its own private channel (`deleteChannel` in `performDeleteWorkspace`) rather than
+        // the shared `commandChannel`, so one workspace's delete can never collide on the wire with a
+        // mutation running against a different workspace (#450) — including another workspace's delete,
+        // which is not rejected here either; it is chained instead (`pendingDeleteChains`).
+        //
+        // Accepted overlap: a delete issued while this same workspace's Start/Stop/Restart/Hide is still
+        // in flight is not blocked here. The daemon's per-workspace lifecycle gate arbitrates that race
+        // and refuses one side with "Workspace action is already in progress."; the refusal surfaces as
+        // this delete's error and lifts the pending mark, so a retry works. Client-side tracking of which
+        // workspace the shared-channel mutation targets would buy only an earlier copy of that message.
+        guard !isWorkspacePendingDeletion(workspace.id) else { return }
         let identity = overviewIdentity
-        // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
-        // (which no longer carries the workspace) is published, so the band never flicks back to looking
-        // untouched on its way out; on a definitive failure lifting it restores the ordinary band beside
-        // the error. A timeout is neither of those — see the catch block below — so the mark's removal
-        // is handled explicitly per outcome instead of by an unconditional `defer`.
+        // Marked for the whole mutation, immediately — including whatever time this delete spends queued
+        // behind a predecessor below, so the band reads as deleting the instant this is called rather than
+        // once its request actually goes out. On success the mark is lifted only after the refreshed
+        // overview (which no longer carries the workspace) is published, so the band never flicks back to
+        // looking untouched on its way out; on a definitive failure lifting it restores the ordinary band
+        // beside the error. A timeout is neither of those — see the catch block below — so the mark's
+        // removal is handled explicitly per outcome instead of by an unconditional `defer`.
         workspaceIDsPendingDeletion.insert(workspace.id)
 
+        // Chained behind whatever delete this daemon (keyed by `identity`) already has queued or in
+        // flight — see `pendingDeleteChains`'s declaration for why it is keyed rather than a single tail.
+        // Queuing costs nothing visible: the mark above already put this workspace's band into its
+        // deleting state.
+        let predecessor = pendingDeleteChains[identity]
+        let task = Task {
+            await predecessor?.value
+            await self.performDeleteWorkspace(
+                workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, identity: identity)
+        }
+        pendingDeleteChains[identity] = task
+        await task.value
+    }
+
+    /// The body of one queued delete, run once `deleteWorkspace` has chained it behind any predecessor on
+    /// the same daemon (see `pendingDeleteChains`). `identity` is the caller's `overviewIdentity` snapshot
+    /// from before it queued, not from when this actually starts: a device switch during the wait is
+    /// exactly the kind of change the `identity == overviewIdentity` guard below, and every other one in
+    /// this function, exists to catch. Without it a queued delete would resume against whatever device is
+    /// active by then and send this workspace's id — which may not even exist there — to the wrong daemon.
+    private func performDeleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool, identity: Int)
+        async
+    {
+        guard identity == overviewIdentity else {
+            // This delete was never sent to any daemon: the request below is the first thing that talks
+            // to the network, and the identity mismatch means the active device changed while this was
+            // still queued. A delete is only ever issued against the active device — running it in the
+            // background against the device the user switched away from would mean suppressing that
+            // device's reconciliation and publishes against whatever is now active, for a case that needs
+            // a device switch to land mid-queue. Cancelling audibly, instead, means a confirmed
+            // destructive action the user asked for is never silently skipped: they see it did not
+            // happen and can repeat it from the device that owns the workspace.
+            //
+            // Accepted overlap: the mark removed here is keyed by workspace id alone, so if the user
+            // switched away AND back (a fresh identity) and re-confirmed this same workspace's delete
+            // before this cancelled task ran, this removal clears the retry's mark and the error below
+            // misreports it. That needs a queued delete, two device switches, and a same-workspace
+            // retry inside one chain's lifetime; the retry itself still runs, and its own outcome (or
+            // the next overview reporting the daemon-side teardown) restores the row's true state.
+            // Per-attempt mark ownership is what fixing it would take, and it is not worth carrying
+            // for that window.
+            workspaceIDsPendingDeletion.remove(workspace.id)
+            errorMessage =
+                "\"\(workspace.displayName)\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device."
+            return
+        }
         // Sent on a dedicated command channel rather than the shared one the overview poll also uses.
         // The daemon runs a delete's teardown (stop, worktree removal, record drop) on its own queue, so
         // it can take many seconds — far longer than the 8s the poll allows itself. The transport does
@@ -1954,6 +2094,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let deleteChannel = bridgeClient.makeCommandChannel()
         defer { Task { await deleteChannel.close() } }
 
+        // `deletedWorkspaceNotice` and `errorMessage`, set below and in `handleBridgeError`, are single
+        // slots, not queues: whichever delete's outcome lands last wins, silently replacing whatever an
+        // earlier delete left on screen if the user has not dismissed it yet. Accepted — deletes from this
+        // client are chained per daemon (`pendingDeleteChains`), so a same-client overlap here is already narrow (this
+        // one landing while a queued predecessor's notice is still up), and a lost notice for a delete that
+        // still succeeded is low stakes next to the complexity of queuing them for display.
         do {
             let response = try await bridgeClient.archiveWorkspace(
                 workspaceID: workspace.id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, commandChannel: deleteChannel
@@ -2007,8 +2153,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 // would be a verdict the client never reached — the row would go back to looking ordinary
                 // and offering Delete again, for a workspace the daemon may still finish deleting. The
                 // marking stays and the error is held until an overview can answer (see
-                // `resolveDeferredWorkspaceDeletions`). `isMutating` still clears on return, so only this
-                // row stays inert, not the whole UI.
+                // `resolveDeferredWorkspaceDeletions`). This delete never touched `isMutating`, so only
+                // this row stays inert — every other workspace's controls were never affected.
                 workspaceDeletionsAwaitingOverview[workspace.id] = DeferredWorkspaceDeletion(
                     error: error, requestedBranchDeletion: requestedBranchDeletion)
             }
@@ -2070,7 +2216,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the workspace to stop being listed. Returns whether the workspace is still present once the
     /// budget is spent (or a fetch never resolves) — `false` means the delete is confirmed complete.
     /// Every accepted overview is published exactly like an ordinary refresh, guarded by `identity`
-    /// throughout: a device switch mid-reconciliation must not publish the old backend's state.
+    /// throughout: a device switch mid-reconciliation must not publish the old backend's state. Each
+    /// fetch is also guarded by `mutationGeneration`, the same way `applyMutationResponse` guards its own
+    /// publish: a concurrent shared-channel mutation's response can land and publish first, and this
+    /// fetch — already superseded — must not overwrite it.
     ///
     /// A refetch that still lists the workspace is not automatically evidence of failure: the daemon runs
     /// the delete's teardown on its own queue and reports which workspaces are still on it via
@@ -2088,14 +2237,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
         var resolvedAtLeastOnce = false
         for attempt in 0..<Self.workspaceDeletionReconciliationAttempts {
             guard identity == overviewIdentity else { return .unknown }
+            // Captured immediately before the fetch below, not after it returns: a concurrent
+            // overview-derived operation (another mutation response, a different reconciliation, a
+            // session-timeout recovery) that bumps `mutationGeneration` while the fetch itself is still
+            // in flight must still be caught. Capturing after the fetch returns would already reflect
+            // that bump as if it were this attempt's own baseline, passing a staleness check it should
+            // fail (#450 review round 5).
+            let mutationGenerationAtFetch = mutationGeneration
             guard let refreshedOverview = try? await bridgeClient.fetchOverview(commandChannel: commandChannel) else {
                 if attempt + 1 < Self.workspaceDeletionReconciliationAttempts { try? await Task.sleep(for: workspaceDeletionReconciliationInterval) }
                 continue
             }
             guard identity == overviewIdentity else { return .unknown }
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            // `updateBrowserRoutes` re-checks this same generation itself before it merges routes or
+            // updates the proxy, so a fresher fact landing during either of its own awaits skips those
+            // mutations too, not only the publish below.
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
             guard identity == overviewIdentity else { return .unknown }
-            publishOverview(refreshedOverview)
+            // A generation mismatch here means a fresher overview-derived fact landed while this
+            // attempt's fetch or route update was suspended — not that this attempt's own read of the
+            // delete's outcome is wrong. Skip the publish, but keep evaluating this fetch's evidence
+            // below regardless, so an unrelated mutation racing this reconciliation does not cost it a
+            // whole attempt.
+            if mutationGeneration == mutationGenerationAtFetch { publishOverview(refreshedOverview) }
             guard refreshedOverview.workspaces.contains(where: { $0.id == workspaceID }) else {
                 errorMessage = nil
                 connectionNotice = nil
@@ -2289,24 +2453,44 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesDeviceTerminalSessionSummary? {
+    /// Reads the model's currently published `overview` — the right data for every UI-facing caller,
+    /// which wants to know what the *app* currently shows. See `terminalSession(for:in:)` for a caller
+    /// that instead needs a specific fetch or mutation response's own evidence.
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesDeviceTerminalSessionSummary? { terminalSession(for: row, in: overview) }
+
+    /// A caller answering someone from a specific fetch or mutation response it already holds in hand —
+    /// evidence of what the daemon just did for that one caller's own action, independent of whether
+    /// this model's shared, published state happened to win its own ordering race (#450 review round 7)
+    /// — passes `searchOverview` explicitly instead of going through `terminalSession(for:)`.
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow, in searchOverview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         guard let sessionID = row.sessionID else { return nil }
-        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        if let session = searchOverview?.sessions.first(where: { $0.id == sessionID }) { return session }
         guard case .terminal(let terminalRow) = row.source else { return nil }
-        return terminalSession(from: terminalRow)
+        return terminalSession(from: terminalRow, in: searchOverview)
     }
 
     func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
         overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
     }
 
-    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? {
-        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap(terminalSession(for:))
+    /// See `terminalSession(for:)`/`terminalSession(for:in:)`: reads the published `overview`.
+    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? { refreshedSession(forRowID: rowID, in: overview) }
+
+    /// See `terminalSession(for:in:)`: a caller reading its own fetch or mutation response's evidence
+    /// passes that overview explicitly instead of going through `refreshedSession(forRowID:)`.
+    func refreshedSession(forRowID rowID: String, in searchOverview: SpacesDeviceOverviewPayload?) -> SpacesDeviceTerminalSessionSummary? {
+        searchOverview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap {
+            terminalSession(for: $0, in: searchOverview)
+        }
     }
 
-    private func terminalSession(from row: SpacesDeviceWorkspaceTerminalRow) -> SpacesDeviceTerminalSessionSummary? {
+    private func terminalSession(from row: SpacesDeviceWorkspaceTerminalRow, in searchOverview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         guard let sessionID = row.sessionID else { return nil }
-        let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
+        let workspace = searchOverview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
             id: sessionID, title: row.title, liveTitle: row.liveTitle, workingDirectory: row.workingDirectory, shell: "", command: nil,
@@ -2336,11 +2520,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             let response = try await operation()
             await applyMutationResponse(response, identity: identity)
-            // The connection changed while the mutation was in flight: the published overview belongs to
-            // the previous backend, so resolving a session from it would hand back the wrong device's row.
+            // The connection changed while the mutation was in flight: the response describes the
+            // previous backend, so resolving a session from it would hand back the wrong device's row.
             guard identity == overviewIdentity else { return nil }
-            if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
-            if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
+            // Resolved from `response.overview` — this mutation's own evidence of what it just did — not
+            // from the model's published `overview`. `applyMutationResponse` above gates its publish on
+            // `isOverviewFetchCurrent`, which answers a different question ("is this the freshest
+            // overview-derived fact right now") than the one this call owes its own caller ("did my own
+            // action produce a session"): a fresher, unrelated fetch (another mutation, a delete
+            // reconciliation, a timeout recovery) can bump `mutationGeneration` while this mutation's own
+            // `updateBrowserRoutes` await is suspended and make its publish lose that race even though
+            // the mutation itself fully succeeded. Reading `self.overview` here would then report a
+            // successful Run/Restart/Terminal as a failure — self-healing on the next poll, but only
+            // after the launch flow already showed the wrong answer (#450 review round 7).
+            if let sessionID = response.sessionID { return response.overview?.sessions.first(where: { $0.id == sessionID }) }
+            if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID, in: response.overview) }
             return nil
         } catch {
             guard identity == overviewIdentity else { return nil }
@@ -2365,11 +2559,27 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // refresh discard a perfectly current overview.
         guard identity == overviewIdentity else { return }
         // Bumped for every applied mutation, including one that carried no overview: the daemon's state
-        // changed either way, so any poll already in flight is describing the world before it.
+        // changed either way, so any poll already in flight is describing the world before it. Captured
+        // right after bumping, and re-checked once this call resumes from the await below: a delete's
+        // private channel no longer excludes a shared-channel mutation from running at the same time
+        // (#450), so two responses can now be applying concurrently, and there is no guarantee the one
+        // that started first is the one that resumes first. If some other call's response already bumped
+        // and published while this one was suspended, this one is the stale side of that race.
         mutationGeneration &+= 1
+        let mutationGenerationAtApply = mutationGeneration
         guard let overview = response.overview else { return }
-        await updateBrowserRoutes(overview: overview, identity: identity)
-        guard identity == overviewIdentity else { return }
+        await updateBrowserRoutes(overview: overview, identity: identity, mutationGeneration: mutationGenerationAtApply)
+        // Skip rather than republish: a newer mutation's response already landed and published its
+        // overview while this one was suspended above, so this one is describing a moment the app has
+        // already moved past.
+        //
+        // Accepted bound of this ordering: "newer" is apply-start order on this client, not daemon
+        // snapshot order. Responses arriving on independent connections can invert — an older lifecycle
+        // response bumping the generation after a newer delete response started applying discards the
+        // delete's overview — because nothing in the wire carries a daemon-side revision to totally
+        // order snapshots by. A misordered pair leaves stale rows for at most one poll interval and the
+        // next overview corrects it; a daemon revision (a wire change) is what fixing it would take.
+        guard isOverviewFetchCurrent(identity: identity, mutationGeneration: mutationGenerationAtApply) else { return }
         // Cleared before publishing, for the same reason as in `performRefresh`.
         connectionNotice = nil
         errorMessage = nil
@@ -2434,6 +2644,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
+    /// Reconciles a row's session after `run`/`restart` timed out, by refetching the overview and
+    /// looking for a fresh session in it. Guarded exactly like every other overview-derived fetch (#450
+    /// review round 5): `identity` catches a connection change, and `mutationGenerationAtFetch` — bumped
+    /// and captured immediately before the fetch, the same order `applyMutationResponse` uses — catches
+    /// a fresher overview-derived fact (another mutation response, a reconciliation fetch) landing while
+    /// this fetch or its route update is in flight. A generation mismatch alone skips only the publish
+    /// (and `updateBrowserRoutes` skips its own route-table merge and proxy update the same way); the
+    /// session lookup below still runs against whatever is currently published either way, which is the
+    /// fresher of the two overviews regardless of which one this call fetched.
     private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
         -> SpacesDeviceTerminalSessionSummary?
     {
@@ -2443,19 +2662,30 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
-            // Fetched after the mutation was sent, so it supersedes any poll already in flight.
+            // Fetched after the mutation was sent, so it supersedes any poll already in flight. Captured
+            // right after bumping, before the fetch — not after it returns, or a fresher fact landing
+            // during the fetch itself would already be reflected in the "baseline" this compares against.
             mutationGeneration &+= 1
+            let mutationGenerationAtFetch = mutationGeneration
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.
             guard identity == overviewIdentity else { return nil }
-            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity, mutationGeneration: mutationGenerationAtFetch)
             guard identity == overviewIdentity else { return nil }
-            errorMessage = nil
-            connectionNotice = nil
-            refreshFailureStreak = nil
-            publishOverview(refreshedOverview)
-            return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
+            if mutationGeneration == mutationGenerationAtFetch {
+                errorMessage = nil
+                connectionNotice = nil
+                refreshFailureStreak = nil
+                publishOverview(refreshedOverview)
+            }
+            // Resolved from `refreshedOverview` — this fetch's own evidence — not from the model's
+            // published `overview`, for the same reason `performMutationReturningSession` reads its
+            // `response.overview`: a fresher, unrelated overview-derived fact can win the publish race
+            // above even though this fetch genuinely found the session, and reading published state here
+            // would then report the timeout recovery as failed when it actually succeeded (#450 review
+            // round 7).
+            return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID, in: refreshedOverview))
         } catch { return nil }
     }
 
