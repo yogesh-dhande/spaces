@@ -62,12 +62,16 @@ final class SpacesMCPStdioServer {
     private let input: FileHandle
     private let output: FileHandle
     private let encoder: JSONEncoder
+    /// Reads the binary identity this process is running at construction — i.e. at `spaces mcp` start,
+    /// before any tool call can have failed — which is what bounds the re-exec (see `MCPStaleImageReload`).
+    private let staleImageReload: MCPStaleImageReload
     /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
     private var readBuffer = Data()
 
-    init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) {
+    init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload()) {
         self.input = input
         self.output = output
+        self.staleImageReload = staleImageReload
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         self.encoder = encoder
@@ -460,7 +464,27 @@ final class SpacesMCPStdioServer {
             let profileResponse = try callTool(name: name, arguments: arguments)
             let withPendingEvents = try attachingPendingAgentEvents(to: profileResponse)
             try sendToolResult(id: id, text: try encodedText(withPendingEvents), isError: false)
-        } catch { try sendToolResult(id: id, text: error.localizedDescription, isError: true) }
+        } catch { try respondToFailedToolCall(id: id, error: error) }
+    }
+
+    /// Answers a failed tool call, and reloads this process's binary image when the failure was a daemon
+    /// that has moved ahead of it (see `MCPStaleImageReload`). The answer is written first and the exec
+    /// runs only after those bytes are on stdout: `writeJSONObject` completes one whole newline-delimited
+    /// message, so the exec always lands on a message boundary and never truncates a half-written frame.
+    /// Internal so that ordering is unit-testable.
+    ///
+    /// Accepted: anything already drained into `readBuffer` but not yet handled is discarded by the exec,
+    /// because it lives in this image's memory rather than in the stdin pipe (whose unread bytes the
+    /// successor inherits). MCP stdio clients are request/response — they wait for each tool result before
+    /// writing again — so a message can only be sitting there if the client pipelined one, and the cost is
+    /// bounded to that one message on the single call where a reload happens.
+    func respondToFailedToolCall(id: Any?, error: Error) throws {
+        guard let execTarget = staleImageReload.execTarget(for: error) else {
+            try sendToolResult(id: id, text: error.localizedDescription, isError: true)
+            return
+        }
+        try sendToolResult(id: id, text: MCPStaleImageReload.retryMessage, isError: true)
+        staleImageReload.reload(into: execTarget)
     }
 
     /// Drains any events a watched child queued for the current Spaces terminal
