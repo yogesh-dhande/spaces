@@ -142,6 +142,7 @@ func makeTestOrchestrator(
     builtInTerminalWindowCloser: WorkspaceOrchestrator.BuiltInTerminalWindowCloser? = nil,
     builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
     builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+    builtInTerminalForegroundProcessSampler: WorkspaceOrchestrator.BuiltInTerminalForegroundProcessSampler? = nil,
     daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
     WorkspaceOrchestrator(
@@ -149,5 +150,7 @@ func makeTestOrchestrator(
         git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
         builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress, currentDate: currentDate)
+        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+        builtInTerminalForegroundProcessSampler: builtInTerminalForegroundProcessSampler, daemonHandoffInProgress: daemonHandoffInProgress,
+        currentDate: currentDate)
 }

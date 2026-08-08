@@ -75,6 +75,40 @@ public enum TerminalForegroundProcessInspector {
         #endif
     }
 
+    /// Whether `pid` has at least one child process right now, read live from the OS.
+    ///
+    /// The conditional stop of a user-closed ad hoc terminal asks this about the session's shell: a shell
+    /// holding background or stopped jobs, or waiting on one, is the tty's foreground process with the
+    /// same argv it has at an idle prompt, so its own foreground sample cannot tell the two apart. Work
+    /// the shell holds shows up as a child.
+    public static func hasChildProcesses(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        #if os(macOS)
+            // A one-pid buffer is enough for a yes/no: the call reports what it found, and a NULL buffer
+            // would answer with a system-wide size estimate instead of this pid's children.
+            var childPID: pid_t = 0
+            let found = withUnsafeMutablePointer(to: &childPID) { proc_listchildpids(pid, $0, Int32(MemoryLayout<pid_t>.size)) }
+            return found > 0
+        #elseif os(Linux)
+            // Children are per-thread, so every thread of the process has to be asked. The `children` file
+            // needs CONFIG_PROC_CHILDREN; a kernel without it makes every read fail. Alive but unanswerable
+            // presumes children, so a kernel without CONFIG_PROC_CHILDREN degrades to keeping sessions,
+            // never to killing jobs; only a genuinely empty read counts as "no children".
+            let taskDirectory = URL(fileURLWithPath: "/proc/\(pid)/task", isDirectory: true)
+            guard let taskURLs = try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil), !taskURLs.isEmpty
+            else { return false }
+            var anyChildrenFileRead = false
+            for taskURL in taskURLs {
+                guard let children = try? String(contentsOf: taskURL.appendingPathComponent("children"), encoding: .utf8) else { continue }
+                anyChildrenFileRead = true
+                if children.contains(where: { !$0.isWhitespace }) { return true }
+            }
+            return !anyChildrenFileRead
+        #else
+            return false
+        #endif
+    }
+
     public static func detectedAgent(pid: Int32) -> TerminalForegroundAgentSnapshot? {
         guard let process = inspect(pid: pid) else { return nil }
         return classify(process)

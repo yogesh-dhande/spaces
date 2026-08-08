@@ -75,6 +75,71 @@ extension WorkspaceOrchestrator {
         return true
     }
 
+    /// Stops an ad hoc built-in terminal session whose owning pane the user just closed, but only when
+    /// the terminal is sitting at a bare prompt with nothing left holding it. Returns whether the session
+    /// was terminated; `false` means it was kept and stays recoverable in the sidebar.
+    ///
+    /// Three things have to be true, in this order:
+    ///  1. the session has no configured owner, so `agent spawn` sessions and configured process
+    ///     terminals are refused outright (closing their panes only ever detaches);
+    ///  2. no live owner-mode attachment remains. The closing client detaches before asking, so an owner
+    ///     attachment still standing means ownership transferred to another local pane or another device
+    ///     already owns it, and that owner keeps the session;
+    ///  3. its foreground is a bare shell AND that shell is holding no child process, both read fresh from
+    ///     the OS at this instant rather than from the ~1s-old sample on persisted runtime state: a command
+    ///     started just before the close must never be killed by a decision made against a foreground that
+    ///     predates it. The child check is what separates an idle prompt from a shell holding work it is
+    ///     not in the foreground of (a background or stopped job, a `wait`), which reports the same
+    ///     executable and argv as an idle prompt, and it survives an uninspectable foreground: a shell pid
+    ///     that resolved but could not be inspected (a zombie process-group leader in the instant before
+    ///     the shell reaps it) is treated as bare-equivalent only once the child check has cleared it,
+    ///     never on the strength of the missing reading alone. A session with no reading at all (no live
+    ///     core here, or a dead pid) is bare: there is no process left to protect, and a fresh-open close
+    ///     race resolves toward stopping rather than leaking a shell.
+    ///
+    /// There is deliberately no sweep behind this: a session closed while a program ran stays alive after
+    /// that program exits, so the user can reopen it and see why. Closing it at the prompt is the only
+    /// termination trigger.
+    @discardableResult public func stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(workspaceID: String, sessionID: String) throws -> Bool {
+        // During an exec-in-place handoff the session terminator no-ops and live sessions are carried into
+        // the successor daemon, so deleting this session's product rows here would orphan a live terminal.
+        // A quiet `false` here, rather than the `throw WorkspaceError.daemonHandoffInProgress` the sibling
+        // handoff gates use, is deliberate: this call is driven by a routine pane close, not an explicit
+        // user action on the handoff-sensitive operation itself, so it should not surface an error, and the
+        // next explicit close against the successor daemon succeeds normally.
+        guard !daemonHandoffInProgress() else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+            guard !builtInTerminalSessionHasConfiguredOwner(ownership) else { return false }
+            guard !builtInTerminalSessionHasLiveOwnerAttachment(sessionID: sessionID) else { return false }
+            guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID) else { return false }
+            if let reading = builtInTerminalForegroundProcessSampler(sessionID) {
+                guard !reading.shellHasChildProcesses else { return false }
+                if let process = reading.process {
+                    guard
+                        TerminalBareShellForeground.isBareShell(
+                            executableName: process.executableName, argv: process.argv, launchShell: launchConfiguration.shell)
+                    else { return false }
+                }
+            }
+            return try stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: workspaceID, sessionID: sessionID)
+        }
+    }
+
+    /// Whether some client still holds the session's owner attachment, judged by the same lease rule the
+    /// daemon applies everywhere (`liveAttachments`), so a remote viewer whose lease lapsed without ever
+    /// sending a detach does not count.
+    ///
+    /// Fails closed: a session whose paths or attachment snapshot cannot be read is presumed owned. This
+    /// answer gates a termination, and the two mistakes are not symmetric: a wrongful stop destroys a
+    /// terminal the user cannot get back, while a session wrongly kept costs one more close.
+    func builtInTerminalSessionHasLiveOwnerAttachment(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return true }
+        guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: currentDate()) else { return true }
+        return liveAttachments.contains { $0.mode == .owner }
+    }
+
     func stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: String, sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID), let workspace = try store.workspace(id: workspaceID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)

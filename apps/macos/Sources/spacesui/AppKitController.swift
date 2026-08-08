@@ -346,7 +346,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
-    private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var appEffectiveAppearanceObservation: NSKeyValueObservation?
     private var didStartBackgroundServices = false
@@ -600,7 +599,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
-        setupTerminalAttachmentStateObserver()
         setupTextInputDidEndEditingObserver()
         setupAppEffectiveAppearanceObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
@@ -678,10 +676,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let workspaceDidTerminateApplicationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceDidTerminateApplicationObserver)
             self.workspaceDidTerminateApplicationObserver = nil
-        }
-        if let terminalAttachmentStateDidChangeObserver {
-            NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
-            self.terminalAttachmentStateDidChangeObserver = nil
         }
         if let textInputDidEndEditingObserver {
             NotificationCenter.default.removeObserver(textInputDidEndEditingObserver)
@@ -2115,7 +2109,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
                 pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
                 detachClientAction: detachClientAction,
-                onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
+                onCloseClientDetached: { [weak self] ownedOrEnded in
+                    self?.stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: sessionID, closedPaneOwnedOrEnded: ownedOrEnded)
+                },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
@@ -2304,21 +2300,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         events.map(\.id)
     }
 
-    /// Resolves a session's kind from the loaded device overview (not the daemon
-    /// database): top-level sessions carry their row kind, and process/agent rows
-    /// identify configured sessions. Used to decide whether an ad hoc session stops
-    /// once it has no live attachments.
-    private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
-        for overview in deviceSections.compactMap({ $0.overview }) {
-            if let session = overview.sessions.first(where: { $0.id == sessionID }) { return Self.terminalSessionKind(rowKind: session.rowKind) }
-            for workspace in overview.workspaces {
-                if workspace.processRows.contains(where: { $0.sessionID == sessionID }) { return .process }
-                if workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID }) { return .agent }
-            }
-        }
-        return .shell
-    }
-
     /// Closes a session's pane for the close IPC and daemon-driven session
     /// termination, keeping the `terminal_window_close` perf metric the E2E harness
     /// parses.
@@ -2358,74 +2339,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return slug.isEmpty ? "remote-device" : slug
     }
 
-    /// Whether an ad hoc built-in terminal session left without a client should stop.
-    /// Liveness comes from the device overview's attachment snapshot, not the
-    /// daemon database; `hasLiveAttachments` should be `true` when liveness is
-    /// unknown so a session is never stopped out from under another client.
-    nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
-        hasLiveAttachments: Bool, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false
-    ) -> Bool {
+    /// Whether closing a terminal pane should ask the daemon to stop the ad hoc session behind it.
+    /// Only an owner close does, or the close of a pane whose session has already ended (an explicit
+    /// close is the user dismissing that terminal, and the ask is what removes its row): for a live
+    /// session, a viewer's close leaves it with its owner, but a viewer is not a distinct case once the
+    /// session has ended, since any pane of an ended session reports as ended and asks. A quit that keeps
+    /// sessions running must leave every session alone. Whether the session is ad hoc at all, and whether
+    /// it is idle at a bare prompt, are the daemon's to decide.
+    nonisolated static func shouldRequestAdHocBareShellStopOnPaneClose(closedPaneOwnedOrEnded: Bool, isAppTerminatingAndKeepingSessions: Bool) -> Bool
+    {
         guard !isAppTerminatingAndKeepingSessions else { return false }
-        guard !isConfiguredProcessSession else { return false }
-        return !hasLiveAttachments
+        return closedPaneOwnedOrEnded
     }
 
-    func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
-        guard !keepsTerminalSessionsRunningDuringTermination else { return }
-        // A session owned by a configured process or agent is not ad hoc; the overview's
-        // session kind tells us without a daemon-DB read.
-        guard remoteTerminalSessionKind(sessionID: sessionID) == .shell else { return }
-        guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return }
-        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // The loaded overview may not yet reflect the detach/expiry that triggered this
-            // cleanup, so decide on the authoritative attachment snapshot fetched from the
-            // owning device. A device that does not answer leaves the session untouched.
-            guard let fetched = await Self.fetchSessionAttachmentSnapshot(sessionID: sessionID, device: device, clientApp: clientApp) else { return }
-            // A remote viewer can stop refreshing its lease without ever sending a detach,
-            // leaving its attachment row with detachedAt == nil. Judge liveness with the
-            // lease rule — against the daemon's own clock — so an expired viewer does not keep
-            // an otherwise-unattached ad hoc session alive, and clock skew does not expire a
-            // live one.
-            let hasLiveAttachments = !fetched.snapshot.liveAttachments(now: fetched.daemonNow).isEmpty
-            guard
-                Self.shouldTerminateAdHocBuiltInTerminalSession(
-                    hasLiveAttachments: hasLiveAttachments, isConfiguredProcessSession: false,
-                    isAppTerminatingAndKeepingSessions: self.keepsTerminalSessionsRunningDuringTermination)
-            else { return }
-            self.stopAdHocTerminalSession(sessionID: sessionID)
-        }
-    }
-
-    /// Fetches the authoritative attachment snapshot for a session from its owning device,
-    /// along with the daemon's emission time. The snapshot's lease timestamps are stamped by
-    /// that daemon, so liveness must be judged against `daemonNow` rather than this Mac's
-    /// clock — a remote device's clock can skew past the 60s lease interval.
-    nonisolated private static func fetchSessionAttachmentSnapshot(
-        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp
-    ) async -> (snapshot: TerminalSessionAttachmentSnapshot, daemonNow: Date)? {
-        await Task.detached(priority: .utility) {
-            let response = try? SpacesDeviceClient.request(
-                SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID))), device: device,
-                clientApp: clientApp)
-            guard let state = response?.sessionState, let snapshot = state.attachmentSnapshot else { return nil }
-            return (snapshot, GhosttyRemoteSessionStateTimestamp.date(from: state.emittedAt) ?? Date())
-        }.value
-    }
-
-    /// Stops an ad hoc built-in terminal session through the owning daemon's Device API.
-    private func stopAdHocTerminalSession(sessionID: String) {
+    /// Asks the owning daemon to stop the ad hoc terminal behind a pane the user just closed. The daemon
+    /// terminates it only when it is an ad hoc shell sitting at a bare prompt with no surviving owner
+    /// attachment, and otherwise keeps it recoverable in the sidebar, so no session-kind gate is applied
+    /// here: the client's view of a session's kind comes from overview rows, which an exited coding-agent
+    /// row keeps claiming long after the agent is gone.
+    func stopAdHocBuiltInTerminalSessionIfBareShell(sessionID: String, closedPaneOwnedOrEnded: Bool) {
+        guard
+            Self.shouldRequestAdHocBareShellStopOnPaneClose(
+                closedPaneOwnedOrEnded: closedPaneOwnedOrEnded, isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination)
+        else { return }
         guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID), let device = deviceForWorkspaceMutation(workspaceID: workspaceID)
         else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.stopWorkspaceTerminal(
+                try SpacesDeviceClient.stopWorkspaceTerminalIfBareShell(
                     workspaceID: workspaceID, sessionID: sessionID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            if case .success = result { self.requestSidebarReload() }
+            // Only a session the daemon actually terminated changed any row; a kept session leaves the
+            // sidebar exactly as it was, so reloading for it would be pure churn on every pane close.
+            guard case .success(let response) = result, response.terminatedTerminalSession == true else { return }
+            self.requestSidebarReload()
         }
     }
 
@@ -2491,25 +2440,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.attemptDesktopControlRecoveryIfNeeded()
             }
         }
-    }
-
-    private func setupTerminalAttachmentStateObserver() {
-        terminalAttachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
-        ) { [weak self] notification in
-            let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
-            MainActor.assumeIsolated {
-                guard let self, let changedSessionID else { return }
-                self.handleTerminalAttachmentStateDidChange(sessionID: changedSessionID)
-            }
-        }
-    }
-
-    private func handleTerminalAttachmentStateDidChange(sessionID: String) {
-        // A session with an open pane keeps its own client attached; only sessions
-        // without one are candidates for unattached ad hoc cleanup.
-        guard panelCoordinator.content(forSessionID: sessionID) == nil else { return }
-        terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
     /// Flushes a deferred sidebar reload when text editing ends. The reload guard

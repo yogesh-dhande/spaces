@@ -382,6 +382,11 @@ enum SpacesDaemonProfileCommandRouting {
         // mutation (including the handoff-resume inserts that ran before this), so there is nothing to seed
         // here — and reading `sessionCores` from this main-actor context would be an illegal sync wait on
         // the engine actor.
+        // Installed before either server accepts a request: the orchestrator a request builds resolves
+        // these overrides at construction time, so a request that lands before the install would run
+        // against the no-op defaults (a nil foreground sample reads as a bare shell, a handoff reads as
+        // not in progress).
+        installProcessWideOrchestratorHooks()
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
@@ -394,7 +399,6 @@ enum SpacesDaemonProfileCommandRouting {
     /// filesystem/process state into the database; `databaseDidChange` reconciles
     /// their watcher/observer sets when projects or running processes change.
     private func startDeviceRuntimeServices() {
-        installProcessWideOrchestratorHooks()
         guard let databasePath = try? DatabaseLocator.defaultPath() else {
             writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
             return
@@ -487,6 +491,13 @@ enum SpacesDaemonProfileCommandRouting {
         }
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
             TerminalEngineActor.runSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
+        }
+        // The conditional ad-hoc stop (`stopWorkspaceTerminalIfBareShell`) reads a session's foreground
+        // through this rather than from persisted runtime state, whose foreground sample can be a second
+        // old, long enough for a command the user launched right before closing the pane to be invisible
+        // to a decision that would then kill it.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalForegroundProcessSampler { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.currentForegroundReading(sessionID: sessionID) }
         }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
         // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
@@ -1667,6 +1678,18 @@ enum SpacesDaemonProfileCommandRouting {
             daemonHandoffInProgress: { [weak self] in self?.handoffInProgress ?? false })
         _ = try orchestrator.syncConfig()
         return orchestrator
+    }
+
+    /// The live foreground process of a session this daemon hosts, paired with whether the session's own
+    /// shell is holding any child process. A session it does not host answers nil, which the conditional
+    /// stop reads as nothing left to protect. A hosted session whose foreground pid cannot be inspected (a
+    /// zombie process-group leader in the instant before the shell reaps it) still answers with a reading
+    /// whose `process` is nil, so the child check below keeps standing on its own instead of being skipped
+    /// along with the unreadable foreground.
+    @TerminalEngineActor private func currentForegroundReading(sessionID: String) -> BuiltInTerminalForegroundReading? {
+        guard let core = sessionCores[sessionID] else { return nil }
+        let shellHasChildProcesses = core.childPID().map { TerminalForegroundProcessInspector.hasChildProcesses(pid: $0) } ?? false
+        return BuiltInTerminalForegroundReading(process: core.currentForegroundProcess(), shellHasChildProcesses: shellHasChildProcesses)
     }
 
     @TerminalEngineActor private func terminateBuiltInTerminalSession(id sessionID: String) {
