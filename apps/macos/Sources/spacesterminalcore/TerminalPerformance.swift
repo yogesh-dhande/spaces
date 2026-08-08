@@ -19,14 +19,21 @@ public enum TerminalPerformance {
 
     public static func elapsedMS(since startedAt: Date) -> Int { max(Int(Date().timeIntervalSince(startedAt) * 1000), 0) }
 
-    public static func logMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
+    /// `detail` is `@autoclosure` so a disabled log never pays for it. Hot call sites build theirs by
+    /// sorting and joining a metric attribute dictionary, which on the terminal's per-frame path costs
+    /// more than the log line it would have produced.
+    public static func logMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: @autoclosure () -> String = "") {
         guard isEnabled else { return }
+        let detail = detail()
         let suffix = detail.isEmpty ? "" : " \(detail)"
         logLine("spaces: perf metric=\(metric) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n")
     }
 
-    public static func logWorkspaceMetric(_ metric: String, workspaceID: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
+    public static func logWorkspaceMetric(
+        _ metric: String, workspaceID: String, target: String, elapsedMS: Int, success: Bool, detail: @autoclosure () -> String = ""
+    ) {
         guard isEnabled else { return }
+        let detail = detail()
         let suffix = detail.isEmpty ? "" : " \(detail)"
         logLine(
             "spaces: perf metric=\(metric) workspace=\(workspaceID) target=\(target) success=\(success ? 1 : 0) elapsed_ms=\(elapsedMS)\(suffix)\n")

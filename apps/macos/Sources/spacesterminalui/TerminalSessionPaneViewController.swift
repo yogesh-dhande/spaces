@@ -200,6 +200,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// against it (`screenContentCanChangePresentation`) to tell a first frame arriving from an
     /// unchanged blank pane.
     private var surfaceAvailabilityAtLastPresentation: Bool?
+    /// Counts every `refreshNow()` call, regardless of which observer triggered it. `refreshNow()` is
+    /// the pane's one full-refresh entry point, so this is the seam a test uses to prove a single
+    /// state-stream payload (e.g. one `session_metadata` reason) causes at most one refresh instead of
+    /// guessing from side effects — two observers doing the identical unconditional refresh on the same
+    /// notification pair would otherwise double this silently.
+    private(set) var debugRefreshNowCallCountForTesting = 0
     private var lastObservedOwnerClientID: String?
     /// Whether this pane's client holds the session's owner attachment, as of the last snapshot it
     /// observed. Read at close time, before the detach, so the close can report an owner close: only an
@@ -547,6 +553,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
+        debugRefreshNowCallCountForTesting += 1
         // A refresh is where the pane resolves what it presents, so it is also where the surface
         // availability that resolution was made from is recorded. Recording on exit captures a
         // surface this refresh attached or released.

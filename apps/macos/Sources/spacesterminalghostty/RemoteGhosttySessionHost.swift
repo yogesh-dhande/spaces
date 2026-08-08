@@ -9,12 +9,30 @@
     /// — failed to reach the device. Raised from the serial input queue (off the main actor, awaited
     /// through its `async` `onError`) with the error the send threw, and deliberately not classified
     /// here: the host knows only that its request failed, while the owner of the session's link state
-    /// (`DeviceTerminalSessionStateModel.isTransportFailureEvidenceOfLostLink`) knows whether a given
-    /// failure is evidence about the link.
+    /// (`DeviceTerminalSessionStateModel.reportFailedInputSend`) knows whether a given failure is
+    /// evidence about the link, and whether that evidence is conclusive.
     ///
-    /// Returns whether the failure itself proves the link is gone. When `true`, the host discards this
-    /// pane's queued input (`TerminalInputSerialQueue.cancelAll()`) instead of letting a backlog typed
-    /// during the outage drain and deliver late — including any Enter — once the link recovers.
+    /// Returns whether the failure is CONCLUSIVE proof the link is gone, not merely that this one send
+    /// failed. When `true`, the host discards this pane's queued input (`TerminalInputSerialQueue.cancelAll()`)
+    /// instead of letting a backlog typed during the outage drain and deliver late — including any Enter —
+    /// once the link recovers. A bare request timeout answers `false`: the failed send is still reported
+    /// (whatever failure surfacing the model does for it — the disconnect notice, the paced reconnect —
+    /// runs the same as for any other transport failure), but the timeout alone does not prove the queued
+    /// backlog would go nowhere. The interactive control deadline is tight enough
+    /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that a live but
+    /// congested link can miss it on its own: the send path never touches the main actor
+    /// (`TerminalInputSerialQueue.enqueue` hands off to a detached task that talks to the pinned-TLS
+    /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
+    /// request client, which acquires its request lock before starting the per-operation deadline, so a
+    /// keystroke queued behind a grid-sized resync fetch is not charged for that wait — it gets a fresh
+    /// 5s window once its turn comes. What actually burns that window is the daemon's own answer running
+    /// late: under heavy streaming the daemon's serial terminal-engine queue is saturated, so a
+    /// keystroke's response can genuinely time out with nothing wrong with the link. Discarding a live
+    /// pane's backlog on that false alarm is the bug this distinction exists to avoid — and a silently
+    /// dead link (nothing ever answers) produces the identical timeout, so the timeout by itself is not
+    /// conclusive either way. Only a connection-level failure (refused, closed, every candidate address
+    /// unreachable) — or a repeat failure during an outage a prior conclusive failure already confirmed —
+    /// answers `true`.
     public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (
@@ -51,10 +69,12 @@
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
         /// Notified when an interactive control request — typed input, paste, key, scroll, resize, or
         /// clear-screen — throws. Input rides a different connection than the state subscription, so a
-        /// send that cannot reach the device is the earliest proof the link is gone — a silently dead
-        /// network path leaves the subscription's socket looking healthy until TCP keepalive gives up a
-        /// minute or more later. See `reportInputFailure`, the shared call point every one of those
-        /// requests funnels its failure through.
+        /// send that cannot reach the device is the earliest evidence the link may be gone — a silently
+        /// dead network path leaves the subscription's socket looking healthy until TCP keepalive gives up
+        /// a minute or more later. "May be" because a bare request timeout is not conclusive by itself (see
+        /// the handler's own doc): the same 5s deadline that catches a dead link also catches an app-side
+        /// stall that never touched the network. See `reportInputFailure`, the shared call point every one
+        /// of those requests funnels its failure through.
         private let inputFailureHandler: RemoteGhosttyInputFailureHandler?
         private let terminalView: GhosttyMirrorTerminalView
         /// The main actor's mirror of the payload the pipeline stored, updated as each reduction result
@@ -539,7 +559,9 @@
             let decodeMS = output.reduceMS
             let dropReason = reduction.dropReason
             latestState = reduction.storedPayload
-            if reduction.didRequestResync { requestRenderUpdateStateResync() }
+            // Covers a resync the pipeline's apply mailbox inherited from an output it coalesced away:
+            // the superseded frame is not worth drawing, but the full frame it could not build is.
+            if output.requestsResync { requestRenderUpdateStateResync() }
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
             let applyStartedAt = Date()
@@ -566,35 +588,45 @@
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
-            let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-            var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
-                outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-                dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
-                frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
-                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
-                appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
-                operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
-                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
-                resyncCount: reduction.didRequestResync ? 1 : nil)
-            renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-            renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
-            renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
-            SpacesDeviceTerminalPerformanceLogger.emit(
-                .init(
-                    sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,
-                    attributes: renderUpdateAttributes))
-            TerminalPerformance.logMetric(
-                "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-                success: true,
-                detail:
-                    "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
-            )
-            TerminalPerformance.logMetric(
-                "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
-                detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
+            // The attribute dictionary below is ~20 string conversions per payload on a path that runs
+            // at the session's flush rate, so it is built only when something is listening. `emittedAt`
+            // is parsed inside the same gate for the same reason: it feeds nothing but these metrics.
+            let deviceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            if deviceLoggingEnabled || TerminalPerformance.isEnabled {
+                let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+                var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
+                    reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
+                    outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+                    dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
+                    frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
+                    targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                    appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
+                    operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+                    scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
+                    resyncCount: output.requestsResync ? 1 : nil)
+                renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+                renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+                renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
+                // The payloads this apply superseded report nothing of their own; this is their trace.
+                renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
+                if deviceLoggingEnabled {
+                    SpacesDeviceTerminalPerformanceLogger.emit(
+                        .init(
+                            sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
+                            elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,
+                            attributes: renderUpdateAttributes))
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_remote_state_receive", target: "session=\(payload.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: true,
+                    detail:
+                        "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
+                )
+                TerminalPerformance.logMetric(
+                    "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
+                    detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
+            }
             postLocalNotifications(for: payload)
         }
 
@@ -1099,9 +1131,13 @@
         }
 
         /// Reports one interactive control send's failure to `inputFailureHandler` and, only when the
-        /// failure is itself proof the link is gone, discards this pane's queued input backlog rather than
-        /// letting it drain and deliver late — including any Enter — once the link recovers. Shared by
-        /// every interactive control path: the four still chained on `inputQueue`'s `onError` (input, key,
+        /// failure is CONCLUSIVE proof the link is gone (not merely a timed-out round trip — see the
+        /// handler's own doc), discards this pane's queued input backlog rather than letting it drain and
+        /// deliver late — including any Enter — once the link recovers. A bare timeout still reaches the
+        /// handler and still gets whatever failure surfacing it does, but leaves the backlog queued: the
+        /// serial chain already tolerates a thrown predecessor (each enqueued task awaits its predecessor's
+        /// `.result`, not its success), so the next queued send simply attempts on its own. Shared by every
+        /// interactive control path: the four still chained on `inputQueue`'s `onError` (input, key,
         /// clear-screen, scroll), and the resize path, which sends off that queue in its own detached task
         /// and so calls this directly instead of through `onError`. `self`-free so every call site can
         /// capture it by value into a closure or task body built off the main actor.

@@ -3508,6 +3508,51 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
     }
 
+    /// A `session_metadata` state-stream payload must cause at most one `refreshNow()`, not two. Before
+    /// the fix, `TerminalRemoteSessionStateNotificationRouting` fanned this reason out to both
+    /// `.spacesTerminalSessionMetadataDidChange` and `.spacesTerminalRuntimeStateDidChange`, and this
+    /// pane observes both with the identical unconditional refresh — so one title rewrite from a coding
+    /// agent (which can happen many times a second) ran the full refresh twice. Posts through the real
+    /// routing table (`postStateStreamNotifications`), not the individual `debugSimulate*` hooks, so the
+    /// assertion exercises the fan-out itself rather than one notification in isolation.
+    @MainActor func testSessionMetadataStateStreamPayloadCausesExactlyOneRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-metadata-refresh-count"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot()
+        fakeHost.effectiveTitle = "backend"
+        fakeHost.effectiveWorkingDirectory = "/tmp/work"
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: fakeHost)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+
+        controller.debugForceRefresh()
+        let refreshCountBeforeMetadataChange = controller.debugRefreshNowCallCountForTesting
+
+        fakeHost.effectiveTitle = "streaming agent output"
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.sessionMetadata, sessionID: sessionID)
+
+        XCTAssertEqual(controller.displayTitle, "streaming agent output", "the single refresh must still have picked up the new title")
+        XCTAssertEqual(
+            controller.debugRefreshNowCallCountForTesting, refreshCountBeforeMetadataChange + 1,
+            "one session_metadata payload must cause exactly one refreshNow(), not one per routed notification")
+    }
+
     /// Posts the local notifications a state-stream payload with `reason` fans out to.
     @MainActor private func postStateStreamNotifications(reason: String, sessionID: String) {
         for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason) {

@@ -369,6 +369,43 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             "a repeat failure during an outage already reported down must still say the link is gone")
     }
 
+    /// The main-thread-stall keystroke-drop fix: a FRESH request timeout (the link not already known
+    /// down) is not by itself conclusive proof the link is gone — the same 5s interactive deadline that
+    /// catches a dead link also catches an app-side stall that never touched the network — so
+    /// `reportFailedInputSend` must answer `false` for one, which is what keeps `RemoteGhosttySessionHost`
+    /// from discarding the pane's queued input backlog behind it. The failure-surfacing side effects
+    /// (disconnect notice, torn-down subscription, armed reconnect) still fire exactly as they do for any
+    /// other transport failure — only the return value, and so only whether the backlog survives, differs.
+    /// A connection-level failure on the very next fresh outage remains conclusive and answers `true`,
+    /// proving the distinction is about the error shape and not merely "the second call in a row."
+    @MainActor func testFreshRequestTimeoutSurfacesTheFailureButIsNotConclusiveOfLostLink() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        XCTAssertFalse(
+            model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out.")),
+            "a bare request timeout alone is not conclusive proof the link is down")
+        XCTAssertTrue(model.isStateStreamDisconnected, "the timeout must still surface the same disconnect notice as any other transport failure")
+        XCTAssertFalse(model.hasActiveStreamClientForTesting, "the timeout must still tear down the subscription like any other transport failure")
+
+        // `SpacesPinnedTLSConnectionError.timeout` is what the production request path actually throws on
+        // a deadline (see `SpacesDeviceClient.isDeviceAPIRequestTimeout`'s doc); it must classify the
+        // same way as the declared `SpacesDeviceAPIRequestClientError.timeout` case above. The link is
+        // already reported down from the first assertion, so this exercises the "already disconnected"
+        // branch, which always answers true regardless of shape — covered separately by
+        // `testReportFailedInputSendReturnValueTracksWhetherTheLinkIsGoneNotWhetherItDidFreshWork`. A
+        // second model proves the pinned-TLS timeout shape is not conclusive on a FRESH outage too.
+        let secondModel = try makeModel(sessionID: "session-\(UUID().uuidString)")
+        secondModel.installStreamClientForTesting(FakeStreamClient())
+        secondModel.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        XCTAssertFalse(
+            secondModel.reportFailedInputSend(SpacesPinnedTLSConnectionError.timeout),
+            "the pinned-TLS timeout the production request path actually throws must classify the same as the declared timeout case")
+        XCTAssertTrue(secondModel.isStateStreamDisconnected)
+    }
+
     /// The interactive control commands on the hot per-keystroke path (typed input, key, scroll, resize,
     /// clear-screen) get the shortened deadline; every other control command — session-management calls
     /// like attach/detach/heartbeat/takeover/appearance, off that path — keeps the Device API's own
