@@ -12,9 +12,9 @@ import spacesdevicecore
 /// hoc terminals, none of which the daemon opens on Start, so Terminal stays a separate action.
 struct WorkspaceControlBar: View {
     let workspace: SpacesDeviceWorkspaceSummary
-    /// Whether this workspace's own controls should read as busy — currently just its pending-delete
-    /// state. Deliberately not the app-wide `model.isMutating`: a mutation running against a different
-    /// workspace has nothing to do with this bar (#450).
+    /// Whether these controls would be refused right now: a shared-channel mutation is in flight (the
+    /// model runs those one at a time, so a tap would be dropped silently) or this workspace's own delete
+    /// is pending. Another workspace's delete never sets either — see the call site (#450).
     let isBusy: Bool
     let onStart: () -> Void
     let onRestart: () -> Void

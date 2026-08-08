@@ -365,10 +365,13 @@ struct SpacesTabView: View {
             // the structural change this deliberately avoids) but nothing under a workspace on its way out
             // is worth acting on.
             WorkspaceControlBar(
-                // Only this workspace's own pending-delete state, not `model.isMutating`: that flag also
-                // covers mutations against other workspaces, and this band has nothing to do with those
-                // (#450).
-                workspace: group.workspace, isBusy: isDeleting, onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                // Every action here rides the shared `commandChannel`, whose gate drops a second mutation
+                // without sending it, so the bar must read busy while any shared-channel mutation is in
+                // flight or its taps would silently do nothing. A delete never sets `isMutating` (it runs
+                // on its own private channel), so another workspace's delete never dims this bar (#450);
+                // this workspace's own delete dims it via `isDeleting`.
+                workspace: group.workspace, isBusy: model.isMutating || isDeleting,
+                onStart: { Task { await model.launchWorkspace(group.workspace) } },
                 onRestart: { Task { await model.restartWorkspace(group.workspace) } },
                 onStop: { Task { await model.stopWorkspace(group.workspace) } },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.

@@ -1942,6 +1942,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // delete runs on its own private channel (`deleteChannel` below) rather than the shared
         // `commandChannel`, so one workspace's delete can never collide on the wire with a mutation
         // running against a different workspace (#450) — including another workspace's delete.
+        //
+        // Accepted overlap: a delete issued while this same workspace's Start/Stop/Restart/Hide is still
+        // in flight is not blocked here. The daemon's per-workspace lifecycle gate arbitrates that race
+        // and refuses one side with "Workspace action is already in progress."; the refusal surfaces as
+        // this delete's error and lifts the pending mark, so a retry works. Client-side tracking of which
+        // workspace the shared-channel mutation targets would buy only an earlier copy of that message.
         guard !isWorkspacePendingDeletion(workspace.id) else { return }
         let identity = overviewIdentity
         // Marked for the whole mutation. On success the mark is lifted only after the refreshed overview
