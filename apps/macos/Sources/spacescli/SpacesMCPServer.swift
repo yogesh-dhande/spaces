@@ -62,18 +62,45 @@ final class SpacesMCPStdioServer {
     private let input: FileHandle
     private let output: FileHandle
     private let encoder: JSONEncoder
+    /// Reads the binary identity this process is running at construction — i.e. at `spaces mcp` start,
+    /// before any tool call can have failed — which is what bounds the re-exec (see `MCPStaleImageReload`).
+    private let staleImageReload: MCPStaleImageReload
     /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
-    private var readBuffer = Data()
+    /// Internal because the stale-image reload gates on it being empty, and that invariant is unit-tested.
+    var readBuffer = Data()
+    /// A reload the exec gate deferred because frames were still buffered, performed by the read loop once
+    /// they are drained. Internal so the deferral is unit-testable.
+    var deferredReloadTarget: String?
 
-    init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) {
+    init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload()) {
         self.input = input
         self.output = output
+        self.staleImageReload = staleImageReload
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         self.encoder = encoder
     }
 
-    func run() throws { while let data = readMessage() { try handleMessage(data) } }
+    func run() throws {
+        while let data = readMessage() {
+            try handleMessage(data)
+            performDeferredReloadIfDrained()
+        }
+    }
+
+    /// Performs a reload the exec gate deferred, at the first point every drained frame has been answered
+    /// and the loop would otherwise block for new input. This is the drain point the deferral contract in
+    /// `respondToFailedToolCall` names; without it a buffered frame that raises no daemon call of its own
+    /// (a notification, a `tools/list`) would leave this image stale and blocked, and the client's retry
+    /// would have to fail a second time before the reload happened. The message-boundary invariant holds
+    /// by construction here: `handleMessage` has returned, so any response it wrote is a complete frame.
+    /// The target is taken before the attempt, so a failed `execv` leaves the server on the same footing
+    /// as the direct path — serving the stale image, re-deciding on the next mismatch.
+    private func performDeferredReloadIfDrained() {
+        guard readBuffer.isEmpty, let target = deferredReloadTarget else { return }
+        deferredReloadTarget = nil
+        staleImageReload.reload(into: target)
+    }
 
     private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
@@ -460,7 +487,37 @@ final class SpacesMCPStdioServer {
             let profileResponse = try callTool(name: name, arguments: arguments)
             let withPendingEvents = try attachingPendingAgentEvents(to: profileResponse)
             try sendToolResult(id: id, text: try encodedText(withPendingEvents), isError: false)
-        } catch { try sendToolResult(id: id, text: error.localizedDescription, isError: true) }
+        } catch { try respondToFailedToolCall(id: id, error: error) }
+    }
+
+    /// Answers a failed tool call, and reloads this process's binary image when the failure was a daemon
+    /// that has moved ahead of it (see `MCPStaleImageReload`). The answer is written first and the exec
+    /// runs only after those bytes are on stdout: `writeJSONObject` completes one whole newline-delimited
+    /// message, so the exec always lands on a message boundary and never truncates a half-written frame.
+    /// Internal so that ordering is unit-testable.
+    ///
+    /// The exec is additionally gated on `readBuffer` being empty. `readMessage` drains whatever
+    /// `availableData` returns, so a client that pipelined can leave whole further frames — or the front
+    /// of a partial one — sitting in this image's memory, and exec discards all of it: unread bytes still
+    /// in the stdin pipe are inherited by the successor, but drained bytes are gone. An empty buffer is
+    /// therefore the invariant that makes a lost or torn frame impossible.
+    ///
+    /// The gate defers rather than drops: a non-empty buffer records the target and the read loop performs
+    /// the reload at `performDeferredReloadIfDrained`, the first point every drained frame has been
+    /// answered. That is what keeps the promise the retry answer makes — the client's next call reaches a
+    /// current image — no matter what those buffered frames turn out to be. A buffered frame that does
+    /// itself hit this path with an empty buffer reloads directly and makes the record redundant.
+    func respondToFailedToolCall(id: Any?, error: Error) throws {
+        guard let execTarget = staleImageReload.execTarget(for: error) else {
+            try sendToolResult(id: id, text: error.localizedDescription, isError: true)
+            return
+        }
+        try sendToolResult(id: id, text: MCPStaleImageReload.retryMessage, isError: true)
+        guard readBuffer.isEmpty else {
+            deferredReloadTarget = execTarget
+            return
+        }
+        staleImageReload.reload(into: execTarget)
     }
 
     /// Drains any events a watched child queued for the current Spaces terminal

@@ -1058,6 +1058,14 @@ public struct TerminalServiceDaemonWireIncompatibility: Sendable {
     public let message: String
 
     public var canRestartDaemon: Bool { verdict == .daemonTooOld }
+
+    /// The daemon has moved ahead of this build, so this process's image is the stale side. The
+    /// counterpart to `canRestartDaemon`, which names the opposite direction. Both exist so callers
+    /// discriminate the two directions on the typed verdict rather than on the message prose: the
+    /// messages are user-facing text that is free to change, while the direction decides behavior — a
+    /// long-lived `spaces mcp` server reloads its own binary image on this one (`MCPStaleImageReload`)
+    /// and leaves the other alone.
+    public var daemonSpeaksNewerProtocol: Bool { verdict == .clientTooOld }
 }
 
 extension TerminalService {
