@@ -22,12 +22,12 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", runtimeTargetID: "window-codex",
-                terminalTarget: TerminalTargetRecord(runtimeTargetID: "window-codex", trackingID: "session-codex"), sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now"))
+                terminalTarget: TerminalTargetRecord(runtimeTargetID: "window-codex", trackingID: "session-codex"), sessionKey: nil, status: .idle,
+                createdAt: "now", updatedAt: "now"))
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
+            store: store, builtInTerminalWindowCloser: { sessionID, _ in closed.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
         try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
@@ -55,7 +55,7 @@ extension OrchestratorTests {
             id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
             terminalTarget: TerminalTargetRecord(trackingID: "old-session"), status: .idle, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(originalRecord)
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
         try orchestrator.finalizeAgentRow(
@@ -80,7 +80,7 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
@@ -185,7 +185,7 @@ extension OrchestratorTests {
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
+            store: store, builtInTerminalWindowCloser: { sessionID, _ in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1310,7 +1310,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // A live agent that finished a turn: `.done`, with no recorded exit event.
         let child = try orchestrator.registerAgentWindow(
@@ -1344,7 +1344,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session", status: .spinning)
@@ -1381,7 +1381,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // Life 1: the agent exits while its terminal stays open — the row is kept `.exited` with a recorded
         // exit event, and the watcher (edge retained on a kept row) receives the first exited notice.
@@ -1430,7 +1430,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -1472,7 +1472,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .waiting)
@@ -1579,7 +1579,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // A live terminal keeps the row (and its recorded events) after the exit; a dead one would
         // delete the row and cascade away the very event this test counts.
@@ -1735,7 +1735,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
@@ -1769,7 +1769,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1930,7 +1930,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _, _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // The snapshot a reconcile pass read before classification landed.
         let stale = try orchestrator.registerAgentWindow(

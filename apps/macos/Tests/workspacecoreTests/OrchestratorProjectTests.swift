@@ -133,7 +133,7 @@ extension OrchestratorTests {
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
         let orchestrator = makeTestOrchestrator(
-            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in },
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionTerminator: { _ in })
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")

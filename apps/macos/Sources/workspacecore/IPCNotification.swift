@@ -48,6 +48,18 @@ public enum IPCNotification {
     public static let cycleDirectionUserInfoKey = "cycle_direction"
     public static let terminalSessionIDUserInfoKey = "terminal_session_id"
     public static let terminalAttachmentModeUserInfoKey = "terminal_attachment_mode"
+    /// `TerminalOpenFocusIntent` on an `openTerminalSessionWindow` IPC. Required: every poster states
+    /// `.focus` or `.withoutFocus` explicitly. A notification with no value, a blank one, or one this
+    /// build does not recognize is malformed and the receiver drops it, the same as a missing session ID.
+    public static let terminalOpenFocusIntentUserInfoKey = "terminal_open_focus_intent"
+    /// The session an `openTerminalSessionWindow` replaces, so the replacement claims that session's
+    /// pane instead of installing a new one. Absent means the open replaces nothing.
+    public static let terminalOpenReplacesSessionIDUserInfoKey = "terminal_open_replaces_session_id"
+    /// `TerminalPaneCloseDisposition` on a `closeTerminalSessionWindow` IPC. Required: every poster states
+    /// `.teardown` or `.awaitReplacement` explicitly. A notification with no value, a blank one, or one
+    /// this build does not recognize is malformed and the receiver drops it, the same as a missing
+    /// session ID.
+    public static let terminalCloseDispositionUserInfoKey = "terminal_close_disposition"
     public static let terminalSessionIsTerminatingUserInfoKey = "terminal_session_is_terminating"
     public static let focusRequestIDUserInfoKey = "focus_request_id"
     public static let outputPathUserInfoKey = "output_path"

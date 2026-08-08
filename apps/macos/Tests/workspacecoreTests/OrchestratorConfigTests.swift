@@ -111,7 +111,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionLauncher: { _ in throw WorkspaceError.invalidArgument(message: "launcher failed") })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
@@ -137,7 +137,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let launchCapture = TerminalLaunchAttemptCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionLauncher: { _ in
                 launchCapture.count += 1
                 throw WorkspaceError.invalidArgument(message: "launcher should not run")
@@ -193,7 +193,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
@@ -352,7 +352,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()

@@ -82,7 +82,7 @@ extension OrchestratorTests {
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
+            store: store, builtInTerminalWindowCloser: { sessionID, _ in closed.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
         try orchestrator.stopWorkspace(workspaceID: workspace.id)
@@ -247,7 +247,8 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
         let orchestrator = makeTestOrchestrator(
-            store: store, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+            store: store, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _, _ in },
+            builtInTerminalSessionTerminator: { _ in })
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-teardown")

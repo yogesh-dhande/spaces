@@ -1453,16 +1453,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private nonisolated func handleOpenTerminalSessionWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        guard
+            let focusIntent = Self.terminalOpenFocusIntent(
+                ipcRawValue: notification.userInfo?[IPCNotification.terminalOpenFocusIntentUserInfoKey] as? String)
+        else { return }
         let modeRawValue = notification.userInfo?[IPCNotification.terminalAttachmentModeUserInfoKey] as? String
         let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
+        let openIntent = TerminalPaneOpenIntent(
+            focus: focusIntent,
+            replacesSessionID: Self.trimmedNonEmpty(notification.userInfo?[IPCNotification.terminalOpenReplacesSessionIDUserInfoKey] as? String))
         let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
-        Task { @MainActor [weak self, object, sessionID, mode, requestID] in
+        Task { @MainActor [weak self, object, sessionID, mode, openIntent, requestID] in
             guard let self else { return }
             guard self.matchesProfileIPCObject(object) else { return }
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
-                detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, requestID: requestID)
+                detail:
+                    "mode=\(mode.rawValue) focus=\(openIntent.focus.rawValue) replaces=\(openIntent.replacesSessionID ?? "-")\(requestID.map { " request_id=\($0)" } ?? "")"
+            )
+            await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, openIntent: openIntent, requestID: requestID)
         }
     }
 
@@ -1513,7 +1522,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let focusRequestID = UUID().uuidString
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let opened = await self.openTerminalSessionPane(sessionID: sessionID, mode: .owner, requestID: focusRequestID)
+                let opened = await self.openTerminalSessionPane(sessionID: sessionID, mode: .owner, openIntent: .focused, requestID: focusRequestID)
                 if !opened { self.presentTerminalDeepLinkUnknownSessionAlert(sessionID: sessionID) }
             }
         case .remote(let sessionID, let deviceID): openRemoteTerminalDeepLink(sessionID: sessionID, deviceID: deviceID)
@@ -1538,7 +1547,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
             let opened = await self.openTerminalSessionPane(
-                sessionID: sessionID, mode: .owner, requestID: focusRequestID, resolvedRequest: Self.terminalSessionPaneOpenRequest(from: match))
+                sessionID: sessionID, mode: .owner, openIntent: .focused, requestID: focusRequestID,
+                resolvedRequest: Self.terminalSessionPaneOpenRequest(from: match))
             if !opened { self.presentTerminalDeepLinkRemoteSessionNotFoundAlert(sessionID: sessionID, deviceName: device.name) }
         }
     }
@@ -1587,13 +1597,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private nonisolated func handleCloseTerminalSessionWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
+        guard
+            let disposition = Self.terminalPaneCloseDisposition(
+                ipcRawValue: notification.userInfo?[IPCNotification.terminalCloseDispositionUserInfoKey] as? String)
+        else { return }
         let sessionIsTerminating = (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true"
-        Task { @MainActor [weak self, object, sessionID, sessionIsTerminating] in
+        Task { @MainActor [weak self, object, sessionID, sessionIsTerminating, disposition] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             TerminalPerformance.logMetric(
                 "terminal_window_close_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
-                detail: "terminating=\(sessionIsTerminating ? 1 : 0)")
-            self.closeTerminalSessionPane(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
+                detail: "terminating=\(sessionIsTerminating ? 1 : 0) disposition=\(disposition.rawValue)")
+            self.closeTerminalSessionPane(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating, disposition: disposition)
         }
     }
 
@@ -1910,23 +1924,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// after the pane opens. The pane's own attach otherwise stays a viewer when another
     /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
     /// perf metric the E2E harness parses.
+    /// `focusIntent` is independent of `mode`: a `.withoutFocus` open still reclaims owner attachment,
+    /// it just installs (or leaves) the pane without selecting its tab, fronting its panel, or moving
+    /// the caret, so a programmatic launch does not take the window the user is working in.
     /// `resolvedRequest`, when provided, skips the internal session→device resolution: the remote
     /// deep-link open resolves the request against the link's explicitly named device (so it never
     /// falls back to the local device the way the session-id-only resolve does) and hands it in here,
     /// reusing this one open/focus + owner-reclaim + metric path.
     @discardableResult private func openTerminalSessionPane(
-        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, resolvedRequest: DeviceTerminalOpenRequest? = nil
+        sessionID: String, mode: TerminalAttachmentMode, openIntent: TerminalPaneOpenIntent, requestID: String? = nil,
+        resolvedRequest: DeviceTerminalOpenRequest? = nil
     ) async -> Bool {
         let startedAt = Date()
+        let focusIntent = openIntent.focus
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        cancelDeferredExternalWindowHide()
+        let modeDetail = "mode=\(mode.rawValue) focus=\(focusIntent.rawValue)"
+        // The invariant for a replacement's open, enforced here and nowhere else: it either claims the
+        // pane its restart is holding or releases it, exactly once, on every path out of this function.
+        // Every failure exit below funnels through this one `defer` rather than cleaning up for itself,
+        // because the ways an open can fail are open-ended (the session may not resolve yet, its device
+        // may refuse the install, its content may fail to build) and a path that forgot to release would
+        // strand the terminated predecessor on screen with nothing left able to close it: the daemon
+        // consumed the reservation when it launched the replacement, and overview pruning skips held
+        // panes. Only an open that actually claimed the pane settles the hold: an open that succeeded by
+        // installing a fresh pane (the predecessor's was closed by the user before the restart, so there
+        // was nothing to claim) leaves the hold untouched and still owing a release, which is why the
+        // test below is on the action taken rather than on the open having worked.
+        var openAction: TerminalPaneOpenAction?
+        defer {
+            if let orphaned = Self.heldPredecessorSessionToRelease(replacesSessionID: openIntent.replacesSessionID, openAction: openAction) {
+                panelCoordinator.releasePaneHeldForReplacement(sessionID: orphaned)
+            }
+        }
+        // A non-focusing open leaves the app wherever it is, so a pending "hide Spaces after a browser
+        // focus" task is not superseded by it the way a focusing open supersedes it.
+        if focusIntent == .focus { cancelDeferredExternalWindowHide() }
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
         // Re-showing the pane the user is already focused in and owns is a foreground-and-focus, so it also
-        // skips resolving the request: resolution only exists to install or re-target a pane.
-        if reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
+        // skips resolving the request: resolution only exists to install or re-target a pane. A
+        // non-focusing open has nothing to foreground, so it never takes this shortcut.
+        if focusIntent == .focus, reusedExistingPane, panelCoordinator.refocusFocusedTerminalPane(forSessionID: sessionID) {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                detail: "mode=\(mode.rawValue) reused=1 route=pane refocus=1\(requestDetail)")
+                detail: "\(modeDetail) reused=1 route=pane refocus=1\(requestDetail)")
             return true
         }
         let resolved: DeviceTerminalOpenRequest?
@@ -1934,19 +1974,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let request = resolved else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=\(mode.rawValue) route=pane reason=resolve_nil\(requestDetail)")
+                detail: "\(modeDetail) route=pane reason=resolve_nil\(requestDetail)")
             return false
         }
-        guard panelCoordinator.openOrFocusTerminalPane(request) else {
+        guard let action = panelCoordinator.openOrFocusTerminalPane(request, openIntent: openIntent) else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=\(mode.rawValue) route=pane reason=pane_open_failed\(requestDetail)")
+                detail: "\(modeDetail) route=pane reason=pane_open_failed\(requestDetail)")
             return false
         }
+        openAction = action
         if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "mode=\(mode.rawValue) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "\(modeDetail) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
         return true
     }
 
@@ -1957,7 +1998,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         // Focus must not preempt a different active owner (matching the pre-rework focus
         // path); only the owner-mode open IPC reclaims ownership.
-        let focused = await openTerminalSessionPane(sessionID: sessionID, mode: .viewer, requestID: requestID)
+        let focused = await openTerminalSessionPane(sessionID: sessionID, mode: .viewer, openIntent: .focused, requestID: requestID)
         logPerfMetric(
             "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: focused,
             detail: "route=pane\(requestDetail)")
@@ -1967,7 +2008,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// state model plus the Device API control closures, hosted by the window-independent
     /// pane view controller. Local and remote sessions share this one path. Returns nil
     /// (surfacing the error) when the session's paths or state model cannot be built.
-    func makeTerminalPaneContent(request: DeviceTerminalOpenRequest) -> TerminalPaneContentController? {
+    /// - Parameter focusIntent: The intent of the open needing this content, so a construction failure is
+    ///   reported the same way a preparation failure is: modally only for an open the user is waiting on.
+    func makeTerminalPaneContent(request: DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) -> TerminalPaneContentController?
+    {
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2149,7 +2193,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             content.applyTerminalTextSize(terminalTextSize)
             return content
         } catch {
-            showError(error)
+            reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
             return nil
         }
     }
@@ -2303,21 +2347,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Closes a session's pane for the close IPC and daemon-driven session
     /// termination, keeping the `terminal_window_close` perf metric the E2E harness
     /// parses.
-    private func closeTerminalSessionPane(sessionID: String, sessionIsTerminating: Bool = false) {
+    /// Forwards a close to the coordinator unconditionally, and decides only what to report.
+    ///
+    /// Deliberately not gated on the session having a pane in memory. A restart's `awaitReplacement`
+    /// close is most often for a workspace the user is not viewing, whose panel has never been
+    /// materialized, and that is precisely the case whose pane position the hold exists to protect: the
+    /// coordinator records the hold against the persisted layout with no placement to point at. A
+    /// placement gate here would swallow the disposition before it ever reached that, and the observable
+    /// result is the whole bug the hold prevents, so the gate is a reporting detail only.
+    ///
+    /// Not private: this handler layer, rather than the coordinator underneath it, is where a swallowed
+    /// disposition can hide, so it is reachable from tests.
+    func closeTerminalSessionPane(sessionID: String, sessionIsTerminating: Bool = false, disposition: TerminalPaneCloseDisposition = .teardown) {
         let startedAt = Date()
-        guard panelCoordinator.placement(forSessionID: sessionID) != nil else {
-            logPerfMetric(
-                "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "route=missing_pane terminating=\(sessionIsTerminating ? 1 : 0)")
-            return
-        }
+        let closeDetail = "terminating=\(sessionIsTerminating ? 1 : 0) disposition=\(disposition.rawValue)"
+        let route = Self.terminalPaneCloseRoute(hasPlacement: panelCoordinator.placement(forSessionID: sessionID) != nil, disposition: disposition)
         logPerfMetric(
-            "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "route=pane terminating=\(sessionIsTerminating ? 1 : 0)")
-        panelCoordinator.closePane(forSessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
+            "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+            success: route != .missingPane, detail: "route=\(route.rawValue) \(closeDetail)")
+        panelCoordinator.closePane(forSessionID: sessionID, sessionIsTerminating: sessionIsTerminating, disposition: disposition)
     }
 
-    private static func trimmedNonEmpty(_ value: String?) -> String? {
+    nonisolated private static func trimmedNonEmpty(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
     }
@@ -4644,6 +4695,172 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         paneIsFocused: Bool, paneIsInSelectedTab: Bool, paneHoldsOwnerAttachedSurface: Bool
     ) -> Bool { paneIsFocused && paneIsInSelectedTab && paneHoldsOwnerAttachedSurface }
 
+    /// What opening a terminal session's pane does to the panel layout.
+    enum TerminalPaneOpenAction: Equatable {
+        /// Select the pane's tab, bring its panel forward, and put the caret in it.
+        case focusExistingPane
+        /// Leave the pane exactly where it sits: the session re-targets in place and nothing moves.
+        case leaveExistingPaneInPlace
+        /// Point the pane of the session this one replaces at this session, keeping its tab and split.
+        case claimReplacedPane
+        /// Install the pane as a new tab, selected and focused.
+        case openFocusedTab
+        /// Install the pane as a new tab that is neither selected nor focused.
+        case installUnselectedTab
+    }
+
+    /// What a pane open does to the layout, given whether the session already has a pane, whether the
+    /// session it replaces still has one, and whether the open may move focus.
+    ///
+    /// A session that already has its own pane is placed, so that wins over any claim: re-opening it
+    /// must not go move a different pane. Claiming beats installing, which is the whole point of naming
+    /// a predecessor: a restart's replacement takes over the pane the user arranged instead of arriving
+    /// at the end of the tab strip. A named predecessor that no longer has a pane (the user closed it
+    /// during the restart) leaves nothing to claim and falls through to the ordinary install. Pure so
+    /// each of those precedences is directly testable.
+    nonisolated static func terminalPaneOpenAction(hasExistingPane: Bool, hasReplaceablePane: Bool, focusIntent: TerminalOpenFocusIntent)
+        -> TerminalPaneOpenAction
+    {
+        if hasExistingPane { return focusIntent == .focus ? .focusExistingPane : .leaveExistingPaneInPlace }
+        if hasReplaceablePane { return .claimReplacedPane }
+        return focusIntent == .focus ? .openFocusedTab : .installUnselectedTab
+    }
+
+    /// What an arriving `awaitReplacement` close does, given what the replacement's open already did.
+    enum TerminalPaneHoldAction: Equatable {
+        /// The ordinary order: hold the pane until the replacement claims it.
+        case hold
+        /// The replacement's open beat this close and already retargeted the pane, so there is nothing of
+        /// the predecessor's left here. Consuming the marker is the whole transition: recording a hold
+        /// would strand a dead id, and tearing down would kill the pane the replacement now lives in.
+        case consumeClaim
+        /// The replacement's open beat this close and failed, so the hold is dead on arrival and the pane
+        /// is torn down now rather than held for a replacement that is not coming.
+        case teardown
+    }
+
+    /// The close and the open are independent IPCs, so either can be processed first. This is the whole
+    /// out-of-order half of the hold state machine, pure so all three orders are directly testable. A
+    /// pending claim wins over a pending release: a claim that succeeded is authoritative about where the
+    /// pane went, while a release only says an open did not claim it.
+    nonisolated static func terminalPaneHoldAction(hasPendingClaim: Bool, hasPendingRelease: Bool) -> TerminalPaneHoldAction {
+        if hasPendingClaim { return .consumeClaim }
+        return hasPendingRelease ? .teardown : .hold
+    }
+
+    /// What a close reports, given whether the session has a pane in memory and what the daemon asked
+    /// for. Reporting only: every close is forwarded to the coordinator regardless.
+    enum TerminalPaneCloseRoute: String, Equatable {
+        /// A materialized pane was closed or held.
+        case pane
+        /// No pane in memory, but a hold was recorded for the workspace's persisted layout. This is the
+        /// ordinary shape for a restart of a workspace the user is not currently viewing, so it is a
+        /// success rather than the nothing-to-do case below.
+        case hold
+        /// No pane in memory and nothing asked for, so the close found nothing to do.
+        case missingPane = "missing_pane"
+    }
+
+    /// Pure so the case that used to be swallowed, a hold for a workspace with no materialized panel, is
+    /// directly testable as a distinct outcome rather than as "no pane, nothing to do".
+    nonisolated static func terminalPaneCloseRoute(hasPlacement: Bool, disposition: TerminalPaneCloseDisposition) -> TerminalPaneCloseRoute {
+        if hasPlacement { return .pane }
+        return disposition == .awaitReplacement ? .hold : .missingPane
+    }
+
+    /// The pane-close disposition a `closeTerminalSessionWindow` IPC carries. The field is required: every
+    /// poster states `.teardown` or `.awaitReplacement` explicitly. A notification with no value, a blank
+    /// one, or one this build does not recognize is malformed, and nil tells the caller to drop the IPC,
+    /// the same as a missing session ID.
+    nonisolated static func terminalPaneCloseDisposition(ipcRawValue: String?) -> TerminalPaneCloseDisposition? {
+        guard let raw = ipcRawValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return TerminalPaneCloseDisposition(rawValue: raw)
+    }
+
+    /// What the swap from placeholder to ready terminal does with the caret.
+    enum TerminalPanePreparationFocusAction: Equatable {
+        /// Leave the caret wherever the user put it.
+        case none
+        /// Put the caret back in this pane, because the placeholder it replaces was holding it.
+        case restoreToPreparedPane
+        /// Put the caret in the panel's focused pane, landing a focusing open in the terminal it asked for.
+        case activatePanelFocusedPane
+    }
+
+    /// What an open's deferred work does with the caret. Credential preparation finishes long after the
+    /// pane is installed, and the completion re-activates the panel's focused pane so a focusing open
+    /// lands the caret in the terminal it just prepared. A non-focusing open must not do that: the user
+    /// has had the whole async window to click into the sidebar or another pane, and taking the caret
+    /// then is the theft the intent forbids.
+    ///
+    /// Withholding it unconditionally is wrong in one case, though, and it is the case where the user
+    /// asked: they clicked into the waiting pane while it was still preparing, so the placeholder holds
+    /// the caret, and swapping the placeholder out removes the first responder. Restoring it there is not
+    /// stealing focus, it is not dropping focus the user already gave this pane. Pure so both halves are
+    /// directly testable.
+    nonisolated static func terminalPanePreparationFocusAction(focusIntent: TerminalOpenFocusIntent, preparedPaneHoldsKeyboardFocus: Bool)
+        -> TerminalPanePreparationFocusAction
+    {
+        if focusIntent == .focus { return .activatePanelFocusedPane }
+        return preparedPaneHoldsKeyboardFocus ? .restoreToPreparedPane : .none
+    }
+
+    /// The held predecessor an open has orphaned, if any. A replacement's open is the only thing that can
+    /// release the hold its restart placed: the daemon consumed that reservation the moment it launched
+    /// the replacement, so it will never send a teardown for the old session, and the client's overview
+    /// pruning deliberately skips held panes. An open that names a replaced session and then fails for
+    /// any reason therefore has to release the pane itself, or the terminated predecessor stays on screen
+    /// for good. Pure so the "claimed it or released it" rule is directly testable.
+    nonisolated static func heldPredecessorSessionToRelease(replacesSessionID: String?, openAction: TerminalPaneOpenAction?) -> String? {
+        guard let replacesSessionID, openAction != .claimReplacedPane else { return nil }
+        return replacesSessionID
+    }
+
+    /// Whether a retarget hands the caret to the replacement. A restart's replacement takes over the pane
+    /// its predecessor occupied, and that pane may be the one the user is typing in: swapping the content
+    /// tears the predecessor's view out and the first responder goes with it, so the user would be left
+    /// typing into nothing by a restart running in the background. Moving the caret across is not the
+    /// focus theft the intent forbids, it is keeping focus the pane already had. Pure so the one case
+    /// that transfers, and the ordinary case that touches nothing, are directly testable.
+    nonisolated static func terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: Bool) -> Bool {
+        replacedPaneHoldsKeyboardFocus
+    }
+
+    /// Whether a failed open reports itself with a modal. A user waiting on a terminal they asked for is
+    /// owed the error in front of them; a programmatic launch failing in the background is not a reason
+    /// to interrupt whatever the user is doing, and its pane already says so in place.
+    ///
+    /// One rule for every way an open can fail, not just the one it was written for: credential
+    /// preparation returning an error, content construction throwing after preparation succeeded, and the
+    /// owning device refusing the install. `reportTerminalPaneOpenFailure` is the single site that applies
+    /// it, so a new failure mode cannot quietly reintroduce the modal.
+    nonisolated static func terminalPaneOpenFailureUsesModalAlert(focusIntent: TerminalOpenFocusIntent) -> Bool { focusIntent == .focus }
+
+    /// Reports an open's failure, modally or not at all, by the open's focus intent. The only door to
+    /// `showError` on the pane-open path.
+    func reportTerminalPaneOpenFailure(_ error: Error, focusIntent: TerminalOpenFocusIntent) {
+        guard Self.terminalPaneOpenFailureUsesModalAlert(focusIntent: focusIntent) else { return }
+        showError(error)
+    }
+
+    /// Whether closing a pane hands the caret to the pane that takes its place. A user closing a pane
+    /// (close button, `Cmd+W`, closing its tab) is asking to carry on in that panel, so focus moves to
+    /// the neighbor. A close the daemon drove (a session it terminated for a stop, a restart, or a
+    /// process that exited, plus the client-side prune of sessions a device no longer retains) is not a
+    /// user action at all: the user is wherever they were, possibly in another app, and pulling their
+    /// caret into a terminal because some background session ended is never what they asked for. Pure so
+    /// the line between the two closes is directly testable.
+    nonisolated static func terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: Bool) -> Bool { !sessionIsTerminating }
+
+    /// The focus intent an `openTerminalSessionWindow` IPC carries. The field is required: every poster
+    /// states `.focus` or `.withoutFocus` explicitly. A notification with no value, a blank one, or one
+    /// this build does not recognize is malformed, and nil tells the caller to drop the IPC, the same as
+    /// a missing session ID. Pure so the decode is directly testable.
+    nonisolated static func terminalOpenFocusIntent(ipcRawValue: String?) -> TerminalOpenFocusIntent? {
+        guard let raw = ipcRawValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return TerminalOpenFocusIntent(rawValue: raw)
+    }
+
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
     /// detail is being built, so a retained pane keeps whatever it was built with: a device that goes
@@ -4722,8 +4939,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Surfaces why a pane could not be opened for a terminal target, naming the device the request
     /// pinned rather than re-deriving it from a workspace the sidebar may not list.
-    func showTerminalOpenRequestDeviceUnavailableError(_ request: DeviceTerminalOpenRequest) {
-        showError(deviceUnavailableError(deviceID: request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)))
+    func showTerminalOpenRequestDeviceUnavailableError(_ request: DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) {
+        reportTerminalPaneOpenFailure(
+            deviceUnavailableError(deviceID: request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)), focusIntent: focusIntent)
     }
 
     /// Surfaces why a selection-driven daemon action could not resolve its device.
@@ -6666,7 +6884,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The right panel is the workspace's panel (tabs of terminal panes) and
         // nothing else; workspace identity and actions live in the footer strip below.
         let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
-        panelCoordinator.restoreLayoutIfNeeded(scope: scope)
+        panelCoordinator.restoreLayoutIfNeeded(scope: scope, focusIntent: .focus)
         let panelView = panelCoordinator.panelView(for: scope)
         // Overview ticks land here every few seconds. When this workspace's panel is
         // already the visible detail, tearing it down and re-adding it would dismiss
@@ -10849,7 +11067,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
         let reusedExistingPane = existingPaneBeforeResolution || panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
         let paneFocusStartedAt = Date()
-        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else {
+        guard panelCoordinator.openOrFocusTerminalPane(openRequest, openIntent: .focused) != nil else {
             if reusedExistingPane {
                 existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
             } else {

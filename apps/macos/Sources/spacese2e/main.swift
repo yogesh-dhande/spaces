@@ -2067,7 +2067,12 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
         guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
-        try IPCNotification.post(IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID])
+        try IPCNotification.post(
+            IPCNotification.closeTerminalSessionWindow,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalCloseDispositionUserInfoKey: TerminalPaneCloseDisposition.teardown.rawValue,
+            ])
         try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
     }
 }
@@ -2081,7 +2086,11 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
         let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
         try IPCNotification.post(
-            IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID])
+            IPCNotification.closeTerminalSessionWindow,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID,
+                IPCNotification.terminalCloseDispositionUserInfoKey: TerminalPaneCloseDisposition.teardown.rawValue,
+            ])
         try emitJSON(["sessionID": trimmedSessionID])
     }
 }

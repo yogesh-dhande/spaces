@@ -209,7 +209,7 @@ final class AgentHookTests: XCTestCase {
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
+            store: store, builtInTerminalWindowCloser: { sessionID, _ in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = UUID().uuidString
@@ -324,7 +324,7 @@ final class AgentHookTests: XCTestCase {
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
+            store: store, builtInTerminalWindowCloser: { sessionID, _ in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 

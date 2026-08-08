@@ -3,6 +3,24 @@ import spacesterminalcore
 import systembridge
 
 extension WorkspaceOrchestrator {
+    /// Launching a workspace's configured processes never moves focus.
+    ///
+    /// Every one of these launches is programmatic: the only orchestrator whose window opener actually
+    /// reaches the macOS client is the daemon's profile-command orchestrator, which serves
+    /// `spaces workspace start`/`restart` and the MCP tools that wrap them. In-app and mobile lifecycle
+    /// actions run through the Device API, whose orchestrator opens no panes at all. So a configured
+    /// process launch that lands in the client is, by construction, one a script or an agent asked for
+    /// while the user was working somewhere else, and taking their window and caret for it is a
+    /// disruption they did not ask for. The pane is still installed so the output is one click away; it
+    /// simply arrives on an unselected tab.
+    static let configuredProcessOpenFocusIntent = TerminalOpenFocusIntent.withoutFocus
+
+    /// The open intent for a configured process launch: never focusing, and naming the session it takes
+    /// over from when the launch is a restart's replacement, so the pane keeps its place in the layout.
+    static func configuredProcessOpenIntent(replacing replacedSessionID: String? = nil) -> TerminalPaneOpenIntent {
+        TerminalPaneOpenIntent(focus: configuredProcessOpenFocusIntent, replacesSessionID: replacedSessionID)
+    }
+
     public func updateRunningWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate], restartChangedCommands: Bool) throws {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
@@ -277,16 +295,24 @@ extension WorkspaceOrchestrator {
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
         )
         let session: SpacesTerminalSessionHandle
+        // The replacement takes over this process's pane, so its session is closed as held rather than
+        // torn down. `replacedSessionID` stays set until the launch claims it; a launch that throws
+        // releases the hold on the way out so no pane is left waiting for a session that never arrives.
+        var replacedSessionID: String?
         if isManagedTerminalApp(process.terminalApp) {
-            terminateBuiltInTerminalSession(for: process)
+            replacedSessionID = replacedTerminalSessionID(for: process)
+            terminateBuiltInTerminalSession(for: process, closeDisposition: replacedSessionID == nil ? .teardown : .awaitReplacement)
         } else {
             _ = terminateProcessForRestart(process)
         }
+        defer { if let held = replacedSessionID { builtInTerminalWindowCloser(held, .teardown) } }
         let command = try spacesTerminalCommand(template: template, env: env)
         releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
         session = try launchSpacesTerminalSession(
-            title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+            title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner,
+            openIntent: Self.configuredProcessOpenIntent(replacing: replacedSessionID), backend: .ghosttyEmbedded, readinessPolicy: .sessionReady,
+            workspaceID: workspace.id, kind: .process)
+        replacedSessionID = nil
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             Self.writeStandardError(
                 "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n"
@@ -523,9 +549,12 @@ extension WorkspaceOrchestrator {
         return (logFile, pidFile)
     }
 
-    func launchProcesses(workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false) throws
-        -> [WindowRecord]
-    {
+    /// - Parameter reservations: On a restart, the pane each configured process's previous session left
+    ///   held, claimed here so the replacement takes it over in place.
+    func launchProcesses(
+        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false,
+        reservations: ReplacedTerminalSessionReservations? = nil
+    ) throws -> [WindowRecord] {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
             try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
@@ -539,8 +568,9 @@ extension WorkspaceOrchestrator {
             let name = template.name ?? template.command
             let sessionCommand = try spacesTerminalCommand(template: template, env: env)
             let session = try launchSpacesTerminalSession(
-                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner,
+                openIntent: Self.configuredProcessOpenIntent(replacing: reservations?.claimSessionID(processKey: runningProcessMatchKey(name: name))),
+                backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
             let now = nowISO8601()
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
@@ -725,7 +755,7 @@ extension WorkspaceOrchestrator {
             if terminalWindow.roleValue == .terminal, isManagedTerminalApp(terminalWindow.app),
                 let sessionID = normalizedTerminalSessionID(terminalWindow.terminalTrackingID)
             {
-                builtInTerminalWindowCloser(sessionID)
+                builtInTerminalWindowCloser(sessionID, .teardown)
             }
             try store.deleteWindow(id: terminalWindow.id)
         }
@@ -768,8 +798,8 @@ extension WorkspaceOrchestrator {
             }
         }
         let session = try launchSpacesTerminalSession(
-            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, openIntent: Self.configuredProcessOpenIntent(),
+            backend: .ghosttyEmbedded, readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         let now = nowISO8601()
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
