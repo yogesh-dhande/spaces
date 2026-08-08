@@ -273,8 +273,19 @@ struct SpacesDeviceOverviewBuilder {
                 guard let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty else { return nil }
                 return (templateID, process)
             }, uniquingKeysWith: { existing, _ in existing })
+        // Only a row with no templateID at all (a legacy row from before per-process identity existed)
+        // may be claimed by name below. A row whose templateID is set but stale (the process it was
+        // configured for was removed while it ran, removal keeps the tracked row, and a later edit reused
+        // that name for a *different* process under a fresh id) must not be claimed by that new template:
+        // it already failed the id check above and is not a live instance of it. Without this, the new
+        // template's row here would report `canRun: false` (already running) from the stale row, hiding
+        // Start even though the backend (`WorkspaceOrchestrator.matchingConfiguredTemplateForMissingCheck`,
+        // the same rule, applied to the same stale-id state) treats the new template as missing and would
+        // launch it. A row excluded here still gets its own row from the fallback loop below, keyed by its
+        // own (stale) templateID, so it stays visible and reported as running rather than disappearing.
         let runningByKey = Dictionary(
-            descriptor.runningProcesses.map { (normalizedRunRowName($0.templateName), $0) }, uniquingKeysWith: { existing, _ in existing })
+            descriptor.runningProcesses.filter { ($0.templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty }
+                .map { (normalizedRunRowName($0.templateName), $0) }, uniquingKeysWith: { existing, _ in existing })
         for template in descriptor.settings?.processes ?? [] {
             let key = normalizedRunRowName(template.name ?? "")
             guard !key.isEmpty else { continue }

@@ -107,6 +107,39 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(runtime?.runningProcessCount, 2)
         XCTAssertEqual(runtime?.exitedProcessCount, 0)
         XCTAssertEqual(runtime?.waitingAgentWindowCount, 1)
+        XCTAssertEqual(runtime?.missingConfiguredProcessCount, 0, "every process row here is already running")
+    }
+
+    /// Codex round 5 (P1) on issue #438: `isRunning` turns true the moment an ad hoc terminal or agent
+    /// session starts (`markWorkspaceRunningIfNeeded`), independent of whether any configured process is
+    /// running. `missingConfiguredProcessCount` is what lets a client tell that apart, so it must count
+    /// every `canRun` row the daemon reports (server-side `SpacesDeviceOverviewBuilder.processRows` sends
+    /// one row per configured template, `canRun: true` whenever it is not `.running`, whether the row has
+    /// never been launched at all or has exited) rather than staying hardcoded to zero.
+    func testOverviewViewModelCountsMissingConfiguredProcessesFromCanRunRowsEvenWhileRunningFromAdHocRuntime() {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-ad-hoc-only", projectID: "project-1", projectName: "Project", branch: "feature/adhoc", baseBranch: "main",
+                    dir: "/device/project-adhoc", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
+                    processRows: [
+                        SpacesDeviceWorkspaceProcessRow(
+                            id: "process-web", workspaceID: "workspace-ad-hoc-only", name: "web", command: "npm run dev", processID: nil,
+                            sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false)
+                    ],
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-ad-hoc-only", title: "shell", workingDirectory: "/device/project-adhoc",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    ])
+            ], sessions: [], daemonStatus: Self.status())
+
+        let model = SpacesDeviceOverviewViewModel(overview: overview)
+
+        let runtime = model.workspaceRuntimeStatusByID["workspace-ad-hoc-only"]
+        XCTAssertEqual(runtime?.lifecycleState, .running, "the ad hoc terminal already marked the workspace running")
+        XCTAssertEqual(runtime?.missingConfiguredProcessCount, 1, "the configured process was never launched and must still count as missing")
     }
 
     func testProjectSettingsViewModelPreservesFullConfigSurface() {

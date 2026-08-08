@@ -308,11 +308,9 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - App-level configuration is changed in the app only, not through `spaces`.
 - The project and workspace editors validate process commands when they are saved. Process commands must be non-empty.
 - Stop shuts down tracked runtime state and closes tracked browser-session tabs safely.
-- Restart performs a stop followed by a fresh launch.
-- `workspace start` is the idempotent "ensure running" path:
-  - if stopped, it launches the workspace
-  - if running, it restores failed or exited runtime
-- `workspace restart` forces a full restart
+- Start (the sidebar and control-bar Start action, and `workspace start` in the CLI) is convergent: it launches whatever configured processes are not currently running and leaves already-running ones untouched, restoring failed or exited configured processes along the way. An ad hoc terminal or a coding-agent session is not configured runtime, so its presence never blocks Start and Start never stops or restarts it. A workspace whose configured processes are all already running succeeds as a no-op.
+- Restart (the sidebar and control-bar Restart action, and `workspace restart` in the CLI) forces a full stop followed by a fresh launch; the stop ends every tracked runtime the workspace has, including ad hoc terminals and coding-agent sessions.
+- The sidebar menu and workspace detail footer offer Start whenever the workspace is stopped or any configured process is missing a live run, alongside Restart and Stop when the workspace is running. A workspace running only ad hoc terminals or coding-agent sessions therefore still offers Start, since Start is the non-destructive way to bring up its configured processes; Restart remains the destructive full reset.
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Workspaces with setup `pending`, `running`, or `failed` show a setup recovery screen instead of normal workspace detail controls.
 - The setup recovery screen shows setup status, timestamps, exit code, error text, and the setup log tail. It allows setup retry, Finder reveal, ad-hoc terminal access, and setup log copy/open actions. Failed setup also exposes inline setup script editing before retry.
@@ -404,7 +402,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Ad-hoc terminal rows should keep their generated focus name as the primary label and use the live terminal window title as secondary text.
 - Production CLI-driven focus is not part of the `spaces` command surface.
 - Harness-driven focus should use unique names across focusable browser sessions, processes, and coding-agent terminals when it needs to exercise focus behavior.
-- Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
+- Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities. A `spaces.yaml` process or browser session entry without a name is rejected at import, naming the offending entry by its command or URL so the user can find it in the file.
 - Focus target discovery may remain GUI-centric; the production CLI does not need a separate read-only discovery command.
 - `spaces terminal tail` should reconstruct the visible terminal screen from persisted session output using the session's last known terminal size, so wrapped lines and full-screen terminal redraws stay aligned with the live session after resizes.
 - `spaces terminal tail` should keep showing a running session's screen for as long as the session lives, however the running program chooses to redraw. A full-screen program that paints its frame once and then updates it in place must stay readable — an orchestrator confirming a child agent's progress must never be handed blank output for a session that is working.

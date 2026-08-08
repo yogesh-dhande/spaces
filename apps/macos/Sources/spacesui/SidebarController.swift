@@ -2090,16 +2090,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             item.isEnabled = isEnabled
             menu.addItem(item)
         }
+        // `isRunning` alone hides Start exactly when ad hoc or agent runtime made it true but a configured
+        // process is still missing (see `workspaceLifecycleControlsOfferStart`); Start is offered
+        // alongside Restart/Stop in that state instead of being replaced by them.
+        let missingConfiguredProcessCount = host.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
+        if AppKitController.workspaceLifecycleControlsOfferStart(
+            isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount)
+        {
+            addItem(
+                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
+        }
         if workspace.isRunning {
             addItem(
                 "Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id,
                 isEnabled: daemonActionsEnabled)
             addItem(
                 "Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id,
-                isEnabled: daemonActionsEnabled)
-        } else {
-            addItem(
-                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
                 isEnabled: daemonActionsEnabled)
         }
         menu.addItem(.separator())

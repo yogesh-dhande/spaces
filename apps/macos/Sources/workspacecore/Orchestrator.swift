@@ -814,9 +814,13 @@ public final class WorkspaceOrchestrator {
         } catch { return false }
     }
 
-    public func launchWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try launchWorkspaceUnlocked(workspaceID: workspaceID) }
-    }
+    /// Start is convergent: it launches whatever configured runtime (processes) is not already running and
+    /// leaves everything else alone. Ad hoc terminals and coding-agent sessions are not configured runtime,
+    /// so their presence never blocks or restarts Start; a workspace whose configured processes are already
+    /// running succeeds as a no-op. This is `upWorkspace` with `restartIfRunning: false` under its own name
+    /// for callers (the macOS Start action, the iOS control bar, and remote-device `workspace start`) that
+    /// only ever want the launch-or-converge behavior, never a forced restart.
+    public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
 
     public func restartWorkspace(workspaceID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
@@ -835,8 +839,26 @@ public final class WorkspaceOrchestrator {
                     _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
                     try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
+                    // The setup recovery screen keeps ad hoc terminal access open while setup is pending,
+                    // running, or failed, so a workspace can reach this branch (tracked runtime present)
+                    // with setup never having succeeded. `launchWorkspaceUnlocked` runs this same sequence
+                    // before touching any configured process; this branch has to run it too, or Start would
+                    // launch configured processes into a worktree setup never finished, or silently report
+                    // success on a workspace whose setup failed. Same call order and same lock as
+                    // `launchWorkspaceUnlocked`: `withWorkspaceSetupLock` inside these calls is a separate
+                    // gate keyed by workspace id, so running them under the already-held lifecycle lock does
+                    // not deadlock (`launchWorkspaceUnlocked` already does exactly this from inside the same
+                    // lifecycle lock in the other two branches below).
+                    try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
+                    try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+                    try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
                     try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
+                    // Restarting exited rows above only revives processes that were already tracked. A
+                    // workspace whose only runtime is ad hoc (an ad hoc terminal or a coding-agent session,
+                    // issue #438) has no rows at all for its configured processes, so it needs its own step
+                    // to launch those: the ones neither running nor exited.
+                    try launchMissingConfiguredProcesses(workspaceID: workspaceID, background: background)
                     if try hasTrackedRuntimeIndicators(workspaceID: workspaceID) { try markWorkspaceRunningIfNeeded(workspaceID: workspaceID) }
                 }
                 return
@@ -853,6 +875,13 @@ public final class WorkspaceOrchestrator {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
+        // This cold-launch path unconditionally relaunches every configured process, which would kill and
+        // restart already-running ones and would be destructive if reached with runtime present. Every
+        // caller (`restartWorkspace`, and `upWorkspace`'s not-already-running branch) already guarantees no
+        // tracked runtime exists before calling in, so this guard should never fire; it stays as an
+        // invariant check rather than something a user can hit. Start (`launchWorkspace`) routes through
+        // `upWorkspace` instead, which launches only what is missing and leaves already-running processes
+        // and any ad hoc or agent runtime untouched instead of refusing.
         guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
@@ -1090,15 +1119,24 @@ public final class WorkspaceOrchestrator {
         let waitingAgentWindowCount = agentWindows.filter { $0.status == .waiting }.count
 
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let expectedProcessKeys = (settings?.processes ?? []).map { configuredProcessMatchKey(name: $0.name) }
-        let trackedProcessKeys = runningProcesses.map { runningProcessMatchKey(name: $0.templateName) }
-        let missingConfiguredProcessCount = missingRuntimeRecordCount(expectedKeys: expectedProcessKeys, actualKeys: trackedProcessKeys)
+        let configuredProcesses = settings?.processes ?? []
+        // A template is missing (needs Start) when no row is both a live, running instance of it and
+        // actually resolves to it: `matchingConfiguredTemplateForMissingCheck` is the same rule
+        // `launchMissingConfiguredProcesses` matches by (templateID first, then processKey only for a row
+        // with no templateID at all), so a stale-templateID row can never satisfy a template it does not
+        // match, and requiring `.running` here (not just "some row exists") is what keeps an exited row
+        // from reading as satisfied when a fresh Start would actually revive it.
+        let missingConfiguredProcessCount = configuredProcesses.filter { template in
+            !runningProcesses.contains { process in
+                process.status == .running && matchingConfiguredTemplateForMissingCheck(for: process, settings: settings)?.id == template.id
+            }
+        }.count
 
         let expectedBrowserTargets = Set(try resolvedWorkspaceBrowserSessions(workspaceID: workspaceID).compactMap(\.url).filter { !$0.isEmpty })
         let trackedBrowserTargets = Set(trackedWindows.filter { $0.roleValue == .browser }.compactMap(\.targetURL).filter { !$0.isEmpty })
         let missingConfiguredBrowserSessionCount = expectedBrowserTargets.subtracting(trackedBrowserTargets).count
 
-        let expectsManagedRuntime = !expectedProcessKeys.isEmpty
+        let expectsManagedRuntime = !configuredProcesses.isEmpty
         let runtimeHealth: WorkspaceRuntimeHealth =
             switch lifecycleState {
             case .stopped: hasTrackedRuntimeIndicators ? .partial : .healthy
@@ -1117,17 +1155,6 @@ public final class WorkspaceOrchestrator {
             hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
             exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentWindowCount,
             missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
-    }
-
-    private func missingRuntimeRecordCount(expectedKeys: [String], actualKeys: [String]) -> Int {
-        var actualCounts: [String: Int] = [:]
-        for key in actualKeys { actualCounts[key, default: 0] += 1 }
-
-        var missingCount = 0
-        for key in expectedKeys {
-            if let currentCount = actualCounts[key], currentCount > 0 { actualCounts[key] = currentCount - 1 } else { missingCount += 1 }
-        }
-        return missingCount
     }
 
     /// The message a contended workspace lifecycle gate reports. Named rather than written twice: the

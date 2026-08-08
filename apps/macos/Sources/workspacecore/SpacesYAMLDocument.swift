@@ -146,6 +146,18 @@ public enum SpacesYAMLService {
         // Service names become DNS hostnames, so validate them at the import boundary. Done here
         // rather than inside `init(from:)` so the precise message is not wrapped by the YAML decoder.
         for service in document.services { try ServiceName.validated(service) }
+        // Configured processes and browser sessions must always have explicit names (spec.md): Spaces
+        // rejects an unnamed entry rather than falling back to its command or URL as an identity. The
+        // settings editor already enforces this at save time (`requiredConfiguredFocusName`); a
+        // spaces.yaml is the other place these get their name, so it is validated here, at the same import
+        // boundary as service names, naming the offending entry by its command/URL since that is the one
+        // thing an unnamed entry is guaranteed to have.
+        for process in document.processes where process.name == nil {
+            throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: process '\(process.command)' is missing a name.")
+        }
+        for session in document.browserSessions where session.name == nil {
+            throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: browser session '\(session.url ?? "")' is missing a name.")
+        }
         return document
     }
 

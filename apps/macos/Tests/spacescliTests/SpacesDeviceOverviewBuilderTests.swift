@@ -139,6 +139,45 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(rows.first(where: { $0.name == "web" })?.runState, .notStarted)
     }
 
+    /// Codex round 7 (P2) on issue #438: a configured process removed while running keeps its row (removal
+    /// never deletes tracked rows), stale templateID and all, and a later edit reuses that name for a
+    /// *different*, newly configured process under a fresh id. The stale row must not be claimed by the new
+    /// template via the name fallback: `launchMissingConfiguredProcesses`
+    /// (`matchingConfiguredTemplateForMissingCheck`) already treats the new template as missing and would
+    /// launch it, so `canRun` here must agree, or Start looks unavailable for a workspace where it would
+    /// actually do something.
+    func testBuildsConfiguredProcessRowAsStartableWhenAStaleTemplateIDRowReusesItsName() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+            lastLaunchedAt: nil)
+        // A live row whose templateID ("old-template-id") no longer matches anything in settings: the
+        // configured process it was launched for was removed while it ran.
+        let staleRow = RunningProcessRecord(
+            id: "process-stale-web", workspaceID: workspace.id, templateID: "old-template-id", templateName: "web", command: "echo old",
+            terminalApp: "Spaces", terminalTrackingID: "session-stale-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: "now", exitedAt: nil)
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project],
+            workspaces: [
+                .init(
+                    project: project, workspace: workspace,
+                    settings: WorkspaceSettings(processes: [ProcessTemplate(id: "new-template-id", name: "web", command: "echo new")]),
+                    runningProcesses: [staleRow])
+            ], sessions: [])
+
+        let rows = overview.workspaces.first?.processRows ?? []
+        let newTemplateRow = rows.first(where: { $0.templateID == "new-template-id" })
+        XCTAssertEqual(newTemplateRow?.runState, .notStarted, "the stale row must not be read as a live instance of the new template")
+        XCTAssertEqual(newTemplateRow?.canRun, true, "Start has something to do for the newly configured process")
+        // The stale row still gets its own row (the fallback loop), reported as running under its own
+        // (stale) templateID rather than disappearing.
+        let staleOwnRow = rows.first(where: { $0.templateID == "old-template-id" })
+        XCTAssertEqual(staleOwnRow?.runState, .running)
+        XCTAssertEqual(staleOwnRow?.canRun, false, "the stale row is already live; Start has nothing to do for it")
+    }
+
     func testStartingTerminalSessionSummaryKeepsWorkspaceTerminalRowRunning() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(

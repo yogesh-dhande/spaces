@@ -3422,6 +3422,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return mainWindowIsFocused || commandPaletteIsVisible
     }
 
+    /// Whether the workspace lifecycle controls (sidebar row context menu, detail footer) should offer
+    /// Start, alongside Restart/Stop when the workspace is already running.
+    ///
+    /// `isRunning` turns true the instant an ad hoc terminal or coding-agent session starts
+    /// (`markWorkspaceRunningIfNeeded`, called from `launchWorkspaceCommandSession` and
+    /// `reserveWorkspaceTerminalLaunchUnlocked`), which is not the same as the workspace's configured
+    /// processes being fully up: a workspace can be `isRunning` from ad hoc runtime alone with every
+    /// configured process still missing. Gating Start purely on `isRunning` (as both surfaces did before
+    /// this) hid it exactly in that state and left Restart, which tears down the ad hoc terminal or agent
+    /// session, as the only reachable action, the opposite of Start's convergent contract, which leaves
+    /// them untouched.
+    nonisolated static func workspaceLifecycleControlsOfferStart(isRunning: Bool, missingConfiguredProcessCount: Int) -> Bool {
+        !isRunning || missingConfiguredProcessCount > 0
+    }
+
     struct WorkspaceRunProcessEntry: Sendable {
         enum Kind: Sendable, Equatable {
             case process
@@ -6638,6 +6653,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let notes: String
         let isLifecycleRunning: Bool
         let isRunning: Bool
+        let offersStart: Bool
         let warningSummary: String?
         let deviceAcceptsDaemonActions: Bool
         let unreachableDeviceTooltip: String?
@@ -6655,14 +6671,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+        let offersStart = Self.workspaceLifecycleControlsOfferStart(
+            isRunning: workspace.isRunning, missingConfiguredProcessCount: runtimeStatus.missingConfiguredProcessCount)
         // Git workspaces are named after their branch, so a branch label matching the
         // name would just duplicate it.
         let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let signature = WorkspaceDetailFooterSignature(
             workspaceID: workspace.id, displayName: workspace.displayName, branch: branch, directory: workspace.dir, notes: notes,
-            isLifecycleRunning: isLifecycleRunning, isRunning: workspace.isRunning, warningSummary: runtimeStatus.warningSummary,
-            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspace.id),
+            isLifecycleRunning: isLifecycleRunning, isRunning: workspace.isRunning, offersStart: offersStart,
+            warningSummary: runtimeStatus.warningSummary, deviceAcceptsDaemonActions: deviceAcceptsDaemonActions(forWorkspaceID: workspace.id),
             unreachableDeviceTooltip: unreachableDeviceTooltip(forWorkspaceID: workspace.id))
         // Overview ticks land here many times a second while a terminal streams, and the strip is rebuilt
         // from scratch, which destroys the button under the pointer between mouse-down and mouse-up. A
@@ -6754,6 +6772,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         notesButton.setAccessibilityIdentifier("workspace-detail-notes")
         disableWhenDeviceCannotAct(notesButton, workspaceID: workspace.id)
         footer.addArrangedSubview(notesButton)
+
+        // `isRunning` turns true the moment an ad hoc terminal or agent session starts and says nothing
+        // about whether a configured process is actually running, so the running case can still owe Start:
+        // offered here alongside Restart/Stop instead of being replaced by them, matching the sidebar row's
+        // context menu (see `workspaceLifecycleControlsOfferStart`).
+        if offersStart, workspace.isRunning {
+            let startButton = footerActionButton(symbol: "play.circle", tooltip: "Start", action: #selector(launchWorkspace(_:)))
+            startButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            startButton.setAccessibilityIdentifier("workspace-detail-start")
+            disableWhenDeviceCannotAct(startButton, workspaceID: workspace.id)
+            footer.addArrangedSubview(startButton)
+        }
 
         // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
         // workspace can only be started, so it offers Launch alone; a running one offers Restart and Stop.
