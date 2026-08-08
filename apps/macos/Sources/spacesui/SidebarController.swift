@@ -253,6 +253,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .success(let snapshot):
             host.logStartupProfile("sidebar_snapshot_received")
             applySidebarDataSnapshot(snapshot)
+            // Alerts is where the app opens when the snapshot resolved no pane of its own — the launch
+            // placeholder's spinner is what would otherwise be left on screen. This landing (here, or
+            // deferred through `launchLandingOwed` when the initial load failed) is the only path that
+            // navigates to Alerts without the user acting: the reconcile paths never do. A background
+            // presentation on purpose: nothing has rendered an alerts pane yet, so the render cannot be
+            // skipped as an unchanged repaint, and a landing that raced a New Project / New Workspace
+            // form opened during loading must not dismiss it the way `.userNavigation` would.
+            if host.detailPane == .none { host.showAlertsDetail() }
             host.logStartupProfile("sidebar_snapshot_applied")
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
@@ -263,8 +271,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             host.showError(error)
             host.showPlaceholder(message: "Spaces couldn't load workspace data.")
+            // The error placeholder is launch content, not a pane the user chose, and the reconcile
+            // paths deliberately never replace an unresolved `.none` pane — so the landing this launch
+            // never performed is owed to the first successful reload, or the error text would outlive
+            // the outage it reported.
+            launchLandingOwed = true
             host.startBackgroundServicesIfNeeded()
         }
+    }
+
+    /// Whether the app still owes the user its launch landing because the initial snapshot failed and
+    /// rendered the load-error placeholder instead. Consumed by the first successful snapshot apply.
+    private var launchLandingOwed = false
+
+    /// Performs the launch landing deferred by a failed initial load, once data has arrived. The pane
+    /// check keeps the rule that reconciliation never navigates: if the user reached any pane in the
+    /// meantime, the owed landing lapses rather than replacing what they chose.
+    func performOwedLaunchLandingIfNeeded() {
+        guard launchLandingOwed else { return }
+        launchLandingOwed = false
+        if host.detailPane == .none { host.showAlertsDetail() }
     }
 
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh"), so an
@@ -391,6 +417,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // The preserve verdict was computed against the pre-reload data; this reload removed what the
             // detail pane was preserving — e.g. the local daemon went offline and its selected workspace
             // vanished. Reconcile the pane instead of leaving stale workspace detail/actions visible.
+            // Whether the pane actually comes down is `refreshSelection`'s call: a daemon that went
+            // offline takes its rows with it for the outage, which is not the same as the workspace
+            // being gone, and the pane stays for the terminal in it.
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_reconciled_ready")
         } else if AppKitController.shouldRefreshVisibleWorkspaceDetail(
@@ -416,6 +445,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
+        performOwedLaunchLandingIfNeeded()
         host.reopenPersistedPanelWindowsIfPossible()
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
@@ -1086,6 +1116,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceSections[index].loadState)
         {
+            host.refreshSelection()
+        } else if host.visibleWorkspaceDetailDeviceID() == deviceID, let visibleWorkspaceID = host.detailPane.workspaceID,
+            findWorkspace(id: visibleWorkspaceID) == nil
+        {
+            // A loaded overview is authoritative about removals, and a loaded-to-loaded update crosses no
+            // load-state transition for the branch above to notice. When this device's fresh overview no
+            // longer lists the workspace on screen — deleted from another client — reconcile now, so the
+            // stale pane resolves to the placeholder instead of waiting out the next local reload. Fires
+            // only on an actual removal: the offline branch retains the device's rows, and the
+            // wire-incompatible branch returns above after presenting its block.
             host.refreshSelection()
         }
     }

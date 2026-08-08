@@ -4665,8 +4665,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The device owning the workspace whose detail pane is on screen, or nil when the detail shows
     /// anything else. Read at the moment a device's load state moves, to decide whether that pane's
-    /// daemon-backed controls are now wrong.
-    func visibleWorkspaceDetailDeviceID() -> String? { visibleDetailWorkspaceID.flatMap(deviceID(forWorkspaceID:)) }
+    /// daemon-backed controls are now wrong. Taken from the pane rather than from the sidebar data, so
+    /// it still answers while that device's rows are missing — which is exactly when its load state
+    /// moved.
+    func visibleWorkspaceDetailDeviceID() -> String? { detailPane.workspaceDeviceID }
 
     /// The tooltip a control disabled by an outage carries, naming the device the way the sidebar rows
     /// and the add-project device picker do. Nil for any other state — a device that is merely still
@@ -4836,6 +4838,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
     }
 
+    /// Re-resolves the detail pane from the current selection after device data changed. This is
+    /// reconciliation, never navigation: reloads are event-driven (a bell, an agent event, a poll), so a
+    /// pass that resolves nothing must leave the user where they are rather than move them. Alerts is
+    /// reached only from what the user reaches for — the sidebar's Alerts row, its shortcut, leader
+    /// navigation past the first workspace — and from the launch landing in `loadInitialSidebarData`,
+    /// which is why it is presented here only when it is already the pane on screen.
     func refreshSelection() {
         if showingAlerts {
             showAlertsDetail()
@@ -4859,7 +4867,52 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: localDeviceID, verdict: verdict)
             return
         }
-        showAlertsDetail()
+        let paneDeviceID = detailPane.workspaceDeviceID
+        guard
+            Self.unresolvedSelectionDropsWorkspacePane(
+                pane: detailPane, hasSelectedWorkspace: selectedWorkspaceID != nil,
+                paneDeviceLoadState: paneDeviceID.flatMap { deviceSection(id: $0)?.loadState },
+                paneDeviceCompatibility: paneDeviceID.flatMap { deviceCompatibility(forDeviceID: $0) })
+        else { return }
+        // The selection goes with the pane. Left pointing at a workspace nothing lists, it would fail to
+        // resolve on every later reload and rebuild this placeholder each time. The outline's own
+        // selection goes too: when the row still exists (a pending deletion the daemon later rejects),
+        // a row left visually selected would swallow the next click on it — an already-selected row
+        // emits no selection change — leaving this placeholder stuck until some other row is selected.
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        // Suppressed so the outline delegate does not classify this programmatic deselection as the user
+        // clicking empty space — its no-selection branch presents as `.userNavigation`, which would close
+        // an open form window over a background reload.
+        suppressOutlineSelectionChanges = true
+        outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        showPlaceholder()
+    }
+
+    /// Whether a reconcile that resolved no selection has to take down the workspace pane on screen.
+    /// Everything else is left alone — reconciliation does not navigate — so this decides the one case
+    /// that cannot be left: a workspace pane with nothing behind it.
+    ///
+    /// It comes down twice. `hasSelectedWorkspace == false` means the selection was cleared deliberately
+    /// (the user clicked empty space, or collapsed the project holding the selected workspace), so the
+    /// pane has no reason left to be there. With a selection that failed to resolve, the owning device
+    /// decides: an offline or wire-incompatible daemon answers with an empty placeholder overview, so
+    /// its rows vanishing during a restart is not evidence of a deletion and tearing a focused terminal
+    /// out of the container over it would be wrong. Only a device that is answering and wire-compatible
+    /// — the same authority rule that gates pane pruning — is believed when it stops listing a
+    /// workspace, and a device gone from the sidebar entirely can never bring one back.
+    nonisolated static func unresolvedSelectionDropsWorkspacePane(
+        pane: DetailPane, hasSelectedWorkspace: Bool, paneDeviceLoadState: SidebarDeviceLoadState?, paneDeviceCompatibility: SpacesWireCompatibility?
+    ) -> Bool {
+        guard pane.workspaceID != nil else { return false }
+        guard hasSelectedWorkspace else { return true }
+        guard let paneDeviceLoadState else { return true }
+        return localSnapshotAuthorizesPanePrune(loadState: paneDeviceLoadState, compatibility: paneDeviceCompatibility)
     }
 
     /// Setup progress is polled back from the owning daemon, and an unreachable device's rows stay
@@ -5077,10 +5130,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch action {
         case .leaveAlone: return
         case .clear:
-            // The block was established above to be this device's, so clearing it leaves the pane empty
-            // until `refreshSelection` re-resolves it.
+            // The block was established above to be this device's; `refreshSelection` re-resolves the
+            // pane from the selection. When it resolves nothing it renders nothing — reconciliation
+            // never navigates — and `presentDetailPane(.none)` records the pane without touching the
+            // container, so a recovery with no selection to return to has to paint the neutral
+            // placeholder itself or the retired block's views would stay on screen behind an empty
+            // pane record.
             presentDetailPane(.none)
             refreshSelection()
+            if detailPane == .none { showPlaceholder() }
         case .rerender:
             // `verdict` is guaranteed non-nil here: `.rerender` only comes from `blockRemedy` returning a
             // remedy, which itself requires a non-optional verdict.
@@ -6557,8 +6615,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func prepareWorkspaceDetailContainer(workspaceID: String, presentation: DetailPanePresentation) {
-        presentDetailPane(.workspace(id: workspaceID), presentation: presentation)
+    private func prepareWorkspaceDetailContainer(workspaceID: String, deviceID: String, presentation: DetailPanePresentation) {
+        presentDetailPane(.workspace(id: workspaceID, deviceID: deviceID), presentation: presentation)
         showingSettings = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
@@ -6591,7 +6649,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // This workspace's device is compatible; every branch below presents the workspace pane
         // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, deviceID: workspaceDeviceID, presentation: presentation)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
             requestSidebarReload()
             return
@@ -6599,7 +6657,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deviceWorkspace = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspaceSummary)
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
-            prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id, deviceID: workspaceDeviceID, presentation: presentation)
             showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
@@ -6622,7 +6680,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             panelCoordinator.refreshTabTitles(scope: scope)
             return
         }
-        prepareWorkspaceDetailContainer(workspaceID: workspace.id, presentation: presentation)
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id, deviceID: workspaceDeviceID, presentation: presentation)
         showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
@@ -10280,7 +10338,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let resolver = shortcutSettingResolver()
         if let modifiers = try? resolver.leaderModifiers() {
             shortcutLeaderModifiers = modifiers
-        } else {
+        } else if shortcutLeaderModifiers.isEmpty {
+            // A read that throws keeps the leader already in effect (see `resolvedShortcutSpec`); the
+            // default answers only a load that has never succeeded, and never an empty set, which would
+            // leave every leader-backed chord matching a bare letter.
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(ClientSettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
         toggleShortcutSpec = loadShortcutSpec(resolver, setting: .guiHotkey)
@@ -10301,7 +10362,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func loadShortcutSpec(_ resolver: ShortcutSettingResolver, setting: ShortcutSetting) -> HotkeySpec? {
-        if let stored = try? HotkeySpec.parse(resolver.rawValue(for: setting)) { return stored }
+        Self.resolvedShortcutSpec(resolver, setting: setting, current: shortcutSpec(for: setting), leaderModifiers: shortcutLeaderModifiers)
+    }
+
+    /// The chord a shortcut setting is bound to after a load pass, given the one it is bound to now.
+    ///
+    /// A read that throws is a transient client-database failure, not a preference, so the setting keeps
+    /// `current`. Answering it with `defaultSpec` instead would drop the leader modifiers that
+    /// `rawValue(for:)` applies to leader-backed settings and degrade the whole table to bare letters
+    /// until the next successful read — a stray "a" would open Alerts. On the launch pass nothing is in
+    /// effect yet, so a throwing read installs the safe default instead of nil — composed with
+    /// `leaderModifiers` for a leader-backed setting, never the bare key — or the global summon and
+    /// palette hotkeys would go unregistered for the life of the outage. `defaultSpec` still answers the
+    /// genuinely-unset setting, which `rawValue(for:)` resolves without throwing, and a stored value too
+    /// malformed to parse.
+    nonisolated static func resolvedShortcutSpec(
+        _ resolver: ShortcutSettingResolver, setting: ShortcutSetting, current: HotkeySpec?, leaderModifiers: Set<HotkeyModifier>
+    ) -> HotkeySpec? {
+        guard let raw = try? resolver.rawValue(for: setting) else {
+            if let current { return current }
+            guard let defaultSpec = try? HotkeySpec.parse(setting.defaultSpec) else { return nil }
+            return setting.usesLeader ? defaultSpec.adding(modifiers: leaderModifiers) : defaultSpec
+        }
+        if let stored = try? HotkeySpec.parse(raw) { return stored }
         return try? HotkeySpec.parse(setting.defaultSpec)
     }
 
@@ -11277,11 +11360,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
+    func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
         guard case .workspace(let targetWorkspaceID)? = Self.activationSelectionTarget(focusedWorkspaceID: focusedWorkspaceID) else {
-            // No tracked focused window: re-render the current pane so its contents are fresh, without
-            // changing which pane is shown.
-            refreshSelection()
+            // No tracked focused window: the summon carries no view intent, so re-render the current pane
+            // so its contents are fresh and change nothing about which pane is shown. `refreshSelection`
+            // would re-resolve the pane from the selection, which is more than a summon is allowed to do.
+            rerenderVisibleDetailPane()
             return
         }
         guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
@@ -11290,6 +11374,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         selectWorkspace(workspace)
+    }
+
+    /// Redraws the pane already on screen against current device state and resolves nothing else, so
+    /// which pane is shown cannot change. Each case re-renders only while its own content still stands
+    /// up; when it does not, the pane is left as it is for the next reload to reconcile.
+    private func rerenderVisibleDetailPane() {
+        switch detailPane {
+        case .none: return
+        case .alerts: showAlertsDetail()
+        case .workspace(let workspaceID, _):
+            guard let (project, workspace) = findWorkspace(id: workspaceID) else { return }
+            showWorkspaceDetail(project: project, workspace: workspace)
+        case .compatibilityBlock(let deviceID):
+            guard let verdict = deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
+            showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+        }
     }
 
     @objc func showProjectSettings(_ sender: NSButton) {

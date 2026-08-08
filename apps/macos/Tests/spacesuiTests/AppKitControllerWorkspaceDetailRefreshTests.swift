@@ -166,7 +166,7 @@ import workspacecore
     // Settings is intentionally not a pane case: it floats over whatever pane is shown, so it stays a
     // separate flag and is not cleared by presenting a pane.
     @Test func presentingAPaneReplacesThePreviousPanesFacets() {
-        var pane = DetailPane.workspace(id: "workspace-1")
+        var pane = DetailPane.workspace(id: "workspace-1", deviceID: "device-1")
         #expect(pane.workspaceID == "workspace-1")
         #expect(!pane.isAlerts)
         #expect(pane.compatibilityBlockDeviceID == nil)
@@ -181,7 +181,7 @@ import workspacecore
         #expect(!pane.isAlerts, "Presenting the compatibility block clears alerts")
         #expect(pane.workspaceID == nil)
 
-        pane = .workspace(id: "workspace-2")
+        pane = .workspace(id: "workspace-2", deviceID: "device-1")
         #expect(pane.workspaceID == "workspace-2")
         #expect(pane.compatibilityBlockDeviceID == nil, "Presenting a workspace clears the compatibility block")
         #expect(!pane.isAlerts)
@@ -202,19 +202,20 @@ import workspacecore
         #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .backgroundRefresh))
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .backgroundRefresh))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-1", deviceID: "device-1"),
+                presentation: .backgroundRefresh))
     }
 
     // The refresh paths change pane content on their own: a remote device turning wire-incompatible
     // swaps in its compatibility block, recovery clears the pane, a failed reload swaps in the error
-    // placeholder, and a selected workspace deleted elsewhere drops the pane back to alerts. None of
+    // placeholder, and a selected workspace deleted elsewhere drops the pane to the placeholder. None of
     // those are the user navigating, so none may dismiss a form window — which is why the rule reads the
     // caller's intent instead of inferring it from the content having changed.
     @Test func backgroundRefreshThatChangesPaneContentKeepsFormWindows() {
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .compatibilityBlock(deviceID: "device-1"), presentation: .backgroundRefresh),
-            "A device turning wire-incompatible must not close a dialog")
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-1"),
+                presentation: .backgroundRefresh), "A device turning wire-incompatible must not close a dialog")
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
                 current: .compatibilityBlock(deviceID: "device-1"), presented: .none, presentation: .backgroundRefresh),
@@ -224,20 +225,21 @@ import workspacecore
             "A failed reload's placeholder must not close a dialog")
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .backgroundRefresh),
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .none, presentation: .backgroundRefresh),
             "A selected workspace deleted elsewhere must not close a dialog")
     }
 
     @Test func userNavigationToDifferentPaneContentDismissesFormWindows() {
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .alerts, presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+                current: .alerts, presented: .workspace(id: "workspace-1", deviceID: "device-1"), presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .alerts, presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-2"), presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-2", deviceID: "device-1"),
+                presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
                 current: .compatibilityBlock(deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-2"),
@@ -288,7 +290,8 @@ import workspacecore
         #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .userNavigation))
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-1", deviceID: "device-1"),
+                presentation: .userNavigation))
     }
 
 }
