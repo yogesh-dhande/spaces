@@ -66,7 +66,8 @@ final class SpacesMCPStdioServer {
     /// before any tool call can have failed — which is what bounds the re-exec (see `MCPStaleImageReload`).
     private let staleImageReload: MCPStaleImageReload
     /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
-    private var readBuffer = Data()
+    /// Internal because the stale-image reload gates on it being empty, and that invariant is unit-tested.
+    var readBuffer = Data()
 
     init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload()) {
         self.input = input
@@ -473,17 +474,21 @@ final class SpacesMCPStdioServer {
     /// message, so the exec always lands on a message boundary and never truncates a half-written frame.
     /// Internal so that ordering is unit-testable.
     ///
-    /// Accepted: anything already drained into `readBuffer` but not yet handled is discarded by the exec,
-    /// because it lives in this image's memory rather than in the stdin pipe (whose unread bytes the
-    /// successor inherits). MCP stdio clients are request/response — they wait for each tool result before
-    /// writing again — so a message can only be sitting there if the client pipelined one, and the cost is
-    /// bounded to that one message on the single call where a reload happens.
+    /// The exec is additionally gated on `readBuffer` being empty. `readMessage` drains whatever
+    /// `availableData` returns, so a client that pipelined can leave whole further frames — or the front
+    /// of a partial one — sitting in this image's memory, and exec discards all of it: unread bytes still
+    /// in the stdin pipe are inherited by the successor, but drained bytes are gone. An empty buffer is
+    /// therefore the invariant that makes a lost or torn frame impossible. When the buffer is not empty
+    /// the caller still gets the retry answer and this image keeps serving what it already drained; the
+    /// next daemon-is-newer failure that lands with an empty buffer performs the reload, which the batch
+    /// reaches by its last buffered frame at the latest.
     func respondToFailedToolCall(id: Any?, error: Error) throws {
         guard let execTarget = staleImageReload.execTarget(for: error) else {
             try sendToolResult(id: id, text: error.localizedDescription, isError: true)
             return
         }
         try sendToolResult(id: id, text: MCPStaleImageReload.retryMessage, isError: true)
+        guard readBuffer.isEmpty else { return }
         staleImageReload.reload(into: execTarget)
     }
 
