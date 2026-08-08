@@ -1117,6 +1117,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             newLoadState: host.deviceSections[index].loadState)
         {
             host.refreshSelection()
+        } else if host.visibleWorkspaceDetailDeviceID() == deviceID, let visibleWorkspaceID = host.detailPane.workspaceID,
+            findWorkspace(id: visibleWorkspaceID) == nil
+        {
+            // A loaded overview is authoritative about removals, and a loaded-to-loaded update crosses no
+            // load-state transition for the branch above to notice. When this device's fresh overview no
+            // longer lists the workspace on screen — deleted from another client — reconcile now, so the
+            // stale pane resolves to the placeholder instead of waiting out the next local reload. Fires
+            // only on an actual removal: the offline branch retains the device's rows, and the
+            // wire-incompatible branch returns above after presenting its block.
+            host.refreshSelection()
         }
     }
 

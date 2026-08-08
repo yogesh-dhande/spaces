@@ -4875,9 +4875,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 paneDeviceCompatibility: paneDeviceID.flatMap { deviceCompatibility(forDeviceID: $0) })
         else { return }
         // The selection goes with the pane. Left pointing at a workspace nothing lists, it would fail to
-        // resolve on every later reload and rebuild this placeholder each time.
+        // resolve on every later reload and rebuild this placeholder each time. The outline's own
+        // selection goes too: when the row still exists (a pending deletion the daemon later rejects),
+        // a row left visually selected would swallow the next click on it — an already-selected row
+        // emits no selection change — leaving this placeholder stuck until some other row is selected.
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
         selectedProjectID = nil
         selectedWorkspaceID = nil
+        outlineView.deselectAll(nil)
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         showPlaceholder()
     }
 
