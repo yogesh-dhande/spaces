@@ -167,9 +167,95 @@ extension WorkspaceOrchestrator {
     }
 
     func restartExitedProcesses(workspaceID: String, background: Bool) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspaceID)
+        // Templates a `.running` row already satisfies, by the same strict rule the missing-check uses
+        // (templateID match, or a name match only for a row with no templateID at all). Tracked as a
+        // mutable set, not a one-time snapshot: restarting one exited row below can itself add to it, which
+        // matters when two stale rows independently resolve by name to the same template (see below).
+        var liveTemplateIDs = Set(
+            processes.filter { $0.status == .running }
+                .compactMap { matchingConfiguredTemplateForMissingCheck(for: $0, settings: settings)?.id })
         for process in processes where process.status == .exited {
+            // Bulk convergence (Start) restarts only a row that still resolves to a currently configured
+            // template. Removing a process from workspace settings while it is running deliberately keeps
+            // its runtime row (removal never deletes tracked rows), so a since-removed process can sit here
+            // `.exited` with no matching template. `configuredProcessTemplate`'s fallback to an ad hoc
+            // template built from the row itself exists for the *explicit* per-process restart action (a
+            // user's deliberate click on that specific row), not for bulk convergence: applying it here
+            // would make Start silently relaunch a command the user removed from configuration, breaking
+            // the "Start launches only configured processes" contract. A skipped stale row is left exactly
+            // as is; stop and the existing settings/window cleanup paths own removing it, not this filter.
+            guard let resolvedTemplate = matchingConfiguredTemplate(for: process, settings: settings) else { continue }
+            // A stale-templateID exited row (its own template was removed while it ran, and a later edit
+            // reused its name for a *different* process under a fresh id) resolves here via
+            // `matchingConfiguredTemplate`'s unconditional name fallback to that new template, the same
+            // resolution `configuredProcessTemplate`/the explicit restart action uses, deliberately, because
+            // there the row IS the thing being restarted. Bulk convergence has to ask a second question this
+            // stale row's identity does not answer: is the new template already live somewhere else (round-6
+            // launched it as its own row, separately)? If so, restarting this row under the new template's
+            // command would produce a second, duplicate row for a template meant to have exactly one; the
+            // stale row stays exited, as documented, rather than being revived into a duplicate. If the new
+            // template has no live row anywhere yet, this exited row is the one live-launchable path back to
+            // it (the self-healing case), so it still restarts.
+            guard !liveTemplateIDs.contains(resolvedTemplate.id) else { continue }
             try restartProcessInTerminal(workspaceID: workspaceID, process: process, background: background)
+            liveTemplateIDs.insert(resolvedTemplate.id)
+        }
+    }
+
+    /// Launches every configured process template that has no runtime record at all, leaving templates that
+    /// already have a `.running` or `.exited` row untouched (an exited one is `restartExitedProcesses`'s job,
+    /// and a running one stays running). A workspace whose only tracked runtime is an ad hoc terminal or a
+    /// coding-agent session (issue #438) has zero rows for its configured processes, so this is what makes
+    /// Start launch them instead of doing nothing: `restartExitedProcesses` only revives rows that already
+    /// exist. Called under the workspace lifecycle lock by `upWorkspace`.
+    func launchMissingConfiguredProcesses(workspaceID: String, background: Bool) throws {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard let settings = try loadWorkspaceSettings(project: project, workspace: workspace), !settings.processes.isEmpty else { return }
+        let running = try store.runningProcesses(workspaceID: workspaceID)
+        // Matches through `matchingConfiguredTemplateForMissingCheck`, the templateID-then-processKey
+        // resolution `restartExitedProcesses` and `configuredProcessTemplate` also build on, but without
+        // their name-match fallback for a row whose templateID is set but stale (see that function's doc
+        // comment): an unnamed configured process's `processKey` falls back to its command, and a live row
+        // whose `templateID` is unset entirely (a legacy row from before per-process identity existed,
+        // never touched since) is keyed by that same command in `template_name` and still resolves by name
+        // here. A row with a nonempty but stale templateID does not: it is left stale rather than let it
+        // satisfy whatever template later reused its old name, so that new template still launches.
+        let missingTemplates = settings.processes.filter { template in
+            !running.contains { matchingConfiguredTemplateForMissingCheck(for: $0, settings: settings)?.id == template.id }
+        }
+        guard !missingTemplates.isEmpty else { return }
+
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
+        let existingPorts = try store.workspacePorts(workspaceID: workspace.id)
+        if existingPorts.count != portDefinitions.count {
+            let portRange = try store.appConfig().portRange
+            _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: portRange)
+        }
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let env = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
+        // `workspace.isRunning` is the snapshot from the top of this call and never updated mid-batch (the
+        // workspace record is only marked running after every template here has been tried), so each call
+        // would otherwise compute the same "restore on failure" answer regardless of an earlier sibling's
+        // outcome. Once one template has launched, a later failure must not restore placeholder
+        // reservations over its now-live ports.
+        //
+        // Seeded from `running`, not just this loop: a retry after a partial batch (one template launched
+        // last attempt and is live, another failed) filters that already-live row out of `missingTemplates`
+        // above, so it never gets a turn to set this within the loop below, and a `.running` row this call
+        // did not launch itself (one `restartExitedProcesses` just revived, moments earlier in the same
+        // `upWorkspace` pass) is exactly as live and exactly as much at risk from a reservation restore.
+        var batchHasLiveLaunch = running.contains { $0.status == .running }
+        for template in missingTemplates {
+            _ = try launchConfiguredProcess(
+                template: template, workspace: workspace, env: env, background: background,
+                restoreReservedPortsOnFailure: batchHasLiveLaunch ? false : nil)
+            batchHasLiveLaunch = true
         }
     }
 
@@ -247,14 +333,52 @@ extension WorkspaceOrchestrator {
 
     func configuredProcessTemplate(for process: RunningProcessRecord, workspace: WorkspaceRecord, project: ProjectRecord) throws -> ProcessTemplate {
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
+        if let template = matchingConfiguredTemplate(for: process, settings: settings) { return template }
+        return ProcessTemplate(name: process.templateName, command: process.command)
+    }
+
+    /// Resolves the template `settings.processes` still configures for `process`, matching by templateID
+    /// first and then by process key (name), the same resolution order `configuredProcessTemplate` uses.
+    /// Returns nil when neither matches: the process was removed from workspace settings while it was
+    /// running (removal keeps the tracked row) or was never configured runtime to begin with. Kept as one
+    /// helper so `configuredProcessTemplate`'s deliberate ad hoc fallback and `restartExitedProcesses`'s
+    /// configured-only filter cannot drift onto different matching rules.
+    ///
+    /// The name fallback is deliberately unconditional here, including for a row whose `templateID` is set
+    /// but matches nothing current (removed while it ran, its slot's name later reused by a differently
+    /// configured process under a fresh id): both of this helper's callers only ever act on that row itself
+    /// (`configuredProcessTemplate` resolves what an explicit restart of that specific row relaunches as;
+    /// `restartExitedProcesses` only reaches an `.exited` row), so picking up the new template's command is
+    /// a convergent, one-row substitution, not a duplicate. `launchMissingConfiguredProcesses`'s
+    /// missing-check needs the opposite answer for exactly that stale-id case, because it asks a different
+    /// question ("is some other row already this template") where the same fallback would wrongly let the
+    /// stale row satisfy the new template and suppress launching it; see
+    /// `matchingConfiguredTemplateForMissingCheck`.
+    func matchingConfiguredTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
         if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty,
             let template = settings?.processes.first(where: { $0.id == templateID })
         {
             return template
         }
         let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let template = settings?.processes.first(where: { self.processKey(for: $0) == processKey }) { return template }
-        return ProcessTemplate(name: process.templateName, command: process.command)
+        return settings?.processes.first(where: { self.processKey(for: $0) == processKey })
+    }
+
+    /// The missing-check's own resolution, stricter than `matchingConfiguredTemplate` in exactly one case:
+    /// a row whose `templateID` is set but matches no current template never falls back to a name match.
+    /// That row was configured once, under a different id, and removed while it ran (removal keeps the
+    /// tracked row); if a later edit reuses its old name for a *different* process under a fresh id, the
+    /// row is stale with respect to that new template, not a live instance of it. `matchingConfiguredTemplate`
+    /// treating the name match as good enough is right for its own callers (see its doc comment) but wrong
+    /// here: `launchMissingConfiguredProcesses` would read the new template as already running and never
+    /// launch its command, leaving the stale row running under the reused name indefinitely. A row with no
+    /// `templateID` at all (never had per-process identity, or genuinely never configured) still resolves by
+    /// name, same as `matchingConfiguredTemplate`; that path is unaffected by this restriction.
+    func matchingConfiguredTemplateForMissingCheck(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
+        let trimmedTemplateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmedTemplateID.isEmpty else { return settings?.processes.first(where: { $0.id == trimmedTemplateID }) }
+        let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return settings?.processes.first(where: { self.processKey(for: $0) == processKey })
     }
 
     func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
@@ -616,14 +740,23 @@ extension WorkspaceOrchestrator {
     /// environment contracts and users resolve conflicts manually.
     func releaseReservedPortsForRuntimeStart(workspaceID: String) { PortReserver.shared.releasePorts(workspaceID: workspaceID) }
 
+    /// - Parameter restoreReservedPortsOnFailure: Overrides the default "restore only when the workspace
+    ///   was stopped" rule. `launchMissingConfiguredProcesses` passes `false` for every template after the
+    ///   batch's first successful launch: restoring placeholder reservations rebinds every one of the
+    ///   workspace's assigned ports, including ones a sibling launch earlier in the same batch already
+    ///   started a real server on, which can make that live server lose its bind (or fail one still coming
+    ///   up) to the placeholder socket. Once the batch has a live process, the workspace is no longer
+    ///   meaningfully "stopped" for reservation purposes even though `workspace.isRunning` (captured once,
+    ///   before the batch) has not been updated to say so yet.
     @discardableResult func launchConfiguredProcess(
-        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false
+        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false,
+        restoreReservedPortsOnFailure: Bool? = nil
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         _ = background
         let name = processKey(for: template)
         let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-        let shouldRestoreReservedPortsOnFailure = !workspace.isRunning
+        let shouldRestoreReservedPortsOnFailure = restoreReservedPortsOnFailure ?? !workspace.isRunning
         releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
         // If the launch started from a stopped workspace and throws after releasing placeholders,
         // restore them so the stopped workspace keeps its pinned ports held. A workspace that was

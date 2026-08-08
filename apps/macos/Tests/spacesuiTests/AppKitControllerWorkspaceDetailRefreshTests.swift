@@ -60,6 +60,20 @@ import workspacecore
                 commandPaletteIsVisible: true))
     }
 
+    /// Codex round 5 (P1) on issue #438: `isRunning` turns true the instant an ad hoc terminal or agent
+    /// session starts, independent of whether any configured process is actually running, so gating Start
+    /// purely on `isRunning` hides it exactly in the state where it is the right (non-destructive) action.
+    @Test func workspaceLifecycleControlsOfferStartWheneverConfiguredRuntimeIsMissing() {
+        // Stopped: Start is offered regardless of the missing count (matches today's behavior).
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 0))
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 1))
+        // Running with every configured process up: Start stays hidden, matching today's behavior.
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 0))
+        // Running from ad hoc/agent runtime alone, with a configured process still missing: Start must be
+        // offered instead of forcing the user through the destructive Restart action.
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 1))
+    }
+
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: true))
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
@@ -240,12 +254,12 @@ import workspacecore
     // moves on its own.
     private func footerSignature(
         workspaceID: String = "workspace-1", displayName: String = "feature", branch: String = "feature", directory: String = "/tmp/feature",
-        notes: String = "", isLifecycleRunning: Bool = true, isRunning: Bool = true, warningSummary: String? = nil,
+        notes: String = "", isLifecycleRunning: Bool = true, isRunning: Bool = true, offersStart: Bool = false, warningSummary: String? = nil,
         deviceAcceptsDaemonActions: Bool = true, unreachableDeviceTooltip: String? = nil
     ) -> AppKitController.WorkspaceDetailFooterSignature {
         AppKitController.WorkspaceDetailFooterSignature(
             workspaceID: workspaceID, displayName: displayName, branch: branch, directory: directory, notes: notes,
-            isLifecycleRunning: isLifecycleRunning, isRunning: isRunning, warningSummary: warningSummary,
+            isLifecycleRunning: isLifecycleRunning, isRunning: isRunning, offersStart: offersStart, warningSummary: warningSummary,
             deviceAcceptsDaemonActions: deviceAcceptsDaemonActions, unreachableDeviceTooltip: unreachableDeviceTooltip)
     }
 
@@ -262,6 +276,9 @@ import workspacecore
         #expect(footerSignature(notes: "check the flake") != rendered)
         #expect(footerSignature(isLifecycleRunning: false) != rendered, "the status dot follows the lifecycle state")
         #expect(footerSignature(isRunning: false) != rendered, "a stopped workspace offers Launch alone, with no Stop button")
+        #expect(
+            footerSignature(offersStart: true) != rendered,
+            "Start becomes reachable alongside Restart/Stop when a configured process is missing (issue #438)")
         #expect(footerSignature(warningSummary: "1 process exited") != rendered)
         #expect(footerSignature(deviceAcceptsDaemonActions: false) != rendered, "an unreachable device's controls are disabled and dimmed")
         #expect(footerSignature(unreachableDeviceTooltip: "linux-box is offline") != rendered)

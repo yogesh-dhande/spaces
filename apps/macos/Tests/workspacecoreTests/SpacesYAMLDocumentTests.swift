@@ -7,7 +7,8 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         let document = try SpacesYAMLService.decode(
             """
             processes:
-              - command: npm run api
+              - name: api
+                command: npm run api
             """)
 
         XCTAssertEqual(document.version, 1)
@@ -15,7 +16,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertNil(document.stopScript)
         XCTAssertTrue(document.services.isEmpty)
         XCTAssertEqual(document.processes.first?.command, "npm run api")
-        XCTAssertNil(document.processes.first?.name)
+        XCTAssertEqual(document.processes.first?.name, "api")
         XCTAssertEqual(document.processes.first?.onExit, ProcessExitAction.none)
         XCTAssertTrue(document.browserSessions.isEmpty)
     }
@@ -73,6 +74,37 @@ final class SpacesYAMLDocumentTests: XCTestCase {
             XCTAssertThrowsError(try SpacesYAMLService.decode("services:\n  - \(invalid)\n"), "expected \(invalid) to be rejected") { error in
                 XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("service name"))
             }
+        }
+    }
+
+    /// Configured processes must always have an explicit name (spec.md): a spaces.yaml process entry
+    /// without one is rejected at import, naming the offending entry by its command so the user can find
+    /// it in the file.
+    func testDecodeRejectsUnnamedProcess() throws {
+        XCTAssertThrowsError(
+            try SpacesYAMLService.decode(
+                """
+                processes:
+                  - command: npm run api
+                """)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("npm run api"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("missing a name"))
+        }
+    }
+
+    /// Same contract for browser sessions, named by URL since that is the one thing an unnamed session is
+    /// guaranteed to have.
+    func testDecodeRejectsUnnamedBrowserSession() throws {
+        XCTAssertThrowsError(
+            try SpacesYAMLService.decode(
+                """
+                browser_sessions:
+                  - url: http://localhost:3000
+                """)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("http://localhost:3000"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("missing a name"))
         }
     }
 

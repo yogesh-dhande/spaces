@@ -86,12 +86,20 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
                     + workspace.terminalRows.filter { $0.runState == .exited }.count
                 let waitingAgentCount = workspace.codingAgentRows.filter { $0.activityState == .waiting }.count
                 let hasTrackedIndicators = runningProcessCount > 0 || exitedProcessCount > 0 || waitingAgentCount > 0 || workspace.sessionCount > 0
+                // `canRun` is true for every configured-process row the daemon did not report `.running` for
+                // (never launched, or exited), computed server-side (`SpacesDeviceOverviewBuilder.processRows`)
+                // over every configured template, not only ones with a runtime record. Counting it here is
+                // what lets a client tell "configured processes fully up" apart from `isRunning`, which turns
+                // true the moment an ad hoc terminal or agent session starts and says nothing about whether
+                // any configured process is actually running.
+                let missingConfiguredProcessCount = workspace.processRows.filter(\.canRun).count
                 return (
                     workspace.id,
                     SpacesDeviceWorkspaceRuntime(
                         workspaceID: workspace.id, lifecycleState: SpacesDeviceWorkspaceLifecycle(isRunning: workspace.isRunning),
                         hasTrackedRuntimeIndicators: hasTrackedIndicators, runningProcessCount: runningProcessCount,
-                        exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentCount)
+                        exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentCount,
+                        missingConfiguredProcessCount: missingConfiguredProcessCount)
                 )
             },
             // A malformed or racy overview payload could repeat a workspace id; keep

@@ -4,11 +4,12 @@ import spacesdevicecore
 /// Workspace-level controls, shown at the top of an expanded workspace's rows.
 ///
 /// Lifecycle actions follow the workspace's state rather than being shown-but-disabled: a stopped
-/// workspace can only be started, so it offers Start alone; a running one offers Restart and Stop.
-/// This matches the Mac sidebar's workspace context menu.
+/// workspace offers Start alone; a running one offers Restart and Stop, plus Start alongside them when a
+/// configured process is still missing (an ad hoc terminal or agent session can mark the workspace
+/// running on its own). This matches the Mac sidebar's workspace context menu.
 ///
-/// Starting a workspace launches its configured processes and coding agents — not its browser sessions
-/// or ad hoc terminals, which the daemon never opens — so Terminal stays a separate action.
+/// Starting a workspace launches its configured processes, not its coding agents, browser sessions, or ad
+/// hoc terminals, none of which the daemon opens on Start, so Terminal stays a separate action.
 struct WorkspaceControlBar: View {
     let workspace: SpacesDeviceWorkspaceSummary
     let isMutating: Bool
@@ -19,17 +20,26 @@ struct WorkspaceControlBar: View {
     /// (Demo Mode), so the bar never offers a control the backend rejects.
     let onNewTerminal: (() -> Void)?
 
+    /// Whether Start should be offered even while `workspace.isRunning` is true, mirroring the Mac
+    /// footer/sidebar's `workspaceLifecycleControlsOfferStart`. `isRunning` turns true the moment an ad
+    /// hoc terminal or coding-agent session starts and says nothing about whether any configured process
+    /// is actually running, so a workspace can be `isRunning` from ad hoc runtime alone with a configured
+    /// process still missing. `canRun` is true for a configured-process row the daemon has not reported as
+    /// `.running` (exited or never launched), so its presence is exactly "Start has something to do."
+    private var offersStart: Bool { !workspace.isRunning || workspace.processRows.contains { $0.canRun } }
+
     var body: some View {
         HStack(spacing: 8) {
+            if offersStart {
+                WorkspaceControlButton(
+                    title: "Start", systemImage: "play.fill", tint: Theme.accent, identifier: "workspace.start.\(workspace.id)", action: onStart)
+            }
             if workspace.isRunning {
                 WorkspaceControlButton(
                     title: "Restart", systemImage: "arrow.clockwise", tint: Theme.muted, identifier: "workspace.restart.\(workspace.id)",
                     action: onRestart)
                 WorkspaceControlButton(
                     title: "Stop", systemImage: "stop.fill", tint: Theme.red, identifier: "workspace.stop.\(workspace.id)", action: onStop)
-            } else {
-                WorkspaceControlButton(
-                    title: "Start", systemImage: "play.fill", tint: Theme.accent, identifier: "workspace.start.\(workspace.id)", action: onStart)
             }
             if let onNewTerminal {
                 WorkspaceControlButton(
