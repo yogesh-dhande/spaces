@@ -2476,21 +2476,21 @@
             let renderStateKey = "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=identity"
             let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "identity")
             defer { hostView.removeFromSuperview() }
-            let appliesAfterMount = hostView.debugRenderFrameApplyCount
+            let appliesAfterMount = hostView.renderFrameApplyCountForTesting
             XCTAssertGreaterThan(appliesAfterMount, 0, "mounting has to put the first frame on the surface")
 
             // A layout pass carries no new frame.
             hostView.setNeedsLayout()
             hostView.layoutIfNeeded()
-            XCTAssertEqual(hostView.debugRenderFrameApplyCount, appliesAfterMount)
+            XCTAssertEqual(hostView.renderFrameApplyCountForTesting, appliesAfterMount)
 
             // A title-only payload leaves the owner epoch's snapshot untouched, so the viewer re-pushes
             // exactly what it pushed before.
             hostView.update(snapshot: sampleSnapshot(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
-            XCTAssertEqual(hostView.debugRenderFrameApplyCount, appliesAfterMount, "a repeated frame must not be re-applied")
+            XCTAssertEqual(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "a repeated frame must not be re-applied")
 
             hostView.update(snapshot: sampleSnapshotWithExclamation(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
-            XCTAssertGreaterThan(hostView.debugRenderFrameApplyCount, appliesAfterMount, "changed content must reach the surface")
+            XCTAssertGreaterThan(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "changed content must reach the surface")
         }
 
         /// `TerminalViewerModel.updateOwnerRenderSnapshot` is the steady-streaming path: it keeps the
@@ -2516,14 +2516,14 @@
             hostView.update(
                 ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: fixedEpochID, bootstrapSnapshot: sampleSnapshot()),
                 endedRender: nil, fallbackText: "Waiting for terminal state...")
-            let appliesAfterFirstSnapshot = hostView.debugRenderFrameApplyCount
+            let appliesAfterFirstSnapshot = hostView.renderFrameApplyCountForTesting
 
             hostView.update(
                 ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
                     sessionID: "test-session", id: fixedEpochID, bootstrapSnapshot: sampleSnapshotWithExclamation()),
                 endedRender: nil, fallbackText: "Waiting for terminal state...")
             XCTAssertGreaterThan(
-                hostView.debugRenderFrameApplyCount, appliesAfterFirstSnapshot,
+                hostView.renderFrameApplyCountForTesting, appliesAfterFirstSnapshot,
                 "a snapshot swap under the same owner epoch id must still reach the surface")
         }
 
@@ -2550,7 +2550,7 @@
 
             let firstView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reapply-first")
             defer { firstView.removeFromSuperview() }
-            let appliesBeforeSurrender = firstView.debugRenderFrameApplyCount
+            let appliesBeforeSurrender = firstView.renderFrameApplyCountForTesting
             XCTAssertTrue(firstView.hasMirrorSurfaceForTesting)
 
             // A second view mounting takes the mirror over for real: `GhosttySharedTerminalMirror.acquire`
@@ -2573,7 +2573,7 @@
 
             XCTAssertTrue(firstView.hasMirrorSurfaceForTesting, "the mirror must come back to the view it was parked for")
             XCTAssertGreaterThan(
-                firstView.debugRenderFrameApplyCount, appliesBeforeSurrender,
+                firstView.renderFrameApplyCountForTesting, appliesBeforeSurrender,
                 "the reacquired mirror still holds the second view's cells, so the first view's own frame must reach the surface again")
         }
 

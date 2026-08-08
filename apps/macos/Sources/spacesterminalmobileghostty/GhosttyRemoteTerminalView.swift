@@ -245,8 +245,11 @@ import Foundation
         /// change, a keyboard frame, a sibling view's update — and each of those reaches
         /// `applyLatestRenderFrameIfPossible`. Applying a frame the surface already shows costs a
         /// full-grid cell copy and a GPU-blocking `ghostty_mirror_apply_render_frame`, so a byte-identical
-        /// frame is skipped instead. Cleared wherever the surface this describes goes away or is rebound,
-        /// so a fresh surface always re-applies.
+        /// frame is skipped instead. Cleared wherever the surface this describes goes away or is rebound, so
+        /// a fresh surface always re-applies, and also in `setTerminalFontSize(_:)`: a font retune changes
+        /// what the surface should show without changing anything this identity tracks (a font decrease
+        /// leaves the cropped frame byte-identical), so it is cleared there too rather than skipped as a
+        /// no-op.
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastSurfaceGeometry: SurfaceGeometry?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
@@ -511,6 +514,12 @@ import Foundation
             fontSize = newFontSize
             guard mirror != nil else { return }
             GhosttySharedTerminalMirror.shared.setFontSize(newFontSize, from: self)
+            // The identity below has no notion of font size, so a retune that leaves the cropped frame
+            // byte-identical (a font decrease is the common case: it never changes what a fixed viewport
+            // can crop from the snapshot) would otherwise be skipped as a no-op re-apply, leaving Ghostty's
+            // own reflow of the old-sized grid on screen until the next real frame lands. Clearing here
+            // forces `applyLatestRenderFrameIfPossible()` to apply regardless of whether the frame changed.
+            lastAppliedRenderFrameIdentity = nil
             renderLatestSnapshot()
             reportViewportSizeIfNeeded()
         }
@@ -622,7 +631,7 @@ import Foundation
         /// applied-frame identity performs is invisible from the outside — the surface shows the same
         /// pixels either way — so this is what lets a test see that a repeat layout or a title-only
         /// payload costs no apply.
-        public private(set) var debugRenderFrameApplyCount = 0
+        public private(set) var renderFrameApplyCountForTesting = 0
 
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
@@ -1015,7 +1024,7 @@ import Foundation
             let applyStartedAt = Date()
             let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-            debugRenderFrameApplyCount += 1
+            renderFrameApplyCountForTesting += 1
             // Built only when something is listening: this runs once per applied frame, and the dictionary
             // costs more than the apply it describes.
             if SpacesDeviceTerminalPerformanceLogger.isEnabled(), let sessionID = activeOwnerEpoch?.sessionID {

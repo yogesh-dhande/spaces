@@ -1942,8 +1942,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let target = submittedStateCount + 1
         submitLatestState(payload)
         await withCheckedContinuation { continuation in
-            // Checked inside the body, not before the `await`: the apply can land in the gap, and a waiter
-            // registered after the apply it was waiting for would never be released.
+            // Defensive, not a race guard: `withCheckedContinuation` inherits the caller's main-actor
+            // isolation, so this body runs synchronously in the same run as `submitLatestState` above, and
+            // `appliedStateCount < target` holds by construction here. The mailbox drain that would advance
+            // `appliedStateCount` always hops through a `Task`, so it cannot land in this gap. Kept as a
+            // guard anyway so the invariant stays checked rather than assumed.
             guard appliedStateCount < target else {
                 continuation.resume()
                 return
@@ -2229,7 +2232,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Applies one reduction output exactly as the pipeline's mailbox would, so the consumption rules —
     /// which payload's state is installed, whose resync request is honored, what a stopped model drops —
     /// can be asserted against a constructed output instead of against a reduce task's timing.
-    func applyReducedStateForTesting(_ output: TerminalRemoteStateReductionOutput) { applyReducedState(output) }
+    func applyReducedStateForTesting(_ output: TerminalRemoteStateReductionOutput) {
+        // Keeps `submittedStateCount` in step with the `appliedStateCount` bump `applyReducedState` makes
+        // below, so an `applyLatestState` awaited later in the same test still resolves against a real
+        // submission instead of resolving early because the counters drifted apart.
+        submittedStateCount += UInt64(output.coalescedAwayCount) + 1
+        applyReducedState(output)
+    }
 
     /// Injects an owner-interactive state so composer/input send sequencing can be exercised without a
     /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).
