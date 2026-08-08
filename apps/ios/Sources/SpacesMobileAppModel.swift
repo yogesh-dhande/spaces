@@ -531,9 +531,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// first thing that can answer. In-memory and per-run like `workspaceIDsPendingDeletion`: a relaunch
     /// refetches reality rather than restoring a verdict that was never reached.
     private var workspaceDeletionsAwaitingOverview: [String: DeferredWorkspaceDeletion] = [:]
-    /// Tail of this client's delete queue: each `deleteWorkspace` call chains its work behind whatever
-    /// task is stored here, then replaces it with its own, so at most one `archiveWorkspace` request is
-    /// ever in flight from this client at a time.
+    /// Tails of this client's per-daemon delete queues, keyed by the `overviewIdentity` snapshot the
+    /// delete was issued against: each `deleteWorkspace` call chains its work behind whatever task is
+    /// stored under its own key, then replaces that entry with its own, so at most one `archiveWorkspace`
+    /// request is ever in flight from this client to a given daemon at a time.
     ///
     /// This exists for a false-failure race, not wire safety — `deleteChannel` already isolates each
     /// delete's own connection. The daemon runs every `archiveWorkspace`/`deleteProject` request off one
@@ -545,8 +546,37 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// listed with no teardown registered, which reads as a genuine failure. The daemon then dequeues and
     /// deletes it anyway: the row would go back to normal and vanish moments later, having been reported
     /// as a failed delete. Chaining closes the window by construction, since this client never has two
-    /// `archiveWorkspace` requests on that queue at once to begin with (#450 review round 2).
-    @ObservationIgnored private var pendingDeleteChain: Task<Void, Never>?
+    /// `archiveWorkspace` requests on the same daemon's queue at once to begin with (#450 review round 2).
+    ///
+    /// Keyed rather than a single tail (#450 review round 3): daemons are independent, each with its own
+    /// teardown queue, so a delete against device B has no business waiting out a delete against device
+    /// A's still-running reconciliation. `overviewIdentity` already is this model's notion of "which
+    /// connection a caller was talking to when it started," bumped on every device switch and reused
+    /// as-is here rather than introducing a second one; it is not quite "device" (switching away from and
+    /// back to the same device mid-delete mints two different keys for what is really one daemon), but
+    /// that narrower case is a rarer version of the same residual race already accepted below, not a new
+    /// one this keying introduces.
+    ///
+    /// A chain's own entry is not removed once its task completes — the dictionary is small (one entry
+    /// per device switch this run, not per delete) and, like `workspaceIDsPendingDeletion`, is in-memory
+    /// and per-run.
+    ///
+    /// Release on `.unknown`, and the residual race that leaves open: when a timed-out delete's
+    /// reconciliation (see `reconcileWorkspaceDeletionOutcome`) lands on `.unknown` — the daemon still
+    /// working, no verdict reached — this chain's task for it completes anyway, releasing the next queued
+    /// delete to send its own request even though the first workspace's teardown may still be occupying
+    /// the daemon's queue. A successor queued behind it can then hit the identical false-failure shape
+    /// this chain otherwise closes. This is deliberate, not an oversight: waiting the successor out until
+    /// the deferred delete resolves (`workspaceDeletionsAwaitingOverview`, itself unbounded) would block
+    /// every later delete on this daemon for as long as the daemon takes, which is worse than the race it
+    /// would close. The window it leaves needs a single teardown to run past two stacked 30s request
+    /// timeouts — one client-side hop over 60s wall-clock — plus a second delete queued right behind the
+    /// first, and even then it converges on its own: the workspace's teardown finishes either way, and the
+    /// row's false failure report corrects itself the moment the next overview stops listing it. It is the
+    /// same shape the daemon-side `withTeardownRegistered` comment already accepts for a delete issued
+    /// from a *different* client — no client can exclude another from its daemon's one queue either — just
+    /// reachable here from this client's own queued successor instead of a stranger's.
+    @ObservationIgnored private var pendingDeleteChains: [Int: Task<Void, Never>] = [:]
     /// Attention events the user dismissed on the active device, one at a time or with Clear. Identities
     /// are stable per source+kind+date, so a dismissed event stays dismissed until its source changes
     /// state again. Persisted per device via `SpacesMobileDismissedAlertsStore` and pruned against that
@@ -1958,7 +1988,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // delete runs on its own private channel (`deleteChannel` in `performDeleteWorkspace`) rather than
         // the shared `commandChannel`, so one workspace's delete can never collide on the wire with a
         // mutation running against a different workspace (#450) — including another workspace's delete,
-        // which is not rejected here either; it is chained instead (`pendingDeleteChain`).
+        // which is not rejected here either; it is chained instead (`pendingDeleteChains`).
         //
         // Accepted overlap: a delete issued while this same workspace's Start/Stop/Restart/Hide is still
         // in flight is not blocked here. The daemon's per-workspace lifecycle gate arbitrates that race
@@ -1976,25 +2006,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // removal is handled explicitly per outcome instead of by an unconditional `defer`.
         workspaceIDsPendingDeletion.insert(workspace.id)
 
-        // Chained behind whatever delete this client already has queued or in flight — see
-        // `pendingDeleteChain`'s declaration for why. Queuing costs nothing visible: the mark above already
-        // put this workspace's band into its deleting state.
-        let predecessor = pendingDeleteChain
+        // Chained behind whatever delete this daemon (keyed by `identity`) already has queued or in
+        // flight — see `pendingDeleteChains`'s declaration for why it is keyed rather than a single tail.
+        // Queuing costs nothing visible: the mark above already put this workspace's band into its
+        // deleting state.
+        let predecessor = pendingDeleteChains[identity]
         let task = Task {
             await predecessor?.value
             await self.performDeleteWorkspace(
                 workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, identity: identity)
         }
-        pendingDeleteChain = task
+        pendingDeleteChains[identity] = task
         await task.value
     }
 
-    /// The body of one queued delete, run once `deleteWorkspace` has chained it behind any predecessor
-    /// (see `pendingDeleteChain`). `identity` is the caller's `overviewIdentity` snapshot from before it
-    /// queued, not from when this actually starts: a device switch during the wait is exactly the kind of
-    /// change the `identity == overviewIdentity` guard below, and every other one in this function,
-    /// exists to catch. Without it a queued delete would resume against whatever device is active by
-    /// then and send this workspace's id — which may not even exist there — to the wrong daemon.
+    /// The body of one queued delete, run once `deleteWorkspace` has chained it behind any predecessor on
+    /// the same daemon (see `pendingDeleteChains`). `identity` is the caller's `overviewIdentity` snapshot
+    /// from before it queued, not from when this actually starts: a device switch during the wait is
+    /// exactly the kind of change the `identity == overviewIdentity` guard below, and every other one in
+    /// this function, exists to catch. Without it a queued delete would resume against whatever device is
+    /// active by then and send this workspace's id — which may not even exist there — to the wrong daemon.
     private func performDeleteWorkspace(_ workspace: SpacesDeviceWorkspaceSummary, deleteLocalBranch: Bool, deleteRemoteBranch: Bool, identity: Int)
         async
     {
@@ -2018,7 +2049,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // `deletedWorkspaceNotice` and `errorMessage`, set below and in `handleBridgeError`, are single
         // slots, not queues: whichever delete's outcome lands last wins, silently replacing whatever an
         // earlier delete left on screen if the user has not dismissed it yet. Accepted — deletes from this
-        // client are chained (`pendingDeleteChain`), so a same-client overlap here is already narrow (this
+        // client are chained per daemon (`pendingDeleteChains`), so a same-client overlap here is already narrow (this
         // one landing while a queued predecessor's notice is still up), and a lost notice for a delete that
         // still succeeded is low stakes next to the complexity of queuing them for display.
         do {

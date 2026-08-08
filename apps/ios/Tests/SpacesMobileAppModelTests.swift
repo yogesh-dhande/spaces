@@ -406,7 +406,7 @@
         /// duration, so a second workspace's delete — sent on its own private channel and with no bearing
         /// on the first — was rejected by the same guard, silently. Neither call is rejected now: both
         /// mark their own workspace immediately, and workspace-docs's delete is not dropped just because
-        /// workspace-feature's is still unresolved — it queues behind it (`pendingDeleteChain`, review
+        /// workspace-feature's is still unresolved — it queues behind it (`pendingDeleteChains`, review
         /// round 2 finding 1) and completes on its own once the queue reaches it. See
         /// `testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests` for the queue's ordering
         /// guarantee itself; this test's focus is that queuing is not rejection.
@@ -461,9 +461,12 @@
         /// issued back to back from this client could therefore both sit on that queue at once; if the
         /// first is still occupying it past this client's 30s request timeout, the second — still queued,
         /// still unregistered — would time out too and reconcile to a false failure, even though the
-        /// daemon goes on to delete it anyway (review round 2, finding 1). `pendingDeleteChain` closes the
+        /// daemon goes on to delete it anyway (review round 2, finding 1). `pendingDeleteChains` closes the
         /// window by construction: this proves this client never has two `archiveWorkspace` requests on
-        /// the wire at once, regardless of which workspaces they target.
+        /// the same daemon's wire at once, regardless of which workspaces they target. Both deletes here
+        /// target the same device (no identity change), so they share one chain key; see
+        /// `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete` for proof that a
+        /// *different* device's delete gets its own key and is not serialized against this one.
         func testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests() async {
             let gate = SpacesMobileAsyncGate()
             let recorder = SpacesMobileRequestRecorder()
@@ -497,8 +500,9 @@
             let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
             while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
 
-            // workspace-docs's request cannot appear here no matter how long this waits: `pendingDeleteChain`
-            // makes it wait on workspace-feature's whole call, which is parked on the still-closed gate.
+            // workspace-docs's request cannot appear here no matter how long this waits: `pendingDeleteChains`
+            // makes it wait on workspace-feature's whole call (same device, same chain key), which is
+            // parked on the still-closed gate.
             var requests = await recorder.snapshot()
             XCTAssertEqual(
                 requests.map(\.commandName), ["archiveWorkspace"], "the second delete's request must not be sent while the first is still unresolved")
@@ -519,6 +523,60 @@
             XCTAssertEqual(secondPayload.workspaceID, "workspace-docs")
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// `pendingDeleteChains` keys its tail by `overviewIdentity`, not one shared tail, because two
+        /// different devices have two independent daemon teardown queues: a delete against device B has
+        /// no business waiting out a delete against device A (review round 3, finding 1). There is no
+        /// second real paired device/backend in this harness, so this reuses the same seam the earlier
+        /// device-switch delete tests already rely on (`handleAuthenticationFailure`, which bumps
+        /// `overviewIdentity` exactly as a real device switch does) rather than standing up a second
+        /// `SpacesDeviceAPIClient`; that is enough to exercise the keying itself, since the chain keys on
+        /// the identity value alone.
+        func testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // Confirms workspace-feature's request is actually parked on the gate (its chain entry is a
+            // still-unresolved task) before switching, so the test proves independence rather than luck.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Stands in for switching to a different paired device: bumps `overviewIdentity`, the value
+            // `pendingDeleteChains` keys on, the same way `SpacesMobileAppModel.selectDevice` does.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request reaches the daemon without waiting for workspace-feature's gate to
+            // open: different `overviewIdentity` at call time means a different chain entry.
+            while await recorder.snapshot().count < 2 { await Task.yield() }
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "still unresolved, untouched by the device switch")
+
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
         }
 
         /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
