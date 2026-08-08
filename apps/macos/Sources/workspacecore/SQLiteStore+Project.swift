@@ -45,12 +45,6 @@ extension SQLiteStore {
                     sql: "INSERT INTO project_browser_sessions(project_id, name, url, order_index) VALUES (?, ?, ?, ?)",
                     bindings: [project.id, session.name ?? "", session.url ?? "", String(index)])
             }
-            try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [project.id])
-            for (index, launcher) in project.agentLaunchers.enumerated() {
-                try execute(
-                    sql: "INSERT INTO project_agent_launchers(project_id, id, name, command, order_index) VALUES (?, ?, ?, ?, ?)",
-                    bindings: [project.id, launcher.id, launcher.name, launcher.command, String(index)])
-            }
         }
     }
 
@@ -100,8 +94,6 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
                 sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-            try execute(
-                sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
                 sql: "DELETE FROM workspace_service_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
@@ -110,7 +102,6 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM projects WHERE id = ?", bindings: [id])
         }
     }
@@ -130,12 +121,9 @@ extension SQLiteStore {
         let browserSessions = try queryRows(
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
-        let agentLaunchers = try queryRows(
-            sql: "SELECT id, name, command FROM project_agent_launchers WHERE project_id = ? ORDER BY order_index", bindings: [id]
-        ).map { row in AgentLauncher(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1], command: row[2]) }
         return ProjectRecord(
             id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
             setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
-            browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+            browserSessions: browserSessions)
     }
 }

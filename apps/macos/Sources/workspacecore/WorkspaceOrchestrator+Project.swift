@@ -280,18 +280,15 @@ extension WorkspaceOrchestrator {
         update(&record)
         let previousPorts = baseRecord.ports
         let previousProcesses = baseRecord.processes
-        let previousAgentLaunchers = baseRecord.agentLaunchers
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+            browserSessions: record.browserSessions)
         record.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
-        record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
         record.ports = try normalizedServiceDefinitions(record.ports)
         try validateProcessTemplates(record.processes)
-        try validateUniqueConfiguredFocusNames(
-            processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+        try validateUniqueConfiguredFocusNames(processes: record.processes, browserSessions: record.browserSessions)
         return record
     }
 
@@ -316,25 +313,21 @@ extension WorkspaceOrchestrator {
         }
         let previousPorts = settings.ports
         let previousProcesses = settings.processes
-        let previousAgentLaunchers = settings.agentLaunchers
         settings.stopScript = project.stopScript
         settings.ports = project.ports
         settings.processes = seededWorkspaceProcesses(from: project.processes)
         settings.browserSessions = project.browserSessions
-        settings.agentLaunchers = project.agentLaunchers
         settings.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: settings.ports)
         settings.ports = try normalizedServiceDefinitions(settings.ports)
         settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
-        settings.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: settings.agentLaunchers)
         try validateProcessTemplates(settings.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
-            agentLaunchers: settings.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: settings.stopScript)
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         if syncPorts {
             let appConfig = try store.appConfig()

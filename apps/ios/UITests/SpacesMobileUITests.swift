@@ -324,7 +324,7 @@ final class SpacesMobileUITests: XCTestCase {
     ///
     /// The `workspace-delete-scroll` lane deletes a workspace whose rows are all configured, so its
     /// section's item count never moves. This one first gives the workspace rows that exist only while
-    /// something is running — a coding agent started from its launcher, and a workspace terminal whose
+    /// something is running — a coding agent running in a workspace terminal, and a workspace terminal whose
     /// command has exited — so tearing it down takes several rows out of a section that is still on
     /// screen. It also visits the Agents and Alerts tabs first, since a TabView keeps a visited tab's
     /// collection view alive and one delete then diffs rows out of all three lists in the same update,

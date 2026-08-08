@@ -75,7 +75,13 @@ WORKSPACE_BRANCH="redesign-hero"
 WORKSPACE_NOTES="Redesign the landing page hero for clarity and impact"
 LANTERN_BRANCH_WORKSPACE_BRANCH="redesign-hero"
 LANTERN_BRANCH_WORKSPACE_NOTES="Redesign the API error console hero section"
-MOCK_AGENT_LABEL="Mock Agent"
+# The mock coding agent runs in a plain workspace terminal titled MOCK_AGENT_TERMINAL_TITLE and
+# becomes a coding-agent row through its own hook signals — the only way an agent comes into
+# existence. Its hook signals report no label, so registration materializes the stored label
+# MOCK_AGENT_LABEL: the row, its pane, and `spaces open` all address that one name, while the
+# terminal keeps its own launch title.
+MOCK_AGENT_TERMINAL_TITLE="Mock Agent"
+MOCK_AGENT_LABEL="Coding Agent"
 SPACES_PID=""
 CAFFEINATE_PID=""
 RECORDER_PID=""
@@ -1193,15 +1199,12 @@ processes:
     command: >-
       python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
     on_exit: none
-agent_launchers:
-  - name: parity-agent
-    command: >-
-      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
 YAML
+  spaces_e2e_write_parity_agent_script "$project_dir/parity-agent" "$SPACES_CLI"
   git -C "$project_dir" init >/dev/null
   git -C "$project_dir" config user.email "spaces-e2e@example.invalid"
   git -C "$project_dir" config user.name "Spaces E2E"
-  git -C "$project_dir" add README.txt spaces.yaml
+  git -C "$project_dir" add README.txt spaces.yaml parity-agent
   git -C "$project_dir" commit -m "Initial device API parity fixture" >/dev/null
 }
 
@@ -1526,10 +1529,41 @@ PY
   printf '%s\n' "$script_path"
 }
 
-mock_agent_launcher_command() {
-  local host="$1"
-  local workspace_dir="$2"
-  create_mock_agent_script "$workspace_dir"
+# Starts the mock coding agent the only way one can start: as a command run inside a plain workspace
+# terminal session, which its hook signals then turn into a coding-agent row. Prints the terminal
+# session id, which is how the row is addressed until its focus name resolves.
+start_mock_agent_terminal_session() {
+  local workspace_dir="$1"
+  local agent_script session_json
+  agent_script="$(create_mock_agent_script "$workspace_dir")"
+  session_json="$TMP_ROOT/mock-agent-session.json"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" start-workspace-terminal-session --workspace-dir "$workspace_dir" \
+    --title "$MOCK_AGENT_TERMINAL_TITLE" --command "$agent_script" >"$session_json" \
+    || fail "failed to start the mock coding agent terminal session in $workspace_dir"
+  json_get "$session_json" "id"
+}
+
+# Waits until the mock agent's hook signals have registered its coding-agent row for `session_id`.
+wait_for_agent_row_for_session() {
+  local workspace_dir="$1"
+  local session_id="$2"
+  local dump_file="$TMP_ROOT/agent-row-dump.json"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    dump_workspace "$workspace_dir" "$dump_file"
+    if python3 - "$dump_file" "$session_id" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+raise SystemExit(0 if any(r.get("terminalTrackingID") == sys.argv[2] for r in data.get("agentWindows", [])) else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for the coding-agent row of terminal session $session_id"
 }
 
 create_high_output_process_script() {
@@ -1556,19 +1590,6 @@ Path(script_path).write_text(content)
 os.chmod(script_path, 0o755)
 PY
   printf '%s\n' "$script_path"
-}
-
-set_workspace_agent_launcher() {
-  local workspace_dir="$1"
-  local launcher_name="$2"
-  local launcher_command="$3"
-  "$SPACES_E2E_CLI" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --name "$launcher_name" --command "$launcher_command" \
-    >/tmp/spaces-e2e-agent-launcher.json
-}
-
-clear_workspace_agent_launchers() {
-  local workspace_dir="$1"
-  "$SPACES_E2E_CLI" set-workspace-agent-launchers --workspace-dir "$workspace_dir" --clear >/tmp/spaces-e2e-agent-launcher-clear.json
 }
 
 clear_workspace_agent_windows() {
@@ -4259,23 +4280,23 @@ wait_for_event_log_contains_since_line() {
   fail "timed out waiting for event log pattern: $pattern"
 }
 
+# Agent rows are addressed here by the terminal session the agent runs in, not by name: a row is
+# named by whatever label the agent reports, and by the materialized default when it reports none.
 wait_for_agent_status() {
   local workspace_dir="$1"
-  local label="$2"
+  local session_id="$2"
   local expected_status="$3"
   local dump_file="$TMP_ROOT/agent-status-dump.json"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     dump_workspace "$workspace_dir" "$dump_file"
     local actual_status
-    actual_status="$(python3 - "$dump_file" "$label" <<'PY'
+    actual_status="$(python3 - "$dump_file" "$session_id" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
-target = sys.argv[2]
 for record in data.get("agentWindows", []):
-    label = record.get("label") or ""
-    if label == target or label.startswith(target + "-"):
+    if record.get("terminalTrackingID") == sys.argv[2]:
         print(record.get("status") or "")
         break
 PY
@@ -4285,7 +4306,7 @@ PY
     fi
     sleep 0.2
   done
-  fail "timed out waiting for agent status: $label == $expected_status"
+  fail "timed out waiting for agent status of session $session_id: $expected_status"
 }
 
 wait_for_process_running_recovery() {
@@ -4720,10 +4741,17 @@ wait_for_cycle_target_focus() {
       ;;
     terminal:*|process:*|agent:*)
       local target_name target_session_id
-      target_name="$(extract_cycle_window_title "$cycle_target")"
-      target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
-      if [[ -z "$target_session_id" ]]; then
-        target_session_id="$(known_spaces_terminal_session_id_for_name "$target_name")"
+      if [[ "$cycle_target" == agent:* ]]; then
+        # The cycle perf line names an agent target by row id, so resolve it to the row's stored name.
+        # These lanes run exactly one coding agent, so its identity is already known.
+        target_name="$MOCK_AGENT_LABEL"
+        target_session_id="$KNOWN_SPACES_AGENT_SESSION_ID"
+      else
+        target_name="$(extract_cycle_window_title "$cycle_target")"
+        target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
+        if [[ -z "$target_session_id" ]]; then
+          target_session_id="$(known_spaces_terminal_session_id_for_name "$target_name")"
+        fi
       fi
       if [[ -n "$target_session_id" ]]; then
         if ! wait_for_spaces_terminal_frontmost_session_optional "$target_session_id"; then
@@ -4767,13 +4795,22 @@ refocus_cycle_target() {
     browser:*)
       target_name="docs"
       ;;
-    terminal:*|process:*|agent:*)
+    agent:*)
+      # The cycle perf line names an agent row by row id; refocus it by the row's stored name.
+      target_name="$MOCK_AGENT_LABEL"
+      ;;
+    terminal:*|process:*)
       target_name="$(extract_cycle_window_title "$cycle_target")"
       ;;
     *)
       fail "unexpected cycle target for refocus: $cycle_target"
       ;;
   esac
+  if [[ "$cycle_target" != browser:* ]]; then
+    # See seed_cycle_focus_history: a terminal-kind refocus only registers while Spaces is active,
+    # and the preceding measurement may have left Chrome frontmost.
+    activate_spaces_pid "$SPACES_PID"
+  fi
   run_spaces_logged "$TMP_ROOT/$label_slug-refocus-cycle-target.log" open "$target_name" "$workspace_dir"
   transition_pause "$label refocus cycle target"
 }
@@ -4852,6 +4889,12 @@ seed_cycle_focus_history() {
   shift
   local seed_target
   for seed_target in "$@"; do
+    if [[ "$seed_target" != "docs" ]]; then
+      # A pane focus only lands while Spaces is active (`terminal_pane_focus ... reason=app_inactive`
+      # otherwise reports focus_observed=0), and a docs seed leaves Chrome frontmost. Foreground
+      # Spaces before a terminal-kind seed so the seeded focus becomes the cycle's current position.
+      activate_spaces_pid "$SPACES_PID"
+    fi
     run_spaces_logged "/tmp/spaces-e2e-cycle-seed-${seed_label}-${seed_target// /-}.log" open "$seed_target" "$workspace_dir"
     transition_pause "$host seed $seed_target focus ($seed_label)"
     if [[ "$seed_target" == "docs" ]]; then
@@ -5191,12 +5234,10 @@ run_window_cycle_small_assertions() {
   local docs_expected="${3:-Harbor docs sentinel}"
   local backend_expected="${4:-\"workspace\": \"harbor-web\"}"
   local dump_file="$TMP_ROOT/$host-window-cycle-small-dump.json"
-  local agent_script browser_docs_url docs_window_id backend_status_url
+  local browser_docs_url docs_window_id backend_status_url
 
   reset_fixture_runtime "$workspace_dir"
   ensure_configured_terminal_host "$host"
-  agent_script="$(mock_agent_launcher_command "$host" "$workspace_dir")"
-  set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: small window cycle profile setup"
   run_spaces_logged /tmp/spaces-e2e-cycle-profile-start.log start "$workspace_dir"
@@ -5213,6 +5254,10 @@ run_window_cycle_small_assertions() {
   backend_status_url="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
   ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "$docs_expected" "$backend_status_url" "$backend_expected"
 
+  # The docs step leaves Chrome frontmost, and a pane focus only lands while Spaces is active
+  # (terminal_pane_focus reports app_inactive / focus_observed=0 otherwise), so foreground Spaces
+  # before the terminal-pane opens whose focus the waits below assert.
+  activate_spaces_pid "$SPACES_PID"
   run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-frontend.log open frontend "$workspace_dir"
   transition_pause "$host open frontend for cycle profile"
   KNOWN_SPACES_FRONTEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
@@ -5227,9 +5272,10 @@ run_window_cycle_small_assertions() {
   wait_for_spaces_front_window_title "backend"
   wait_for_terminal_session_live_render "$KNOWN_SPACES_BACKEND_SESSION_ID" "$host backend cycle profile"
 
+  KNOWN_SPACES_AGENT_SESSION_ID="$(start_mock_agent_terminal_session "$workspace_dir")"
+  wait_for_agent_row_for_session "$workspace_dir" "$KNOWN_SPACES_AGENT_SESSION_ID"
   run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
   transition_pause "$host open agent for cycle profile"
-  KNOWN_SPACES_AGENT_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$MOCK_AGENT_LABEL" "$dump_file")"
   wait_for_condition "spaces_front_terminal_pane_session_id" "$KNOWN_SPACES_AGENT_SESSION_ID"
   wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
   wait_for_terminal_session_live_render "$KNOWN_SPACES_AGENT_SESSION_ID" "$host agent cycle profile"
@@ -5254,12 +5300,9 @@ run_launch_and_focus_assertions() {
   local docs_expected="${3:-Harbor docs sentinel}"
   local backend_expected="${4:-\"workspace\": \"harbor-web\"}"
   local dump_file="$TMP_ROOT/$host-dump.json"
-  local agent_script
 
   reset_fixture_runtime "$workspace_dir"
   ensure_configured_terminal_host "$host"
-  agent_script="$(mock_agent_launcher_command "$host" "$workspace_dir")"
-  set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: launch workspace and persist terminal host"
   run_spaces_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
@@ -5480,8 +5523,11 @@ PY
   # These are the workspace-detail focus cases the user asked for, using the
   # real detail-pane shortcuts instead of harness-directed focus.
   ensure_single_spaces_instance "$SPACES_PID"
-  agent_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$MOCK_AGENT_LABEL" "$dump_file")"
+  # The numbered shortcuts cover a coding agent, and a coding agent exists only while one is running:
+  # start the mock agent in a workspace terminal and wait for its hook signals to register the row.
+  agent_session_id="$(start_mock_agent_terminal_session "$workspace_dir")"
   [[ -n "$agent_session_id" ]] || fail "expected tracked agent terminal session"
+  wait_for_agent_row_for_session "$workspace_dir" "$agent_session_id"
   if is_spaces_terminal_target "$host"; then
     KNOWN_SPACES_FRONTEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
     KNOWN_SPACES_BACKEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "backend" "$dump_file")"
@@ -5786,7 +5832,6 @@ PY
         >/tmp/spaces-e2e-terminate-agent-session.json 2>>"$DEBUG_LOG" || true
       KNOWN_SPACES_AGENT_SESSION_ID=""
     fi
-    clear_workspace_agent_launchers "$workspace_dir"
     clear_workspace_agent_windows "$workspace_dir"
     pass_case
   fi
@@ -6054,7 +6099,8 @@ run_multi_workspace_focus_and_cycle_assertions() {
   ensure_configured_terminal_host "$host"
   begin_case "$host: multi-workspace focus and cycle isolation"
   ensure_single_spaces_instance "$SPACES_PID"
-  clear_workspace_agent_launchers "$primary_workspace_dir"
+  # This lane asserts focus isolation between two workspaces with no coding agent in play; the runtime
+  # reset below stops any agent an earlier case left running in the primary workspace.
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
 
@@ -6165,31 +6211,27 @@ run_multi_workspace_focus_and_cycle_assertions() {
 run_agent_status_assertions() {
   local host="$1"
   local workspace_dir="$2"
-  local dump_file="$TMP_ROOT/$host-agent-status.json"
-  local workspace_title workspace_id agent_run_view_pattern agent_script
+  local agent_session_id
 
   ensure_configured_terminal_host "$host"
-  dump_workspace "$workspace_dir" "$dump_file"
-  workspace_title="$(json_get "$dump_file" "workspace.name")"
-  agent_script="$(mock_agent_launcher_command "$host" "$workspace_dir")"
-  set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: coding agent status updates"
-  # Launch a real configured coding agent and assert its waiting/done lifecycle
-  # through both persisted agent-window state and the visible GUI rows.
+  # Run a real coding agent the way the product offers — a command inside a workspace terminal — and
+  # assert the waiting/done lifecycle its hook signals drive onto the persisted agent-window state.
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
   run_spaces_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
-  transition_pause "$host launch workspace with agent"
+  transition_pause "$host launch workspace before starting the agent"
+  agent_session_id="$(start_mock_agent_terminal_session "$workspace_dir")"
+  wait_for_agent_row_for_session "$workspace_dir" "$agent_session_id"
 
   wait_for_event_log_contains "agent-blocked:$workspace_dir"
-  wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
+  wait_for_agent_status "$workspace_dir" "$agent_session_id" "waiting"
 
   wait_for_event_log_contains "agent-done:$workspace_dir"
-  wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "done"
+  wait_for_agent_status "$workspace_dir" "$agent_session_id" "done"
 
   reset_fixture_runtime "$workspace_dir"
-  clear_workspace_agent_launchers "$workspace_dir"
   pass_case
 }
 

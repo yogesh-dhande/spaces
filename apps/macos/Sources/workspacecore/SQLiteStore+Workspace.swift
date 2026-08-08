@@ -79,7 +79,6 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_service_ports WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_services WHERE workspace_id = ?", bindings: [id])
@@ -140,19 +139,6 @@ extension SQLiteStore {
         }
     }
 
-    public func setWorkspaceAgentLaunchers(workspaceID: String, launchers: [AgentLauncher]) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
-            for (index, launcher) in launchers.enumerated() {
-                try execute(
-                    sql: """
-                        INSERT INTO workspace_agent_launchers(workspace_id, id, name, command, order_index)
-                        VALUES (?, ?, ?, ?, ?)
-                        """, bindings: [workspaceID, launcher.id, launcher.name, launcher.command, String(index)])
-            }
-        }
-    }
-
     public func workspaceSettingsExists(workspaceID: String) throws -> Bool {
         let rows = try queryRows(sql: "SELECT workspace_id FROM workspace_settings WHERE workspace_id = ?", bindings: [workspaceID])
         return !rows.isEmpty
@@ -163,7 +149,6 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM workspace_settings WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
-            try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_service_ports WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_services WHERE workspace_id = ?", bindings: [workspaceID])
         }
@@ -254,17 +239,6 @@ extension SQLiteStore {
                 VALUES (?)
                 ON CONFLICT(workspace_id) DO NOTHING
                 """, bindings: [workspaceID])
-    }
-
-    public func workspaceAgentLaunchers(workspaceID: String) throws -> [AgentLauncher] {
-        let rows = try queryRows(
-            sql: """
-                SELECT id, name, command
-                FROM workspace_agent_launchers
-                WHERE workspace_id = ?
-                ORDER BY order_index
-                """, bindings: [workspaceID])
-        return rows.map { AgentLauncher(id: $0[0].isEmpty ? UUID().uuidString : $0[0], name: $0[1], command: $0[2]) }
     }
 
     func decodeWorkspace(row: [String]) -> WorkspaceRecord? {

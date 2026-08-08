@@ -521,8 +521,8 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     /// Writes a minimal schema-v11 database (`migration_state` at 11 and the pre-rename `agent_sessions`
     /// shape, plus the `runtime_targets` table the agent read joins) with one annotated, kind-detected
-    /// agent row. The migrator upgrades this fixture to v12 (adding `agent_sessions.user_label`) on open;
-    /// the test asserts the pre-existing row survives with no rename stored.
+    /// agent row. The migrator upgrades this fixture through v12 (adding `agent_sessions.user_label`) to
+    /// the current version on open; the test asserts the pre-existing row survives with no rename stored.
     private func createV11Database(at path: String, workspaceID: String, agentID: String, terminalSessionID: String) throws {
         var handle: OpaquePointer?
         guard sqlite3_open(path, &handle) == SQLITE_OK, let db = handle else {

@@ -10,7 +10,6 @@
                 makeAgentRow(id: "agent-idle-exited", runState: .exited, activityState: .idle),
                 makeAgentRow(id: "agent-waiting", runState: .running, activityState: .waiting),
                 makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning),
-                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
                 makeAgentRow(id: "agent-running-idle", runState: .running, activityState: .idle),
                 makeAgentRow(id: "agent-done", runState: .running, activityState: .done),
             ])
@@ -30,7 +29,6 @@
         func testNotRunningAgentsAreNeverListed() {
             let overview = makeOverview(codingAgentRows: [
                 makeAgentRow(id: "agent-idle-exited", runState: .exited, activityState: .idle),
-                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
                 makeAgentRow(id: "agent-exited", runState: .running, activityState: .exited),
             ])
 
@@ -56,7 +54,6 @@
             XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-a", runState: .running, activityState: .waiting)), .blocked)
 
             let overview = makeOverview(codingAgentRows: [
-                makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle),
                 makeAgentRow(id: "agent-spinning", runState: .running, activityState: .spinning),
                 makeAgentRow(id: "agent-done", runState: .running, activityState: .done),
                 makeAgentRow(id: "agent-waiting", runState: .running, activityState: .waiting),
@@ -68,7 +65,6 @@
         /// An idle agent says nothing about itself, so its terminal decides which band it lands in.
         func testIdleAgentBandsOnItsTerminalRunState() {
             XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-a", runState: .running, activityState: .idle)), .working)
-            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-b", runState: .notStarted, activityState: .idle)), .notRunning)
             XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: makeAgentRow(id: "agent-c", runState: .exited, activityState: .idle)), .notRunning)
         }
 
@@ -93,7 +89,7 @@
         func testSkipsHiddenWorkspaces() {
             let workspace = makeWorkspace(
                 id: "workspace-hidden", branch: "feature", isHidden: true,
-                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .notStarted, activityState: .idle)])
+                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning)])
             let overview = makeOverview(workspaces: [workspace])
 
             XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
@@ -106,7 +102,7 @@
             XCTAssertEqual(gitEntry.detail, "spaces · ios-redesign")
 
             let nonGitEntry = SpacesMobileAgentEntry(
-                row: makeAgentRow(id: "agent-b", runState: .notStarted, activityState: .idle), workspaceDisplayName: "notes-app",
+                row: makeAgentRow(id: "agent-b", runState: .running, activityState: .idle), workspaceDisplayName: "notes-app",
                 projectName: "Notes-App")
             XCTAssertEqual(nonGitEntry.detail, "notes-app")
         }
@@ -171,9 +167,8 @@
             -> SpacesDeviceWorkspaceCodingAgentRow
         {
             SpacesDeviceWorkspaceCodingAgentRow(
-                id: id, workspaceID: "workspace-feature", name: "claude", command: "claude", agentID: runState == .notStarted ? nil : "runtime-\(id)",
-                sessionID: runState == .notStarted ? nil : "session-\(id)", isConfigured: true, runState: runState, activityState: activityState,
-                canRun: runState != .running, canStop: runState == .running, canRestart: runState == .running)
+                id: id, workspaceID: "workspace-feature", name: "claude", command: "claude", agentID: "runtime-\(id)",
+                sessionID: "session-\(id)", runState: runState, activityState: activityState, canStop: true)
         }
     }
 #endif

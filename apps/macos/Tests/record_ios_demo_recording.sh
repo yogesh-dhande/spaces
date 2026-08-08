@@ -246,6 +246,23 @@ workspace_id_for() {
   demo_env "$spacese2e" lookup-workspace --project-dir "$1" | jq -r '.id'
 }
 
+# Renames the coding-agent row backing terminal session `$2` to `$3`. The row appears only once the
+# agent has signalled, so this polls the overview for the agent id the rename is addressed by.
+name_coding_agent() {
+  local workspace_id="$1" session_id="$2" title="$3" agent_id="" deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    agent_id="$(device_request '{"overview":{}}' | jq -r --arg ws "$workspace_id" --arg sid "$session_id" '
+      .result.overview.workspaces[] | select(.id == $ws) | .codingAgentRows[] | select(.sessionID == $sid) | .agentID // empty')"
+    [[ -z "$agent_id" ]] || break
+    sleep 0.5
+  done
+  if [[ -z "$agent_id" ]]; then
+    log "Failed to resolve the coding-agent row for session $session_id."
+    exit 1
+  fi
+  device_request "{\"renameAgentSession\":{\"workspaceID\":\"$workspace_id\",\"agentID\":\"$agent_id\",\"title\":\"$title\"}}" >/dev/null
+}
+
 seed_and_launch() {
   spaces_e2e_create_harbor_fixture_repo "$fixture_template_dir" "$temp_root/harbor-web"
   spaces_e2e_create_lantern_fixture_repo "$fixture_template_dir" "$temp_root/lantern-api"
@@ -265,11 +282,17 @@ seed_and_launch() {
 
   log "Launching harbor-web (frontend + backend) and its coding agent..."
   device_request "{\"launchWorkspace\":{\"workspaceID\":\"$harbor_ws\"}}" >/dev/null
-  local agent_response agent_session
-  agent_response="$(device_request "{\"runCodingAgent\":{\"workspaceID\":\"$harbor_ws\",\"agentName\":\"Fix checkout 500\"}}")"
-  agent_session="$(printf '%s' "$agent_response" | jq -r '.result.mutation.sessionID // empty')"
+  # A coding agent is a program running in a workspace terminal that reports the Spaces agent hooks. The
+  # demo package's scripted agent is what the checked-in recording fixtures (overview.json row command,
+  # grid transcripts) were captured from, so a re-record must run the same program.
+  local agent_session
+  agent_session="$(
+    demo_env "$spacese2e" start-workspace-terminal-session \
+      --workspace-dir "$temp_root/harbor-web" --title "Fix checkout 500" \
+      --command "export PYTHONPATH=.spaces-e2e-demo/src; exec /usr/bin/env python3 -m spaces_e2e_demo agent" | jq -r '.id // empty'
+  )"
   if [[ -z "$agent_session" ]]; then
-    log "Failed to resolve the coding-agent session id from runCodingAgent response."
+    log "Failed to start the coding-agent terminal session in harbor-web."
     exit 1
   fi
   # Drive the real agent lifecycle so the row settles into the flagship "waiting on input" state
@@ -281,6 +304,9 @@ seed_and_launch() {
   for event in init working blocked; do
     demo_env "$spaces_cli" agent signal --workspace "$harbor_ws" --session "$agent_session" "$event" >/dev/null
   done
+  # The stand-in reports no label of itself, so the row carries the materialized default name. Name it
+  # the way a user would, through the same rename the app and the mobile clients issue.
+  name_coding_agent "$harbor_ws" "$agent_session" "Fix checkout 500"
 
   log "Launching lantern-api, then crashing its backend (exited state + alert)..."
   device_request "{\"launchWorkspace\":{\"workspaceID\":\"$lantern_ws\"}}" >/dev/null

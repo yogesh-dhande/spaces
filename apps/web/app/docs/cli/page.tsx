@@ -116,7 +116,7 @@ spaces agent signal exit`}</CodeBlock>
           Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Outside one, <code>spaces agent signal</code> exits successfully without reporting an event. Passing <code>--workspace</code> without <code>--session</code>, or the reverse, is an error rather than a silent no-op. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
+          Agent labels come from what the agent reports at <code>init</code>, or from the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
       </article>
 

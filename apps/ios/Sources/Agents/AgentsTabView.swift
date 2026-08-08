@@ -5,23 +5,24 @@ import spacesdevicecore
 struct AgentsTabView: View {
     @Bindable var model: SpacesMobileAppModel
     @State private var selectedSession: SelectedTerminalSessionRoute?
-    @State private var pendingTerminalLaunch: PendingTerminalLaunch?
 
     var body: some View {
         NavigationStack {
+            // An agent row is a live session the user already started, so this tab opens sessions and
+            // never launches one: the shared navigation's pending-launch route stays permanently empty.
             content.background(Theme.bg.ignoresSafeArea()).navigationTitle("Agents").tint(Theme.accent).terminalSessionNavigation(
-                model: model, selectedSession: $selectedSession, pendingTerminalLaunch: $pendingTerminalLaunch)
+                model: model, selectedSession: $selectedSession, pendingTerminalLaunch: .constant(nil))
         }.accessibilityIdentifier("tab.agents").overviewPolling(model: model, tab: .agents, activeDetailRouteID: activeDetailRouteID)
     }
 
-    private var activeDetailRouteID: String? { selectedSession?.id ?? pendingTerminalLaunch?.id }
+    private var activeDetailRouteID: String? { selectedSession?.id }
 
     @ViewBuilder private var content: some View {
         if model.agentGroups.isEmpty {
             ContentUnavailableView {
                 Label("No Active Agents", systemImage: "cpu")
             } description: {
-                Text("Blocked, finished, and working coding agents show up here. Launch one from its workspace on the Spaces tab.")
+                Text("Blocked, finished, and working coding agents show up here. Start one by running its command in a workspace terminal.")
             }
         } else {
             List { ForEach(model.agentGroups) { group in agentGroupSection(group) } }.listStyle(.plain).scrollContentBackground(.hidden)
@@ -43,16 +44,13 @@ struct AgentsTabView: View {
             activateAgentRow(row)
         } label: {
             BandRow(dotKind: row.statusDotKind, tile: .tile(for: .codingAgents), title: entry.row.name, detail: entry.detail) {
-                if row.sessionID != nil { RowChevron() } else if row.canRun { RowPlayIndicator() }
+                if row.sessionID != nil { RowChevron() }
             }
-        }.buttonStyle(.plain).disabled(model.isMutating || (row.sessionID == nil && !row.canRun)).accessibilityIdentifier("agents.row.\(entry.id)")
+        }.buttonStyle(.plain).disabled(model.isMutating || row.sessionID == nil).accessibilityIdentifier("agents.row.\(entry.id)")
     }
 
     private func activateAgentRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
-        if let session = model.terminalSession(for: row) {
-            selectedSession = SelectedTerminalSessionRoute(session: session)
-        } else if row.canRun {
-            pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
-        }
+        guard let session = model.terminalSession(for: row) else { return }
+        selectedSession = SelectedTerminalSessionRoute(session: session)
     }
 }

@@ -7,14 +7,13 @@ import systembridge
 
 extension OrchestratorTests {
 
-    func testStopCodingAgentRemovesRuntimeAndPreservesConfiguredLauncher() throws {
+    func testStopCodingAgentRemovesRuntimeAndTerminatesItsSession() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.upsert(
             window: WindowRecord(
@@ -24,7 +23,7 @@ extension OrchestratorTests {
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", runtimeTargetID: "window-codex",
                 terminalTarget: TerminalTargetRecord(runtimeTargetID: "window-codex", trackingID: "session-codex"), sessionKey: nil,
-                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
+                status: .idle, createdAt: "now", updatedAt: "now"))
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(
@@ -35,98 +34,15 @@ extension OrchestratorTests {
 
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
-        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: workspace.id).map(\.name), ["Codex"])
         XCTAssertEqual(closed.sessionIDs, ["session-codex"])
         XCTAssertEqual(terminated.sessionIDs, ["session-codex"])
     }
 
-    func testRestartCodingAgentRelaunchesClaimedLauncher() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now"))
-        let launches = TerminalLaunchConfigurationCapture()
-        let terminated = TerminalTerminateCapture()
-        let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
-            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
-            builtInTerminalSessionLauncher: { configuration in
-                launches.append(configuration)
-                return TerminalServiceSessionSummary(
-                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
-                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
-                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
-            })
-
-        let relaunched = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
-
-        XCTAssertEqual(terminated.sessionIDs, ["old-session"])
-        XCTAssertEqual(launches.snapshot().map(\.title), ["Codex"])
-        XCTAssertEqual(relaunched.label, "Codex")
-        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: workspace.id).map(\.name), ["Codex"])
-    }
-
     /// The exit reconcilers run on their own store connection without the workspace lifecycle lock, so a
-    /// pass that snapshotted a configured agent's row can reach its finalization write after a restart
-    /// already deleted that row — the restart's own terminate is what wakes those reconcilers. Finalizing
-    /// the stale snapshot must not re-create the row: a resurrected row keeps the configured launcher's
-    /// slot on a dead terminal session (reported "exited" forever) and, still holding the agent's name,
-    /// pushes the relaunched agent onto a collision-deduplicated "<name>-2" row.
-    func testRestartCodingAgentKeepsItsNameWhenStaleExitReconcileLandsDuringRelaunch() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        let originalRecord = AgentWindowRecord(
-            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-            terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
-            status: .idle, createdAt: "now", updatedAt: "now")
-        try store.upsertAgentWindow(originalRecord)
-        let interleave = ReconcileInterleave()
-        let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in },
-            builtInTerminalSessionLauncher: { configuration in
-                // The relaunch's session launch is the window between the restart's row delete and the
-                // registration of the replacement row, which is where the stale pass lands in practice.
-                interleave.run()
-                return TerminalServiceSessionSummary(
-                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
-                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
-                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
-            })
-        // Exactly the call `reconcileExitedSessionBackedAgentRows` makes for a row whose session ended,
-        // carrying the snapshot it read before the restart deleted the row.
-        interleave.action = {
-            try orchestrator.finalizeAgentRow(
-                originalRecord, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
-        }
-
-        let relaunched = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
-
-        XCTAssertNil(interleave.thrownError)
-        let rows = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(rows.count, 1, "A restart must leave one agent row, not a stranded original plus its replacement.")
-        XCTAssertEqual(rows.first?.label, "Codex", "The relaunched agent must keep the configured name instead of being deduplicated.")
-        XCTAssertEqual(relaunched.label, "Codex")
-        XCTAssertEqual(rows.first?.terminalTrackingID, relaunched.terminalTrackingID, "The surviving row must be the relaunched agent's row.")
-    }
-
-    /// Same race on the stop path: the stop deletes the row through the finalization chokepoint, and a
-    /// reconcile pass holding a pre-stop snapshot must not bring it back — a resurrected row keeps the
-    /// configured agent reporting "exited" on a dead session instead of returning to "not started".
+    /// pass that snapshotted an agent's row can reach its finalization write after a stop already deleted
+    /// that row — the stop's own terminate is what wakes those reconcilers. Finalizing the stale snapshot
+    /// must not bring the row back: a resurrected row reports "exited" on a dead session forever instead of
+    /// disappearing.
     func testStopCodingAgentIsNotUndoneByStaleExitReconcile() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
@@ -134,13 +50,10 @@ extension OrchestratorTests {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         let originalRecord = AgentWindowRecord(
             id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-            terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
-            status: .idle, createdAt: "now", updatedAt: "now")
+            terminalTarget: TerminalTargetRecord(trackingID: "old-session"), status: .idle, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(originalRecord)
         let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
@@ -150,55 +63,6 @@ extension OrchestratorTests {
 
         XCTAssertTrue(
             try store.agentWindows(workspaceID: workspace.id).isEmpty, "A stopped agent must stay stopped instead of reappearing as an exited row.")
-    }
-
-    func testRestartCodingAgentRejectsUnconfiguredAdHocRuntime() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-review",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
-        let orchestrator = makeTestOrchestrator(store: store)
-
-        XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-review")) { error in
-            XCTAssertEqual(error.localizedDescription, "Invalid argument: Unconfigured live coding agents cannot be restarted from Spaces.")
-        }
-    }
-
-    func testRestartCodingAgentRejectsStaleClaimedLauncherBeforeStopping() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-current", name: "Reviewer", command: "codex --review")])
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now"))
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
-                status: .idle, createdAt: "now", updatedAt: "now"))
-        let terminated = TerminalTerminateCapture()
-        let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
-
-        XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")) { error in
-            XCTAssertEqual(error.localizedDescription, "Invalid argument: Configured coding agent not found.")
-        }
-
-        XCTAssertEqual(terminated.sessionIDs, [])
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"])
     }
 
     /// Stopping a watched coding agent (macOS sidebar / Device API stop) routes through the shared stop
@@ -244,46 +108,6 @@ extension OrchestratorTests {
             "the stopped terminal's own inbound queue is dropped")
     }
 
-    /// Restarting a watched coding agent stops the old child through the same chokepoint, so its
-    /// subscribers are owed — and must receive — the exited notice for the OLD child before the relaunch.
-    func testRestartCodingAgentDeliversExitedNoticeForOldChild() throws {
-        let store = try makeTemporaryStore()
-        let projectDir = try makeTempDirectory().path
-        let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
-                status: .spinning, createdAt: "now", updatedAt: "now"))
-        // A plain-shell subscriber terminal (no agent row of its own) is idle and receives immediately.
-        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: "agent-codex", createdAt: "t")
-
-        let recorder = AgentNotificationSubmitterRecorder()
-        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
-        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-
-        let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in },
-            builtInTerminalSessionLauncher: { configuration in
-                TerminalServiceSessionSummary(
-                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
-                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
-                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
-            })
-
-        _ = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
-
-        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
-        XCTAssertTrue(
-            recorder.delivered.first?.line.contains("is exited") == true,
-            "the subscriber must be told the OLD child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
-        XCTAssertEqual(recorder.delivered.count, 1, "the relaunch itself must not deliver a second notice")
-    }
-
     /// Stopping a whole workspace ends every coding agent in it. A subscriber watching one of those agents
     /// (which may live in another workspace) must be told the child exited BEFORE the bulk row delete
     /// cascades the subscription edges away — the delivery only happens if notify precedes delete.
@@ -306,164 +130,6 @@ extension OrchestratorTests {
         XCTAssertTrue(
             recorder.delivered.first?.line.contains("is exited") == true,
             "the subscriber must be told the child exited before the rows vanished, got: \(recorder.delivered.first?.line ?? "nothing")")
-    }
-
-    func testLaunchAgentLauncherUsesBuiltInSpacesTerminalAndRegistersAgentWindow() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let dbPath = root.appendingPathComponent("spaces.db").path
-
-        let store = try makeTemporaryStore()
-        let openCapture = TerminalOpenCapture()
-        let terminateCapture = TerminalTerminateCapture()
-        let launchedConfigurations = TerminalLaunchConfigurationCapture()
-        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher { configuration in
-            launchedConfigurations.append(configuration)
-            let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
-            try paths.ensureDirectories()
-            try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
-            try TerminalSessionPersistence.writeRuntimeState(
-                .init(
-                    sessionID: configuration.sessionID, backend: configuration.backend, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
-                    childPID: 5432, state: .running, updatedAt: "2026-05-18T18:00:00Z", title: configuration.title,
-                    workingDirectory: configuration.workingDirectory), paths: paths)
-            return TerminalServiceSessionSummary(
-                id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
-                backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
-                servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 5432, controlSocketPath: paths.controlSocketPath,
-                outputPath: paths.outputPath)
-        }
-        defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
-        let orchestrator = makeTestOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                openCapture.sessionIDs.append(sessionID)
-                openCapture.modes.append(mode)
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! seedTerminalSessionRow(sessionID: sessionID, paths: paths)
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
-                        updatedAt: "2026-05-10T18:00:00Z"), paths: paths)
-            }, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
-        }
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
-            XCTAssertEqual(record.label, "Codex")
-            XCTAssertEqual(record.provider, .spaces)
-        }
-
-        XCTAssertEqual(openCapture.modes, [.owner])
-        let launchedConfiguration = try XCTUnwrap(launchedConfigurations.snapshot().first)
-        XCTAssertEqual(launchedConfiguration.workspaceID, workspace.id)
-        XCTAssertEqual(launchedConfiguration.kind, .agent)
-        let launchedCommand = try XCTUnwrap(launchedConfiguration.command)
-        XCTAssertTrue(launchedCommand.contains(" -ilc "))
-        XCTAssertTrue(launchedCommand.contains("\\033]0;Codex\\007"))
-        XCTAssertTrue(launchedCommand.contains("codex --dangerously-skip-permissions"))
-        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(agentWindows.count, 1)
-        XCTAssertEqual(agentWindows.first?.provider, .spaces)
-        let trackedTerminalWindows = try store.windows(workspaceID: workspace.id).filter { $0.role == "terminal" }
-        XCTAssertTrue(trackedTerminalWindows.isEmpty || trackedTerminalWindows.first?.app == TerminalHost.spaces.appName)
-        XCTAssertTrue(trackedTerminalWindows.isEmpty || trackedTerminalWindows.first?.terminalTrackingID == agentWindows.first?.terminalTrackingID)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
-    }
-
-    func testLaunchAgentLauncherReplacesStaleConfiguredSpacesAgentRowAndClosesPreviousSession() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let dbPath = root.appendingPathComponent("spaces.db").path
-
-        let store = try makeTemporaryStore()
-        let openCapture = TerminalOpenCapture()
-        let closeCapture = TerminalCloseCapture()
-        let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = makeTestOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                openCapture.sessionIDs.append(sessionID)
-                openCapture.modes.append(mode)
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! seedTerminalSessionRow(sessionID: sessionID, paths: paths)
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
-                        updatedAt: "2026-05-10T18:00:00Z"), paths: paths)
-            }, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
-            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
-        }
-        // The pre-existing (stale) agent owns a live session window; seed it so the stale row keeps its
-        // configured "Codex" label and is matched/replaced on relaunch.
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "stale-session")
-        _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "stale-session", status: .idle,
-            claimedLauncherName: "Codex")
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
-            XCTAssertEqual(record.label, "Codex")
-            XCTAssertEqual(record.provider, .spaces)
-            XCTAssertNotEqual(record.terminalTrackingID, "stale-session")
-        }
-
-        XCTAssertEqual(openCapture.modes, [.owner])
-        XCTAssertEqual(closeCapture.sessionIDs, ["stale-session"])
-        XCTAssertEqual(terminateCapture.sessionIDs, ["stale-session"])
-        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
-        XCTAssertEqual(agentWindows.count, 1)
-        XCTAssertEqual(agentWindows.first?.label, "Codex")
-        XCTAssertEqual(agentWindows.first?.provider, .spaces)
-        XCTAssertNotEqual(agentWindows.first?.terminalTrackingID, "stale-session")
-    }
-
-    func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = makeTestOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
-        // A live Spaces terminal session already owns its tracked window before an agent hook fires;
-        // the agent correlates to that window instead of minting its own (which would otherwise make
-        // the dedup suffix the agent against a window it just created for itself).
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "session-a")
-        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "session-b")
-
-        let configured = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a", status: .idle,
-            claimedLauncherName: "Mock Agent")
-
-        let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "session-b", label: "Mock Agent", status: .waiting)
-
-        let agentWindows = try store.agentWindows(workspaceID: workspace.id)
-        let configuredAfterUpdate = try XCTUnwrap(agentWindows.first { $0.id == configured.id })
-        XCTAssertEqual(agentWindows.count, 2)
-        XCTAssertEqual(configuredAfterUpdate.label, "Mock Agent")
-        XCTAssertEqual(configuredAfterUpdate.status, .idle)
-        XCTAssertEqual(configuredAfterUpdate.terminalTrackingID, "session-a")
-        XCTAssertNotEqual(updated.id, configured.id)
-        XCTAssertEqual(updated.label, "Mock Agent-2")
-        XCTAssertEqual(updated.status, .waiting)
-        XCTAssertEqual(updated.terminalTrackingID, "session-b")
     }
 
     func testRefreshWorkspaceWindowsKeepsBuiltInAgentTerminalWindowAfterOwnerCloses() throws {
@@ -510,62 +176,6 @@ extension OrchestratorTests {
         let agents = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(agents.map(\.id), ["agent-codex"])
         XCTAssertEqual(agents.first?.terminalTrackingID, sessionID)
-    }
-
-    func testUpdateProjectConfigRejectsDuplicateConfiguredCodingAgentNames() throws {
-        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
-
-        XCTAssertThrowsError(
-            try orchestrator.updateProjectConfig(projectID: project.id) { config in
-                config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex"), AgentLauncher(name: "codex", command: "codex --review")]
-            }
-        ) { error in
-            guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-            XCTAssertTrue(message.contains("coding agents"))
-            XCTAssertTrue(message.contains("Codex"))
-        }
-    }
-
-    func testImportSpacesYAMLWithWorkspaceSyncPreservesAgentLauncherIDsForLiveAgents() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let launches = TerminalLaunchConfigurationCapture()
-        let terminated = TerminalTerminateCapture()
-        let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
-            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
-            builtInTerminalSessionLauncher: { configuration in
-                launches.append(configuration)
-                return TerminalServiceSessionSummary(
-                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
-                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
-                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
-            })
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
-        try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.agentLaunchers = [AgentLauncher(id: "project-launcher-codex", name: "Codex", command: "codex")]
-        }
-        try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(id: "workspace-launcher-codex", name: "Codex", command: "codex")]
-        }
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-codex", workspaceID: defaultWorkspace.id, provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "workspace-launcher-codex",
-                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
-        try spacesYAMLFixture(stopScript: "echo synced-stop").write(
-            to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
-
-        _ = try orchestrator.importSpacesYAML(projectID: project.id, updateAllWorkspaces: true)
-        _ = try orchestrator.restartCodingAgent(workspaceID: defaultWorkspace.id, agentID: "agent-codex")
-
-        XCTAssertEqual(try store.project(id: project.id)?.agentLaunchers.first?.id, "project-launcher-codex")
-        XCTAssertEqual(try store.workspaceAgentLaunchers(workspaceID: defaultWorkspace.id).first?.id, "workspace-launcher-codex")
-        XCTAssertEqual(terminated.sessionIDs, ["old-session"])
-        XCTAssertEqual(launches.snapshot().map(\.title), ["Codex"])
     }
 
     func testUserClosedBuiltInTerminalSessionLeavesOwningAgentRunning() throws {
@@ -631,8 +241,8 @@ extension OrchestratorTests {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), sessionKey: "thread-1", claimedLauncherName: "Codex",
-                    status: .spinning, createdAt: "now", updatedAt: "now"))
+                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), sessionKey: "thread-1", status: .spinning, createdAt: "now",
+                    updatedAt: "now"))
             try store.upsert(
                 window: WindowRecord(
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
@@ -716,7 +326,6 @@ extension OrchestratorTests {
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
             XCTAssertEqual(promotedAgent.label, "Codex")
-            XCTAssertNil(promotedAgent.claimedLauncherID)
             let promotedWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
             XCTAssertEqual(promotedWindow.name, "shell-1")
             XCTAssertEqual(promotedWindow.detail, "codex --model gpt-5")
@@ -887,7 +496,7 @@ extension OrchestratorTests {
     }
 
     /// The termination chokepoint's `.destroyed` reason — shared by stop, kill, workspace stop, terminal
-    /// teardown, stale-slot relaunch, and orphan prune — must notify a watched child's subscribers it
+    /// teardown, and orphan prune — must notify a watched child's subscribers it
     /// exited and drop its inbound watch edge; and a delete that bypasses the chokepoint must fail loudly
     /// under the RESTRICT foreign key. This is what makes the notify-before-delete flow enforceable rather
     /// than conventional.
@@ -1325,11 +934,10 @@ extension OrchestratorTests {
             XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).name, "shell-1")
             XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
 
-            let updated = try orchestrator.updateAgentWindowStatus(
+            _ = try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "thread-1", label: "Codex", status: .spinning
             )
 
-            XCTAssertNil(updated.claimedLauncherName)
             let window = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
             XCTAssertEqual(window.name, "shell-1")
             XCTAssertEqual(window.detail, "codex --model gpt-5")
@@ -1466,8 +1074,7 @@ extension OrchestratorTests {
             AgentWindowRecord(
                 id: inserted.id, workspaceID: inserted.workspaceID, provider: inserted.provider, label: inserted.label,
                 runtimeTargetID: inserted.runtimeTargetID, terminalTarget: inserted.terminalTarget, sessionKey: "session-key-from-hook",
-                claimedLauncherID: inserted.claimedLauncherID, claimedLauncherName: inserted.claimedLauncherName, status: .spinning,
-                note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
+                status: .spinning, note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
 
         // Pass B: the delayed second reconcile pass re-runs the same detection.
         try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
@@ -1525,40 +1132,9 @@ extension OrchestratorTests {
         XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:01Z")
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath)
-        let orchestrator = makeTestOrchestrator(store: store)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
-        let sessionID = "ad-hoc-reserved-foreground-agent"
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try writeTerminalSessionFixture(
-                sessionID: sessionID, workspace: workspace, kind: .shell,
-                runtimeState: TerminalSessionRuntimeState(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
-                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
-                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
-                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
-            try store.upsert(
-                window: WindowRecord(
-                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-
-            XCTAssertEqual(promotedAgent.label, "Codex-2")
-            XCTAssertNoThrow(try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in })
-        }
-    }
-
-    func testReconcileTerminalForegroundAgentClassificationsPreservesConfiguredLauncherRowOnUnknownForeground() throws {
+    /// A session whose foreground the classifier cannot identify leaves an existing agent row alone rather
+    /// than demoting or renaming it.
+    func testReconcileTerminalForegroundAgentClassificationsPreservesAgentRowOnUnknownForeground() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -1578,14 +1154,13 @@ extension OrchestratorTests {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), claimedLauncherName: "Codex", status: .idle, createdAt: "now",
-                    updatedAt: "now"))
+                    terminalTarget: TerminalTargetRecord(trackingID: sessionID), status: .idle, createdAt: "now", updatedAt: "now"))
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
             let agents = try store.agentWindows(workspaceID: workspace.id)
             XCTAssertEqual(agents.map(\.id), ["agent-1"])
-            XCTAssertEqual(agents.first?.claimedLauncherName, "Codex")
+            XCTAssertEqual(agents.first?.label, "Codex")
         }
     }
 
@@ -1636,13 +1211,16 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "Agent window records should be cleared during restart")
     }
 
-    func testUpdateWorkspaceSettingsRejectsDuplicateFocusNamesAcrossProcessAndCodingAgent() throws {
+    /// A live agent row's name is part of the workspace's name space, so a settings write that would give
+    /// a process the same name is refused rather than producing two rows a user cannot tell apart.
+    func testUpdateWorkspaceSettingsRejectsProcessNameTakenByALiveCodingAgent() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "agent-session")
 
         XCTAssertThrowsError(
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
                 settings.processes = [ProcessTemplate(name: "Reviewer", command: "npm run review")]
-                settings.agentLaunchers = [AgentLauncher(name: "reviewer", command: "codex --review")]
             }
         ) { error in
             guard case WorkspaceError.invalidArgument(let message) = error else { return XCTFail("Expected invalidArgument, got \(error)") }
@@ -1707,18 +1285,18 @@ extension OrchestratorTests {
         XCTAssertEqual(recorder.delivered.count, 1, "killing a done agent delivers exactly one exited notice")
     }
 
-    /// A configured launcher's exit is finalized to `.done` WITH a recorded exit event. A later termination
-    /// path — terminal teardown, workspace stop, or a sweep pass — must read that recorded fact and NOT
-    /// re-notify, even though the row's status is `.done`, which a live launcher also carries between turns.
-    func testLauncherExitFinalizeThenDestroyDoesNotReNotify() throws {
+    /// An agent that exits while its terminal is still open is kept at `.exited` WITH a recorded exit
+    /// event. A later termination path — terminal teardown, workspace stop, or a sweep pass — must read
+    /// that recorded fact and NOT re-notify.
+    func testExitFinalizeThenDestroyDoesNotReNotify() throws {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try writeLiveAgentTerminalSession(sessionID: "agent-session", workspace: workspace)
 
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
@@ -1726,22 +1304,21 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "launcher-session", status: .spinning,
-            claimedLauncherName: "Codex")
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
 
-        // The launcher's exit hook finalizes the row to `.done` with a recorded exit event, notifying once.
+        // The agent's exit hook finalizes the row to `.exited` with a recorded exit event, notifying once.
         _ = try orchestrator.finalizeAgentRow(child, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
-        XCTAssertEqual(try store.agentWindow(id: child.id)?.status, .done, "a configured launcher's exit is finalized to .done")
+        XCTAssertEqual(try store.agentWindow(id: child.id)?.status, .exited, "an exit on a live terminal keeps the row at .exited")
         XCTAssertTrue(try store.agentSessionHasRecordedExitEvent(agentSessionID: child.id), "the exit-finalization records the exit event")
         XCTAssertEqual(recorder.delivered.count, 1, "the exit is notified exactly once")
 
-        // A later terminal-teardown/workspace-stop destroy must not re-notify the already-finalized launcher.
+        // A later terminal-teardown/workspace-stop destroy must not re-notify the already-finalized row.
         let finalized = try XCTUnwrap(try store.agentWindow(id: child.id))
         try orchestrator.finalizeAgentRow(finalized, reason: .destroyed(terminateTerminalSession: false))
 
         XCTAssertNil(try store.agentWindow(id: child.id), "the destroy still deletes the row")
-        XCTAssertEqual(recorder.delivered.count, 1, "no second exited notice for a launcher whose exit was already delivered")
+        XCTAssertEqual(recorder.delivered.count, 1, "no second exited notice for an agent whose exit was already delivered")
     }
 
     /// The finalized fact must be scoped to the row's CURRENT life. A kept row is reused when a fresh
@@ -1755,29 +1332,28 @@ extension OrchestratorTests {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try writeLiveAgentTerminalSession(sessionID: "agent-session", workspace: workspace)
 
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
         let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
-        // Life 1: a configured launcher exits — the row is kept `.done` with a recorded exit event, and the
-        // watcher (edge retained on a kept row) receives the first exited notice.
+        // Life 1: the agent exits while its terminal stays open — the row is kept `.exited` with a recorded
+        // exit event, and the watcher (edge retained on a kept row) receives the first exited notice.
         let child = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "launcher-session", status: .spinning,
-            claimedLauncherName: "Codex")
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
         _ = try orchestrator.finalizeAgentRow(child, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
-        XCTAssertEqual(try store.agentWindow(id: child.id)?.status, .done)
+        XCTAssertEqual(try store.agentWindow(id: child.id)?.status, .exited)
         XCTAssertTrue(try store.agentSessionHasRecordedExitEvent(agentSessionID: child.id), "life 1's exit is the finalized fact")
         XCTAssertEqual(recorder.delivered.count, 1, "life 1's exit is notified once")
 
         // Life 2: a fresh agent inits in the same terminal. The daemon init path re-registers the SAME row
         // (id preserved), passing the preserved existing status, and records an `init` event on it.
         let reincarnated = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "launcher-session",
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session",
             status: try XCTUnwrap(try store.agentWindow(id: child.id)).status, eventType: "init", eventSource: "spaces_agent_signal")
         XCTAssertEqual(reincarnated.id, child.id, "the restart-reuse init reuses the same row id")
         XCTAssertFalse(
@@ -1955,7 +1531,6 @@ extension OrchestratorTests {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
 
         let recorder = AgentNotificationSubmitterRecorder()
@@ -1963,9 +1538,11 @@ extension OrchestratorTests {
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
         let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
+        // A live terminal keeps the row (and its recorded events) after the exit; a dead one would
+        // delete the row and cascade away the very event this test counts.
+        try writeLiveAgentTerminalSession(sessionID: "agent-session", workspace: workspace)
         let child = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "launcher-session", status: .spinning,
-            claimedLauncherName: "Codex")
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
 
         // Both passes carry the identical pre-exit snapshot and the identical reconciler exit reason.
@@ -2173,8 +1750,7 @@ extension OrchestratorTests {
             XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
 
             let child = try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .idle,
-                claimedLauncherName: "Codex")
+                workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .idle)
             XCTAssertNil(child.detectedAgentKind, "registration precedes classification, so the row starts with no kind")
             try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-subscriber", agentSessionID: child.id, createdAt: "t")
 
@@ -2331,6 +1907,64 @@ extension OrchestratorTests {
         XCTAssertTrue(line.contains("(codex) is exited"), "the exit block must name the kind the row carries, got: \(line)")
     }
 
+    /// A hook `init` carries no label, and foreground detection cannot classify every command, so a row
+    /// registered with nothing to name it would otherwise have no name at all. Registration materializes
+    /// "Coding Agent" as the row's real stored label, so the row, its pane, and focus all read one string.
+    func testRegisteringAnAgentWithNoReportedLabelStoresTheDefaultName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle, eventType: "init",
+            eventSource: "spaces_agent_signal")
+
+        XCTAssertEqual(agent.label, "Coding Agent")
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.label, "Coding Agent")
+    }
+
+    /// The materialized name runs through the same uniquifier a reported label does, so two nameless
+    /// agents in one workspace keep a one-name-to-one-row mapping instead of both answering to one name.
+    func testASecondAgentWithNoReportedLabelIsSuffixed() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+
+        let first = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-1", status: .idle)
+        let second = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-2", status: .idle)
+
+        XCTAssertEqual(first.label, "Coding Agent")
+        XCTAssertEqual(second.label, "Coding Agent-2")
+        XCTAssertEqual(try store.agentWindow(id: second.id)?.label, "Coding Agent-2")
+    }
+
+    /// `spaces open` resolves a name against the workspace's focusable targets, and the app routes the
+    /// request by the row's own name. With the label materialized both read the same string, so an agent
+    /// nothing named is reachable by name.
+    func testAnAgentWithNoReportedLabelIsFocusableByItsMaterializedName() throws {
+        let (_, orchestrator, workspace) = try makeAgentRenameFixture()
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-1", status: .idle)
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session-2", status: .idle)
+
+        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
+
+        XCTAssertTrue(names.contains("Coding Agent"), "got: \(names)")
+        XCTAssertTrue(names.contains("Coding Agent-2"), "got: \(names)")
+        XCTAssertEqual(Set(names).count, names.count, "no two rows may share a visible name, got: \(names)")
+    }
+
+    /// Clearing a rename recovers the row's stored label, and a materialized one is a stored label like
+    /// any other: the row comes back under the name registration gave it rather than under no name.
+    func testClearingARenameOnAnUnnamedAgentRestoresItsMaterializedName() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
+
+        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "  ")
+
+        XCTAssertNil(try store.agentWindow(id: agent.id)?.userLabel)
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.effectiveLabel, "Coding Agent")
+    }
+
     /// A renamed agent has to answer to the name the user gave it. Focus resolution reads names, so a row
     /// still listed under the label nothing displays is unreachable by the name on screen.
     func testRenamingAnAgentMovesItsFocusNameToTheNewName() throws {
@@ -2345,15 +1979,14 @@ extension OrchestratorTests {
     }
 
     /// A rename obeys the same one-visible-name-per-row rule a config edit does, so it is refused when the
-    /// name is already taken by a process, a browser session, a launcher, or another agent.
+    /// name is already taken by a process, a browser session, or another agent.
     func testRenamingAnAgentOntoATakenNameIsRefusedAndWritesNothing() throws {
         let (store, orchestrator, workspace) = try makeAgentRenameFixture()
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run dev")])
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "codex", command: "codex")])
         try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "Claude", session: "session-1"))
         try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-2", workspaceID: workspace.id, label: "Opencode", session: "session-2"))
 
-        for taken in ["web", "codex", "Opencode"] {
+        for taken in ["web", "Opencode"] {
             XCTAssertThrowsError(try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: taken), taken) { error in
                 guard case WorkspaceError.invalidArgument = error else { return XCTFail("expected invalidArgument for \(taken), got \(error)") }
             }
@@ -2399,50 +2032,6 @@ extension OrchestratorTests {
         XCTAssertTrue(names.contains("Codex") && names.contains("Codex-2"), "got: \(names)")
     }
 
-    /// A stale claim must not soften the clear's collision check. The agent survived its launcher's
-    /// deletion (stale claim id and name), was renamed while unconfigured, and a launcher with the same
-    /// name was then recreated under a new id: the recreated launcher's name is taken, so the clear
-    /// recovers the suffixed variant rather than parking the raw label next to the launcher's row.
-    func testClearingARenameBesideARecreatedSameNameLauncherRecoversASuffixedName() throws {
-        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
-        try store.upsertAgentWindow(
-            AgentWindowRecord(
-                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-1"), claimedLauncherID: "launcher-deleted",
-                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
-        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Reviewer")
-        // Recreated under a fresh id, so the stale claim id matches nothing and the agent stays
-        // unclaimed: the launcher write's claim-formation clearing must leave the rename standing.
-        try orchestrator.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-recreated", name: "Codex", command: "codex")])
-        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.userLabel, "Reviewer")
-
-        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "")
-
-        XCTAssertEqual(try store.agentWindow(id: "agent-1")?.effectiveLabel, "Codex-2")
-        let names = try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)
-        XCTAssertEqual(Set(names).count, names.count, "no two rows may share a visible name, got: \(names)")
-    }
-
-    /// Launcher claims fold accents and casing the way every other name comparison does, so an agent
-    /// reporting "reviewer" fills the "Réviewer" launcher's row and is named by that entry.
-    func testLauncherClaimFoldsDiacriticsAndRefusesTheClaimedAgentsRename() throws {
-        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-reviewer", name: "Réviewer", command: "codex")])
-        try store.upsertAgentWindow(makeRenameFixtureAgent(id: "agent-1", workspaceID: workspace.id, label: "reviewer", session: "session-1"))
-
-        let claims = AgentLauncherClaim.resolve(
-            agents: try store.agentWindows(workspaceID: workspace.id),
-            launchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
-        XCTAssertEqual(claims.agentIDByLauncherID["launcher-reviewer"], "agent-1")
-
-        XCTAssertThrowsError(try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: "agent-1", title: "Auditor")) { error in
-            guard case WorkspaceError.invalidArgument = error else { return XCTFail("expected invalidArgument, got \(error)") }
-        }
-        XCTAssertNil(try store.agentWindow(id: "agent-1")?.userLabel)
-    }
-
     /// A rename lives in its own column that no lifecycle write touches, so the row keeps it. The record a
     /// status update hands back has to keep it too: the daemon renders the watcher's notice straight off
     /// that returned record, so one rebuilt without the rename announces the agent under the label the user
@@ -2479,7 +2068,7 @@ extension OrchestratorTests {
         try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: child.id, title: "Reviewer")
 
         let stored = try XCTUnwrap(store.agentWindow(id: child.id))
-        let exited = try XCTUnwrap(orchestrator.recordAgentExitStatus(stored, status: .exited))
+        let exited = try XCTUnwrap(orchestrator.recordAgentExitStatus(stored))
 
         XCTAssertEqual(exited.effectiveLabel, "Reviewer")
     }
@@ -2496,56 +2085,33 @@ extension OrchestratorTests {
         XCTAssertFalse(try store.setAgentSessionUserLabel(id: "ghost-agent", userLabel: "Reviewer"))
     }
 
-    /// A launcher added after the rename claims the agent by its reported label, and the configured row
-    /// names it from then on. The now-hidden rename has to go: it would keep feeding every other name
-    /// consumer, and it would come back as the row's name if the launcher were removed again.
-    func testAddingALauncherThatClaimsARenamedAgentClearsItsRename() throws {
+    /// Every agent row is renameable: a row created by an agent's own hook signal takes the name the user
+    /// gives it, stored on the session so later signals cannot overwrite it.
+    func testRenamingAHookRegisteredAgentNamesItsRow() throws {
         let (store, orchestrator, workspace) = try makeAgentRenameFixture()
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle)
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .spinning,
+            eventType: "init", eventSource: "spaces_agent_signal")
+
         try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
-
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]
-        }
-
-        let stored = try XCTUnwrap(store.agentWindow(id: agent.id))
-        XCTAssertNil(stored.userLabel)
-        XCTAssertEqual(stored.effectiveLabel, "Codex", "the launcher names the row now")
-    }
-
-    /// The other direction: the launcher already exists and a registration binds this row to it, which is
-    /// the same claim forming and the same stale rename to drop.
-    func testRegistrationThatBindsARenamedAgentToALauncherClearsItsRename() throws {
-        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
-        let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Opencode", terminalTrackingID: "session-1", status: .idle)
-        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
-        try store.setWorkspaceAgentLaunchers(
-            workspaceID: workspace.id, launchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
-
-        let registered = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle,
-            claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex")
-
-        XCTAssertEqual(registered.id, agent.id, "the same row, now bound to the launcher")
-        XCTAssertNil(registered.userLabel, "the returned record drops the rename too, not just the stored row")
-        XCTAssertNil(try store.agentWindow(id: agent.id)?.userLabel)
-    }
-
-    /// A settings write that claims nothing leaves a rename standing: only the agent a launcher took over
-    /// naming loses its own name.
-    func testSettingsWriteThatClaimsNothingLeavesTheRenameStanding() throws {
-        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
-        let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-1", status: .idle)
-        try orchestrator.renameAgentSession(workspaceID: workspace.id, agentID: agent.id, title: "Reviewer")
-
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.agentLaunchers = [AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")]
-        }
 
         XCTAssertEqual(try store.agentWindow(id: agent.id)?.userLabel, "Reviewer")
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.effectiveLabel, "Reviewer")
+    }
+
+    /// An agent whose process ends while its terminal session stays open keeps its row at `.exited`: the
+    /// terminal is still addressable and a fresh agent can reuse the row. There is no keep-at-`.done`
+    /// disposition for any row.
+    func testHandleAgentExitRecordsExitedForAgentOnLiveTerminal() throws {
+        let (store, orchestrator, workspace) = try makeAgentRenameFixture()
+        try writeLiveAgentTerminalSession(sessionID: "agent-session", workspace: workspace)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session", status: .spinning)
+
+        let result = try XCTUnwrap(orchestrator.handleAgentExit(agent))
+
+        XCTAssertEqual(result.status, .exited)
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .exited)
     }
 
     private func makeAgentRenameFixture() throws -> (SQLiteStore, WorkspaceOrchestrator, WorkspaceRecord) {
@@ -2557,6 +2123,19 @@ extension OrchestratorTests {
         try store.upsert(workspace: workspace)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         return (store, makeTestOrchestrator(store: store), workspace)
+    }
+
+    /// Writes the on-disk artifacts that make a built-in terminal session read as live: a launch
+    /// configuration, a running runtime state owned by this process, and the control socket. An agent row
+    /// bound to such a session survives its exit as `.exited` instead of being deleted with a dead terminal.
+    private func writeLiveAgentTerminalSession(sessionID: String, workspace: WorkspaceRecord) throws {
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .agent,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                updatedAt: "2026-06-06T00:00:00Z", title: "Codex", workingDirectory: workspace.dir))
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
     }
 
     private func makeRenameFixtureAgent(id: String, workspaceID: String, label: String, session: String) -> AgentWindowRecord {

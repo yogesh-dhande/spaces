@@ -6,9 +6,14 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$ROOT_DIR"
 source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
+source "$SCRIPT_DIR/e2e_fixture_repos.sh"
 
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 TERMINAL_SERVICE_BIN="${SPACESD_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/spacesd}"
+# The fixture's stand-in coding agent reports its lifecycle through this CLI from inside the
+# workspace terminal it runs in; the daemon forwards its own SPACES_DB_PATH there, so it resolves
+# this lane's throwaway profile.
+SPACES_CLI_BIN="$ROOT_DIR/apps/macos/.build/debug/spaces"
 TMP_ROOT="${TMPDIR:-/tmp}/spaces-local-device-e2e.$$"
 TMP_HOME="$TMP_ROOT/home"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
@@ -48,6 +53,7 @@ trap cleanup EXIT
 require_local_config() {
   [[ -x "$SPACES_E2E_BIN" ]] || fail "spacese2e not found at $SPACES_E2E_BIN."
   [[ -x "$TERMINAL_SERVICE_BIN" ]] || fail "spacesd not found at $TERMINAL_SERVICE_BIN."
+  [[ -x "$SPACES_CLI_BIN" ]] || fail "spaces CLI not found at $SPACES_CLI_BIN."
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for local paired-device E2E."
 }
 
@@ -157,15 +163,12 @@ processes:
     command: >-
       python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
     on_exit: none
-agent_launchers:
-  - name: parity-agent
-    command: >-
-      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
 YAML
+  spaces_e2e_write_parity_agent_script "$project_root/parity-agent" "$SPACES_CLI_BIN"
   git -C "$project_root" init >/dev/null
   git -C "$project_root" config user.email "spaces-e2e@example.invalid"
   git -C "$project_root" config user.name "Spaces E2E"
-  git -C "$project_root" add README.txt spaces.yaml
+  git -C "$project_root" add README.txt spaces.yaml parity-agent
   git -C "$project_root" commit -m "Initial device API parity fixture" >/dev/null
   printf '%s\n' "$project_root"
 }

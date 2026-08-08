@@ -166,16 +166,14 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", setupScript: "make setup",
             stopScript: "make stop-project", ports: [ServiceDefinition(id: "project-web-port", name: "WEB")],
             processes: [ProcessTemplate(id: "project-web-process", name: "web", command: "npm run dev", kind: "server", onExit: .restart)],
-            browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")],
-            agentLaunchers: [AgentLauncher(id: "project-codex-agent", name: "Codex", command: "codex")])
+            browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")])
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
             isDefault: false, isRunning: true, lastLaunchedAt: nil, notes: "Use this payload for local and remote detail views.")
         let settings = WorkspaceSettings(
             stopScript: "make stop-workspace", ports: [ServiceDefinition(id: "workspace-api-port", name: "API")],
             processes: [ProcessTemplate(id: "workspace-api-process", name: "api", command: "npm run api", onExit: .none)],
-            browserSessions: [BrowserSession(name: "api", url: "http://localhost:$API")],
-            agentLaunchers: [AgentLauncher(id: "workspace-review-agent", name: "Review", command: "codex --review")])
+            browserSessions: [BrowserSession(name: "api", url: "http://localhost:$API")])
         let setupState = WorkspaceSetupState(
             status: .failed, errorMessage: "missing dependency", startedAt: "2026-05-18T08:00:00Z", finishedAt: "2026-05-18T08:01:00Z", exitCode: 127,
             logPath: "/tmp/setup.log")
@@ -201,9 +199,6 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(projectSummary?.config.processes.first?.onExit, "restart")
         XCTAssertEqual(projectSummary?.config.browserSessions.first?.name, "web")
         XCTAssertEqual(projectSummary?.config.browserSessions.first?.url, "http://localhost:$WEB")
-        XCTAssertEqual(projectSummary?.config.agentLaunchers.first?.id, "project-codex-agent")
-        XCTAssertEqual(projectSummary?.config.agentLaunchers.first?.name, "Codex")
-        XCTAssertEqual(projectSummary?.config.agentLaunchers.first?.command, "codex")
 
         let workspaceSummary = overview.workspaces.first
         XCTAssertEqual(workspaceSummary?.id, workspace.id)
@@ -226,9 +221,6 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceSummary?.config.browserSessions.first?.url, "http://localhost:$API")
         XCTAssertEqual(workspaceSummary?.config.resolvedBrowserSessions.first?.name, "api")
         XCTAssertEqual(workspaceSummary?.config.resolvedBrowserSessions.first?.url, "http://localhost:4000")
-        XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.id, "workspace-review-agent")
-        XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.name, "Review")
-        XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.command, "codex --review")
     }
 
     func testOverviewIncludesSetupLogTailWhileRunningSoRemoteClientsCanStreamProgress() throws {
@@ -295,48 +287,48 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceOverview?.terminalRows.first(where: { $0.sessionID == "session-api" }), nil)
     }
 
-    func testBuildsConfiguredAndAdHocCodingAgentRows() {
+    /// Every coding-agent row is a live agent session: a workspace with agent rows and nothing else
+    /// configured produces exactly those rows, each stoppable, whether or not its terminal is still alive.
+    func testBuildsOneStoppableRowPerLiveCodingAgent() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
             lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
-        let configuredAgent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", sessionKey: nil,
+        let liveAgent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "codex", terminalTrackingID: "session-codex", sessionKey: nil,
             status: .spinning, createdAt: "now", updatedAt: "now")
-        let adHocAgent = AgentWindowRecord(
+        let deadTerminalAgent = AgentWindowRecord(
             id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "missing-session",
             sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
             workspaces: [
-                .init(
-                    project: project, workspace: workspace,
-                    settings: WorkspaceSettings(agentLaunchers: [AgentLauncher(name: "codex", command: "codex")]),
-                    agentWindows: [configuredAgent, adHocAgent])
+                .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [liveAgent, deadTerminalAgent])
             ], sessions: [codexSession])
 
         let rows = overview.workspaces.first?.codingAgentRows ?? []
+        XCTAssertEqual(rows.map(\.name).sorted(), ["codex", "reviewer"])
         XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.runState, .running)
         XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.activityState, .spinning)
         XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.sessionID, "session-codex")
+        XCTAssertEqual(rows.first(where: { $0.name == "codex" })?.canStop, true)
         XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.runState, .exited)
         XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.canStop, true)
-        XCTAssertEqual(rows.first(where: { $0.name == "reviewer" })?.canRestart, false)
     }
 
-    /// A coding-agent row is named by its configured entry or its agent record, and describes itself with
-    /// the title its terminal reports, the same pairing an ad hoc shell row shows. A row whose session has
-    /// reported no title, and a launcher row with no agent behind it, have nothing to add.
+    /// A coding-agent row is named by its agent record, and describes itself with the title its terminal
+    /// reports, the same pairing an ad hoc shell row shows. A row whose session has reported no title has
+    /// nothing to add.
     func testCodingAgentRowCarriesItsSessionsLiveTitleBesideItsName() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
             lastLaunchedAt: nil)
         let agent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", sessionKey: nil,
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "codex", terminalTrackingID: "session-codex", sessionKey: nil,
             status: .spinning, createdAt: "now", updatedAt: "now")
 
         func rows(runtimeTitle: String?) -> [SpacesDeviceWorkspaceCodingAgentRow] {
@@ -346,11 +338,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             let overview = SpacesDeviceOverviewBuilder.build(
                 projects: [project],
                 workspaces: [
-                    .init(
-                        project: project, workspace: workspace,
-                        settings: WorkspaceSettings(agentLaunchers: [
-                            AgentLauncher(name: "codex", command: "codex"), AgentLauncher(name: "idle", command: "idle"),
-                        ]), agentWindows: [agent])
+                    .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [agent])
                 ], sessions: [session])
             return overview.workspaces.first?.codingAgentRows ?? []
         }
@@ -358,42 +346,33 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let reported = rows(runtimeTitle: "refactoring SidebarController.swift")
         XCTAssertEqual(reported.first(where: { $0.name == "codex" })?.name, "codex")
         XCTAssertEqual(reported.first(where: { $0.name == "codex" })?.liveTitle, "refactoring SidebarController.swift")
-        // The unstarted launcher row has no session, so it has no live title to carry.
-        XCTAssertNil(reported.first(where: { $0.name == "idle" })?.liveTitle)
         XCTAssertNil(rows(runtimeTitle: nil).first(where: { $0.name == "codex" })?.liveTitle)
         // A program that clears its title hands the row back to its name alone, per the catalog entry's
         // blank-title normalization.
         XCTAssertNil(rows(runtimeTitle: "   ").first(where: { $0.name == "codex" })?.liveTitle)
     }
 
-    func testMatchesRenamedConfiguredAgentByLauncherID() {
+    /// A renamed agent's row shows the rename, not the label the agent reports for itself.
+    func testRenamedAgentRowShowsItsUserLabel() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
             lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
-        let configuredAgent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Old Codex", terminalTrackingID: "session-codex", sessionKey: nil,
-            status: .spinning, createdAt: "now", updatedAt: "now")
-        let claimedAgent = AgentWindowRecord(
-            id: configuredAgent.id, workspaceID: configuredAgent.workspaceID, provider: configuredAgent.provider, label: configuredAgent.label,
-            runtimeTargetID: configuredAgent.runtimeTargetID, terminalTarget: configuredAgent.terminalTarget, sessionKey: configuredAgent.sessionKey,
-            claimedLauncherID: "launcher-codex", claimedLauncherName: "Old Codex", status: configuredAgent.status,
-            createdAt: configuredAgent.createdAt, updatedAt: configuredAgent.updatedAt)
+        let renamedAgent = AgentWindowRecord(
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Old Codex", userLabel: "Codex",
+            terminalTarget: TerminalTargetRecord(runtimeTargetID: nil, trackingID: "session-codex"), status: .spinning, createdAt: "now",
+            updatedAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
             workspaces: [
-                .init(
-                    project: project, workspace: workspace,
-                    settings: WorkspaceSettings(agentLaunchers: [AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]),
-                    agentWindows: [claimedAgent])
+                .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [renamedAgent])
             ], sessions: [codexSession])
 
         let row = overview.workspaces.first?.codingAgentRows.first
         XCTAssertEqual(row?.name, "Codex")
-        XCTAssertEqual(row?.launcherID, "launcher-codex")
         XCTAssertEqual(row?.agentID, "agent-codex")
         XCTAssertEqual(row?.sessionID, "session-codex")
     }

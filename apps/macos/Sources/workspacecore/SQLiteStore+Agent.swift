@@ -21,8 +21,6 @@ extension SQLiteStore {
         COALESCE(runtime_targets.tracking_id, ''),
         COALESCE(agent_sessions.terminal_session_id, ''),
         COALESCE(agent_sessions.session_key, ''),
-        COALESCE(agent_sessions.claimed_launcher_id, ''),
-        COALESCE(agent_sessions.claimed_launcher_name, ''),
         agent_sessions.status,
         agent_sessions.note,
         agent_sessions.created_at,
@@ -31,10 +29,10 @@ extension SQLiteStore {
         COALESCE(agent_sessions.user_label, '')
         """
 
-    /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
-    /// launcher launch) hold the authoritative record they just computed, so on conflict the row's
-    /// lifecycle columns take the caller's values: `status`, `session_key`, and `claimed_launcher_name`
-    /// are overwritten from `excluded`. `detected_agent_kind` is the exception both upserts share: a
+    /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`)
+    /// hold the authoritative record they just computed, so on conflict the row's lifecycle columns take
+    /// the caller's values: `status` and `session_key` are overwritten from
+    /// `excluded`. `detected_agent_kind` is the exception both upserts share: a
     /// caller that observed no kind (foreground detection has not classified the session, or already
     /// cleared its classification at exit) carries nil, and nil must never erase a kind the row already
     /// learned — the stored value is what the exit notification names.
@@ -45,12 +43,12 @@ extension SQLiteStore {
     /// Records a finalized exit status on an agent row, but only while the row still is the one the
     /// caller judged — same id, still bound to the same terminal session. The exit reconcilers
     /// (`reconcileExitedSessionBackedAgentRows`, the foreground reconciler) run on their own connection
-    /// without the workspace lifecycle lock, so a stop or restart can delete the row, and a fresh agent
+    /// without the workspace lifecycle lock, so a stop can delete the row, and a fresh agent
     /// reusing the row can rebind it to a new session, between the pass reading its snapshot and writing
-    /// its verdict. An upsert would re-insert the deleted row: it would hold the configured launcher's
-    /// slot on a dead session (reported "exited" forever) and, still carrying the agent's name, force the
-    /// replacement agent onto a deduplicated `<name>-2` row. Returns whether the write applied.
-    public func markAgentWindowExitStatus(_ snapshot: AgentWindowRecord, status: AgentWindowStatus, updatedAt: String) throws -> Bool {
+    /// its verdict. An upsert would re-insert the deleted row: it would sit on a dead session (reported
+    /// "exited" forever) and, still carrying the agent's name, force the replacement agent onto a
+    /// deduplicated `<name>-2` row. Returns whether the write applied.
+    public func markAgentWindowExitStatus(_ snapshot: AgentWindowRecord, updatedAt: String) throws -> Bool {
         let expectedSessionID = spacesAgentTerminalSessionID(snapshot)
         return try withImmediateTransaction {
             try execute(
@@ -58,7 +56,7 @@ extension SQLiteStore {
                     UPDATE agent_sessions
                     SET status = ?, updated_at = ?
                     WHERE id = ? AND terminal_session_id IS NULLIF(?, '')
-                    """, bindings: [status.rawValue, updatedAt, snapshot.id, expectedSessionID ?? ""])
+                    """, bindings: [AgentWindowStatus.exited.rawValue, updatedAt, snapshot.id, expectedSessionID ?? ""])
             guard let row = try queryRow(sql: "SELECT changes()"), let changed = Int(row.first ?? "") else { return false }
             return changed > 0
         }
@@ -70,8 +68,8 @@ extension SQLiteStore {
     /// separate connection, during which a hook signal (its own connection) can commit a newer
     /// status/session-key. An overwriting upsert would revert that live state to the caller's stale
     /// snapshot; this guarantee is therefore enforced in SQL, not in the caller: on conflict the
-    /// lifecycle columns keep the STORED row's values — `status`, `session_key`, `claimed_launcher_name`
-    /// (coalesced), `created_at`, and `updated_at` — regardless of what the caller's record carried,
+    /// lifecycle columns keep the STORED row's values — `status`, `session_key`, `created_at`, and
+    /// `updated_at` — regardless of what the caller's record carried,
     /// closing the read-modify-upsert race entirely. `updated_at` tracks when the row's lifecycle state
     /// was entered (see `setAgentSessionNote`), so it must move in lockstep with `status`, not with a
     /// detection refresh that leaves status untouched. On first insert (no conflict) the record's own
@@ -89,8 +87,6 @@ extension SQLiteStore {
           runtime_target_id = excluded.runtime_target_id,
           terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
           session_key = excluded.session_key,
-          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
-          claimed_launcher_name = excluded.claimed_launcher_name,
           note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           updated_at = excluded.updated_at
@@ -105,8 +101,6 @@ extension SQLiteStore {
           runtime_target_id = excluded.runtime_target_id,
           terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
           session_key = agent_sessions.session_key,
-          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
-          claimed_launcher_name = COALESCE(excluded.claimed_launcher_name, agent_sessions.claimed_launcher_name),
           note = COALESCE(excluded.note, agent_sessions.note),
           detected_agent_kind = COALESCE(excluded.detected_agent_kind, agent_sessions.detected_agent_kind),
           created_at = agent_sessions.created_at,
@@ -116,8 +110,7 @@ extension SQLiteStore {
     /// Neither upsert writes `user_label`: it is absent from the INSERT column list and from both conflict
     /// clauses, so a lifecycle, hook, or detection write can neither set nor erase a user's rename, which
     /// is what keeps a rename stable while the agent keeps signaling. Every write to the column goes
-    /// through `setAgentSessionUserLabel`, and only two callers reach it: the rename command, and claim
-    /// formation clearing a rename off an agent a configured launcher has taken over naming.
+    /// through `setAgentSessionUserLabel`, whose only caller is the rename command.
     /// `AgentWindowRecord.userLabel` is therefore read-only here: a record carrying one is not rejected,
     /// it simply does not carry that field into the table.
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
@@ -127,15 +120,15 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, detected_agent_kind, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, note, detected_agent_kind, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
-                    terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
-                    record.note ?? "", record.detectedAgentKind ?? "", record.createdAt, record.updatedAt,
+                    terminalSessionID ?? "", record.sessionKey ?? "", record.note ?? "", record.detectedAgentKind ?? "", record.createdAt,
+                    record.updatedAt,
                 ])
         }
     }
@@ -355,10 +348,10 @@ extension SQLiteStore {
     /// unambiguous fact that its exit was already delivered through the termination chokepoint. Exit
     /// finalization (`WorkspaceOrchestrator.handleAgentExit` → `recordAgentExitStatus`, and the delete
     /// branch) always appends an `event_type = 'exit'` row, and that event survives on a row the
-    /// finalization keeps: a configured launcher held at `.done`, or a live-terminal row held at `.exited`.
-    /// A live agent sitting `.done` after merely completing a turn has only `done` transition events, never
-    /// an `exit` event, so this is what distinguishes a launcher whose exit was already notified from one
-    /// that is still running between turns — a distinction `.done` status alone cannot make.
+    /// finalization keeps: a live-terminal row held at `.exited`. A live agent sitting `.done` after merely
+    /// completing a turn has only `done` transition events, never an `exit` event, so this is what
+    /// distinguishes an agent whose exit was already notified from one that is still running between
+    /// turns — a distinction `.done` status alone cannot make.
     ///
     /// The fact is scoped to the row's current life: a kept row is REUSED when a fresh agent starts in the
     /// same terminal (the restart-reuse reset in `registerAgentWindow` preserves the row id, and both the
@@ -741,19 +734,19 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 19 else { return nil }
+        guard row.count >= 17 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
-        let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
+        let status = AgentWindowStatus(rawValue: row[11]) ?? .idle
         let resolvedTrackingID = row[8].isEmpty ? row[9] : row[8]
         let terminalTarget = decodeTerminalTarget(
             runtimeTargetID: row[4], app: row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5], name: row[6],
             detail: row[7], trackingID: resolvedTrackingID)
         return AgentWindowRecord(
-            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], userLabel: row[18].isEmpty ? nil : row[18],
+            id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], userLabel: row[16].isEmpty ? nil : row[16],
             runtimeTargetID: row[4].isEmpty ? nil : row[4], terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10],
-            claimedLauncherID: row[11].isEmpty ? nil : row[11], claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status,
-            note: row[14].isEmpty ? nil : row[14], detectedAgentKind: row[17].isEmpty ? nil : row[17], createdAt: row[15], updatedAt: row[16])
+            status: status, note: row[12].isEmpty ? nil : row[12], detectedAgentKind: row[15].isEmpty ? nil : row[15], createdAt: row[13],
+            updatedAt: row[14])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {
@@ -781,10 +774,13 @@ extension SQLiteStore {
         return targetID
     }
 
+    /// Whether the runtime-target row backing this agent keeps the terminal's own name and detail. A
+    /// session Spaces knows the kind of answers from that kind: only a plain shell session carries a
+    /// terminal identity worth preserving. An agent row whose session kind is unrecorded (remote, or not
+    /// yet written) is a detection row in a plain shell, so it is treated as one.
     func preservesExistingTerminalMetadata(for record: AgentWindowRecord) throws -> Bool {
         if let sessionID = spacesAgentTerminalSessionID(record), let kind = try terminalSessionKind(sessionID: sessionID) { return kind == .shell }
-        return record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-            && record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        return true
     }
 
     func terminalSessionKind(sessionID: String) throws -> TerminalSessionKind? {

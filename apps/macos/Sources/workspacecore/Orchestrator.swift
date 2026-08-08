@@ -387,21 +387,18 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = existing.ports
         let previousProcesses = existing.processes
-        let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
         existing.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.ports = try normalizedServiceDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
-        existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
-            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         let appConfig = try store.appConfig()
         _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
@@ -829,7 +826,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
-        let (_, initialWorkspace) = try resolveWorkspace(id: workspaceID)
+        // Fail fast on an unknown workspace id before triggering deferred setup for it.
+        _ = try resolveWorkspace(id: workspaceID)
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
@@ -867,17 +865,6 @@ public final class WorkspaceOrchestrator {
 
         if let config {
             newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
-        }
-
-        if let config {
-            for launcher in config.agentLaunchers {
-                let trimmedName = launcher.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedName.isEmpty else { continue }
-                _ = try launchAgentLauncherUnlocked(workspaceID: workspace.id, name: trimmedName, background: background)
-            }
-            newWindows.append(
-                contentsOf: try trackedTerminalWindowsForAgents(
-                    workspaceID: workspace.id, agentWindows: try store.agentWindows(workspaceID: workspace.id)))
         }
 
         var index = 0
@@ -1614,7 +1601,7 @@ public final class WorkspaceOrchestrator {
             results.append((name, target))
         }
 
-        for target in runtimeTargets { append(try focusName(for: target, workspaceID: workspaceID), target: focusableTarget(from: target)) }
+        for target in runtimeTargets { append(focusName(for: target), target: focusableTarget(from: target)) }
 
         for session in configuredBrowsers where !runtimeBrowserURLs.contains(normalizedFocusName(session.targetURL)) {
             append(session.name, target: .browserSession(targetURL: session.targetURL))
@@ -1639,11 +1626,12 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
+    /// A target's focus name is the name it displays. An agent row's is its stored name and nothing else:
+    /// registration materializes a label for a row nothing named, so there is no second name derived from
+    /// the terminal's title for a caller to have to guess at.
+    private func focusName(for target: WorkspaceNavigationTarget) -> String? {
         switch target {
-        case .agent(let record):
-            if let label = sanitizedFocusName(record.effectiveLabel) { return label }
-            return try fallbackAgentFocusName(record)
+        case .agent(let record): return sanitizedFocusName(record.effectiveLabel)
         case .browser(let window): return sanitizedFocusName(window.name)
         case .process(let process): return sanitizedFocusName(process.templateName)
         case .window(let window): return sanitizedFocusName(window.name)
@@ -1667,27 +1655,21 @@ public final class WorkspaceOrchestrator {
         return sanitized
     }
 
-    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]) throws {
+    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession]) throws {
         let processEntries = try processes.map { process in (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process") }
         let browserEntries = try browserSessions.map { session in
             (name: try requiredConfiguredFocusName(session.name, kind: "Browser session"), kind: "browser session")
         }
-        let launcherEntries = try agentLaunchers.map { launcher in
-            (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
-        }
-        let entries = processEntries + browserEntries + launcherEntries
-        try validateUniqueFocusNameEntries(entries)
+        try validateUniqueFocusNameEntries(processEntries + browserEntries)
     }
 
     func validateWorkspaceFocusNames(
-        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentLaunchers: [AgentLauncher]? = nil,
+        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil,
         agentWindows: [AgentWindowRecord]? = nil
     ) throws {
         let workspaceProcesses = try processes ?? store.workspaceProcesses(workspaceID: workspaceID)
         let workspaceBrowserSessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspaceID)
-        let workspaceAgentLaunchers = try agentLaunchers ?? store.workspaceAgentLaunchers(workspaceID: workspaceID)
         let workspaceAgentWindows = try agentWindows ?? store.agentWindows(workspaceID: workspaceID)
-        let claims = AgentLauncherClaim.resolve(agents: workspaceAgentWindows, launchers: workspaceAgentLaunchers)
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
@@ -1696,16 +1678,9 @@ public final class WorkspaceOrchestrator {
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {
                 ($0.name, "browser session")
             })
-            + (try workspaceAgentLaunchers.map { launcher in
-                (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
-            })
             + workspaceAgentWindows.compactMap { record -> (name: String, kind: String)? in
-                // An agent a launcher claims is shown by that launcher's row, which already contributed
-                // the launcher's name above: one row, counted once. Whether a launcher claims it is the
-                // claim rule's answer, not a name comparison, so an agent that merely ends up named like a
-                // launcher (a rename to that name) still counts as its own row and collides, which is what
-                // makes two rows sharing one visible name impossible.
-                guard !claims.claimedAgentIDs.contains(record.id) else { return nil }
+                // Every agent row contributes the name it displays, so two rows can never share one visible
+                // name.
                 guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
             }
@@ -1831,8 +1806,7 @@ public final class WorkspaceOrchestrator {
                     stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
                     ports: try store.workspaceServiceDefinitions(workspaceID: workspace.id),
                     processes: try store.workspaceProcesses(workspaceID: workspace.id),
-                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
-                    agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id))
             } else {
                 settings = nil
             }
@@ -1857,7 +1831,6 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
@@ -1867,13 +1840,12 @@ public final class WorkspaceOrchestrator {
 
     func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         try validateWorkspaceFocusNames(
-            workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
+            workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
@@ -1884,9 +1856,7 @@ public final class WorkspaceOrchestrator {
         let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+        return WorkspaceSettings(stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }

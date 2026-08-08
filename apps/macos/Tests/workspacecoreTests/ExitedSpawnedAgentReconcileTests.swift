@@ -8,7 +8,7 @@ import spacesterminalcore
 /// the row would otherwise stay `spinning`/`waiting` forever. The single sweep covers both a spawned
 /// `.agent`-launch-kind session and an ad-hoc foreground-detected agent in a closed `.shell`-launch-kind
 /// terminal. The reconciler must run the real exit flow: notify subscribers the child exited, then
-/// delete/`.done` the row via the shared `handleAgentExit`. A still-live session must be untouched.
+/// delete the row via the shared `handleAgentExit`. A still-live session must be untouched.
 final class ExitedSpawnedAgentReconcileTests: XCTestCase {
     private final class DeliveryRecorder: @unchecked Sendable {
         var delivered: [(sessionID: String, line: String)] = []
@@ -155,14 +155,13 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
         let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
 
-        // Life 1: a configured launcher exits — row kept `.done` with a recorded exit event, watcher
-        // notified once (the kept row retains its inbound edge).
+        // Life 1: an agent exits while its terminal is still live — row kept `.exited` with a recorded
+        // exit event, watcher notified once (the kept row retains its inbound edge).
         let sessionID = UUID().uuidString
+        try writeLiveTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent)
         let agent = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .spinning,
-            claimedLauncherName: "Codex")
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
         _ = try orchestrator.finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
         XCTAssertEqual(recorder.delivered.count, 1, "life 1's exit is notified once")
@@ -183,8 +182,8 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
             recorder.delivered.last?.line.contains("is exited") == true,
             "the subscriber must be told the NEW life exited, got: \(recorder.delivered.last?.line ?? "nothing")")
 
-        // The sweep re-finalized the launcher row (`.done` + a fresh exit event after the init), so a
-        // further pass re-notifies nothing.
+        // The new life's terminal had already ended, so the sweep deleted the row; a further pass finds
+        // nothing left to finalize and re-notifies nothing.
         let thirdPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
         XCTAssertFalse(thirdPassMutated)
         XCTAssertEqual(recorder.delivered.count, 2, "exactly one notice per life, none re-delivered")

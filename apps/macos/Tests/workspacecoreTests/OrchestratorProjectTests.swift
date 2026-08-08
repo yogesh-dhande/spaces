@@ -218,14 +218,12 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.stopScript = "echo ignored"
-            config.agentLaunchers = [AgentLauncher(name: "Ignored", command: "ignored")]
         }
 
         XCTAssertEqual(project.stopScript, "echo yaml-stop")
         XCTAssertEqual(project.ports.map(\.name), ["api"])
         XCTAssertEqual(project.processes.first?.name, "api")
         XCTAssertEqual(project.browserSessions.first?.url, "http://localhost:3000")
-        XCTAssertEqual(project.agentLaunchers.first?.command, "codex")
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo yaml-stop")
@@ -255,7 +253,6 @@ extension OrchestratorTests {
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo git-yaml-stop")
-        XCTAssertEqual(settings?.agentLaunchers.first?.name, "Codex")
     }
 
     func testGitProjectPreviewAndCreateUseRepositoryDefaultBranch() throws {
@@ -388,7 +385,6 @@ extension OrchestratorTests {
             config.ports = preview.ports
             config.processes = preview.processes
             config.browserSessions = preview.browserSessions
-            config.agentLaunchers = preview.agentLaunchers
         }
 
         XCTAssertEqual(project.stopScript, "echo preview-stop")

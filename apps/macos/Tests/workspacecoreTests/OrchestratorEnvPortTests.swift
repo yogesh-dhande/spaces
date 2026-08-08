@@ -221,7 +221,6 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addPreparedGitProject(prepared) { config in
             config.stopScript = "echo edited-prepared-stop"
-            config.agentLaunchers = [AgentLauncher(name: "Edited", command: "codex --model gpt-5")]
         }
         didCommit = true
 
@@ -230,7 +229,6 @@ extension OrchestratorTests {
         XCTAssertEqual(defaultWorkspace.dir, prepared.defaultWorkspace.dir)
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo edited-prepared-stop")
-        XCTAssertEqual(settings?.agentLaunchers.first?.name, "Edited")
     }
 
     func testImportSpacesYAMLUpdatesOnlyProjectWhenWorkspaceSyncIsOff() throws {
@@ -344,7 +342,6 @@ extension OrchestratorTests {
             config.ports = [ServiceDefinition(id: "old-port", name: "oldport")]
             config.processes = [ProcessTemplate(id: "old-process", name: "old", command: "npm run old")]
             config.browserSessions = [BrowserSession(name: "old-app", url: "http://localhost:4000")]
-            config.agentLaunchers = [AgentLauncher(name: "Old Codex", command: "old-codex")]
         }
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let conflictWorkspace = try orchestrator.createWorkspace(projectID: project.id)
@@ -376,7 +373,6 @@ extension OrchestratorTests {
         XCTAssertEqual(defaultSettingsAfter.ports.map(\.name), defaultSettingsBefore.ports.map(\.name))
         XCTAssertEqual(defaultSettingsAfter.processes.map(\.command), defaultSettingsBefore.processes.map(\.command))
         XCTAssertEqual(defaultSettingsAfter.browserSessions.map(\.url), defaultSettingsBefore.browserSessions.map(\.url))
-        XCTAssertEqual(defaultSettingsAfter.agentLaunchers.map(\.command), defaultSettingsBefore.agentLaunchers.map(\.command))
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.name }, defaultPortsBefore.map { $0.name })
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.port }, defaultPortsBefore.map { $0.port })
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: defaultWorkspace.id)).isRunning)
@@ -389,7 +385,6 @@ extension OrchestratorTests {
         XCTAssertEqual(conflictSettingsAfter.ports.map(\.name), conflictSettingsBefore.ports.map(\.name))
         XCTAssertEqual(conflictSettingsAfter.processes.map(\.command), conflictSettingsBefore.processes.map(\.command))
         XCTAssertEqual(conflictSettingsAfter.browserSessions.map(\.url), conflictSettingsBefore.browserSessions.map(\.url))
-        XCTAssertEqual(conflictSettingsAfter.agentLaunchers.map(\.command), conflictSettingsBefore.agentLaunchers.map(\.command))
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id).map { $0.name }, conflictPortsBefore.map { $0.name })
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id).map { $0.port }, conflictPortsBefore.map { $0.port })
     }
@@ -405,7 +400,7 @@ extension OrchestratorTests {
         try "old: value\n".write(to: configURL, atomically: true, encoding: .utf8)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.stopScript = "echo exported-stop"
-            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
+            config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
         let writtenURL = try orchestrator.exportSpacesYAML(projectID: project.id)
@@ -413,7 +408,7 @@ extension OrchestratorTests {
 
         XCTAssertEqual(writtenURL, configURL)
         XCTAssertTrue(exported.contains("stop_script: echo exported-stop"))
-        XCTAssertTrue(exported.contains("command: codex"))
+        XCTAssertTrue(exported.contains("command: npm run api"))
         XCTAssertFalse(exported.contains("old: value"))
     }
 

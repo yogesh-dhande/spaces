@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 12
+    public static let currentVersion = 13
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -347,6 +347,30 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_sessions ADD COLUMN user_label TEXT;
                     """)
         },
+        // Configured coding agents (per-project and per-workspace `{id, name, command}` launcher entries)
+        // are gone: an agent exists only as a live session started by running its command in a terminal,
+        // and every agent row is renamed through `agent_sessions.user_label`. The two launcher tables and
+        // the two claim columns that bound a live row to a launcher entry therefore have no reader left.
+        //
+        // The DROPs are `IF EXISTS` because only the baseline fresh schema ever created these tables — no
+        // migration step did — so a profile whose chain started before they existed can reach this step
+        // without them.
+        //
+        // The column ALTERs need no table guard: every route to v12 carries `agent_sessions` with both
+        // claim columns — the v9→v10 step creates the table (with them) when the chain arrives without
+        // it, and every baseline that stamped v12 or earlier defined them — so the columns are always
+        // present here to drop. Neither column is indexed or referenced by a constraint, so SQLite's
+        // in-place DROP COLUMN preserves every row.
+        DatabaseMigrationStep(fromVersion: 12, toVersion: 13, description: "Drop agent launchers", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    DROP TABLE IF EXISTS project_agent_launchers;
+                    DROP TABLE IF EXISTS workspace_agent_launchers;
+                    ALTER TABLE agent_sessions DROP COLUMN claimed_launcher_id;
+                    ALTER TABLE agent_sessions DROP COLUMN claimed_launcher_name;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -506,16 +530,6 @@ public enum DatabaseSchema {
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS project_agent_launchers (
-              project_id TEXT NOT NULL,
-              id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT NOT NULL,
-              order_index INTEGER NOT NULL,
-              PRIMARY KEY (project_id, order_index),
-              FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -585,16 +599,6 @@ public enum DatabaseSchema {
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_agent_launchers (
-              workspace_id TEXT NOT NULL,
-              id TEXT NOT NULL,
-              name TEXT NOT NULL,
-              command TEXT NOT NULL,
-              order_index INTEGER NOT NULL,
-              PRIMARY KEY (workspace_id, order_index),
-              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS running_processes (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
@@ -647,8 +651,6 @@ public enum DatabaseSchema {
               runtime_target_id TEXT,
               terminal_session_id TEXT,
               session_key TEXT,
-              claimed_launcher_id TEXT,
-              claimed_launcher_name TEXT,
               note TEXT,
               detected_agent_kind TEXT,
               created_at TEXT NOT NULL,

@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+source "$SCRIPT_DIR/e2e_fixture_repos.sh"
 spaces_e2e_load_env "$ROOT_DIR"
 
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
@@ -576,15 +577,12 @@ processes:
     command: >-
       python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
     on_exit: none
-agent_launchers:
-  - name: parity-agent
-    command: >-
-      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
 YAML
+  spaces_e2e_write_parity_agent_script "$project_dir/parity-agent" "$SPACES_CLI_BIN"
   git -C "$project_dir" init >/dev/null
   git -C "$project_dir" config user.email "spaces-e2e@example.invalid"
   git -C "$project_dir" config user.name "Spaces E2E"
-  git -C "$project_dir" add README.txt spaces.yaml
+  git -C "$project_dir" add README.txt spaces.yaml parity-agent
   git -C "$project_dir" commit -m "Initial device API parity fixture" >/dev/null
 }
 
@@ -4134,20 +4132,20 @@ print(session_id)
 PY
 }
 
-# Runs one configured coding agent in `$1` through the Device API — the same daemon path the app and the
-# mobile clients use — and waits until the workspace's overview reports the agent row running and the
-# named terminal row exited. Both are what put the workspace on the Agents and Alerts tabs.
+# Waits until the workspace's overview — read over the Device API, the same daemon path the app and the
+# mobile clients use — reports the coding agent running in terminal session `$2` and some terminal row
+# exited. Both are what put the workspace on the Agents and Alerts tabs.
 demo_seed_tab_list_rows() {
   local workspace_id="$1"
-  local agent_name="$2"
-  python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$workspace_id" "$agent_name" <<'PY'
+  local agent_session_id="$2"
+  python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$workspace_id" "$agent_session_id" <<'PY'
 import json
 import subprocess
 import sys
 import time
 import uuid
 
-pairing_path, device_key, spacese2e, host, port, workspace_id, agent_name = sys.argv[1:8]
+pairing_path, device_key, spacese2e, host, port, workspace_id, agent_session_id = sys.argv[1:8]
 pairing = json.loads(open(pairing_path, encoding="utf-8").read())[device_key]
 client_app = {
     "installationID": pairing.get("installationID") or str(uuid.uuid4()).upper(),
@@ -4182,17 +4180,20 @@ def workspace_snapshot():
     return None
 
 
-send("runCodingAgent", {"workspaceID": workspace_id, "agentName": agent_name, "agentLauncherID": None})
-
 deadline = time.time() + 60
 observed = None
 while time.time() < deadline:
     workspace = workspace_snapshot()
     if workspace is not None:
-        agents = [row for row in workspace.get("codingAgentRows") or [] if row.get("name") == agent_name]
+        # A live agent row is addressed by the terminal session the agent runs in: the row is named by
+        # whatever label the agent reports for itself, and by the materialized default when it reports none.
+        agents = [row for row in workspace.get("codingAgentRows") or [] if row.get("sessionID") == agent_session_id]
         exited_terminals = [row for row in workspace.get("terminalRows") or [] if row.get("runState") == "exited"]
         observed = {
-            "codingAgentRows": [{"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("codingAgentRows") or []],
+            "codingAgentRows": [
+                {"name": row.get("name"), "sessionID": row.get("sessionID"), "runState": row.get("runState")}
+                for row in workspace.get("codingAgentRows") or []
+            ],
             "terminalRows": [{"title": row.get("title"), "runState": row.get("runState")} for row in workspace.get("terminalRows") or []],
         }
         if agents and agents[0].get("runState") == "running" and exited_terminals:
@@ -4205,15 +4206,14 @@ PY
 
 # Regression lane for deleting a workspace that owns rows only a running session puts there, with all
 # three banded tabs in play. `workspace-delete-scroll` deletes a workspace whose rows are all configured,
-# so its section's item count never moves; here the workspace gets a coding agent started from its
-# launcher and a workspace terminal whose command has exited, so tearing it down takes several rows out
-# of a section that is still listed. Those two rows are also what put the workspace on the Agents and
-# Alerts tabs, which the UI test visits before the delete so their lists mount — a TabView keeps a
-# visited tab's collection view alive, so one delete then diffs rows out of all three lists at once.
+# so its section's item count never moves; here the workspace gets a running coding agent and a workspace
+# terminal whose command has exited, so tearing it down takes several rows out of a section that is
+# still listed. Those two rows are also what put the workspace on the Agents and Alerts tabs, which the
+# UI test visits before the delete so their lists mount — a TabView keeps a visited tab's collection
+# view alive, so one delete then diffs rows out of all three lists at once.
 run_workspace_delete_tab_lists_scenario() {
   begin_scenario "workspace-delete-tab-lists"
 
-  local agent_name="tab-lists-agent"
   local project_id
   project_id="$(demo_project_id "$PROJECT_DIR")" || fail "Unable to resolve the demo project for $PROJECT_DIR."
   printf 'Tab-lists project: %s (%s)\n' "$project_id" "$PROJECT_DIR" >>"$SCENARIO_LOG"
@@ -4243,11 +4243,16 @@ run_workspace_delete_tab_lists_scenario() {
   demo_env "$SPACES_CLI_BIN" workspace start --workspace "$target_workspace_id" >>"$SCENARIO_LOG" 2>&1 \
     || fail "Failed to start the tab-lists target workspace $target_workspace_id."
 
-  # The Agents tab lists coding-agent rows that are doing something, so the launcher has to stay alive
-  # for the whole scenario rather than run and exit.
-  demo_env "$SPACES_E2E_BIN" set-workspace-agent-launchers --workspace-dir "$target_workspace_dir" --name "$agent_name" \
-    --command "python3 -c \"import time; print('tab-lists-agent-ready', flush=True); time.sleep(900)\"" >>"$SCENARIO_LOG" 2>&1 \
-    || fail "Failed to configure the tab-lists coding agent on $target_workspace_id."
+  # The Agents-tab row: a coding agent exists only as a program reporting the Spaces agent hooks from
+  # inside a workspace terminal, so this runs one. It signals `working` and then stays alive for the
+  # whole scenario rather than running and exiting, because the Agents tab lists coding-agent rows that
+  # are doing something.
+  local agent_session_id
+  agent_session_id="$(
+    demo_workspace_terminal_session "$target_workspace_dir" "tab-lists-agent" \
+      "$SPACES_CLI_BIN agent signal init >/dev/null; $SPACES_CLI_BIN agent signal working >/dev/null; printf 'tab-lists-agent-ready\\n'; while true; do sleep 5; done"
+  )" || fail "Failed to start the tab-lists coding agent on $target_workspace_id."
+  track_current_scenario_session "$agent_session_id"
 
   # An exited workspace terminal is the Alerts-tab event: the tab bands attention events by workspace, so
   # this workspace gets a band of its own there. The command runs to completion rather than being
@@ -4258,7 +4263,7 @@ run_workspace_delete_tab_lists_scenario() {
     || fail "Failed to create the tab-lists alert terminal session."
   track_current_scenario_session "$alert_session_id"
 
-  demo_seed_tab_list_rows "$target_workspace_id" "$agent_name" >>"$SCENARIO_LOG" 2>&1 \
+  demo_seed_tab_list_rows "$target_workspace_id" "$agent_session_id" >>"$SCENARIO_LOG" 2>&1 \
     || fail "The tab-lists workspace never produced both an Agents-tab row and an Alerts-tab event. See $SCENARIO_LOG"
 
   export SPACES_MOBILE_E2E_TARGET_WORKSPACE_ID="$target_workspace_id"

@@ -174,7 +174,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                 command: .runWorkspaceProcess(.init(workspaceID: "workspace-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
             SpacesDeviceAPIRequest(
-                command: .runCodingAgent(.init(workspaceID: "workspace-1", agentName: "Codex", agentLauncherID: "launcher-1")), authToken: "SECRET"),
+                command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
@@ -281,8 +281,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                     .init(workspaceID: "workspace-1", processID: "process-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
             SpacesDeviceAPIRequest(
-                command: .restartCodingAgent(
-                    .init(workspaceID: "workspace-1", agentID: "agent-1", agentName: "Codex", agentLauncherID: "launcher-1")), authToken: "SECRET"),
+                command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request) }
@@ -294,7 +293,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             runState: .running, canRun: false, canStop: true, canRestart: true)
         let agentRow = SpacesDeviceWorkspaceCodingAgentRow(
             id: "agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-runtime-1", sessionID: "session-2",
-            isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true, canRestart: true)
+            runState: .running, activityState: .spinning, canStop: true)
         let terminalRow = SpacesDeviceWorkspaceTerminalRow(
             id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
             canOpenTerminal: true, canStop: true)

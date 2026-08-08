@@ -58,8 +58,7 @@ export default function CodingAgentsDocsPage() {
           A coding agent is a tool like Claude Code, Codex, or opencode that you run in a terminal to help you write code. Spaces tracks each agent as a row in the workspace so you can focus its terminal by shortcut and see at a glance whether it is working, blocked on you, or done.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Configure agents on the project as launchers — Spaces opens them for every workspace.</li>
-          <li>• Or start one ad-hoc in any workspace terminal; Spaces will attach it to the workspace when it reports an event.</li>
+          <li>• Run one in any workspace terminal; Spaces attaches it to the workspace when it reports an event or its process is detected running.</li>
           <li>• Rows render under <strong>Coding Agents</strong> in the workspace, after browser and process rows.</li>
         </ul>
       </article>
@@ -77,7 +76,7 @@ export default function CodingAgentsDocsPage() {
           <li>• <strong>exit</strong> &mdash; agent ended; row returns to idle, or is removed if the terminal is gone.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably. Events after <code>init</code> update the row that <code>init</code> created or attached; configured launcher metadata and known agent runtime metadata can also establish the row before the monitor tick runs.
+          Events are accepted only from Spaces-managed terminal sessions. Start agents in a workspace terminal opened by Spaces so the session can be tracked and focused reliably. Events after <code>init</code> update the row that <code>init</code> created or attached; a foreground process Spaces recognizes as a known agent can also establish the row before the monitor tick runs.
         </p>
       </article>
 
@@ -110,14 +109,6 @@ export default function CodingAgentsDocsPage() {
           <CopyablePrompt label="Prompt for Claude Code" text={CLAUDE_PROMPT} />
           <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
         </div>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Configured vs. Ad-hoc</h2>
-        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Configured launchers</strong> live on the project and open automatically when the workspace launches. Their name is reserved — relaunching reuses the same row rather than creating a duplicate.</li>
-          <li>• <strong>Ad-hoc agents</strong> are any Spaces-managed terminal session in which you run an agent yourself. Spaces creates a row the first time the agent reports an event. If an ad-hoc agent reports the same name as a configured launcher, Spaces auto-renames it with a numeric suffix.</li>
-        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

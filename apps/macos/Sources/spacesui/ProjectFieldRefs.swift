@@ -8,7 +8,6 @@ import AppKit
     let portsSection: PortsSection
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
-    let agentLaunchersSection: AgentLaunchersSection
     let importButton: NSButton
     let exportButton: NSButton
     let discardImportedConfigButton: NSButton
@@ -17,8 +16,8 @@ import AppKit
 
     init(
         formTag: Int, projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
-        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
+        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, importButton: NSButton, exportButton: NSButton,
+        discardImportedConfigButton: NSButton
     ) {
         self.formTag = formTag
         self.projectID = projectID
@@ -27,7 +26,6 @@ import AppKit
         self.portsSection = portsSection
         self.processesSection = processesSection
         self.browserSessionsSection = browserSessionsSection
-        self.agentLaunchersSection = agentLaunchersSection
         self.importButton = importButton
         self.exportButton = exportButton
         self.discardImportedConfigButton = discardImportedConfigButton
@@ -35,6 +33,6 @@ import AppKit
 
     var hasOpenSectionEditor: Bool {
         setupScriptSection.hasOpenEditor || stopScriptSection.hasOpenEditor || portsSection.hasOpenEditor || processesSection.hasOpenEditor
-            || browserSessionsSection.hasOpenEditor || agentLaunchersSection.hasOpenEditor
+            || browserSessionsSection.hasOpenEditor
     }
 }

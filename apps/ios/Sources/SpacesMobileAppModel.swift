@@ -328,8 +328,9 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
-    /// The row's secondary text, matching the Mac sidebar: a configured row shows what it runs, an ad
-    /// hoc shell shows the title its program reported (nothing until it reports one).
+    /// The row's secondary text, matching the Mac sidebar: a process row shows what it runs, a coding
+    /// agent shows its terminal's detail text, an ad hoc shell shows the title its program reported
+    /// (nothing until it reports one).
     var detail: String {
         switch source {
         case .process, .codingAgent: command
@@ -338,8 +339,9 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
-    /// What launching this row runs. Only configured processes and coding agents are launched from a
-    /// row — an ad hoc shell already exists and a browser session opens a URL — so the rest have none.
+    /// What this row runs. Only configured processes are launched from a row; a coding agent's command
+    /// is the display text behind `detail`, an ad hoc shell already exists, and a browser session opens
+    /// a URL, so the rest have none.
     var command: String {
         switch source {
         case .process(let row): row.command
@@ -368,10 +370,12 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
+    /// Only a configured process can be started from a row: a coding agent exists only as a live
+    /// session the user started by running its command in a terminal.
     var canRun: Bool {
         switch source {
         case .process(let row): row.canRun
-        case .codingAgent(let row): row.canRun
+        case .codingAgent: false
         case .terminal: false
         case .browserSession: false
         }
@@ -389,7 +393,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var canRestart: Bool {
         switch source {
         case .process(let row): row.canRestart
-        case .codingAgent(let row): row.canRestart
+        case .codingAgent: false
         case .terminal: false
         case .browserSession: false
         }
@@ -407,7 +411,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var canRestartFromTerminalDetail: Bool {
         switch source {
         case .process(let row): row.processID != nil && row.templateID != nil && row.sessionID != nil
-        case .codingAgent(let row): row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
+        case .codingAgent: false
         case .terminal: false
         case .browserSession: false
         }
@@ -1802,13 +1806,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: process.workspaceID, processKey: process.name, processTemplateID: process.templateID ?? process.id,
                     commandChannel: commandChannel)
             }
-        case .codingAgent(let agent):
-            guard agent.canRun else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
-                try await bridgeClient.runCodingAgent(
-                    workspaceID: agent.workspaceID, agentName: agent.name, agentLauncherID: agent.launcherID, commandChannel: commandChannel)
-            }
-        case .terminal, .browserSession: return nil
+        case .codingAgent, .terminal, .browserSession: return nil
         }
     }
 
@@ -1832,7 +1830,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             case .codingAgent(let agent):
                 guard let agentID = agent.agentID else { return }
                 response = try await bridgeClient.stopCodingAgent(
-                    workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
+                    workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
             case .terminal(let terminal):
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(
@@ -1855,13 +1853,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await bridgeClient.restartWorkspaceProcess(
                     workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
             }
-        case .codingAgent(let agent):
-            guard let agentID = agent.agentID else { return nil }
-            return await performMutationReturningSession(fallbackRowID: row.id, timeoutRecovery: timeoutRecovery) {
-                try await bridgeClient.restartCodingAgent(
-                    workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
-            }
-        case .terminal, .browserSession: return nil
+        case .codingAgent, .terminal, .browserSession: return nil
         }
     }
 
@@ -2121,36 +2113,37 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     // MARK: - Renaming runtime rows
 
-    /// Where a runtime row's name lives, and so how a rename reaches the daemon: an ad hoc terminal owns its
-    /// session title, while a configured process, coding agent, or browser session owns an entry in the
-    /// workspace config. Configured entries carry stable identity so the mutation can resolve them against a
-    /// fresh config instead of replacing concurrent edits with the overview's cached snapshot.
+    /// Where a runtime row's name lives, and so how a rename reaches the daemon: an ad hoc terminal and a
+    /// coding agent own their session's name, while a configured process or browser session owns an entry in
+    /// the workspace config. Configured entries carry stable identity so the mutation can resolve them
+    /// against a fresh config instead of replacing concurrent edits with the overview's cached snapshot.
     private enum RuntimeRowRename {
         case terminalSession(sessionID: String)
+        case agentSession(agentID: String)
         case workspaceConfig(entry: ConfigEntry)
 
         enum ConfigEntry {
             case process(id: String)
-            case agentLauncher(id: String)
             case browserSession(name: String)
         }
     }
 
-    /// Whether the row has a name the daemon can rename. A process or coding agent running without a
-    /// configured entry has no name to edit — its name comes from the running process — and a terminal row
-    /// whose session has ended has no session to rename, so those rows offer no Rename. Demo Mode's backend
-    /// rejects config edits, so no row is renamable while it is on.
+    /// Whether the row has a name the daemon can rename. A process running without a configured entry has
+    /// no name to edit — its name comes from the running process — and a terminal row whose session has
+    /// ended has no session to rename, so those rows offer no Rename. An agent row names its session and
+    /// stays renamable as long as the row exists. Demo Mode's backend rejects config edits, so no row is
+    /// renamable while it is on.
     func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
         guard !isDemoModeEnabled else { return false }
         return renameTarget(for: row) != nil
     }
 
-    /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
-    /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
-    /// rule the Mac sidebar's rename follows.
+    /// Renames a runtime row. Renaming a configured process or browser session edits its workspace-config
+    /// entry, so a running process keeps its current name until it is restarted — the same rule the Mac
+    /// sidebar's rename follows.
     ///
-    /// Submitting an empty name clears an ad hoc terminal's rename, restoring the generated name it was
-    /// launched under. A config entry must keep a name, so an empty submission there is discarded.
+    /// Submitting an empty name clears an ad hoc terminal's or an agent's rename, restoring the name
+    /// underneath it. A config entry must keep a name, so an empty submission there is discarded.
     func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title != row.title, let target = renameTarget(for: row) else { return }
@@ -2160,6 +2153,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             case .terminalSession(let sessionID):
                 return try await bridgeClient.renameTerminalSession(
                     workspaceID: row.workspaceID, sessionID: sessionID, title: title, commandChannel: commandChannel)
+            case .agentSession(let agentID):
+                return try await bridgeClient.renameAgentSession(
+                    workspaceID: row.workspaceID, agentID: agentID, title: title, commandChannel: commandChannel)
             case .workspaceConfig(let entry):
                 let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
                 guard let config = currentOverview.workspaces.first(where: { $0.id == row.workspaceID })?.config else {
@@ -2182,10 +2178,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             else { return nil }
             return .workspaceConfig(entry: .process(id: templateID))
         case .codingAgent(let agent):
-            guard let config = workspaceConfig(for: row.workspaceID), let launcherID = agent.launcherID,
-                config.agentLaunchers.contains(where: { $0.id == launcherID })
-            else { return nil }
-            return .workspaceConfig(entry: .agentLauncher(id: launcherID))
+            guard let agentID = agent.agentID else { return nil }
+            return .agentSession(agentID: agentID)
         case .browserSession(let browser):
             // Configured browser sessions carry no id, but the daemon requires their names to be present and
             // unique within the workspace, and resolution preserves the configured name, so the name is the
@@ -2203,7 +2197,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
         -> SpacesDeviceWorkspaceConfig
     {
         var processes = config.processes
-        var agentLaunchers = config.agentLaunchers
         var browserSessions = config.browserSessions
         switch entry {
         case .process(let id):
@@ -2213,12 +2206,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let process = processes[index]
             processes[index] = SpacesDeviceProcessTemplate(
                 id: process.id, name: name, command: process.command, kind: process.kind, onExit: process.onExit)
-        case .agentLauncher(let id):
-            guard let index = agentLaunchers.firstIndex(where: { $0.id == id }) else {
-                throw SpacesDeviceAPIClientError.requestFailed("This coding agent is no longer configured.")
-            }
-            let launcher = agentLaunchers[index]
-            agentLaunchers[index] = SpacesDeviceAgentLauncher(id: launcher.id, name: name, command: launcher.command)
         case .browserSession(let currentName):
             guard let index = browserSessions.firstIndex(where: { $0.name == currentName }) else {
                 throw SpacesDeviceAPIClientError.requestFailed("This browser session is no longer configured.")
@@ -2227,7 +2214,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         return SpacesDeviceWorkspaceConfig(
             stopScript: config.stopScript, ports: config.ports, processes: processes, browserSessions: browserSessions,
-            resolvedBrowserSessions: config.resolvedBrowserSessions, agentLaunchers: agentLaunchers)
+            resolvedBrowserSessions: config.resolvedBrowserSessions)
     }
 
     private func workspaceConfig(for workspaceID: String) -> SpacesDeviceWorkspaceConfig? {

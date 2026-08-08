@@ -15,7 +15,6 @@
       "projects": [
         {
           "config": {
-            "agentLaunchers": [],
             "ports": [
               {
                 "id": "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
@@ -50,13 +49,6 @@
         },
         {
           "config": {
-            "agentLaunchers": [
-              {
-                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-                "id": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-                "name": "Fix checkout 500"
-              }
-            ],
             "ports": [
               {
                 "id": "F746B1B6-031D-41B1-BA05-94680D5555CF",
@@ -91,7 +83,6 @@
         },
         {
           "config": {
-            "agentLaunchers": [],
             "ports": [
               {
                 "id": "789DC866-048B-44E9-9D88-9D314BAD8A2E",
@@ -275,7 +266,6 @@
           "branch": "main",
           "codingAgentRows": [],
           "config": {
-            "agentLaunchers": [],
             "ports": [
               {
                 "id": "67FED074-ECFD-4AF2-8875-A31AA45E56C3",
@@ -347,13 +337,9 @@
             {
               "activityState": "waiting",
               "agentID": "EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
-              "canRestart": true,
-              "canRun": false,
               "canStop": true,
               "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-              "id": "configured-agent:42A4B12F-B617-462F-9539-B230C72B04D7:AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-              "isConfigured": true,
-              "launcherID": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
+              "id": "agent:EAA2DCDA-19BB-4371-B307-027C8A47ADF0",
               "name": "Fix checkout 500",
               "runState": "running",
               "sessionID": "demo-harbor-agent",
@@ -362,13 +348,6 @@
             }
           ],
           "config": {
-            "agentLaunchers": [
-              {
-                "command": "export PYTHONPATH=.spaces-e2e-demo/src; exec '/usr/bin/env' 'python3' '-m' 'spaces_e2e_demo' 'agent'",
-                "id": "AA681503-5E13-4AB4-A7D0-19DC39F7805E",
-                "name": "Fix checkout 500"
-              }
-            ],
             "ports": [
               {
                 "id": "F746B1B6-031D-41B1-BA05-94680D5555CF",
@@ -442,7 +421,6 @@
           "branch": "main",
           "codingAgentRows": [],
           "config": {
-            "agentLaunchers": [],
             "ports": [
               {
                 "id": "789DC866-048B-44E9-9D88-9D314BAD8A2E",
