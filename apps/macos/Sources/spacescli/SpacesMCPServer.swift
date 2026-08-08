@@ -68,6 +68,9 @@ final class SpacesMCPStdioServer {
     /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
     /// Internal because the stale-image reload gates on it being empty, and that invariant is unit-tested.
     var readBuffer = Data()
+    /// A reload the exec gate deferred because frames were still buffered, performed by the read loop once
+    /// they are drained. Internal so the deferral is unit-testable.
+    var deferredReloadTarget: String?
 
     init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput, staleImageReload: MCPStaleImageReload = MCPStaleImageReload()) {
         self.input = input
@@ -78,7 +81,26 @@ final class SpacesMCPStdioServer {
         self.encoder = encoder
     }
 
-    func run() throws { while let data = readMessage() { try handleMessage(data) } }
+    func run() throws {
+        while let data = readMessage() {
+            try handleMessage(data)
+            performDeferredReloadIfDrained()
+        }
+    }
+
+    /// Performs a reload the exec gate deferred, at the first point every drained frame has been answered
+    /// and the loop would otherwise block for new input. This is the drain point the deferral contract in
+    /// `respondToFailedToolCall` names; without it a buffered frame that raises no daemon call of its own
+    /// (a notification, a `tools/list`) would leave this image stale and blocked, and the client's retry
+    /// would have to fail a second time before the reload happened. The message-boundary invariant holds
+    /// by construction here: `handleMessage` has returned, so any response it wrote is a complete frame.
+    /// The target is taken before the attempt, so a failed `execv` leaves the server on the same footing
+    /// as the direct path — serving the stale image, re-deciding on the next mismatch.
+    private func performDeferredReloadIfDrained() {
+        guard readBuffer.isEmpty, let target = deferredReloadTarget else { return }
+        deferredReloadTarget = nil
+        staleImageReload.reload(into: target)
+    }
 
     private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
@@ -478,17 +500,23 @@ final class SpacesMCPStdioServer {
     /// `availableData` returns, so a client that pipelined can leave whole further frames — or the front
     /// of a partial one — sitting in this image's memory, and exec discards all of it: unread bytes still
     /// in the stdin pipe are inherited by the successor, but drained bytes are gone. An empty buffer is
-    /// therefore the invariant that makes a lost or torn frame impossible. When the buffer is not empty
-    /// the caller still gets the retry answer and this image keeps serving what it already drained; the
-    /// next daemon-is-newer failure that lands with an empty buffer performs the reload, which the batch
-    /// reaches by its last buffered frame at the latest.
+    /// therefore the invariant that makes a lost or torn frame impossible.
+    ///
+    /// The gate defers rather than drops: a non-empty buffer records the target and the read loop performs
+    /// the reload at `performDeferredReloadIfDrained`, the first point every drained frame has been
+    /// answered. That is what keeps the promise the retry answer makes — the client's next call reaches a
+    /// current image — no matter what those buffered frames turn out to be. A buffered frame that does
+    /// itself hit this path with an empty buffer reloads directly and makes the record redundant.
     func respondToFailedToolCall(id: Any?, error: Error) throws {
         guard let execTarget = staleImageReload.execTarget(for: error) else {
             try sendToolResult(id: id, text: error.localizedDescription, isError: true)
             return
         }
         try sendToolResult(id: id, text: MCPStaleImageReload.retryMessage, isError: true)
-        guard readBuffer.isEmpty else { return }
+        guard readBuffer.isEmpty else {
+            deferredReloadTarget = execTarget
+            return
+        }
         staleImageReload.reload(into: execTarget)
     }
 

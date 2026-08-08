@@ -175,28 +175,51 @@ final class MCPStaleImageReloadTests: XCTestCase {
     }
 
     /// A client that pipelined leaves further frames drained into this image's memory. Exec would discard
-    /// them, so the reload waits: the failed call is still answered, and the buffered frame is still served
-    /// by this image. The next stale-image failure — reached by the last buffered frame at the latest —
-    /// finds an empty buffer and execs.
-    func testStaleImageDefersTheExecUntilBufferedFramesAreDrained() throws {
+    /// them, so the reload waits — but it is remembered, not dropped: the read loop performs it as soon as
+    /// it has answered the buffered frame, without needing a second failure. That is what makes the retry
+    /// the client was told to send reach a current image even when the buffered frame (here a `ping`)
+    /// raises no daemon call of its own.
+    func testDeferredReloadFiresOnceTheReadLoopDrainsTheBuffer() throws {
+        let inputPipe = Pipe()
         let outputPipe = Pipe()
+        // Closed with nothing written: the read loop ends at EOF after the buffered frame, which is exactly
+        // where a live server would instead block waiting for the client's retry.
+        try inputPipe.fileHandleForWriting.close()
         var execPath: String?
         let reload = stubbedReload(onDiskImageDiffers: true, replaceExecutable: { path, _ in execPath = path })
-        let server = SpacesMCPStdioServer(input: Pipe().fileHandleForReading, output: outputPipe.fileHandleForWriting, staleImageReload: reload)
+        let server = SpacesMCPStdioServer(input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting, staleImageReload: reload)
         server.readBuffer = Data(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#.utf8 + [0x0A])
 
         try server.respondToFailedToolCall(id: 1, error: daemonWireIncompatible(.clientTooOld))
 
         XCTAssertNil(execPath, "a pipelined frame is still buffered, so exec would discard it")
-        XCTAssertEqual(try toolResult(from: outputPipe.fileHandleForReading.availableData).text, MCPStaleImageReload.retryMessage)
-        // The buffered frame stays available to this image rather than being lost.
-        XCTAssertFalse(server.readBuffer.isEmpty)
+        XCTAssertEqual(server.deferredReloadTarget, "/resolved/spaces")
+        XCTAssertFalse(server.readBuffer.isEmpty, "the buffered frame stays available to this image")
 
-        // Once the read loop has drained it, the next failure reloads.
-        server.readBuffer = Data()
+        try server.run()
+        try outputPipe.fileHandleForWriting.close()
+
+        XCTAssertEqual(execPath, "/resolved/spaces", "the reload fires at the drain point, with no second failure")
+        XCTAssertNil(server.deferredReloadTarget)
+        // Both frames were answered before the reload: the retry answer, then the buffered ping's result.
+        let lines = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n")
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(try toolResult(from: Data(lines[0].utf8)).text, MCPStaleImageReload.retryMessage)
+        let ping = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(lines[1].utf8)) as? [String: Any])
+        XCTAssertEqual(ping["id"] as? Int, 2)
+    }
+
+    func testStaleImageFailureWithAnEmptyBufferExecsDirectly() throws {
+        let outputPipe = Pipe()
+        var execPath: String?
+        let reload = stubbedReload(onDiskImageDiffers: true, replaceExecutable: { path, _ in execPath = path })
+        let server = SpacesMCPStdioServer(input: Pipe().fileHandleForReading, output: outputPipe.fileHandleForWriting, staleImageReload: reload)
+
         try server.respondToFailedToolCall(id: 3, error: daemonWireIncompatible(.clientTooOld))
 
         XCTAssertEqual(execPath, "/resolved/spaces")
+        // Nothing was deferred, so the drain point has no redundant second reload to perform.
+        XCTAssertNil(server.deferredReloadTarget)
     }
 
     /// Pipelined frames written in one client write are each read and answered — the property the deferred
