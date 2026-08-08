@@ -4,6 +4,18 @@
     import GhosttyKit
     import spacesterminalcore
 
+    /// Identifies one registration of a surface action handler.
+    ///
+    /// Handlers have to be keyed by the surface pointer, because that is all an action event carries.
+    /// Surface addresses are reused: a pane that frees its mirror and a pane that builds one can land on
+    /// the same address, and an unregistration by address alone would then remove whichever handler is
+    /// currently there — silently killing the live pane's link clicks and search results. A token names
+    /// the registration rather than the address, so unregistering can only remove its own.
+    public struct GhosttyMirrorActionHandlerToken: Sendable, Equatable {
+        fileprivate let surfaceKey: UInt
+        fileprivate let generation: UInt64
+    }
+
     /// The app-process embedded ghostty app runtime that backs the local mirror rendering
     /// (`GhosttyMirrorTerminalView`). It stays on the main actor — the mirror is an `NSView` that ticks
     /// and presents on the render path — while the daemon's `GhosttyEmbeddedAppService` runs on the
@@ -17,9 +29,15 @@
     @MainActor public final class GhosttyMirrorAppService {
         public static let shared = GhosttyMirrorAppService()
 
+        private struct RegisteredActionHandler {
+            let generation: UInt64
+            let handler: @MainActor (GhosttyActionEvent) -> Void
+        }
+
         public private(set) var app: ghostty_app_t?
         private var config: ghostty_config_t?
-        private var surfaceActionHandlers: [UInt: @MainActor (GhosttyActionEvent) -> Void] = [:]
+        private var surfaceActionHandlers: [UInt: RegisteredActionHandler] = [:]
+        private var lastActionHandlerGeneration: UInt64 = 0
 
         private init() {}
 
@@ -61,18 +79,23 @@
             ghostty_app_tick(app)
         }
 
-        public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @MainActor (GhosttyActionEvent) -> Void) {
-            surfaceActionHandlers[surfaceKey(surface)] = handler
+        public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @MainActor (GhosttyActionEvent) -> Void)
+            -> GhosttyMirrorActionHandlerToken
+        {
+            lastActionHandlerGeneration &+= 1
+            let key = surfaceKey(surface)
+            surfaceActionHandlers[key] = RegisteredActionHandler(generation: lastActionHandlerGeneration, handler: handler)
+            return GhosttyMirrorActionHandlerToken(surfaceKey: key, generation: lastActionHandlerGeneration)
         }
 
-        public func unregisterActionHandler(for surface: ghostty_surface_t?) {
-            guard let surface else { return }
-            surfaceActionHandlers.removeValue(forKey: surfaceKey(surface))
+        public func unregisterActionHandler(_ token: GhosttyMirrorActionHandlerToken?) {
+            guard let token, surfaceActionHandlers[token.surfaceKey]?.generation == token.generation else { return }
+            surfaceActionHandlers.removeValue(forKey: token.surfaceKey)
         }
 
-        private func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {
-            guard let handler = surfaceActionHandlers[surfaceKey] else { return }
-            Task { @MainActor in handler(event) }
+        func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {
+            guard let registered = surfaceActionHandlers[surfaceKey] else { return }
+            Task { @MainActor in registered.handler(event) }
         }
 
         private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }
