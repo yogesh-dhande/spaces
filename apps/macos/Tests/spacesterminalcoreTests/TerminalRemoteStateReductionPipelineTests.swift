@@ -473,6 +473,168 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
     /// Long enough for a drain that had more to do to have done it, so a count assertion means the
     /// pipeline stopped there rather than merely not having got there yet.
     private func settle() async throws { try await Task.sleep(for: .milliseconds(200)) }
+    // MARK: - Accessor equivalence
+
+    /// Everything a client reads off a reduced payload, as one comparable value.
+    private struct PayloadReads: Equatable {
+        let hasRenderUpdate: Bool
+        let renderUpdate: Data?
+        let decodedRenderUpdate: GhosttyRenderUpdate?
+        let renderSnapshot: GhosttyTerminalSnapshot?
+        let renderText: String?
+        let renderOwnerEpoch: UInt64?
+
+        init(_ payload: GhosttyRemoteSessionStatePayload) {
+            hasRenderUpdate = payload.hasRenderUpdate
+            renderUpdate = payload.renderUpdate
+            decodedRenderUpdate = payload.decodedRenderUpdate
+            renderSnapshot = payload.renderSnapshot
+            renderText = payload.renderText
+            renderOwnerEpoch = payload.renderOwnerEpoch
+        }
+    }
+
+    private struct ReductionReads: Equatable {
+        let payload: PayloadReads
+        let storedPayload: PayloadReads
+        let frameToApply: GhosttyRenderFrame?
+        let dropReason: String?
+        let didRequestResync: Bool
+
+        init(_ reduction: TerminalRemoteStateReductionResult) {
+            payload = PayloadReads(reduction.payload)
+            storedPayload = PayloadReads(reduction.storedPayload)
+            frameToApply = reduction.frameToApply
+            dropReason = reduction.dropReason
+            didRequestResync = reduction.didRequestResync
+        }
+    }
+
+    /// The reduction the payload's render update carried as an eagerly re-encoded blob: apply the
+    /// incoming update to the baseline, serialize the materialized full frame, and store *that* on the
+    /// payload. This is the behavior the payload's lazily encoded body has to reproduce read for read,
+    /// blob for blob, so it is spelled out here rather than trusted to the type under test.
+    private struct EagerlyEncodingReducer {
+        private var baseline: GhosttyRenderUpdateBaseline?
+
+        mutating func reduce(incomingPayload: GhosttyRemoteSessionStatePayload, previousPayload: GhosttyRemoteSessionStatePayload?)
+            -> TerminalRemoteStateReductionResult
+        {
+            let resolved = resolve(incomingPayload)
+            var dropReason = resolved.dropReason
+            if resolved.frame == nil, incomingPayload.renderUpdate != nil { dropReason = dropReason ?? "decode_failed" }
+            return TerminalRemoteStateReductionResult(
+                payload: resolved.payload, storedPayload: previousPayload?.merged(with: resolved.payload) ?? resolved.payload,
+                decodedUpdate: resolved.decodedUpdate, frameToApply: resolved.frame, dropReason: dropReason,
+                didRequestResync: resolved.dropReason != nil)
+        }
+
+        private mutating func resolve(_ payload: GhosttyRemoteSessionStatePayload) -> (
+            payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, frame: GhosttyRenderFrame?, dropReason: String?
+        ) {
+            guard payload.renderUpdate != nil else { return (payload, nil, nil, nil) }
+            guard let decodedUpdate = payload.decodedRenderUpdate else {
+                return (payload.replacingRenderUpdate(nil), nil, nil, "render_update_decode_failed")
+            }
+            do {
+                let applied = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: baseline)
+                baseline = applied
+                let frame = GhosttyRenderFrame(sessionRevision: applied.sessionRevision, ownerEpoch: applied.ownerEpoch, snapshot: applied.snapshot)
+                guard let encoded = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)) else {
+                    return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, nil)
+                }
+                return (payload.replacingRenderUpdate(encoded), decodedUpdate, frame, nil)
+            } catch {
+                baseline = nil
+                return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, TerminalRemoteStateReducer.renderUpdateDropReason(for: error))
+            }
+        }
+    }
+
+    private func eagerlyEncodedReads(for series: [(payload: GhosttyRemoteSessionStatePayload, isDirectFetch: Bool)]) -> [ReductionReads?] {
+        var reducer = EagerlyEncodingReducer()
+        var previousPayload: GhosttyRemoteSessionStatePayload?
+        return series.map { entry in
+            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return nil }
+            let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload)
+            previousPayload = reduction.storedPayload
+            return ReductionReads(reduction)
+        }
+    }
+
+    private func reads(for series: [(payload: GhosttyRemoteSessionStatePayload, isDirectFetch: Bool)]) -> [ReductionReads?] {
+        var reducer = TerminalRemoteStateReducer()
+        var previousPayload: GhosttyRemoteSessionStatePayload?
+        return series.map { entry in
+            guard entry.payload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return nil }
+            let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload, requestResyncOnApplyFailure: true)
+            previousPayload = reduction.storedPayload
+            return ReductionReads(reduction)
+        }
+    }
+
+    /// A reduced payload reads the same whether its render update is a materialized value or the blob a
+    /// re-encode produced, across a whole delta chain with a direct `.state` fetch and a clipboard write
+    /// interleaved: same bytes, same decoded update, same grid, same text, same owner epoch.
+    func testReducedPayloadReadsMatchTheEagerlyEncodedChain() throws {
+        let series = try streamingSeries(sessionID: "accessor-equivalence", frameCount: 24, fetchIndex: 9, clipboardIndex: 5)
+
+        let actual = reads(for: series)
+        XCTAssertEqual(actual, eagerlyEncodedReads(for: series))
+        XCTAssertTrue(
+            actual.compactMap { $0 }.allSatisfy { $0.storedPayload.renderUpdate != nil },
+            "every reduced payload in a clean chain must still yield wire bytes on demand")
+    }
+
+    /// The same equivalence where the chain breaks: a delta that cannot apply clears the render update
+    /// on its own payload while the stored payload carries the last good screen forward, and the resync
+    /// full frame re-seeds both. Those are the reads a resync round trip is decided on.
+    func testReducedPayloadReadsMatchTheEagerlyEncodedChainAcrossAResync() throws {
+        let first = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let second = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let third = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "charl"))
+        let firstToSecond = GhosttyRenderUpdateFactory.makeUpdate(target: second, baseline: GhosttyRenderUpdateBaseline(frame: first))
+        let secondToThird = GhosttyRenderUpdateFactory.makeUpdate(target: third, baseline: GhosttyRenderUpdateBaseline(frame: second))
+        let fourth = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 4, snapshot: snapshot(text: "delta"))
+        let thirdToFourth = GhosttyRenderUpdateFactory.makeUpdate(target: fourth, baseline: GhosttyRenderUpdateBaseline(frame: third))
+
+        let sessionID = "accessor-equivalence-resync"
+        let series: [(payload: GhosttyRemoteSessionStatePayload, isDirectFetch: Bool)] = [
+            (payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(first)), false),
+            (payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: secondToThird), false),
+            (payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.output, update: firstToSecond), false),
+            (corruptPayload(sessionID: sessionID, sequence: 3), false),
+            (payload(sessionID: sessionID, sequence: 4, reason: TerminalRemoteSessionStateReason.stateChange, update: .full(third)), true),
+            (payload(sessionID: sessionID, sequence: 5, reason: TerminalRemoteSessionStateReason.output, update: thirdToFourth), false),
+        ]
+
+        let actual = reads(for: series)
+        XCTAssertEqual(actual, eagerlyEncodedReads(for: series))
+        XCTAssertEqual(actual.map { $0?.dropReason }, [nil, "base_revision_mismatch", "missing_baseline", "render_update_decode_failed", nil, nil])
+        // A payload whose update dropped carries no update of its own, while the stored payload keeps the
+        // last screen that did apply, which is what a client renders until the resync lands.
+        XCTAssertEqual(actual.map { $0?.payload.hasRenderUpdate }, [true, false, false, false, true, true])
+        XCTAssertEqual(actual.map { $0?.storedPayload.renderText?.prefix(5) }, ["alpha", "alpha", "alpha", "alpha", "charl", "delta"])
+    }
+
+    /// A reduced payload is still a wire payload: serializing it produces the same JSON, under the same
+    /// key, that a payload holding the blob produced, and the round trip reads back identically.
+    func testReducedPayloadSerializesToTheSameWireBytes() throws {
+        let series = try streamingSeries(sessionID: "accessor-wire", frameCount: 6, fetchIndex: 3, clipboardIndex: 400)
+        var reducer = TerminalRemoteStateReducer()
+        var previousPayload: GhosttyRemoteSessionStatePayload?
+        for entry in series {
+            let reduction = reducer.reduce(incomingPayload: entry.payload, previousPayload: previousPayload, requestResyncOnApplyFailure: true)
+            previousPayload = reduction.storedPayload
+
+            let line = try GhosttyRemoteSessionStateCodec.encodeLine(reduction.storedPayload)
+            XCTAssertTrue(
+                String(decoding: line, as: UTF8.self).contains("\"renderUpdate\":\""), "the wire shape names the render update under renderUpdate")
+            let decoded = try GhosttyRemoteSessionStateCodec.decodeLine(line)
+            XCTAssertEqual(PayloadReads(decoded), PayloadReads(reduction.storedPayload))
+            XCTAssertEqual(decoded, reduction.storedPayload)
+        }
+    }
 
     // MARK: - Payload construction
 
@@ -481,6 +643,13 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
             sessionID: sessionID, reason: reason, emittedAt: emittedAt(sequence), sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1,
             screenStateRevision: UInt64(sequence + 1), runtimeState: nil, attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live",
             outputByteCount: nil, renderUpdate: try? GhosttyRenderUpdateBinaryCodec.encode(update))
+    }
+
+    private func corruptPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt(sequence),
+            sessionStateRevision: UInt64(sequence + 1), sessionStateFlags: 1, screenStateRevision: UInt64(sequence + 1), runtimeState: nil,
+            attachmentSnapshot: nil, title: "live", workingDirectory: "/tmp/live", outputByteCount: nil, renderUpdate: Data([0x00, 0x01, 0x02, 0x03]))
     }
 
     private func clipboardPayload(sessionID: String, sequence: Int) -> GhosttyRemoteSessionStatePayload {
