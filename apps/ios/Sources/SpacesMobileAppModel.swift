@@ -1707,20 +1707,33 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func clearPendingPairingLink() { pendingPairingLink = nil }
 
+    /// Raises the re-pair recovery surface for a request the daemon would not authenticate: drops the
+    /// stale overview, publishes `message` as the connection notice, and pushes Paired Devices.
+    ///
+    /// The credential deliberately survives. It is the same token the Keychain still holds, so clearing
+    /// it destroyed the only in-memory copy of something still on disk and, because the overview poll is
+    /// gated on `settings.isPaired`, left the app permanently "unpaired" for the rest of the process with
+    /// no retry that could ever prove otherwise. Keeping it means a failure that was really transport
+    /// trouble self-heals on the next poll, while a genuinely revoked device simply fails the next
+    /// request and lands back on this same screen. The connection itself is still reset, since the
+    /// address and socket that just failed are not worth trusting and the next request should re-race
+    /// every candidate. The client is not rebuilt: with the credential unchanged a rebuild would produce
+    /// an identical client and throw away the resolver state the recovery is about to use.
+    ///
+    /// Re-entrant by design: with the poll still running, a device that keeps rejecting this token calls
+    /// here every couple of seconds. `connectionNotice` is the episode marker, cleared by a successful
+    /// refresh, so the recovery surface is raised once per episode rather than pulling the user back to
+    /// Paired Devices every time they navigate away from it.
     func handleAuthenticationFailure(message: String) {
-        let previousCommandChannel = commandChannel
-        settings.authToken = ""
-        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
-        commandChannel = bridgeClient.makeCommandChannel()
+        guard connectionNotice != message else { return }
         overviewIdentity += 1
-        SpacesMobileSettingsStore.save(settings)
         overview = nil
         workspaceCreateOptions = nil
         connectionNotice = message
         pendingPairingLink = nil
         errorMessage = nil
         isShowingConnectionSettings = true
-        Task { await previousCommandChannel.close() }
+        resetActiveConnectionEndpoint()
     }
 
     func preparePairingLink(_ url: URL) { stagePairingLink { try SpacesDevicePairingLink.parse(url) } }
@@ -1829,8 +1842,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
             case .codingAgent(let agent):
                 guard let agentID = agent.agentID else { return }
-                response = try await bridgeClient.stopCodingAgent(
-                    workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
+                response = try await bridgeClient.stopCodingAgent(workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
             case .terminal(let terminal):
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(

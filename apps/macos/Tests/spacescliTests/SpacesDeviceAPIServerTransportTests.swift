@@ -1412,15 +1412,19 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         let finished = DispatchSemaphore(value: 0)
         let queue = DispatchQueue(label: "spaces.device.api.transport.outcome.test")
         let resultBox = DeviceAPITransportTestResultBox()
+        // Reported the way the clients report it: the verify block's own rejection, not the raw NWError.
+        // A `.failed` TLS state alone does not distinguish a refused pin from a dropped handshake, so a
+        // caller that wants the re-pair verdict has to carry this box.
+        let pinRejection = SpacesPinnedTLSPinRejection()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint, pinRejection: pinRejection))
 
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready: finished.signal()
             case .failed(let error):
-                resultBox.setError(error)
+                resultBox.setError(pinRejection.error ?? error)
                 finished.signal()
             default: break
             }

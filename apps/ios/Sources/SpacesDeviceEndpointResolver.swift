@@ -143,7 +143,8 @@ actor SpacesDeviceEndpointResolver {
         }
         let perCandidateTimeout = orderedHosts.count > 1 ? min(timeout, Self.perCandidateTimeoutCap) : timeout
 
-        switch await Self.race(hosts: orderedHosts, port: nwPort, certificateFingerprint: certificateFingerprint, timeout: perCandidateTimeout, queue: queue)
+        switch await Self.race(
+            hosts: orderedHosts, port: nwPort, certificateFingerprint: certificateFingerprint, timeout: perCandidateTimeout, queue: queue)
         {
         case .success(let host, let connection):
             cachedHost = host
@@ -156,7 +157,9 @@ actor SpacesDeviceEndpointResolver {
             // has a dedicated re-pair recovery flow — while "unreachable" just means try again later or
             // check Tailscale. Surfacing "unreachable" instead here would bury a genuine re-pair signal
             // and leave the caller silently retrying forever (`allCandidatesUnreachable` is treated as a
-            // transient, retryable error upstream).
+            // transient, retryable error upstream). Outranking the rest of the field is only sound
+            // because `attempt` reports a mismatch solely on the verify block's own rejection: a
+            // candidate that timed out or dropped mid-handshake no longer outvotes the others.
             if sawPinMismatch { throw SpacesDeviceAPIClientError.transportAuthenticationFailed }
             // No candidate answered and no pin mismatch was seen anywhere: name every address that was
             // tried and point at Tailscale, rather than surfacing whichever raw transport error happened
@@ -176,17 +179,11 @@ actor SpacesDeviceEndpointResolver {
     /// One candidate's outcome, before folding into `RaceOutcome` across the whole field.
     private enum CandidateOutcome: Sendable {
         case success(host: String, connection: NWConnection)
-        /// A pin mismatch (`pinMismatch: true`) can surface two different ways, both handled in
-        /// `attempt(...)`: the verify block can reject the certificate outright — Network.framework
-        /// reports that as a `.waiting` state carrying the rejection as its error rather than an outright
-        /// `.failed`, which `SpacesDeviceAPIConnectionSupport.waitUntilReady` already resolves immediately
-        /// rather than idling out the timeout (see its own documentation), so this sees it as a transport
-        /// error `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure` recognizes (most common
-        /// in practice); or the handshake can simply never complete while the address still accepts plain
-        /// TCP, which only a follow-up probe can tell apart from "nothing is listening there at all".
-        /// Anything else — nothing answered, or this attempt was cancelled by the race because another
-        /// candidate already won — is
-        /// `pinMismatch: false`.
+        /// `pinMismatch: true` means one thing only: this candidate's pinned-TLS verify block compared
+        /// the peer's certificate against the pin and rejected it. Everything else a failed attempt can
+        /// mean (nothing answered, the handshake stalled or was reset, the race cancelled this attempt
+        /// because another candidate already won) is `pinMismatch: false`, because none of it says
+        /// anything about the daemon's identity.
         case failure(pinMismatch: Bool)
     }
 
@@ -203,16 +200,15 @@ actor SpacesDeviceEndpointResolver {
     /// `group.cancelAll()` runs, since `SpacesDeviceAPIConnectionSupport.withTimeout` resumes a
     /// cancelled attempt by throwing into that same catch block. So by the time this function returns,
     /// no connection is left dangling.
-    private static func race(hosts: [String], port: NWEndpoint.Port, certificateFingerprint: String, timeout: Duration, queue: DispatchQueue)
-        async -> RaceOutcome
+    private static func race(hosts: [String], port: NWEndpoint.Port, certificateFingerprint: String, timeout: Duration, queue: DispatchQueue) async
+        -> RaceOutcome
     {
         await withTaskGroup(of: CandidateOutcome.self) { group in
             for (index, candidateHost) in hosts.enumerated() {
                 group.addTask {
-                    if index > 0 {
-                        do { try await Task.sleep(for: candidateStaggerDelay * index) } catch { return .failure(pinMismatch: false) }
-                    }
-                    return await attempt(host: candidateHost, port: port, certificateFingerprint: certificateFingerprint, timeout: timeout, queue: queue)
+                    if index > 0 { do { try await Task.sleep(for: candidateStaggerDelay * index) } catch { return .failure(pinMismatch: false) } }
+                    return await attempt(
+                        host: candidateHost, port: port, certificateFingerprint: certificateFingerprint, timeout: timeout, queue: queue)
                 }
             }
 
@@ -229,8 +225,7 @@ actor SpacesDeviceEndpointResolver {
                     }
                     winner = (host, connection)
                     group.cancelAll()
-                case .failure(let pinMismatch):
-                    if pinMismatch { sawPinMismatch = true }
+                case .failure(let pinMismatch): if pinMismatch { sawPinMismatch = true }
                 }
             }
             if let winner { return .success(host: winner.host, connection: winner.connection) }
@@ -241,32 +236,24 @@ actor SpacesDeviceEndpointResolver {
     /// One candidate's connect attempt: opens a pinned-TLS connection to `host` and waits for the
     /// handshake, capped at `timeout`. Always resolves to an outcome rather than throwing — `race`'s
     /// task group collects every candidate's result rather than tearing down on the first failure.
-    private static func attempt(host: String, port: NWEndpoint.Port, certificateFingerprint: String, timeout: Duration, queue: DispatchQueue)
-        async -> CandidateOutcome
+    private static func attempt(host: String, port: NWEndpoint.Port, certificateFingerprint: String, timeout: Duration, queue: DispatchQueue) async
+        -> CandidateOutcome
     {
-        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint)
+        let pinRejection = SpacesPinnedTLSPinRejection()
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint, pinRejection: pinRejection)
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
         do {
-            try await SpacesDeviceAPIConnectionSupport.waitUntilReady(connection, queue: queue, timeout: timeout)
+            try await SpacesDeviceAPIConnectionSupport.waitUntilReady(connection, queue: queue, timeout: timeout, pinRejection: pinRejection)
             return .success(host: host, connection: connection)
         } catch {
             connection.cancel()
-            // The common shape of a pin mismatch: the verify block rejects the certificate and the
-            // connection fails immediately with a transport error, not a timeout. Checked first — and
-            // via the same authority `SpacesDeviceAPIAuthentication.recoveryMessage(for:)` uses to route
-            // a raw transport failure into the re-pair flow — so this and that stay in agreement about
-            // what counts as "the pinned identity did not check out".
-            if SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) { return .failure(pinMismatch: true) }
-            // The other shape: an endpoint that accepts TCP and then stalls without ever completing or
-            // explicitly rejecting the handshake. A timed-out wait alone cannot distinguish that from
-            // "nothing is listening there", so this only classifies as a mismatch once the follow-up
-            // plain-TCP probe proves something answered.
-            if SpacesDeviceAPIConnectionSupport.isRequestTimedOut(error),
-                await SpacesDeviceAPIConnectionSupport.canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750))
-            {
-                return .failure(pinMismatch: true)
-            }
-            return .failure(pinMismatch: false)
+            // Identity comes from the verify block's own verdict, never from the shape of the failure.
+            // A handshake that stalled, dropped, or was reset never had a certificate to judge, so it
+            // counts as an unreachable candidate rather than a rejected pin. That is the ordinary result
+            // of racing candidates on a network that has not settled yet, which is exactly what a
+            // foreground resume produces. Only a peer that actually presented a certificate the pin
+            // refused reaches re-pair recovery.
+            return .failure(pinMismatch: pinRejection.error != nil)
         }
     }
 }
