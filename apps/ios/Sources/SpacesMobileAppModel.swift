@@ -970,7 +970,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// workspace terminal rows that are not in the overview's session list.
     func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
-        return runtimeRow(forSessionID: sessionID).flatMap(terminalSession(for:))
+        return runtimeRow(forSessionID: sessionID).flatMap { terminalSession(for: $0) }
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
@@ -2453,24 +2453,44 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesDeviceTerminalSessionSummary? {
+    /// Reads the model's currently published `overview` — the right data for every UI-facing caller,
+    /// which wants to know what the *app* currently shows. See `terminalSession(for:in:)` for a caller
+    /// that instead needs a specific fetch or mutation response's own evidence.
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesDeviceTerminalSessionSummary? { terminalSession(for: row, in: overview) }
+
+    /// A caller answering someone from a specific fetch or mutation response it already holds in hand —
+    /// evidence of what the daemon just did for that one caller's own action, independent of whether
+    /// this model's shared, published state happened to win its own ordering race (#450 review round 7)
+    /// — passes `searchOverview` explicitly instead of going through `terminalSession(for:)`.
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow, in searchOverview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         guard let sessionID = row.sessionID else { return nil }
-        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        if let session = searchOverview?.sessions.first(where: { $0.id == sessionID }) { return session }
         guard case .terminal(let terminalRow) = row.source else { return nil }
-        return terminalSession(from: terminalRow)
+        return terminalSession(from: terminalRow, in: searchOverview)
     }
 
     func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
         overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
     }
 
-    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? {
-        overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap(terminalSession(for:))
+    /// See `terminalSession(for:)`/`terminalSession(for:in:)`: reads the published `overview`.
+    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? { refreshedSession(forRowID: rowID, in: overview) }
+
+    /// See `terminalSession(for:in:)`: a caller reading its own fetch or mutation response's evidence
+    /// passes that overview explicitly instead of going through `refreshedSession(forRowID:)`.
+    func refreshedSession(forRowID rowID: String, in searchOverview: SpacesDeviceOverviewPayload?) -> SpacesDeviceTerminalSessionSummary? {
+        searchOverview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap {
+            terminalSession(for: $0, in: searchOverview)
+        }
     }
 
-    private func terminalSession(from row: SpacesDeviceWorkspaceTerminalRow) -> SpacesDeviceTerminalSessionSummary? {
+    private func terminalSession(from row: SpacesDeviceWorkspaceTerminalRow, in searchOverview: SpacesDeviceOverviewPayload?)
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         guard let sessionID = row.sessionID else { return nil }
-        let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
+        let workspace = searchOverview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
             id: sessionID, title: row.title, liveTitle: row.liveTitle, workingDirectory: row.workingDirectory, shell: "", command: nil,
@@ -2500,11 +2520,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             let response = try await operation()
             await applyMutationResponse(response, identity: identity)
-            // The connection changed while the mutation was in flight: the published overview belongs to
-            // the previous backend, so resolving a session from it would hand back the wrong device's row.
+            // The connection changed while the mutation was in flight: the response describes the
+            // previous backend, so resolving a session from it would hand back the wrong device's row.
             guard identity == overviewIdentity else { return nil }
-            if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
-            if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
+            // Resolved from `response.overview` — this mutation's own evidence of what it just did — not
+            // from the model's published `overview`. `applyMutationResponse` above gates its publish on
+            // `isOverviewFetchCurrent`, which answers a different question ("is this the freshest
+            // overview-derived fact right now") than the one this call owes its own caller ("did my own
+            // action produce a session"): a fresher, unrelated fetch (another mutation, a delete
+            // reconciliation, a timeout recovery) can bump `mutationGeneration` while this mutation's own
+            // `updateBrowserRoutes` await is suspended and make its publish lose that race even though
+            // the mutation itself fully succeeded. Reading `self.overview` here would then report a
+            // successful Run/Restart/Terminal as a failure — self-healing on the next poll, but only
+            // after the launch flow already showed the wrong answer (#450 review round 7).
+            if let sessionID = response.sessionID { return response.overview?.sessions.first(where: { $0.id == sessionID }) }
+            if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID, in: response.overview) }
             return nil
         } catch {
             guard identity == overviewIdentity else { return nil }
@@ -2649,7 +2679,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 refreshFailureStreak = nil
                 publishOverview(refreshedOverview)
             }
-            return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
+            // Resolved from `refreshedOverview` — this fetch's own evidence — not from the model's
+            // published `overview`, for the same reason `performMutationReturningSession` reads its
+            // `response.overview`: a fresher, unrelated overview-derived fact can win the publish race
+            // above even though this fetch genuinely found the session, and reading published state here
+            // would then report the timeout recovery as failed when it actually succeeded (#450 review
+            // round 7).
+            return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID, in: refreshedOverview))
         } catch { return nil }
     }
 

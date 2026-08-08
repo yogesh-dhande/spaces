@@ -1548,6 +1548,48 @@
             XCTAssertEqual(model.refreshedSession(forRowID: "process:process-api")?.id, "session-api")
         }
 
+        /// `terminalSession(for:in:)` and `refreshedSession(forRowID:in:)` are what
+        /// `performMutationReturningSession` and `reconciledSessionAfterMutationTimeout` read from to
+        /// answer whether their own action produced a session (#450 review round 7): both take the
+        /// overview to search explicitly, defaulting to the model's published one for every other,
+        /// UI-facing caller, so a caller instead holding a specific mutation response or reconciliation
+        /// fetch reads that data's own verdict regardless of whether the same overview also won its
+        /// publish race against a fresher, unrelated one.
+        ///
+        /// The genuine race this protects against has no test-reachable suspension point in this harness
+        /// to reproduce deterministically: it requires another overview-derived operation to bump
+        /// `mutationGeneration` between a response's own bump and its own publish check, and
+        /// `updateBrowserRoutes` — the only await in between — returns before reaching any await of its
+        /// own once `activeDeviceID` is nil (the same seam gap already reported for its internal
+        /// generation guard in review round 5). This tests the mechanism the fix relies on directly
+        /// instead: that the explicit overview wins over the published one, not that a race can be staged.
+        func testTerminalSessionForRowReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            // The model's published overview knows nothing about the new session yet — as it would not,
+            // had this mutation's publish lost its ordering race against a fresher, unrelated one.
+            model.overview = makeOverview()
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(newRow))
+
+            XCTAssertNil(model.terminalSession(for: row), "the published overview has no matching session")
+            XCTAssertEqual(model.terminalSession(for: row, in: responseOverview)?.id, "session-api-new")
+        }
+
+        func testRefreshedSessionForRowIDReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            model.overview = makeOverview()
+
+            XCTAssertNil(model.refreshedSession(forRowID: "process:template-api"), "the published overview has no matching row")
+            XCTAssertEqual(model.refreshedSession(forRowID: "process:template-api", in: responseOverview)?.id, "session-api-new")
+        }
+
         func testRuntimeRowLookupBySessionIgnoresVisibleFilters() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
