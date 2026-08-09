@@ -149,6 +149,155 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertTrue(reduction.didRequestResync)
     }
 
+    /// A direct `.state` response re-enters the reducer beside a stream that never stopped, so it has to
+    /// prove at the head of the queue that the session has not already moved past it. Same epoch, revision
+    /// not newer means the client is already there — equal revisions describe identical content — so the
+    /// response is refused rather than allowed to walk the chain backwards.
+    func testReducerDropsAnOutOfBandFrameThatIsNotNewerThanTheBaseline() throws {
+        for responseRevision in [UInt64(1), UInt64(2)] {
+            var reducer = TerminalRemoteStateReducer()
+            let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z")
+            let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+            XCTAssertEqual(streamedReduction.frameToApply?.snapshot, snapshot(text: "bravo"))
+
+            let response = try payload(text: "alpha", sessionRevision: responseRevision, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z")
+            let reduction = reducer.reduce(
+                incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+            XCTAssertNil(reduction.frameToApply, "revision \(responseRevision) is not newer than the baseline's 2")
+            XCTAssertEqual(reduction.dropReason, "stale_out_of_band_state")
+            XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "the stored state must keep the newer screen")
+            XCTAssertFalse(reduction.didRequestResync, "the baseline is intact and newer, so nothing is owed")
+        }
+    }
+
+    /// The other side: exporting state flushes the session's pending output into its surface without
+    /// broadcasting, so a response can be the only carrier of a strictly newer screen and must land.
+    func testReducerAppliesAnOutOfBandFrameNewerThanTheBaseline() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let response = try payload(text: "charl", sessionRevision: 3, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "charl"))
+        XCTAssertNil(reduction.dropReason)
+    }
+
+    /// Owner epochs only advance, so a response stamped with an older one describes a session generation
+    /// that has already been handed off; letting its frame through would replace the newer baseline and
+    /// leave every epoch-gated control request quoting a dead epoch.
+    func testReducerOrdersOutOfBandFramesByOwnerEpochBeforeRevision() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        // Older epoch, and a revision that would have passed on its own.
+        let staleEpochResponse = try payload(text: "alpha", sessionRevision: 9, ownerEpoch: 3, emittedAt: "2026-08-09T00:00:03Z")
+        let staleReduction = reducer.reduce(
+            incomingPayload: staleEpochResponse, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true,
+            isOutOfBand: true)
+        XCTAssertNil(staleReduction.frameToApply)
+        XCTAssertEqual(staleReduction.dropReason, "stale_out_of_band_state")
+        XCTAssertFalse(staleReduction.didRequestResync)
+
+        // Newer epoch, and a revision that would have been refused within one epoch.
+        let handoffResponse = try payload(text: "charl", sessionRevision: 1, ownerEpoch: 5, emittedAt: "2026-08-09T00:00:04Z")
+        let handoffReduction = reducer.reduce(
+            incomingPayload: handoffResponse, previousPayload: staleReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+        XCTAssertEqual(handoffReduction.frameToApply?.snapshot, snapshot(text: "charl"), "a handoff's own epoch machinery owns this case")
+    }
+
+    /// A frameless response still carries runtime state, ownership, title and working directory, and
+    /// merging a stale one reverts metadata that streamed while the read was in flight.
+    func testReducerDropsAFramelessOutOfBandPayloadThatIsNotNewer() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", title: "current")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let response = metadataPayload(emittedAt: "2026-08-09T00:00:01Z", title: "stale")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.dropReason, "stale_out_of_band_state")
+        XCTAssertEqual(reduction.storedPayload.title, "current")
+        XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "refusing the metadata must not disturb the screen either")
+        XCTAssertFalse(reduction.didRequestResync)
+    }
+
+    func testReducerMergesAFramelessOutOfBandPayloadThatIsNewer() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", title: "current")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let response = metadataPayload(emittedAt: "2026-08-09T00:00:03Z", title: "fresh")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertEqual(reduction.storedPayload.title, "fresh")
+        XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "a metadata-only merge carries the stored screen forward")
+    }
+
+    /// `emittedAt` is millisecond-resolution, so a tie says the session answered in the same instant it
+    /// broadcast — not that the response repeats it. Ties are kept, matching the ordering guard the device
+    /// state model applies to the same field.
+    func testReducerKeepsAFramelessOutOfBandPayloadStampedInTheSameInstant() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", title: "current")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let response = metadataPayload(emittedAt: "2026-08-09T00:00:02Z", title: "same instant")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertEqual(reduction.storedPayload.title, "same instant")
+    }
+
+    /// A response reporting the session ended is the session's final word, not one screen update among
+    /// many. Ordering it away would leave the pane believing a dead session is live, so it lands even when
+    /// every ordering field says it is behind.
+    func testReducerNeverRefusesAnOutOfBandPayloadReportingTheSessionEnded() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 5, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:05Z")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let exited = TerminalSessionRuntimeState(
+            sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-08-09T00:00:01Z",
+            exitedAt: "2026-08-09T00:00:01Z")
+        let finalFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "final"))
+        let response = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-08-09T00:00:01Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exited, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(finalFrame)))
+
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "final"))
+        XCTAssertNil(reduction.dropReason)
+    }
+
+    private func payload(text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t") throws
+        -> GhosttyRemoteSessionStatePayload
+    {
+        let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+        return GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
+            sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil, attachmentSnapshot: nil, title: title,
+            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+    }
+
+    private func metadataPayload(emittedAt: String, title: String) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt, sessionStateRevision: nil,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+            workingDirectory: "/tmp/alpha", outputByteCount: nil)
+    }
+
     func testReducerReportsDecodeFailureForCorruptRenderUpdate() {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(

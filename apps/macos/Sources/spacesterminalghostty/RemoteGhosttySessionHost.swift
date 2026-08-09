@@ -110,13 +110,6 @@
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
-        /// Counts the render frames this host has applied. A `.state` fetch snapshots it when it is issued,
-        /// so its completion can tell whether anything painted while the read was in flight; see
-        /// `shouldApplyFetchedRenderPayload`.
-        private var appliedRenderFrameGeneration: UInt64 = 0
-        /// Where the last applied frame sits in the session's order, recorded with the generation bump
-        /// above so a late `.state` response can be compared against what the pane is actually showing.
-        private var lastAppliedRenderFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)?
         private var lastRenderUpdateResyncAt: Date?
         /// The one delayed `.state` request owed to a resync the throttle turned away; see
         /// `scheduleTrailingRenderUpdateResync`.
@@ -571,39 +564,11 @@
             pendingRenderUpdateResyncTask = nil
         }
 
-        /// Whether a `.state` response's render payload is still worth applying.
-        ///
-        /// A response describes the screen as it was when the session answered, and the render-update
-        /// applier takes any full frame whatever revision it carries, so a response that lost the race with
-        /// the subscription would walk the pane back to an older picture. But arrival order alone cannot
-        /// decide that: exporting state flushes the session's pending output into its surface WITHOUT
-        /// broadcasting and without moving the stream's delta baseline, so the frame a read returns can be
-        /// strictly newer than anything the subscription has sent — and nothing is coming to repeat it.
-        /// Ordering is therefore by revision, which the daemon advances monotonically per session within an
-        /// owner epoch (and never reuses for different content: `renderFrameRevision` bumps rather than
-        /// letting two screens share a revision).
-        ///
-        /// So the payload is dropped in exactly one case: a frame applied while the read was in flight, the
-        /// response belongs to the same owner epoch as that frame, and its revision is not newer — equal
-        /// means identical content, older means superseded. Everything else is applied: a strictly newer
-        /// revision is the flush-without-broadcast window above, a different owner epoch belongs to the
-        /// handoff machinery rather than to this comparison, and a missing revision on either side cannot be
-        /// ordered at all. Dropping costs nothing that is owed, either — the same apply that moved the
-        /// generation retired any delayed resync.
-        private func shouldApplyFetchedRenderPayload(_ payload: GhosttyRemoteSessionStatePayload, issuedAtRenderFrameGeneration: UInt64) -> Bool {
-            guard appliedRenderFrameGeneration != issuedAtRenderFrameGeneration else { return true }
-            guard let applied = lastAppliedRenderFrameOrdering, let response = payload.renderFrameOrdering else { return true }
-            guard response.ownerEpoch == applied.ownerEpoch else { return true }
-            guard let appliedRevision = applied.sessionRevision, let responseRevision = response.sessionRevision else { return true }
-            return responseRevision > appliedRevision
-        }
-
         private func requestDirectStateFetch() {
             guard let terminalServiceRequestSender else { return }
             guard !directStateFetchInFlight else { return }
             directStateFetchInFlight = true
             let sessionID = launchConfiguration.sessionID
-            let issuedAtRenderFrameGeneration = appliedRenderFrameGeneration
             Task { @MainActor [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     Self.fetchDirectState(sessionID: sessionID, requestSender: terminalServiceRequestSender)
@@ -616,12 +581,11 @@
                     // and acknowledged whatever happens to the render payload below — dropping them would
                     // lose events no later broadcast repeats.
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
-                    guard self.shouldApplyFetchedRenderPayload(fetchResult.payload, issuedAtRenderFrameGeneration: issuedAtRenderFrameGeneration)
-                    else { return }
                     // Through the same pipeline as the subscription's payloads: a fetched full frame is
                     // the head of a new render-update chain, so it must not overtake a delta already
-                    // queued behind it.
-                    self.submitToStatePipeline(fetchResult.payload)
+                    // queued behind it. Marked out-of-band so the reducer can refuse it if the stream has
+                    // already carried the session past what this read captured.
+                    self.submitToStatePipeline(fetchResult.payload, isOutOfBand: true)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
                         "terminal_remote_state_fetch", target: "session=\(sessionID)", elapsedMS: 0, success: false,
@@ -671,9 +635,13 @@
         /// Hands a payload to the reduction pipeline, noting first whether it carries a full frame this
         /// host has yet to apply (see `pendingFullFrameSubmission`). The note is taken *before* the submit
         /// because the apply that retires it can land as soon as the payload is in.
-        private func submitToStatePipeline(_ payload: GhosttyRemoteSessionStatePayload) {
+        ///
+        /// `isOutOfBand` marks the response to a direct `.state` read, which the reducer orders against its
+        /// own baseline when the payload reaches the head of the queue — the only place that can see a
+        /// newer stream payload submitted ahead of it and still reducing.
+        private func submitToStatePipeline(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool = false) {
             if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
-            statePipeline.submit(payload)
+            statePipeline.submit(payload, isOutOfBand: isOutOfBand)
         }
 
         private func isInteractiveRuntimeStateForControl() -> Bool {
@@ -720,13 +688,7 @@
             // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
             // filled is no longer owed. Ordered after the request above so an output that both carries a
             // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
-            // The generation bump, and the ordering recorded with it, are what let an in-flight `.state`
-            // read tell whether it was overtaken.
-            if let frameForUpdate {
-                appliedRenderFrameGeneration &+= 1
-                lastAppliedRenderFrameOrdering = (frameForUpdate.sessionRevision, frameForUpdate.ownerEpoch)
-                cancelTrailingRenderUpdateResync()
-            }
+            if frameForUpdate != nil { cancelTrailingRenderUpdateResync() }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served

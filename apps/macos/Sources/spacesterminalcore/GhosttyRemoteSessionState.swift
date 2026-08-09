@@ -153,11 +153,6 @@ extension GhosttyRemoteSessionStatePayload {
     /// or when the one there is cannot be classified, which callers treat the same as "not a full frame".
     public var renderUpdateKind: GhosttyRenderUpdateKind? { renderUpdateBody?.kind }
 
-    /// Where a carried full frame sits in the session's order: the revision it describes and the owner
-    /// epoch it belongs to, read from the update's header rather than by decoding its cells. Nil unless the
-    /// payload carries a classifiable full frame, so a caller that cannot order one leaves it alone.
-    public var renderFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)? { renderUpdateBody?.fullFrameOrdering }
-
     public var renderSnapshot: GhosttyTerminalSnapshot? { decodedRenderUpdate?.fullFrame?.snapshot }
 
     public var renderText: String? {

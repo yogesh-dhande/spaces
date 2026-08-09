@@ -98,10 +98,20 @@ public struct TerminalRemoteStateReducer: Sendable {
 
     public mutating func resetRenderUpdateBaseline() { renderUpdateBaseline = nil }
 
+    /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
+    ///   response to a direct `.state` read. Such a payload was captured at request time and can reach
+    ///   this reducer after the stream has already carried the session past it, so it must prove it is not
+    ///   stale before it is allowed to move the chain (see `staleOutOfBandReduction`). Nothing on the wire
+    ///   marks one: a fetch response is stamped `initial`, the same reason a fresh subscriber's unicast
+    ///   initial carries, so provenance is passed in by the caller that made the request.
     public mutating func reduce(
         incomingPayload: GhosttyRemoteSessionStatePayload, previousPayload: GhosttyRemoteSessionStatePayload?,
-        shouldUseFrame: (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool = { _, _ in true }, requestResyncOnApplyFailure: Bool = false
+        shouldUseFrame: (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool = { _, _ in true }, requestResyncOnApplyFailure: Bool = false,
+        isOutOfBand: Bool = false
     ) -> TerminalRemoteStateReductionResult {
+        if isOutOfBand, let staleReduction = staleOutOfBandReduction(incomingPayload: incomingPayload, previousPayload: previousPayload) {
+            return staleReduction
+        }
         let resolved = payloadByResolvingRenderUpdate(incomingPayload)
         var payload = resolved.payload
         var dropReason = resolved.dropReason
@@ -120,14 +130,83 @@ public struct TerminalRemoteStateReducer: Sendable {
             dropReason = dropReason ?? "decode_failed"
         }
         let storedPayload = previousPayload?.merged(with: payload) ?? payload
-        // Every drop asks for a resync, the caller's veto above included: whichever way the frame was
-        // lost, the client is left with a picture the session has already moved past and nothing on the
-        // client ever rebuilds it on its own. The request is the only thing that makes the session
+        // Every drop reaching here asks for a resync, the caller's veto above included: whichever way the
+        // frame was lost, the client is left with a picture the session has already moved past and nothing
+        // on the client ever rebuilds it on its own. The request is the only thing that makes the session
         // re-send a full frame; the caller paces it (see `RemoteGhosttySessionHost`'s once-per-second
-        // throttle), so a run of vetoed frames costs one round trip, not one each.
+        // throttle), so a run of vetoed frames costs one round trip, not one each. The one drop that does
+        // NOT ask is the stale out-of-band refusal above, which returns before this: it discards a frame
+        // the client is already past rather than losing one it needed, so nothing is owed.
         return TerminalRemoteStateReductionResult(
             payload: payload, storedPayload: storedPayload, decodedUpdate: resolved.decodedUpdate, frameToApply: frameToApply, dropReason: dropReason,
             didRequestResync: requestResyncOnApplyFailure && dropReason != nil)
+    }
+
+    /// The reduction a stale out-of-band payload gets: nothing moves.
+    ///
+    /// A direct `.state` read answers with the screen and metadata as they were when the session was
+    /// asked, and it re-enters here beside a stream that never stopped. Ordering it by arrival cannot
+    /// work — a newer stream payload may already be queued ahead of it — so it is ordered here, at the
+    /// head of the queue, against the state this reducer has actually reduced.
+    ///
+    /// A carried full frame is stale when it belongs to an older owner epoch (epochs only advance, so a
+    /// lower one describes a session generation that has been handed off) or when it sits at or below the
+    /// baseline's revision in the same epoch (the daemon advances revisions monotonically per session and
+    /// never lets two different screens share one, so equal means identical content). Anything else is
+    /// applied — a strictly newer revision matters because a `.state` export flushes pending output into
+    /// the session's surface without broadcasting, making that response the only carrier of the screen it
+    /// describes.
+    ///
+    /// A frameless response is ordered by `emittedAt` instead, because nothing else it carries is
+    /// reliably ordered: attachment-only updates and Linux payloads reuse the prior revisions
+    /// (`DeviceTerminalSessionStateModel.apply` documents the same finding and orders on the same field).
+    /// One daemon stamps every payload for a session, so the comparison is against a single clock; a
+    /// backwards step of that wall clock is the known caveat, and its cost is one dropped metadata
+    /// refresh that the next payload supersedes.
+    ///
+    /// The drop deliberately does NOT request a resync, unlike every other drop in `reduce` (see the note
+    /// there): those lose a frame the client needed, while this one refuses a frame the client is already
+    /// past. The baseline is intact and newer, so nothing is owed.
+    private func staleOutOfBandReduction(incomingPayload: GhosttyRemoteSessionStatePayload, previousPayload: GhosttyRemoteSessionStatePayload?)
+        -> TerminalRemoteStateReductionResult?
+    {
+        // With nothing reduced yet there is nothing to be stale against, and nothing to keep instead.
+        guard let previousPayload else { return nil }
+        // A response reporting the session is no longer interactive is never refused. It is the session's
+        // final word rather than one screen update among many, and ordering it away would leave the pane
+        // believing a dead session is live — the opposite of the regression this guard prevents.
+        guard incomingPayload.runtimeState?.state.isInteractive != false else { return nil }
+        let isStale: Bool
+        if incomingPayload.hasRenderUpdate {
+            guard let baseline = renderUpdateBaseline, let frame = incomingPayload.decodedRenderUpdate?.fullFrame else { return nil }
+            isStale = Self.isStale(frame: frame, against: baseline)
+        } else {
+            isStale = Self.isStaleMetadata(incomingPayload, against: previousPayload)
+        }
+        guard isStale else { return nil }
+        return TerminalRemoteStateReductionResult(
+            payload: incomingPayload, storedPayload: previousPayload, decodedUpdate: nil, frameToApply: nil, dropReason: "stale_out_of_band_state",
+            didRequestResync: false)
+    }
+
+    private static func isStale(frame: GhosttyRenderFrame, against baseline: GhosttyRenderUpdateBaseline) -> Bool {
+        if frame.ownerEpoch != baseline.ownerEpoch { return frame.ownerEpoch < baseline.ownerEpoch }
+        // An unrevisioned frame on either side cannot be ordered, so it is left to apply as it did before
+        // this guard existed.
+        guard let frameRevision = frame.sessionRevision, let baselineRevision = baseline.sessionRevision else { return false }
+        return frameRevision <= baselineRevision
+    }
+
+    private static func isStaleMetadata(_ payload: GhosttyRemoteSessionStatePayload, against previousPayload: GhosttyRemoteSessionStatePayload)
+        -> Bool
+    {
+        guard let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt),
+            let previousEmittedAt = GhosttyRemoteSessionStateTimestamp.date(from: previousPayload.emittedAt)
+        else { return false }
+        // Strictly older only. `emittedAt` has millisecond resolution, so a tie is as likely to mean "the
+        // session answered in the same instant it broadcast" as "this is a repeat" — and the model's own
+        // ordering guard (`DeviceTerminalSessionStateModel.apply`) keeps ties for the same reason.
+        return emittedAt < previousEmittedAt
     }
 
     private mutating func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
