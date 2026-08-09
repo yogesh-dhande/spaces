@@ -111,6 +111,15 @@
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
         private var lastRenderUpdateResyncAt: Date?
+        /// The one delayed `.state` request owed to a resync the throttle turned away; see
+        /// `scheduleTrailingRenderUpdateResync`.
+        private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+        /// How long one resync request paces the next. Only a test overrides it
+        /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its
+        /// boundary instead of waiting out a real second.
+        private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
+        var renderUpdateResyncIntervalForTesting: TimeInterval?
+        private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
         /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
@@ -197,6 +206,7 @@
                 directStateStreamClient?.stop()
                 pendingViewportSettleTask?.cancel()
                 pendingViewportResizeTask?.cancel()
+                pendingRenderUpdateResyncTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
             }
@@ -487,11 +497,47 @@
         /// daemon's subscription socket, so an unthrottled retry loop floods the daemon with
         /// unicast initial exports without converging; space the retries so the stream's own
         /// recovery (the forced full-frame broadcast) can land in between.
+        ///
+        /// The throttle paces requests; it never discards one. A `.state` read can answer with no render
+        /// update at all — the session exports none while its capture holds nothing visible — and it stamps
+        /// the throttle just the same, so the next reducer-required resync can land inside a window that
+        /// repaired nothing. Dropping it there would leave a session that emits one delta and goes quiet
+        /// with a blank pane until some unrelated later event, so a suppressed request arms exactly one
+        /// delayed retry at the window boundary instead.
         private func requestRenderUpdateStateResync() {
             let now = Date()
-            if let lastRenderUpdateResyncAt, now.timeIntervalSince(lastRenderUpdateResyncAt) < 1 { return }
+            if let lastRenderUpdateResyncAt {
+                let elapsed = now.timeIntervalSince(lastRenderUpdateResyncAt)
+                if elapsed < renderUpdateResyncInterval {
+                    scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed)
+                    return
+                }
+            }
             lastRenderUpdateResyncAt = now
             requestDirectStateFetch()
+        }
+
+        /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
+        /// while this is pending is already covered by it, so it must not stack a competing timer. Cleared
+        /// when it fires, when a frame lands (`applyReducedState`), and when the host is torn down
+        /// (`deinit`), alongside the pane's other pending tasks — so a dead host can never dial the device.
+        private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
+            guard pendingRenderUpdateResyncTask == nil else { return }
+            pendingRenderUpdateResyncTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                self.pendingRenderUpdateResyncTask = nil
+                // An ended pane showing its own scrollback replay renders from the transcript, not from
+                // session state, so a fetch here would repair nothing it displays.
+                guard !self.isEndedScrollbackReplayActive else { return }
+                self.lastRenderUpdateResyncAt = Date()
+                self.requestDirectStateFetch()
+            }
+        }
+
+        private func cancelTrailingRenderUpdateResync() {
+            pendingRenderUpdateResyncTask?.cancel()
+            pendingRenderUpdateResyncTask = nil
         }
 
         private func requestDirectStateFetch() {
@@ -608,6 +654,10 @@
             if output.requestsResync { requestRenderUpdateStateResync() }
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
+            // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
+            // filled is no longer owed. Ordered after the request above so an output that both carries a
+            // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
+            if frameForUpdate != nil { cancelTrailingRenderUpdateResync() }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
