@@ -207,7 +207,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// session's flush rate.
     @ObservationIgnored private var submittedStateCount: UInt64 = 0
     @ObservationIgnored private var appliedStateCount: UInt64 = 0
-    @ObservationIgnored private var stateApplyWaiters: [(target: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
+    @ObservationIgnored private var stateApplyWaiters:
+        [(target: UInt64, continuation: CheckedContinuation<TerminalRemoteStateReductionOutput, Never>)] = []
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
@@ -1417,7 +1418,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // describing the session as it was when it was asked, re-entering beside a subscription that
             // never stopped. The reducer orders it against what it has already reduced, so one that was
             // overtaken by the stream refuses rather than regressing the screen or the metadata.
-            if applyToLatestState { await applyLatestState(fetchedState, isOutOfBand: true) }
+            if applyToLatestState {
+                let output = await applyLatestState(fetchedState, isOutOfBand: true)
+                // Nil is the honest answer for a response the reducer refused whole: it judged this
+                // payload stale against state the stream has already delivered, so there is no usable
+                // state in it for anyone. Returning it raw is what let callers derive state the apply
+                // itself refuses to derive — the ownership handshake seeding the owner render epoch (and
+                // with it the epoch every input and resize request quotes) from a superseded session
+                // generation, and the ended-state recovery reading a delayed exit report from a run that
+                // has already been relaunched as this session being dead. A caller reading nil as "the
+                // fetch answered nothing" is exactly right: it falls back to what it already holds, or
+                // reports no recovery, which is what a refusal means.
+                if output.reduction?.isRefusedOutOfBandPayload == true {
+                    trace("fetch_state_refused reason=\(reason)")
+                    return nil
+                }
+            }
             return fetchedState
         } catch {
             trace(
@@ -1993,44 +2009,52 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         statePipeline.submit(payload, isOutOfBand: isOutOfBand)
     }
 
-    /// Submits `payload` and returns once the pipeline has applied it (or folded it into a later apply).
+    /// Submits `payload` and returns the pipeline output that accounted for it, once that apply has run.
     /// The routes that read this model's own state immediately afterwards use this rather than
     /// `submitLatestState`: takeover asks whether it actually became the owner, and the connect
     /// bootstrap asks whether it is still connecting, and an apply that had not landed yet would answer
     /// both from the state the payload was meant to replace.
-    func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool) async {
+    ///
+    /// The returned output is what the fetch route reads the reduction's verdict from
+    /// (`refreshLatestState`), so how exactly it corresponds to `payload` matters. In general an apply
+    /// stands for itself plus every submission the mailbox coalesced into it, so a waiter can be released
+    /// by a later output than its own. It cannot happen here: a `.state` response is stamped `initial`
+    /// (a live session's export) or `terminated` (an ended one's), and neither is output-shaped, which
+    /// makes it a coalescing barrier in both directions — `ApplyMailbox.mayCollapse` requires the
+    /// incoming output AND the pending one to be coalescible. So a fetch's output covers exactly its own
+    /// submission, and the verdict read off it is that payload's own.
+    ///
+    /// The waiter is registered before the submit rather than after, so there is no window to guard: this
+    /// body runs synchronously on the main actor (`withCheckedContinuation` inherits the caller's
+    /// isolation and nothing here suspends), and the mailbox drain that resumes waiters always hops
+    /// through a `Task`, so no apply can land between the two lines below.
+    @discardableResult func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool) async
+        -> TerminalRemoteStateReductionOutput
+    {
         let target = submittedStateCount + 1
-        submitLatestState(payload, isOutOfBand: isOutOfBand)
-        await withCheckedContinuation { continuation in
-            // Defensive, not a race guard: `withCheckedContinuation` inherits the caller's main-actor
-            // isolation, so this body runs synchronously in the same run as `submitLatestState` above, and
-            // `appliedStateCount < target` holds by construction here. The mailbox drain that would advance
-            // `appliedStateCount` always hops through a `Task`, so it cannot land in this gap. Kept as a
-            // guard anyway so the invariant stays checked rather than assumed.
-            guard appliedStateCount < target else {
-                continuation.resume()
-                return
-            }
+        return await withCheckedContinuation { continuation in
             stateApplyWaiters.append((target: target, continuation: continuation))
+            submitLatestState(payload, isOutOfBand: isOutOfBand)
         }
     }
 
     /// Accounts one apply against every submission it stands for, and releases whoever was waiting on
-    /// those submissions. Runs for every output the pipeline hands back, including the ones a stopped
-    /// model drops, so a stop can never strand an `applyLatestState` caller.
-    private func noteStateApplied(coalescedAwayCount: Int) {
-        appliedStateCount += UInt64(coalescedAwayCount) + 1
+    /// those submissions with the output that covered them. Runs for every output the pipeline hands
+    /// back, including the ones a stopped model drops, so a stop can never strand an `applyLatestState`
+    /// caller.
+    private func noteStateApplied(_ output: TerminalRemoteStateReductionOutput) {
+        appliedStateCount += UInt64(output.coalescedAwayCount) + 1
         guard !stateApplyWaiters.isEmpty else { return }
         let applied = appliedStateCount
         let released = stateApplyWaiters.filter { $0.target <= applied }
         stateApplyWaiters.removeAll { $0.target <= applied }
-        for waiter in released { waiter.continuation.resume() }
+        for waiter in released { waiter.continuation.resume(returning: output) }
     }
 
     /// Applies one payload the pipeline reduced. Everything left here needs the main actor: the model's
     /// observable state, the clipboard one-shot, the resync request, and the metrics.
     private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
-        defer { noteStateApplied(coalescedAwayCount: output.coalescedAwayCount) }
+        defer { noteStateApplied(output) }
         let incomingPayload = output.incomingPayload
         // The one-shot runs first and unconditionally, ahead of the stop guard below: a clipboard write is
         // an event, not state, and the direct `.state` refresh runs alongside the live subscription, so a

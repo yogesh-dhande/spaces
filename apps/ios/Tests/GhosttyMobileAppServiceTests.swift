@@ -1401,6 +1401,94 @@
             XCTAssertTrue(didDetach, "a refused payload's attachment snapshot must not clear this viewer's own attachment")
         }
 
+        /// The apply is not the only consumer of a `.state` response. `refreshLatestState` hands its return
+        /// to the ownership handshake, which bootstraps the owner render epoch from it — and that epoch is
+        /// what every input and resize request this viewer sends quotes. A refused response describes a
+        /// session generation the stream has already left behind, so an epoch begun from it would stamp
+        /// control requests with a number the daemon has moved past until some later stream frame reseeded
+        /// it. The refusal has to reach the caller, not just the apply.
+        func testAnOwnerBootstrapDoesNotBeginItsRenderEpochFromARefusedStateResponse() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // Answered before the handoff that made this client the owner, so its frame carries an older
+            // owner epoch and the reducer refuses the whole payload. Its snapshot matches the viewport set
+            // below, which is exactly what makes it look like usable bootstrap state to anything reading
+            // the response rather than the reduction.
+            let staleResponse = Self.terminalStateResponse(
+                try Self.framedState(text: "pre-handoff", sessionRevision: 9, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:40Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return staleResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:46Z"))
+            }
+            // A starting session, so no automatic takeover races the one below, and the ownership handshake
+            // it schedules is the only thing that reads `.state`.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The stream's own frame, which is what the response above is ordered against.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            await model.takeOver()
+            XCTAssertTrue(model.isOwner, "the handshake under test only runs for an owner")
+            // Drives the handshake's resize round trip, and sizes the viewport so the frame this viewer
+            // already holds cannot serve as bootstrap state: the fetched one is the only candidate.
+            model.updateViewportSize(columns: 11, rows: 1)
+
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the handshake must have actually read state to bootstrap from")
+            // The handshake asks again instead of settling, because a refused response bootstrapped
+            // nothing and this owner still has no baseline to render from. The mock answers every read
+            // with the same stale payload, so the retries continue for as long as the model lives; a real
+            // session answers the next read with its current frame and the handshake settles on that.
+            let didAskAgain = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didAskAgain, "a refused response is not a bootstrap, so the handshake must ask again rather than settle on it")
+            XCTAssertNil(model.ownerRenderEpoch, "a refused response carries no usable owner state, so no epoch may be begun from it")
+        }
+
+        /// The other family that reads a `.state` return: the recovery that asks whether the session it
+        /// just failed to reach is simply gone. The reducer refuses an ended report only when it is
+        /// provably answering for a superseded run — a different child PID, stamped older than what the
+        /// stream already delivered — which is precisely the delayed exit report of a run that has since
+        /// been relaunched. Believed, it would retire the failure as "this session ended" and leave the
+        /// viewer parked on a live session it stopped reconnecting to.
+        func testARefusedExitReportFromASupersededRunDoesNotEndTheSession() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let exitReportResponse = Self.terminalStateResponse(
+                Self.runState(childPID: 199, state: .exited, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:40Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return exitReportResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .attach else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                // The attach the connect below starts with, answered for the run that already exited.
+                return SpacesDeviceAPIResponse(ok: false, message: "The terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The relaunched run as the stream reported it: a newer stamp, and a different child PID from
+            // the exit report the read above answers with.
+            await model.applyLatestState(
+                Self.runState(childPID: 200, state: .starting, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T14:23:45Z"),
+                isOutOfBand: false)
+
+            model.start()
+
+            // A viewer that accepted the exit report reports nothing and schedules no reconnect: it
+            // believes the session it is looking at is over. Surfacing the connect failure is what says
+            // the refusal reached the caller.
+            await waitUntil("the failed connect to be reported") { model.errorMessage != nil }
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertGreaterThanOrEqual(stateRequestCount, 1, "the recovery must have actually read state")
+        }
+
         /// The takeover response is the exception: it is the acknowledgment of a mutation this client just
         /// made and the only carrier of the attachment snapshot that names this device the owner, so it is
         /// submitted in band. Ordered as a `.state` response would be, a stream payload that raced it would
@@ -1554,6 +1642,19 @@
             return GhosttyTerminalSnapshot(
                 columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
                 defaultBackgroundRGB: 0x000000, cells: cells)
+        }
+
+        /// A payload carrying runtime state and nothing else, which is what the reducer orders one run
+        /// against another by: `childPID` tells the runs apart, `emittedAt` says which is older.
+        private nonisolated static func runState(childPID: Int32, state: TerminalSessionState, reason: String, emittedAt: String)
+            -> GhosttyRemoteSessionStatePayload
+        {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: reason, emittedAt: emittedAt, sessionStateRevision: nil, sessionStateFlags: nil,
+                screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: childPID, state: state, updatedAt: emittedAt), attachmentSnapshot: nil,
+                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
         /// A payload whose attachment snapshot names `clientID` the session's owner, as a takeover response
