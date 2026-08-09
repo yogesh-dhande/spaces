@@ -22,6 +22,9 @@ struct TerminalDetailView: View {
     @State private var hasMountedTerminalSurface = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
+    /// The row awaiting Stop confirmation from the toolbar menu. A separate state from `SpacesTabView`'s
+    /// `pendingStop` because this is a different view with no shared owner to hold it.
+    @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
@@ -120,7 +123,19 @@ struct TerminalDetailView: View {
                 item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
             ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
                 TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
+            }.confirmationDialog(
+                pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
+                presenting: pendingStopRow
+            ) { row in
+                Button("Stop", role: .destructive) { Task { await appModel.stop(row: row) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text(StopConfirmationCopy.rowMessage)
             }.onDisappear { model.stop() }
+    }
+
+    private var pendingStopDialogBinding: Binding<Bool> {
+        Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } })
     }
 
     private var linkPreviewBannerOverlay: some View {
@@ -199,7 +214,7 @@ struct TerminalDetailView: View {
                     }
                     if row.canStopFromTerminalDetail {
                         Button(role: .destructive) {
-                            Task { await appModel.stop(row: row) }
+                            pendingStopRow = row
                         } label: {
                             Label("Stop", systemImage: "stop.fill")
                         }.disabled(appModel.isMutating)
