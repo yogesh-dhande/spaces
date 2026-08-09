@@ -2552,6 +2552,47 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the retried frame paints") { host.snapshotText() == "alpha" }
     }
 
+    /// The open-throttle sibling of the case above: a resync required AFTER the window has expired, while
+    /// the attach's read is still in flight, must also stay owed. The unthrottled path used to stamp the
+    /// throttle and call straight into the fetch, which refused on the in-flight guard — consuming the
+    /// request unsent, the same swallowed resync one branch over.
+    @MainActor func testResyncRequiredAfterTheWindowWhileAFetchIsInFlightStaysOwed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-resync-open-throttle-in-flight"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        // The held first read answers with no render update; only a later read carries the frame.
+        let sender = HeldStateRequestSender(payloads: [framelessPayload(for: fixture), fixture.payload])
+        defer { sender.releaseHeldState() }
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        host.renderUpdateResyncIntervalForTesting = 0.2
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        // The attach's eager resync stamps the throttle and its read is held open.
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
+
+        // Let the throttle window expire with the read still held, THEN fail a reduction: the resync
+        // request takes the unthrottled path while the fetch is still in flight.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        subscriber.emit(try deltaPayloadWithoutABaseline(sessionID: sessionID, runtimeState: fixture.payload.runtimeState))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(sender.stateRequestCount, 1, "the in-flight read is what the resync ran into")
+
+        // The held read finally answers, with nothing to paint, and the session goes quiet.
+        sender.releaseHeldState()
+
+        waitForCondition("the still-owed resync fires once the link is free") { sender.stateRequestCount >= 2 }
+        waitForCondition("the retried frame paints") { host.snapshotText() == "alpha" }
+    }
+
     /// The other direction: a trailing retry is owed only while the pane still needs it. A full frame that
     /// lands before the boundary repairs the chain, so the armed retry must be dropped rather than firing
     /// a `.state` read for a frame the host already has.

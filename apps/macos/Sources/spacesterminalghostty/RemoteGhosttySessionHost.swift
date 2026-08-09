@@ -513,6 +513,14 @@
                     return
                 }
             }
+            // The open-throttle path owes the same guarantee as the throttled one: a fetch already in
+            // flight was issued before this resync was owed, so stamping the throttle and letting
+            // `requestDirectStateFetch` refuse on `directStateFetchInFlight` would consume the request
+            // unsent. Arm the trailing retry instead, exactly as a throttled request does.
+            guard !directStateFetchInFlight else {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                return
+            }
             lastRenderUpdateResyncAt = now
             requestDirectStateFetch()
         }
