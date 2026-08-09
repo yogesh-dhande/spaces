@@ -12,6 +12,7 @@ struct SpacesTabView: View {
     @State private var isShowingFilters = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
+    @State private var pendingStop: PendingStop?
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
@@ -51,6 +52,13 @@ struct SpacesTabView: View {
                 workspace.isRunning
                     ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
                     : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
+        }.confirmationDialog(
+            pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop
+        ) { stop in
+            Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { stop in
+            Text(stop.message)
         }.sheet(item: $pendingDeleteWorkspace) { workspace in
             WorkspaceDeleteSheet(workspace: workspace) { deleteLocalBranch, deleteRemoteBranch in
                 Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
@@ -60,6 +68,17 @@ struct SpacesTabView: View {
 
     private var hideWorkspaceDialogBinding: Binding<Bool> {
         Binding(get: { pendingHideWorkspace != nil }, set: { if !$0 { pendingHideWorkspace = nil } })
+    }
+
+    private var pendingStopDialogBinding: Binding<Bool> {
+        Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } })
+    }
+
+    private func performPendingStop(_ stop: PendingStop) async {
+        switch stop {
+        case .row(let row): await model.stop(row: row)
+        case .workspace(let workspace): await model.stopWorkspace(workspace)
+        }
     }
 
     /// Any detail route — a terminal, a pending terminal launch, or a browser session — that should
@@ -373,7 +392,7 @@ struct SpacesTabView: View {
                 workspace: group.workspace, isBusy: model.isMutating || isDeleting,
                 onStart: { Task { await model.launchWorkspace(group.workspace) } },
                 onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                onStop: { Task { await model.stopWorkspace(group.workspace) } },
+                onStop: { pendingStop = .workspace(group.workspace) },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
                 onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
             ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
@@ -488,7 +507,7 @@ struct SpacesTabView: View {
         }
         if row.canStop {
             Button {
-                Task { await model.stop(row: row) }
+                pendingStop = .row(row)
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }.tint(Theme.red).disabled(model.isMutating)
@@ -512,7 +531,7 @@ struct SpacesTabView: View {
         }
         if row.canStop {
             Button {
-                Task { await model.stop(row: row) }
+                pendingStop = .row(row)
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }.disabled(model.isMutating)
@@ -643,6 +662,28 @@ struct SpacesTabView: View {
             // mutations against other workspaces, which have nothing to do with this loose session (#450).
         }.buttonStyle(.plain).disabled(isDeleting || (!session.isControlAvailable && !session.hasFinalRender)).opacity(isDeleting ? 0.5 : 1)
             .accessibilityIdentifier("terminal.row.\(session.id)")
+    }
+}
+
+/// A stop the user has asked for but not yet confirmed: either one runtime row's session or a whole
+/// workspace. Both live in this tab (the row swipe tray/context menu and the workspace control bar), so
+/// they share this one pending-state/dialog pair rather than each entry point carrying its own.
+private enum PendingStop {
+    case row(SpacesMobileWorkspaceRuntimeRow)
+    case workspace(SpacesDeviceWorkspaceSummary)
+
+    var title: String {
+        switch self {
+        case .row(let row): StopConfirmationCopy.rowTitle(row.title)
+        case .workspace(let workspace): StopConfirmationCopy.workspaceTitle(workspace.displayName)
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .row: StopConfirmationCopy.rowMessage
+        case .workspace: StopConfirmationCopy.workspaceMessage
+        }
     }
 }
 
