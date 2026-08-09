@@ -984,6 +984,13 @@ import Foundation
         /// is for the terminal, not the application" release, the same one a cmd+shift+click uses in a
         /// Mac pane. Without it the probe finds nothing in any pane running a coding agent, which
         /// tracks the mouse for its whole session.
+        ///
+        /// Accepted limitation: an application that asks to capture shift itself (XTSHIFTESCAPE, a
+        /// state the snapshot transports onto the mirror) takes this shift-click too, so its link taps
+        /// forward as clicks instead of opening. That matches a directly attached Ghostty terminal,
+        /// where cmd+shift+click cannot follow a link under such an application either; working around
+        /// it would mean mutating the mirror's shift-capture state around the probe. If link taps ever
+        /// need to win there too, the client-side linkURLs hit-testing design (#373) is the seam.
         private func linkActivationMouseModifiers() -> ghostty_input_mods_e {
             guard mirrorCapturesMouse else { return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
             return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
