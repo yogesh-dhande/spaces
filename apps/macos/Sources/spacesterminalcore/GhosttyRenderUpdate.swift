@@ -526,6 +526,23 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
     }
 
+    /// The ordering fields a full frame carries — the session revision it describes and the owner epoch it
+    /// belongs to — read from the fixed header, with no grid decode. Nil unless the blob is a decodable
+    /// full frame long enough to hold those fields, so a caller that cannot order a response leaves it
+    /// alone rather than guessing. Every field here is fixed-width and written before the variable-length
+    /// body (see `encode`), which is what makes the offsets constant.
+    public static func encodedFrameOrdering(of data: Data) -> (sessionRevision: UInt64?, ownerEpoch: UInt64)? {
+        guard encodedKind(of: data) == .full else { return nil }
+        let sessionRevisionOffset = magic.count + 2 + MemoryLayout<UInt16>.size
+        let ownerEpochOffset = sessionRevisionOffset + 3 * MemoryLayout<UInt64>.size
+        guard data.count >= ownerEpochOffset + MemoryLayout<UInt64>.size else { return nil }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> (sessionRevision: UInt64?, ownerEpoch: UInt64)? in
+            let sessionRevision = UInt64(littleEndian: raw.loadUnaligned(fromByteOffset: sessionRevisionOffset, as: UInt64.self))
+            let ownerEpoch = UInt64(littleEndian: raw.loadUnaligned(fromByteOffset: ownerEpochOffset, as: UInt64.self))
+            return (sessionRevision == nilRevision ? nil : sessionRevision, ownerEpoch)
+        }
+    }
+
     private static func kindByte(_ kind: GhosttyRenderUpdateKind) -> UInt8 {
         switch kind {
         case .full: 1

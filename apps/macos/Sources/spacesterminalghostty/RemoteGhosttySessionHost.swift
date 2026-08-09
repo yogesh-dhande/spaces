@@ -110,10 +110,13 @@
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
-        /// Counts the render frames this host has applied. A `.state` fetch snapshots it when it is issued
-        /// and discards its response if the count moved while the read was in flight; see
-        /// `requestDirectStateFetch`.
+        /// Counts the render frames this host has applied. A `.state` fetch snapshots it when it is issued,
+        /// so its completion can tell whether anything painted while the read was in flight; see
+        /// `shouldApplyFetchedRenderPayload`.
         private var appliedRenderFrameGeneration: UInt64 = 0
+        /// Where the last applied frame sits in the session's order, recorded with the generation bump
+        /// above so a late `.state` response can be compared against what the pane is actually showing.
+        private var lastAppliedRenderFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)?
         private var lastRenderUpdateResyncAt: Date?
         /// The one delayed `.state` request owed to a resync the throttle turned away; see
         /// `scheduleTrailingRenderUpdateResync`.
@@ -568,6 +571,33 @@
             pendingRenderUpdateResyncTask = nil
         }
 
+        /// Whether a `.state` response's render payload is still worth applying.
+        ///
+        /// A response describes the screen as it was when the session answered, and the render-update
+        /// applier takes any full frame whatever revision it carries, so a response that lost the race with
+        /// the subscription would walk the pane back to an older picture. But arrival order alone cannot
+        /// decide that: exporting state flushes the session's pending output into its surface WITHOUT
+        /// broadcasting and without moving the stream's delta baseline, so the frame a read returns can be
+        /// strictly newer than anything the subscription has sent — and nothing is coming to repeat it.
+        /// Ordering is therefore by revision, which the daemon advances monotonically per session within an
+        /// owner epoch (and never reuses for different content: `renderFrameRevision` bumps rather than
+        /// letting two screens share a revision).
+        ///
+        /// So the payload is dropped in exactly one case: a frame applied while the read was in flight, the
+        /// response belongs to the same owner epoch as that frame, and its revision is not newer — equal
+        /// means identical content, older means superseded. Everything else is applied: a strictly newer
+        /// revision is the flush-without-broadcast window above, a different owner epoch belongs to the
+        /// handoff machinery rather than to this comparison, and a missing revision on either side cannot be
+        /// ordered at all. Dropping costs nothing that is owed, either — the same apply that moved the
+        /// generation retired any delayed resync.
+        private func shouldApplyFetchedRenderPayload(_ payload: GhosttyRemoteSessionStatePayload, issuedAtRenderFrameGeneration: UInt64) -> Bool {
+            guard appliedRenderFrameGeneration != issuedAtRenderFrameGeneration else { return true }
+            guard let applied = lastAppliedRenderFrameOrdering, let response = payload.renderFrameOrdering else { return true }
+            guard response.ownerEpoch == applied.ownerEpoch else { return true }
+            guard let appliedRevision = applied.sessionRevision, let responseRevision = response.sessionRevision else { return true }
+            return responseRevision > appliedRevision
+        }
+
         private func requestDirectStateFetch() {
             guard let terminalServiceRequestSender else { return }
             guard !directStateFetchInFlight else { return }
@@ -586,15 +616,8 @@
                     // and acknowledged whatever happens to the render payload below — dropping them would
                     // lose events no later broadcast repeats.
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
-                    // A response describes the screen as it was when the session answered. If a frame
-                    // applied while this read was in flight, the response is redundant by construction: the
-                    // pane is not blank, and the baseline it holds came from the stream, so it already
-                    // matches the one the session's deltas are computed against. Applying it anyway would
-                    // walk the pane back to an older picture — the applier takes any full frame, whatever
-                    // revision it carries — and a screen change newer than this response always has its own
-                    // broadcast on the way, so dropping it loses no terminal state. Nothing is owed either:
-                    // the same apply that moved the generation retired any delayed resync.
-                    guard self.appliedRenderFrameGeneration == issuedAtRenderFrameGeneration else { return }
+                    guard self.shouldApplyFetchedRenderPayload(fetchResult.payload, issuedAtRenderFrameGeneration: issuedAtRenderFrameGeneration)
+                    else { return }
                     // Through the same pipeline as the subscription's payloads: a fetched full frame is
                     // the head of a new render-update chain, so it must not overtake a delta already
                     // queued behind it.
@@ -697,9 +720,11 @@
             // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
             // filled is no longer owed. Ordered after the request above so an output that both carries a
             // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
-            // The generation bump is what makes an in-flight `.state` read know it was overtaken.
-            if frameForUpdate != nil {
+            // The generation bump, and the ordering recorded with it, are what let an in-flight `.state`
+            // read tell whether it was overtaken.
+            if let frameForUpdate {
                 appliedRenderFrameGeneration &+= 1
+                lastAppliedRenderFrameOrdering = (frameForUpdate.sessionRevision, frameForUpdate.ownerEpoch)
                 cancelTrailingRenderUpdateResync()
             }
             let applyStartedAt = Date()

@@ -2552,6 +2552,46 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(sender.stateRequestCount, 1, "a frame applied, so nothing is owed and no retry is armed")
     }
 
+    /// The other side of the staleness rule: a `.state` response can be the ONLY carrier of the newest
+    /// screen. Exporting state flushes the session's pending output into its surface without broadcasting
+    /// and without moving the stream's delta baseline, so the frame that read returns can be newer than
+    /// anything the subscription has sent — with no broadcast coming to repeat it. Ordering by arrival
+    /// alone would discard exactly that frame, so the guard orders by revision instead.
+    @MainActor func testStateResponseNewerThanTheAppliedFrameIsStillApplied() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-newer-state-response"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        // The held read carries the newest screen (revision 3); the subscription paints an older one while
+        // it is in flight.
+        let sender = HeldStateRequestSender(payloads: [
+            try fullFramePayload(sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "charl", sessionRevision: 3)
+        ])
+        defer { sender.releaseHeldState() }
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
+
+        subscriber.emit(
+            try fullFramePayload(
+                sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "bravo", sessionRevision: 2, emittedAt: "2026-08-09T00:00:05Z"
+            ))
+        waitForCondition("the streamed frame paints") { host.snapshotText() == "bravo" }
+
+        sender.releaseHeldState()
+
+        waitForCondition("the newer fetched frame paints") { host.snapshotText() == "charl" }
+    }
+
     /// The trailing retry must survive firing into a fetch that is already in flight.
     ///
     /// The `.state` read a resync would make is refused while another one is in flight, and that other

@@ -127,6 +127,39 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: unknownKind), "a kind byte this build does not know")
     }
 
+    /// The ordering peek carries the same duty as the kind peek: it is what a client compares a late
+    /// `.state` response against, so it has to report exactly what a decode would, and report nothing at
+    /// all for a blob it cannot order.
+    func testEncodedFrameOrderingPeekAgreesWithAFullDecode() throws {
+        for (revision, epoch) in [(UInt64(4), UInt64(9)), (UInt64(0), UInt64(0)), (UInt64.max - 1, UInt64.max)] {
+            let frame = GhosttyRenderFrame(sessionRevision: revision, ownerEpoch: epoch, snapshot: makeSnapshot(lines: ["hello"]))
+            let encoded = try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
+            let ordering = try XCTUnwrap(GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: encoded))
+            let decoded = try XCTUnwrap(GhosttyRenderUpdateBinaryCodec.decode(encoded).fullFrame)
+            XCTAssertEqual(ordering.sessionRevision, decoded.sessionRevision)
+            XCTAssertEqual(ordering.ownerEpoch, decoded.ownerEpoch)
+        }
+
+        // A frame with no revision is unorderable, and says so rather than reporting the wire sentinel.
+        let unrevisioned = GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 3, snapshot: makeSnapshot(lines: ["hello"]))
+        let encodedUnrevisioned = try GhosttyRenderUpdateBinaryCodec.encode(.full(unrevisioned))
+        let unrevisionedOrdering = try XCTUnwrap(GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: encodedUnrevisioned))
+        XCTAssertNil(unrevisionedOrdering.sessionRevision)
+        XCTAssertEqual(unrevisionedOrdering.ownerEpoch, 3)
+
+        // Nothing to order: not a full frame, not decodable, or too short to hold the header fields.
+        let previous = makeSnapshot(lines: ["hello"])
+        let target = makeSnapshot(lines: ["hullo"])
+        let delta = GhosttyRenderUpdateFactory.makeUpdate(
+            target: GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target),
+            baseline: GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1))
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: try GhosttyRenderUpdateBinaryCodec.encode(delta)))
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: Data([0x00, 0x01, 0x02, 0x03, 0x04, 0x05])))
+        let full = try GhosttyRenderUpdateBinaryCodec.encode(
+            .full(GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: makeSnapshot(lines: ["hello"]))))
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: Data(full.prefix(39))))
+    }
+
     /// The peek reads the same header a decode does, including through a slice whose start index is not
     /// zero — the shape a render update takes when it arrives inside a larger buffer.
     func testEncodedKindPeekReadsASliceWithNonZeroStartIndex() throws {

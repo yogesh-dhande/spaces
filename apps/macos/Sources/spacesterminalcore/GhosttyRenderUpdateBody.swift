@@ -42,6 +42,15 @@ final class GhosttyRenderUpdateBody: @unchecked Sendable {
         }
     }
 
+    /// A full frame's session revision and owner epoch without decoding its grid; nil for anything that is
+    /// not a classifiable full frame. See `GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of:)`.
+    var fullFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)? {
+        switch source {
+        case .materialized(let update): update.fullFrame.map { ($0.sessionRevision, $0.ownerEpoch) }
+        case .encoded(let data): GhosttyRenderUpdateBinaryCodec.encodedFrameOrdering(of: data)
+        }
+    }
+
     /// The decoded update: the value itself for a materialized body, a memoized binary decode for an
     /// encoded one (see `GhosttyRenderUpdateDecodeCache`).
     var decodedUpdate: GhosttyRenderUpdate? {
