@@ -348,6 +348,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
+        // First, before anything concurrent exists: the trim reads, truncates, and rewrites the daemon's
+        // own launchd-redirected stdout/stderr files, and that sequence is only atomic against other
+        // writers by not having any. Here no server, Device API, or timer has started, so nothing else
+        // can append mid-trim; moved any later, a request handler's diagnostic write could land between
+        // the tail snapshot and the rewrite and be lost.
+        #if os(macOS)
+            trimOversizedRuntimeLogs()
+        #endif
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
         // after its engine snapshot escape termination and `startSharedServices()` can restart services
@@ -403,6 +411,7 @@ enum SpacesDaemonProfileCommandRouting {
             writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
             return
         }
+        sweepOrphanedWorkspaceSetupDirectories(databasePath: databasePath)
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
@@ -459,6 +468,37 @@ enum SpacesDaemonProfileCommandRouting {
             ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
     }
+
+    /// One-shot startup maintenance: removes `workspace-setup` run directories that no longer belong
+    /// to any workspace in the store (see `WorkspaceSetupDirectorySweep`, issue #423). Best-effort —
+    /// this is diagnostic-file cleanup, not part of the daemon's operational path, so a failure here
+    /// only gets logged.
+    private func sweepOrphanedWorkspaceSetupDirectories(databasePath: String) {
+        do {
+            let store = try SQLiteStore(path: databasePath)
+            let knownWorkspaceIDs = Set(try store.projects().flatMap { project in try store.workspaces(projectID: project.id).map(\.id) })
+            let setupDirectory = URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
+                .appendingPathComponent("workspace-setup", isDirectory: true).path
+            WorkspaceSetupDirectorySweep.sweep(workspaceSetupDirectory: setupDirectory, knownWorkspaceIDs: knownWorkspaceIDs)
+        } catch { writeStandardError("spacesd workspace_setup_sweep_error error=\(error)\n") }
+    }
+
+    #if os(macOS)
+        /// One-shot startup maintenance: trims launchd's stdout/stderr redirects back to a bounded tail
+        /// once either exceeds `RuntimeLogTrimming.maximumSizeBeforeTrimBytes` (issue #469) — nothing
+        /// else ever rotates them, so they otherwise grow for the life of the profile. Only macOS runs
+        /// spacesd under launchd, so this is macOS-only. `TerminalPerformance`'s perf.log has the same
+        /// unbounded-growth problem but is deliberately excluded: it is not written through an O_APPEND
+        /// descriptor, so `RuntimeLogTrimming`'s in-place-truncate safety argument does not hold for it
+        /// (see that type's doc comment).
+        private func trimOversizedRuntimeLogs() {
+            guard let runtimeDirectory = try? SpacesProfile.current().runtimeDirectory else { return }
+            let runtimeDirectoryURL = URL(fileURLWithPath: runtimeDirectory, isDirectory: true)
+            for name in ["spacesd.launchd.out.log", "spacesd.launchd.err.log"] {
+                RuntimeLogTrimming.trimIfOversized(path: runtimeDirectoryURL.appendingPathComponent(name, isDirectory: false).path)
+            }
+        }
+    #endif
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()
