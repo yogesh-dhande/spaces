@@ -202,12 +202,16 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(staleReduction.frameToApply)
         XCTAssertEqual(staleReduction.dropReason, "stale_out_of_band_state")
         XCTAssertFalse(staleReduction.didRequestResync)
+        // The refused payload rides along on the result for its metrics, so consumers are told that
+        // nothing on it — its pre-handoff attachment snapshot most of all — describes current state.
+        XCTAssertTrue(staleReduction.isRefusedOutOfBandPayload)
 
         // Newer epoch, and a revision that would have been refused within one epoch.
         let handoffResponse = try payload(text: "charl", sessionRevision: 1, ownerEpoch: 5, emittedAt: "2026-08-09T00:00:04Z")
         let handoffReduction = reducer.reduce(
             incomingPayload: handoffResponse, previousPayload: staleReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
         XCTAssertEqual(handoffReduction.frameToApply?.snapshot, snapshot(text: "charl"), "a handoff's own epoch machinery owns this case")
+        XCTAssertFalse(handoffReduction.isRefusedOutOfBandPayload, "a payload that applied refused nothing")
     }
 
     /// A frameless response still carries runtime state, ownership, title and working directory, and
@@ -222,6 +226,7 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
             incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
 
         XCTAssertEqual(reduction.dropReason, "stale_out_of_band_state")
+        XCTAssertTrue(reduction.isRefusedOutOfBandPayload, "nothing on this payload moved, so no consumer may read state off it")
         XCTAssertEqual(reduction.storedPayload.title, "current")
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "refusing the metadata must not disturb the screen either")
         XCTAssertFalse(reduction.didRequestResync)
@@ -301,6 +306,8 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(reduction.frameToApply, "the screen is already current, so the frame is the redundant part")
         XCTAssertEqual(reduction.dropReason, "stale_out_of_band_frame")
         XCTAssertFalse(reduction.didRequestResync, "the retained frame is current; nothing is owed")
+        XCTAssertFalse(
+            reduction.isRefusedOutOfBandPayload, "a partial refusal is not a refusal: this payload's metadata genuinely merged, so it still applies")
         XCTAssertEqual(reduction.storedPayload.title, "renamed", "metadata that moved on must still land")
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "and the retained screen is carried forward untouched")
     }

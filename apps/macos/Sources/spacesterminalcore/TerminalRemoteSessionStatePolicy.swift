@@ -77,10 +77,23 @@ public struct TerminalRemoteStateReductionResult: Sendable {
     public let frameToApply: GhosttyRenderFrame?
     public let dropReason: String?
     public let didRequestResync: Bool
+    /// True when the reduction moved nothing at all: an out-of-band payload the reducer refused whole
+    /// (`staleOutOfBandReduction`), whose `storedPayload` is therefore the previous payload untouched.
+    ///
+    /// `payload` still carries the refused input — its attachment snapshot, its render snapshot, its
+    /// metadata — because the metrics and traces describe the payload that arrived. A consumer must
+    /// derive no client state from it while this is set: the payload was captured before whatever
+    /// superseded it, so its attachment snapshot names the ownership of a session generation that has
+    /// been handed off, and its render snapshot describes a screen the client is already past.
+    ///
+    /// A partial refusal (`supersededScreen`, where only the render update is refused and the payload's
+    /// metadata is ordered on its own terms and genuinely merges) is NOT this: the flag stays false
+    /// there, and the payload's remaining state applies as it always did.
+    public let isRefusedOutOfBandPayload: Bool
 
     public init(
         payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?,
-        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool
+        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool, isRefusedOutOfBandPayload: Bool = false
     ) {
         self.payload = payload
         self.storedPayload = storedPayload
@@ -88,6 +101,7 @@ public struct TerminalRemoteStateReductionResult: Sendable {
         self.frameToApply = frameToApply
         self.dropReason = dropReason
         self.didRequestResync = didRequestResync
+        self.isRefusedOutOfBandPayload = isRefusedOutOfBandPayload
     }
 }
 
@@ -254,7 +268,8 @@ public struct TerminalRemoteStateReducer: Sendable {
         payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, dropReason: String
     ) -> TerminalRemoteStateReductionResult {
         TerminalRemoteStateReductionResult(
-            payload: payload, storedPayload: storedPayload, decodedUpdate: nil, frameToApply: nil, dropReason: dropReason, didRequestResync: false)
+            payload: payload, storedPayload: storedPayload, decodedUpdate: nil, frameToApply: nil, dropReason: dropReason, didRequestResync: false,
+            isRefusedOutOfBandPayload: true)
     }
 
     /// The whole payload was refused: its screen belonged to a superseded session generation, or it

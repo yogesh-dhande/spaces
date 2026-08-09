@@ -1352,6 +1352,55 @@
             XCTAssertEqual(model.latestState?.title, "newest", "a response older than what the stream already delivered must not be applied")
         }
 
+        /// A refused response is kept on the reduction for its metrics and nothing else: the reducer moved
+        /// no state, so `storedPayload` is the previous state untouched. The payload itself still carries
+        /// the attachment and screen the session had when it was asked — before whatever superseded it —
+        /// so an apply that read either off it would clear this viewer's own attachment (leaving the next
+        /// dismissal with nothing to detach) and repaint the live owner epoch with the stale screen.
+        func testARefusedStateResponseLeavesTheOwnersAttachmentAndScreenAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
+            // The stream's own frame, which is what the response below is ordered against.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+            XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot, Self.snapshot(text: "live"))
+
+            // A `.state` read answered before the handoff that made this client the owner, delivered after
+            // the stream has carried the viewer past it: an older owner epoch, so the reducer refuses all
+            // of it — screen, attachment snapshot and metadata alike.
+            let previousOwner = TerminalClient(
+                id: "mac-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-06-04T14:23:30Z")
+            let preHandoffSnapshot = TerminalSessionAttachmentSnapshot(
+                clients: [previousOwner],
+                attachments: [
+                    TerminalAttachment(sessionID: "terminal-session", clientID: previousOwner.id, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+                ])
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "pre-handoff", sessionRevision: 9, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:40Z", attachmentSnapshot: preHandoffSnapshot),
+                isOutOfBand: true)
+
+            XCTAssertTrue(model.isOwner, "the refused payload's ownership must not replace the merged state's")
+            XCTAssertEqual(
+                model.ownerRenderEpoch?.bootstrapSnapshot, Self.snapshot(text: "live"),
+                "a refused payload's screen must not reach the live owner render epoch")
+            XCTAssertEqual(model.ownerRenderEpoch?.ownerEpoch, 2, "nor may it walk the epoch that every control request quotes backwards")
+
+            // The attachment this viewer holds is only observable through what dismissing it does, so this
+            // is the assertion that the refused snapshot did not rewrite it: a viewer that believes it is
+            // no longer attached detaches nothing and leaves the session holding a dead client.
+            model.stop()
+            let didDetach = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetach, "a refused payload's attachment snapshot must not clear this viewer's own attachment")
+        }
+
         /// The takeover response is the exception: it is the acknowledgment of a mutation this client just
         /// made and the only carrier of the attachment snapshot that names this device the owner, so it is
         /// submitted in band. Ordered as a `.state` response would be, a stream payload that raced it would
@@ -1483,6 +1532,28 @@
                 sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
                 sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
                 workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        /// A payload carrying a full frame, the shape a session exports whenever it includes screen state.
+        /// `sessionRevision` and `ownerEpoch` are what the reducer orders an out-of-band response by.
+        private nonisolated static func framedState(
+            text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil
+        ) throws -> GhosttyRemoteSessionStatePayload {
+            let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt,
+                sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil,
+                attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        }
+
+        private nonisolated static func snapshot(text: String) -> GhosttyTerminalSnapshot {
+            let cells = text.unicodeScalars.map { scalar in
+                GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+            }
+            return GhosttyTerminalSnapshot(
+                columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+                defaultBackgroundRGB: 0x000000, cells: cells)
         }
 
         /// A payload whose attachment snapshot names `clientID` the session's owner, as a takeover response

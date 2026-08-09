@@ -2064,7 +2064,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // coalesced-away resync retires that request rather than leaving it armed.
         if reduction.frameToApply != nil { cancelTrailingRenderUpdateResync() }
         latestState = reduction.storedPayload
-        if payload.attachmentSnapshot != nil {
+        // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
+        // read was answered, which is before whatever superseded it — a handoff, or this device's own
+        // attach. Reading it here would rewrite this client's attachment from that pre-handoff snapshot
+        // (leaving the next dismissal with nothing to detach, and the next connect free to skip attaching)
+        // and clear a takeover this payload has no say over. `storedPayload`, which every other line below
+        // reads through `latestState`, is the previous state untouched, so the refusal changes nothing.
+        if !reduction.isRefusedOutOfBandPayload, payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
@@ -2098,7 +2104,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isSynchronizingOwnership = false
         }
         let isOwnerAfterMerge = isOwner
-        if isOwnerAfterMerge, payload.renderSnapshot != nil {
+        // Same rule for the screen: a refused payload's render snapshot belongs to a session generation
+        // the reducer just refused, so feeding it to the owner render epoch would repaint this viewer with
+        // stale geometry the pane has already moved past.
+        if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil {
             if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }
         }
         if isOwnerAfterMerge, wasTakingOver {
