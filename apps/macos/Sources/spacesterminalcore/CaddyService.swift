@@ -37,19 +37,34 @@ import Foundation
         /// Ensures Caddy is running with the given config. If it is already running, the config is
         /// reloaded gracefully; otherwise it is started fresh. Returns true when a new process was
         /// launched.
+        ///
+        /// A reload that a confirmed-live Caddy rejects (bad config) or never answers (wedged) does not
+        /// throw: a live Caddy that refuses the new config would otherwise keep serving the previous
+        /// route table indefinitely, with nothing to prompt a retry until some later, unrelated
+        /// reconcile pass happens to succeed. Instead this stops that instance (the same ladder `stop()`
+        /// uses) and falls through to the fresh-start path below with the config already written, so
+        /// routes recover within this call. The original reload failure is not lost: it is written to
+        /// stderr (`CaddyServiceError.reloadFailed`'s description carries the child's exit status and a
+        /// bounded tail of its stderr) so the reason is diagnosable even though recovery means nothing
+        /// is thrown. Only a fresh start that itself fails to come up still throws, unchanged from before.
         @discardableResult public static func ensureRunning(configJSON: Data, timeout: TimeInterval = 5) throws -> Bool {
             let configPath = try configFilePath()
             let socketPath = try adminSocketPath()
             try writeConfig(configJSON, to: configPath)
 
             if FileManager.default.fileExists(atPath: socketPath) {
-                if runReload(configPath: configPath, socketPath: socketPath, timeout: 2) { return false }
+                let reloadResult = runReload(configPath: configPath, socketPath: socketPath, timeout: 2)
+                if reloadResult.exitStatus == 0 { return false }
                 // The owner probe decides whether it is safe to unlink the socket; a wrong "no
                 // owner" answer destroys a live Caddy's admin socket. It therefore gets its own
                 // generous bound (like the reload above) instead of the caller's startup budget,
                 // which tests legitimately set near zero.
-                if adminSocketHasOwner(socketPath, timeout: 10) { throw CaddyServiceError.reloadFailed(configPath) }
-                try? FileManager.default.removeItem(atPath: socketPath)
+                if adminSocketHasOwner(socketPath, timeout: 10) {
+                    logReloadFailureRecovery(configPath: configPath, result: reloadResult)
+                    stop(timeout: timeout)
+                } else {
+                    try? FileManager.default.removeItem(atPath: socketPath)
+                }
             }
 
             let executableURL = try resolveExecutableURL()
@@ -68,17 +83,6 @@ import Foundation
                 Thread.sleep(forTimeInterval: 0.05)
             }
             throw CaddyServiceError.startupTimedOut(executableURL.path)
-        }
-
-        /// Reloads a running Caddy with the given config. Throws if Caddy is not running or the reload
-        /// fails; callers can recover by calling `ensureRunning`.
-        public static func reload(configJSON: Data, timeout: TimeInterval = 5) throws {
-            let configPath = try configFilePath()
-            let socketPath = try adminSocketPath()
-            try writeConfig(configJSON, to: configPath)
-            guard runReload(configPath: configPath, socketPath: socketPath, timeout: timeout) else {
-                throw CaddyServiceError.reloadFailed(configPath)
-            }
         }
 
         /// Gracefully stops the Caddy process for the active profile.
@@ -102,32 +106,65 @@ import Foundation
             try configJSON.write(to: URL(fileURLWithPath: path), options: .atomic)
         }
 
-        private static func runReload(configPath: String, socketPath: String, timeout: TimeInterval) -> Bool {
-            guard let executableURL = try? resolveExecutableURL() else { return false }
+        private static func runReload(configPath: String, socketPath: String, timeout: TimeInterval) -> CaddyProcessResult {
+            guard let executableURL = try? resolveExecutableURL() else { return CaddyProcessResult(exitStatus: nil, stderr: "") }
             return runCaddy(
                 executableURL: executableURL, arguments: ["reload", "--config", configPath, "--address", "unix//\(socketPath)"], timeout: timeout)
-                == 0
         }
 
-        /// Runs a short-lived Caddy CLI invocation and returns its exit status, or nil on launch failure
-        /// or timeout. Reloads/stops are infrequent (lifecycle events) so a blocking child is fine.
-        @discardableResult private static func runCaddy(executableURL: URL, arguments: [String], timeout: TimeInterval) -> Int32? {
+        /// Writes the recovered-from reload failure to stderr so the daemon log carries why Caddy
+        /// refused the new config, even though `ensureRunning` does not throw for this case (see its
+        /// doc comment). Reuses `CaddyServiceError.reloadFailed`'s description instead of formatting the
+        /// exit status and stderr text a second time.
+        private static func logReloadFailureRecovery(configPath: String, result: CaddyProcessResult) {
+            let error = CaddyServiceError.reloadFailed(configPath: configPath, exitStatus: result.exitStatus, stderr: result.stderr)
+            FileHandle.standardError.write(Data("caddy: \(error.localizedDescription); restarting to recover routes.\n".utf8))
+        }
+
+        /// Last N bytes of a reload's stderr kept for diagnostics. Bounded so a runaway or chatty
+        /// Caddy build cannot balloon the daemon's log line; a rejected config's error is always near
+        /// the end of its output.
+        private static let stderrCaptureLimitBytes = 2048
+
+        /// Runs a short-lived Caddy CLI invocation and returns its exit status (nil on launch failure or
+        /// timeout) and a bounded tail of its stderr. Reloads/stops are infrequent (lifecycle events) so
+        /// a blocking child is fine.
+        @discardableResult private static func runCaddy(executableURL: URL, arguments: [String], timeout: TimeInterval) -> CaddyProcessResult {
             let process = Process()
             process.executableURL = executableURL
             process.arguments = arguments
             process.environment = ProcessInfo.processInfo.environment
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { return nil }
+            let errorPipe = Pipe()
+            process.standardError = errorPipe
+            do { try process.run() } catch { return CaddyProcessResult(exitStatus: nil, stderr: "") }
 
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-            if process.isRunning {
-                process.terminate()
-                return nil
+            // Mirrors `TerminalService.capturedStandardOutput`'s watchdog-plus-drain shape: the pipe must
+            // be drained before waiting on exit (a chatty child can fill the kernel's 64KB pipe buffer
+            // and block forever on a reader that never shows up), and the watchdog SIGKILLs a child that
+            // outlives `timeout` so this never blocks past its caller's budget.
+            let timedOutLock = NSLock()
+            var timedOut = false
+            let watchdog = DispatchWorkItem {
+                guard process.isRunning else { return }
+                timedOutLock.lock()
+                timedOut = true
+                timedOutLock.unlock()
+                kill(process.processIdentifier, SIGKILL)
             }
-            return process.terminationStatus
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+            let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            watchdog.cancel()
+
+            timedOutLock.lock()
+            let didTimeOut = timedOut
+            timedOutLock.unlock()
+            let stderrTail = stderrData.suffix(stderrCaptureLimitBytes)
+            let stderrText = String(decoding: stderrTail, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return CaddyProcessResult(exitStatus: didTimeOut ? nil : process.terminationStatus, stderr: stderrText)
         }
 
         private static func terminateProcessesOwningSocket(_ socketPath: String, timeout: TimeInterval) {
@@ -212,16 +249,31 @@ import Foundation
         }
     }
 
+    /// Outcome of a short-lived `caddy` CLI invocation (`reload`, `stop`). `exitStatus` is nil when the
+    /// process never launched or was killed for outliving its timeout; `stderr` is a bounded tail (see
+    /// `CaddyService.stderrCaptureLimitBytes`), empty when nothing was captured.
+    private struct CaddyProcessResult {
+        let exitStatus: Int32?
+        let stderr: String
+    }
+
     public enum CaddyServiceError: LocalizedError {
         case executableNotFound
         case startupTimedOut(String)
-        case reloadFailed(String)
+        /// A `caddy reload` invocation against a confirmed-live Caddy failed. `exitStatus` is nil when
+        /// the child never launched or was killed for outliving its timeout. `ensureRunning` recovers
+        /// from this itself (see its doc comment) rather than throwing it, so in practice this case is
+        /// constructed only to format the recovery's diagnostic log line.
+        case reloadFailed(configPath: String, exitStatus: Int32?, stderr: String)
 
         public var errorDescription: String? {
             switch self {
-            case .executableNotFound: "The caddy executable is required to route workspace service URLs."
-            case .startupTimedOut(let path): "Timed out waiting for caddy to start from \(path)."
-            case .reloadFailed(let path): "Failed to reload caddy with config at \(path)."
+            case .executableNotFound: return "The caddy executable is required to route workspace service URLs."
+            case .startupTimedOut(let path): return "Timed out waiting for caddy to start from \(path)."
+            case .reloadFailed(let configPath, let exitStatus, let stderr):
+                let statusText = exitStatus.map { "exit \($0)" } ?? "timed out"
+                let stderrSuffix = stderr.isEmpty ? "" : ": \(stderr)"
+                return "Failed to reload caddy with config at \(configPath) (\(statusText))\(stderrSuffix)"
             }
         }
     }
