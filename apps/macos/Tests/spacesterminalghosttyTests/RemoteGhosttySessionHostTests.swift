@@ -2470,6 +2470,53 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
     }
 
+    /// The lazy pane open, in the order production performs it: the host is built, its registration with
+    /// the session's state model replays the model's cached full frame straight into the reduction
+    /// pipeline, and the pane attaches in the same main-actor turn — before that detached pipeline has
+    /// reduced anything. The frame the host will paint from is already on its way, so asking the device
+    /// for another one buys nothing and costs a grid-sized export on every pane open.
+    @MainActor func testAttachInTheSameTurnAsAReplayedFullFrameAsksTheSessionForNothing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-attach-replayed-frame"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        let subscriber = ReplayingStateStreamSubscriber(replayPayload: fixture.payload)
+        // No run loop turn between construction (which registers and replays) and the attach.
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+
+        XCTAssertFalse(
+            recorder.requests().contains { if case .state = $0.command { return true } else { return false } },
+            "the replayed frame is queued for this host; attach must not ask the device for another")
+        waitForCondition("host renders the replayed frame") { host.snapshotText() == "alpha" }
+        XCTAssertFalse(recorder.requests().contains { if case .state = $0.command { return true } else { return false } })
+    }
+
+    /// Hands the host a payload synchronously at registration, the way `DeviceTerminalSessionStateModel`
+    /// replays its cached payload to a newly registered listener.
+    private final class ReplayingStateStreamSubscriber: @unchecked Sendable {
+        private final class Client: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+
+        private let replayPayload: GhosttyRemoteSessionStatePayload
+
+        init(replayPayload: GhosttyRemoteSessionStatePayload) { self.replayPayload = replayPayload }
+
+        func subscribe(
+            _: String, onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect _: @escaping @Sendable ((any Error)?) -> Void
+        ) throws -> any TerminalRemoteStateStreamClient {
+            onEvent(replayPayload)
+            return Client()
+        }
+    }
+
     /// The other half of the rule: an attach that already holds a full frame paints from it and asks the
     /// session for nothing. A `.state` fetch per attach would put a grid-sized export on the daemon every
     /// time a pane is focused.

@@ -92,6 +92,20 @@
             shouldUseFrame: { frame, payload in
                 Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
             }, apply: { [weak self] output in self?.applyReducedState(output) })
+        /// Whether a payload carrying a full frame is in the pipeline and has not been applied yet.
+        ///
+        /// The pipeline reduces off the main actor, so a host that is built and attached within one
+        /// main-actor turn — the lazy pane open, whose registration with the session's state model replays
+        /// that model's cached frame synchronously — holds no frame at attach time even though one is
+        /// already on its way. Without this, every such open would ask the device for a frame it is about
+        /// to receive and pay for a grid-sized export.
+        ///
+        /// Cleared by ANY apply the pipeline delivers rather than by matching the payload that set it: the
+        /// apply mailbox collapses runs of outputs, so the apply that lands can describe a later payload
+        /// than the one marked here. Since every submitted payload still produces an apply — its own, or
+        /// the one it was collapsed into — clearing on any apply cannot leave this stuck set, and clearing
+        /// it early (on an apply for an older payload) costs at most the one resync it exists to avoid.
+        private let pendingFullFrameSubmission = PendingFullFrameSubmission()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
@@ -237,16 +251,17 @@
             if !isEndedScrollbackReplayActive {
                 let frame = currentRenderFrameForRenderUpdate()
                 terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
-                // Attaching with no frame means there is nothing to paint and no baseline for the deltas
-                // the stream carries, which describe only the cells that changed. It happens whenever the
-                // subscriber's own full frame has not landed yet (this host is built lazily, after its
-                // pane's state model has been streaming) and whenever an owner change scrubbed the render
-                // update out of the stored payload. Nothing else on this path would ask: the owner
-                // attach's viewport resize below announces nothing when the grid has not moved, and a
-                // delta that fails to apply is the only other trigger. So ask here instead of waiting for
-                // that failure. Throttled with every other resync request and satisfied by the `.state`
-                // response, so a re-attach while one is in flight adds nothing.
-                if frame == nil { requestRenderUpdateStateResync() }
+                // Attaching with no frame, and none on the way, leaves nothing to paint and no baseline for
+                // the deltas the stream carries — they describe only the cells that changed. That happens
+                // when the subscriber's own full frame has not landed yet (this host is built lazily, after
+                // its pane's state model has been streaming) and when an owner change scrubbed the render
+                // update out of the stored payload. Nothing else on this path would ask: the owner attach's
+                // viewport resize below announces nothing when the grid has not moved, and a delta failing
+                // to apply is the only other trigger. So ask here instead of waiting for that failure —
+                // unless a full frame is already queued for this host, which is the ordinary lazy pane open
+                // (see `pendingFullFrameSubmission`). Throttled with every other resync request and
+                // satisfied by the `.state` response, so a re-attach while one is in flight adds nothing.
+                if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync() }
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
@@ -423,7 +438,7 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             let client = GhosttyRemoteSessionStateStreamClient(
-                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.statePipeline.submit(payload) },
+                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.submitToStatePipeline(payload) },
                 onDisconnect: { [weak self] in self?.handleStreamDisconnect() })
             do {
                 try client.start()
@@ -444,7 +459,13 @@
                 // without a main-actor hop at all. The capture is weak so a client that outlives this
                 // host cannot keep the pipeline reducing frames for an owner that is gone.
                 let client = try stateStreamSubscriber(
-                    launchConfiguration.sessionID, { [weak statePipeline = statePipeline] payload in statePipeline?.submit(payload) },
+                    launchConfiguration.sessionID,
+                    { [weak statePipeline = statePipeline, pendingFullFrameSubmission] payload in
+                        // `submitToStatePipeline`'s body, inlined because this callback deliberately does
+                        // not touch `self` (see the capture note above); the marking rule is the same.
+                        if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+                        statePipeline?.submit(payload)
+                    },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
                             self?.directStateStreamClient = nil
@@ -490,7 +511,7 @@
                     // the head of a new render-update chain, so it must not overtake a delta already
                     // queued behind it. The agent signals it came with are independent of the session's
                     // screen state and are applied here rather than waiting on the reduction.
-                    self.statePipeline.submit(fetchResult.payload)
+                    self.submitToStatePipeline(fetchResult.payload)
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
@@ -538,6 +559,14 @@
             lastSubscriptionAttemptAt = Date()
         }
 
+        /// Hands a payload to the reduction pipeline, noting first whether it carries a full frame this
+        /// host has yet to apply (see `pendingFullFrameSubmission`). The note is taken *before* the submit
+        /// because the apply that retires it can land as soon as the payload is in.
+        private func submitToStatePipeline(_ payload: GhosttyRemoteSessionStatePayload) {
+            if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+            statePipeline.submit(payload)
+        }
+
         private func isInteractiveRuntimeStateForControl() -> Bool {
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
@@ -554,6 +583,9 @@
         /// view, the state the clipboard one-shot reads, the resync request, the metrics, and the
         /// notifications.
         private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+            // Any apply at all retires the pending-full-frame note, whichever payload it describes; see
+            // `pendingFullFrameSubmission` for why matching them would be the wrong rule.
+            pendingFullFrameSubmission.clear()
             let incomingPayload = output.incomingPayload
             // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
             // whichever route delivered it may have done so out of order with respect to the state
@@ -1185,5 +1217,19 @@
             if hasMatchingLastRequestedSize, runtimeSize == nil, !force { return false }
             return true
         }
+    }
+
+    /// One host's note that a full frame is in its reduction pipeline, unapplied. Lock-guarded because the
+    /// state stream submits payloads from its own thread while the main actor reads and clears it. See
+    /// `RemoteGhosttySessionHost.pendingFullFrameSubmission` for the rule it encodes.
+    private final class PendingFullFrameSubmission: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending = false
+
+        var isPending: Bool { lock.withLock { pending } }
+
+        func mark() { lock.withLock { pending = true } }
+
+        func clear() { lock.withLock { pending = false } }
     }
 #endif

@@ -146,6 +146,13 @@ extension GhosttyRemoteSessionStatePayload {
 extension GhosttyRemoteSessionStatePayload {
     public var decodedRenderUpdate: GhosttyRenderUpdate? { renderUpdateBody?.decodedUpdate }
 
+    /// What kind of render update the payload carries, answered from the update's header rather than by
+    /// decoding its cells. Read this wherever the question is only "does this hand the reader a complete
+    /// screen?" — a grid decode there costs a full columns×rows pass on paths (listener registration, the
+    /// submit into the reduction pipeline) that must not do grid work. Nil when there is no render update,
+    /// or when the one there is cannot be classified, which callers treat the same as "not a full frame".
+    public var renderUpdateKind: GhosttyRenderUpdateKind? { renderUpdateBody?.kind }
+
     public var renderSnapshot: GhosttyTerminalSnapshot? { decodedRenderUpdate?.fullFrame?.snapshot }
 
     public var renderText: String? {
@@ -247,13 +254,12 @@ public enum GhosttyRemoteSessionStateTimestamp {
             return tens * 10 + ones
         }
 
-        guard bytes[4] == UInt8(ascii: "-"), bytes[7] == UInt8(ascii: "-"), bytes[10] == UInt8(ascii: "T"),
-            bytes[13] == UInt8(ascii: ":"), bytes[16] == UInt8(ascii: ":")
+        guard bytes[4] == UInt8(ascii: "-"), bytes[7] == UInt8(ascii: "-"), bytes[10] == UInt8(ascii: "T"), bytes[13] == UInt8(ascii: ":"),
+            bytes[16] == UInt8(ascii: ":")
         else { return nil }
         guard let y0 = digit(0), let y1 = digit(1), let y2 = digit(2), let y3 = digit(3) else { return nil }
         let year = y0 * 1000 + y1 * 100 + y2 * 10 + y3
-        guard let month = twoDigits(5), let day = twoDigits(8), let hour = twoDigits(11), let minute = twoDigits(14),
-            let second = twoDigits(17)
+        guard let month = twoDigits(5), let day = twoDigits(8), let hour = twoDigits(11), let minute = twoDigits(14), let second = twoDigits(17)
         else { return nil }
 
         var nanoseconds = 0
@@ -272,8 +278,7 @@ public enum GhosttyRemoteSessionStateTimestamp {
         // resolves years before 1583 against the historical Julian calendar rather than proleptic
         // Gregorian, so this civil-days arithmetic would disagree with it there. Every real `emittedAt`
         // reflects a wall-clock time near now, so the floor never affects a genuine wire timestamp.
-        guard year >= 1583, month >= 1, month <= 12, day >= 1, day <= daysInMonth(year: year, month: month),
-            hour <= 23, minute <= 59, second <= 59
+        guard year >= 1583, month >= 1, month <= 12, day >= 1, day <= daysInMonth(year: year, month: month), hour <= 23, minute <= 59, second <= 59
         else { return nil }
 
         // Days-since-epoch via the proleptic-Gregorian civil-days algorithm
@@ -301,9 +306,7 @@ public enum GhosttyRemoteSessionStateTimestamp {
         }
     }
 
-    private static func isLeapYear(_ year: Int) -> Bool {
-        (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-    }
+    private static func isLeapYear(_ year: Int) -> Bool { (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 }
 }
 
 /// Cached ISO8601 formatter for session runtime/attachment timestamps (`updatedAt`,

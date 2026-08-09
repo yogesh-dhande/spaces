@@ -506,6 +506,26 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
     }
 
+    /// The kind of update an encoded blob carries, read from its fixed header alone.
+    ///
+    /// A caller that only needs to classify a render update — is this a full frame, or a delta that is
+    /// useless without one? — would otherwise pay a whole columns×rows cell decode for a question the
+    /// first six bytes answer. That decode is exactly the work the off-main reduction pipeline exists to
+    /// keep off the main actor, so the classification paths (`GhosttyRemoteSessionStatePayload.renderUpdateKind`)
+    /// read the header instead.
+    ///
+    /// Returns nil for anything this build would refuse to decode — wrong magic, wrong version, unknown
+    /// kind byte, or too short to hold the header — so an unclassifiable blob is never mistaken for a full
+    /// frame. Callers treat nil as "not a full frame".
+    public static func encodedKind(of data: Data) -> GhosttyRenderUpdateKind? {
+        guard data.count >= magic.count + 2 else { return nil }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> GhosttyRenderUpdateKind? in
+            guard (0..<magic.count).allSatisfy({ raw[$0] == magic[$0] }) else { return nil }
+            guard Int(raw[magic.count]) == GhosttyRenderUpdate.currentVersion else { return nil }
+            return try? kind(for: raw[magic.count + 1])
+        }
+    }
+
     private static func kindByte(_ kind: GhosttyRenderUpdateKind) -> UInt8 {
         switch kind {
         case .full: 1

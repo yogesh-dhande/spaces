@@ -350,12 +350,15 @@
         /// depends on holding a render baseline. The cache itself is left alone — the delta is still the
         /// state the next payload merges onto for the listeners that do have the baseline for it.
         ///
-        /// The decode this costs runs once per listener registration (a pane's render host registers
-        /// once), never per payload, and the decode is memoized on the payload's body besides.
+        /// The classification reads the update's header (`renderUpdateKind`) and never decodes its cells:
+        /// this runs on the main actor during listener registration, and a grid decode here is precisely
+        /// the work the off-main reduction pipeline exists to keep off it. A blob whose header cannot be
+        /// classified is treated as not-a-full-frame and stripped, which is the safe direction — the
+        /// listener resyncs rather than being handed something it cannot use.
         private func replayPayloadForNewListener() -> GhosttyRemoteSessionStatePayload? {
             guard let latestRemoteStatePayload else { return nil }
             guard latestRemoteStatePayload.hasRenderUpdate else { return latestRemoteStatePayload }
-            guard latestRemoteStatePayload.decodedRenderUpdate?.fullFrame == nil else { return latestRemoteStatePayload }
+            guard latestRemoteStatePayload.renderUpdateKind != .full else { return latestRemoteStatePayload }
             return latestRemoteStatePayload.replacingRenderUpdate(nil)
         }
 
