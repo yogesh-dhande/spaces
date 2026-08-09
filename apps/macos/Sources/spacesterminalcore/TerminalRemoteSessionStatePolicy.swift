@@ -125,7 +125,7 @@ public struct TerminalRemoteStateReducer: Sendable {
         // directory, ownership and runtime state from being thrown away with a screen the client is
         // already showing: screen revisions only advance with screen content, and a quiet terminal changes
         // metadata without painting anything.
-        if isOutOfBand, let previousPayload, incomingPayload.runtimeState?.state.isInteractive != false {
+        if isOutOfBand, let previousPayload, Self.isOutOfBandPayloadOrderable(incomingPayload, against: previousPayload) {
             switch outOfBandFrameDisposition(of: incomingPayload) {
             case .supersededSession:
                 // An older owner epoch invalidates the whole payload, not just its screen: the attachment
@@ -174,6 +174,33 @@ public struct TerminalRemoteStateReducer: Sendable {
             didRequestResync: requestResyncOnApplyFailure && dropReason != nil && dropReason != Self.staleOutOfBandFrameDropReason)
     }
 
+    /// Whether an out-of-band payload is subject to the ordering below at all.
+    ///
+    /// A response reporting the session is no longer interactive is normally exempt: it is the session's
+    /// final word rather than one screen update among many, and ordering it away would leave the pane
+    /// believing a dead session is live. But a `.state` read capturing one run's exit can be delayed
+    /// across a relaunch and arrive after the stream has already reported the NEW run live, and applying
+    /// that would mark a running session dead and disable its input until some later event. So the
+    /// exemption is withheld from a response that is provably answering for a superseded run.
+    ///
+    /// "Provably" needs both a run discriminator and a direction. The discriminator is the child PID,
+    /// which is the part of `TerminalSessionRuntimeState.runIdentity` that distinguishes one launch from
+    /// another — the rest of that identity is the exit timestamp, which necessarily differs between a run's
+    /// live and ended payloads and so cannot separate runs from exits. The direction is `emittedAt`: a
+    /// different child PID alone says the payloads describe different runs, not which is older, and a
+    /// response for a genuinely NEWER run must still land. What this cannot catch: a payload carrying no
+    /// runtime state, or two runs the daemon reports under the same child PID (a PID reused after wrap),
+    /// where the exemption stands as before.
+    private static func isOutOfBandPayloadOrderable(
+        _ payload: GhosttyRemoteSessionStatePayload, against previousPayload: GhosttyRemoteSessionStatePayload
+    ) -> Bool {
+        guard payload.runtimeState?.state.isInteractive == false else { return true }
+        guard let childPID = payload.runtimeState?.childPID, let previousChildPID = previousPayload.runtimeState?.childPID,
+            childPID != previousChildPID
+        else { return false }
+        return isStaleMetadata(payload, against: previousPayload)
+    }
+
     /// Where an out-of-band payload's own full frame sits relative to what the client is holding.
     ///
     /// A direct `.state` read answers with the screen and metadata as they were when the session was
@@ -203,15 +230,20 @@ public struct TerminalRemoteStateReducer: Sendable {
 
     private func outOfBandFrameDisposition(of payload: GhosttyRemoteSessionStatePayload) -> OutOfBandFrameDisposition {
         guard payload.hasRenderUpdate else { return .usable }
-        // With no baseline there is no chain to protect from regression, and this response is the head of
-        // the next one — refusing it would strand the client with nothing to apply deltas to.
-        guard renderUpdateBaseline != nil else { return .usable }
         guard let retained = retainedFrameOrdering, let frame = payload.decodedRenderUpdate?.fullFrame else { return .usable }
         if frame.ownerEpoch != retained.ownerEpoch { return frame.ownerEpoch < retained.ownerEpoch ? .supersededSession : .usable }
         // An unrevisioned frame on either side cannot be ordered, so it is left to apply as it did before
         // this guard existed.
         guard let frameRevision = frame.sessionRevision, let retainedRevision = retained.sessionRevision else { return .usable }
-        return frameRevision <= retainedRevision ? .supersededScreen : .usable
+        if frameRevision > retainedRevision { return .usable }
+        // A broken chain (a delta that could not apply nils the baseline) makes the EQUAL-revision response
+        // useful again: its content is byte-identical to what the pane already shows, so nothing repaints
+        // backwards, and it re-heads the chain the deltas that follow need. That is the only concession —
+        // a strictly older frame is refused whether or not the chain is broken, since applying one would
+        // both regress the pane and, because the caller retires an armed resync on any applied frame,
+        // silently cancel the resync the breakage asked for.
+        if frameRevision == retainedRevision, renderUpdateBaseline == nil { return .usable }
+        return .supersededScreen
     }
 
     /// The reduction an out-of-band payload gets when nothing about it may move the client's state.

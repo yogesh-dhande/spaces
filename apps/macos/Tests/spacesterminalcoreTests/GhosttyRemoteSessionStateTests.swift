@@ -305,6 +305,89 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "and the retained screen is carried forward untouched")
     }
 
+    /// A failed delta nils the baseline while the pane keeps showing the frame it last retained. A
+    /// response older than that frame must still be refused: accepting it because the chain happens to be
+    /// broken would repaint the pane backwards AND retire the resync that failure asked for, since the
+    /// caller retires one on any applied frame.
+    func testReducerRefusesAnOutOfBandFrameOlderThanTheRetainedOneWithNoBaseline() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let seeded = try payload(text: "alpha", sessionRevision: 3, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:03Z")
+        let seededReduction = reducer.reduce(incomingPayload: seeded, previousPayload: nil)
+        XCTAssertEqual(seededReduction.frameToApply?.snapshot, snapshot(text: "alpha"))
+
+        let orphan = GhosttyRenderUpdateFactory.makeUpdate(
+            target: GhosttyRenderFrame(sessionRevision: 9, ownerEpoch: 4, snapshot: snapshot(text: "delta")),
+            baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 8, ownerEpoch: 4, snapshot: snapshot(text: "charl"))))
+        let orphanPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 9,
+            sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
+        let broken = reducer.reduce(incomingPayload: orphanPayload, previousPayload: seededReduction.storedPayload, requestResyncOnApplyFailure: true)
+        XCTAssertEqual(broken.dropReason, "base_revision_mismatch")
+        XCTAssertTrue(broken.didRequestResync)
+
+        let older = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:05Z")
+        let reduction = reducer.reduce(
+            incomingPayload: older, previousPayload: broken.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        // No frame applied is what keeps the caller's armed resync alive; it retires one only on an apply.
+        XCTAssertNil(reduction.frameToApply, "an older frame must not repaint over the newer one the pane holds")
+        XCTAssertEqual(reduction.dropReason, "stale_out_of_band_frame")
+        XCTAssertFalse(reduction.didRequestResync)
+    }
+
+    /// The exception that narrowing must preserve: with the chain broken, a response carrying the very
+    /// frame the pane already holds re-heads it. The content is byte-identical, so nothing repaints
+    /// backwards, and refusing it would strand the client with no baseline for the deltas that follow.
+    func testReducerAcceptsAnOutOfBandFrameEqualToTheRetainedOneWithNoBaseline() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let seeded = try payload(text: "alpha", sessionRevision: 3, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:03Z")
+        let seededReduction = reducer.reduce(incomingPayload: seeded, previousPayload: nil)
+
+        let orphan = GhosttyRenderUpdateFactory.makeUpdate(
+            target: GhosttyRenderFrame(sessionRevision: 9, ownerEpoch: 4, snapshot: snapshot(text: "delta")),
+            baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 8, ownerEpoch: 4, snapshot: snapshot(text: "charl"))))
+        let orphanPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 9,
+            sessionStateFlags: 1, screenStateRevision: 9, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(orphan))
+        let broken = reducer.reduce(incomingPayload: orphanPayload, previousPayload: seededReduction.storedPayload, requestResyncOnApplyFailure: true)
+        XCTAssertTrue(broken.didRequestResync)
+
+        let reHead = try payload(text: "alpha", sessionRevision: 3, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:05Z")
+        let reduction = reducer.reduce(
+            incomingPayload: reHead, previousPayload: broken.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "alpha"), "the response re-heads the broken chain")
+        XCTAssertNil(reduction.dropReason)
+    }
+
+    /// A `.state` read capturing one run's exit can be delayed across a relaunch and arrive after the
+    /// stream has already reported the new run live. Exempting every ended response would let that answer
+    /// mark a running session dead and disable its input until some later event.
+    func testReducerRefusesAnEndedOutOfBandResponseFromASupersededRun() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let liveState = TerminalSessionRuntimeState(
+            sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 3, state: .running, updatedAt: "2026-08-09T00:00:05Z")
+        let live = try payload(text: "bravo", sessionRevision: 5, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:05Z", runtimeState: liveState)
+        let liveReduction = reducer.reduce(incomingPayload: live, previousPayload: nil)
+        XCTAssertEqual(liveReduction.storedPayload.runtimeState?.state, .running)
+
+        let deadRunState = TerminalSessionRuntimeState(
+            sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-08-09T00:00:01Z",
+            exitedAt: "2026-08-09T00:00:01Z")
+        let deadRunResponse = try payload(
+            text: "final", sessionRevision: 1, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z", reason: TerminalRemoteSessionStateReason.terminated,
+            runtimeState: deadRunState)
+        let reduction = reducer.reduce(
+            incomingPayload: deadRunResponse, previousPayload: liveReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.dropReason, "stale_out_of_band_state")
+        XCTAssertEqual(reduction.storedPayload.runtimeState?.state, .running, "a dead run's answer must not mark the live run exited")
+        XCTAssertEqual(reduction.storedPayload.renderText, "bravo")
+        XCTAssertFalse(reduction.didRequestResync)
+    }
+
     /// `emittedAt` is millisecond-resolution, so a tie says the session answered in the same instant it
     /// broadcast — not that the response repeats it. Ties are kept, matching the ordering guard the device
     /// state model applies to the same field.
@@ -347,12 +430,12 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
 
     private func payload(
         text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t",
-        reason: String = TerminalRemoteSessionStateReason.initial
+        reason: String = TerminalRemoteSessionStateReason.initial, runtimeState: TerminalSessionRuntimeState? = nil
     ) throws -> GhosttyRemoteSessionStatePayload {
         let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
         return GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionRevision, sessionStateFlags: 1,
-            screenStateRevision: sessionRevision, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/alpha",
+            screenStateRevision: sessionRevision, runtimeState: runtimeState, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/alpha",
             outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
     }
 

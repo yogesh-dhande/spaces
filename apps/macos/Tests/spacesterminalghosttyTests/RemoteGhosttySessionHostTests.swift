@@ -1369,6 +1369,17 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runningState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
             title: "live-title", workingDirectory: "/tmp/live", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "RUNNING", sessionRevision: 2))
+        // The relaunched run's own exit: a distinct child process, its own exit time, and a later emission
+        // than the live state it follows — which is what the daemon serves for a second exit, and what
+        // makes the two runs distinguishable to everything that orders by run rather than by arrival.
+        let secondExitState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 3, state: .exited, updatedAt: "2026-06-05T00:00:03Z",
+            exitedAt: "2026-06-05T00:00:03Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
+        let secondExitPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:03Z", sessionStateRevision: 3,
+            sessionStateFlags: 1, screenStateRevision: 3, runtimeState: secondExitState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "final-01", sessionRevision: 3))
         let recorder = DirectTerminalServiceRecorder(payload: endedPayload)
 
         // Each fetch suspends until the test resolves it, so the test controls when the OLD run's
@@ -1399,7 +1410,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
 
         // The relaunched session exits again, arming a fresh ended replay.
-        recorder.setPayload(endedPayload)
+        recorder.setPayload(secondExitPayload)
         waitForCondition("relaunched session exits again") {
             host.requestSurfaceRefresh()
             guard let text = host.snapshotText() else { return false }
