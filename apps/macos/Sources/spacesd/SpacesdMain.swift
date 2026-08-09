@@ -403,6 +403,8 @@ enum SpacesDaemonProfileCommandRouting {
             writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
             return
         }
+        sweepOrphanedWorkspaceSetupDirectories(databasePath: databasePath)
+        trimOversizedRuntimeLogs()
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
@@ -458,6 +460,38 @@ enum SpacesDaemonProfileCommandRouting {
                 forName: IPCNotification.caddyRouteRegistryDidChange, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
+    }
+
+    /// One-shot startup maintenance: removes `workspace-setup` run directories that no longer belong
+    /// to any workspace in the store (see `WorkspaceSetupDirectorySweep`, issue #423). Best-effort —
+    /// this is diagnostic-file cleanup, not part of the daemon's operational path, so a failure here
+    /// only gets logged.
+    private func sweepOrphanedWorkspaceSetupDirectories(databasePath: String) {
+        do {
+            let store = try SQLiteStore(path: databasePath)
+            let knownWorkspaceIDs = Set(try store.projects().flatMap { project in try store.workspaces(projectID: project.id).map(\.id) })
+            let setupDirectory = URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
+                .appendingPathComponent("workspace-setup", isDirectory: true).path
+            WorkspaceSetupDirectorySweep.sweep(workspaceSetupDirectory: setupDirectory, knownWorkspaceIDs: knownWorkspaceIDs)
+        } catch { writeStandardError("spacesd workspace_setup_sweep_error error=\(error)\n") }
+    }
+
+    /// One-shot startup maintenance: trims launchd's stdout/stderr redirects and the perf log back to
+    /// a bounded tail once either exceeds `RuntimeLogTrimming.maximumSizeBeforeTrimBytes` (issue #469)
+    /// — nothing else ever rotates them, so they otherwise grow for the life of the profile. The
+    /// launchd log names are macOS-specific (only macOS runs spacesd under launchd); perf.log is
+    /// trimmed on every platform since `TerminalPerformance` writes it whenever `DEBUG=1`.
+    private func trimOversizedRuntimeLogs() {
+        guard let runtimeDirectory = try? SpacesProfile.current().runtimeDirectory else { return }
+        #if os(macOS)
+            let logNames = ["spacesd.launchd.out.log", "spacesd.launchd.err.log", "perf.log"]
+        #else
+            let logNames = ["perf.log"]
+        #endif
+        let runtimeDirectoryURL = URL(fileURLWithPath: runtimeDirectory, isDirectory: true)
+        for name in logNames {
+            RuntimeLogTrimming.trimIfOversized(path: runtimeDirectoryURL.appendingPathComponent(name, isDirectory: false).path)
+        }
     }
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
