@@ -1850,6 +1850,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
+        cancelTrailingRenderUpdateResync()
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false
@@ -2245,8 +2246,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
     /// while this is pending is already covered by it, so it must not stack a competing timer. Cancelled
-    /// when a materialized frame lands (`applyReducedState`), when the session ends, and on stop — so a
-    /// viewer the user has left, or one whose pane is already repaired, never dials the device.
+    /// when a materialized frame lands (`applyReducedState`), when the session ends, on stop, and when a
+    /// revoked pairing tears the viewer down (`handleAuthenticationFailure`) — so a viewer the user has
+    /// left, one whose pane is already repaired, or one the device no longer authenticates, never dials
+    /// the device.
     ///
     /// The request stays owed until a fetch genuinely starts. A resync read already in flight refuses this
     /// one, and that read was issued before this resync was owed, so treating the refusal as delivery is

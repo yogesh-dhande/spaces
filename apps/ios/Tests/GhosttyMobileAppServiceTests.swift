@@ -134,6 +134,8 @@
             func append(_ message: String) { messages.append(message) }
 
             func firstMessage() -> String? { messages.first }
+
+            func count() -> Int { messages.count }
         }
 
         private final class HoldOpenTCPServer: @unchecked Sendable {
@@ -1319,6 +1321,50 @@
             try await Task.sleep(for: .milliseconds(500))
             let stateRequestCount = await recorder.countStateRequests()
             XCTAssertEqual(stateRequestCount, 2, "six unappliable payloads must cost one read plus one coalesced retry")
+        }
+
+        /// A revoked pairing tears the viewer down and sends the user to re-pair. A trailing resync armed
+        /// before that revocation would dial the device again afterwards, fail authentication a second
+        /// time, and ask the user to re-pair twice for one revocation, so the teardown cancels it.
+        func testARevokedPairingCancelsTheTrailingResyncRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            // The device refuses this client outright, so the resync read below comes back as a revoked
+            // pairing rather than a full frame.
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+
+            // Two unappliable payloads inside one throttle window: the first sends the resync read the
+            // revoked pairing fails, the second arms the trailing retry behind it.
+            for index in 0..<2 {
+                let payload = Self.outputState(title: "unappliable-\(index)", emittedAt: "2026-06-04T14:23:5\(index)Z")
+                let stored = try XCTUnwrap(model.latestState).merged(with: payload)
+                model.applyReducedStateForTesting(
+                    TerminalRemoteStateReductionOutput(
+                        incomingPayload: payload,
+                        reduction: TerminalRemoteStateReductionResult(
+                            payload: payload, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: "missing_baseline",
+                            didRequestResync: true), reduceMS: 0))
+            }
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            // Past the trailing window, so a retry that outlived the teardown would have fired by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1, "a viewer torn down by a revoked pairing must not dial the device again")
+            let promptCount = await authenticationRecorder.count()
+            XCTAssertEqual(promptCount, 1, "one revocation must ask the user to re-pair exactly once")
         }
 
         /// A `.state` response describes the session as it was when it was asked, and it re-enters beside a
