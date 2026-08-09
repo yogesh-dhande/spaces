@@ -1581,6 +1581,57 @@
             XCTAssertNil(model.ownerRenderEpoch, "a refused response carries no usable owner state, so no epoch may be begun from it")
         }
 
+        /// The partial refusal, which the whole-payload refusal above cannot stand in for. A response
+        /// whose frame alone is superseded — same owner epoch, a revision this viewer already holds — has
+        /// its metadata ordered separately, and that metadata genuinely merges, so the reduction reports no
+        /// refusal and the caller is handed a payload. What that payload must not still carry is the
+        /// refused frame: the handshake bootstraps the owner render epoch from whatever it is given, and a
+        /// screen the reducer just declined is exactly what it must not seed from.
+        func testAnOwnerBootstrapDoesNotSeedItsRenderEpochFromAPartiallyRefusedStateResponse() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // The same owner epoch as the frame this viewer holds and a lower revision, so only the frame
+            // is refused; a stamp newer than everything already reduced, so the payload's metadata merges
+            // and the reduction is not a refusal. Its snapshot matches the viewport set below, which is
+            // what makes it look like usable bootstrap state to anything reading the response rather than
+            // the reduction.
+            let supersededScreenResponse = Self.terminalStateResponse(
+                try Self.framedState(text: "stale-frame", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:47Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return supersededScreenResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:46Z"))
+            }
+            // A starting session, so no automatic takeover races the one below, and the ownership handshake
+            // it schedules is the only thing that reads `.state`.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The stream's own frame: the revision the response above is ordered against, and too narrow
+            // for the viewport below to bootstrap from.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 9, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            await model.takeOver()
+            XCTAssertTrue(model.isOwner, "the handshake under test only runs for an owner")
+            // Drives the handshake's resize round trip, and sizes the viewport so the frame this viewer
+            // already holds cannot serve as bootstrap state: the fetched one is the only candidate.
+            model.updateViewportSize(columns: 11, rows: 1)
+
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the handshake must have actually read state to bootstrap from")
+            // The handshake asks again instead of settling, because the response's only screen was refused
+            // and this owner still has no baseline to render from. The mock answers every read with the
+            // same superseded frame, so the retries continue for as long as the model lives; a real session
+            // answers the next read with its current frame and the handshake settles on that.
+            let didAskAgain = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didAskAgain, "a response whose frame was refused bootstrapped nothing, so the handshake must ask again")
+            XCTAssertNil(model.ownerRenderEpoch, "a refused frame must not become the owner epoch's bootstrap snapshot")
+        }
+
         /// The other family that reads a `.state` return: the recovery that asks whether the session it
         /// just failed to reach is simply gone. The reducer refuses an ended report only when it is
         /// provably answering for a superseded run — a different child PID, stamped older than what the

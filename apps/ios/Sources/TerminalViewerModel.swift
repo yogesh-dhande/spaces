@@ -571,6 +571,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // moved past, which this one cannot be; applying that rule here would let a stream payload
             // that raced it refuse the snapshot on `emittedAt` alone and leave a successful takeover
             // reading as unconfirmed.
+            //
+            // The accepted residual of applying in band: output the session emitted after it captured
+            // this response, but delivered before the response is submitted, is overwritten by this apply,
+            // which walks the delta baseline back to the screen the takeover was answered with. The next
+            // delta then fails its base-revision check and the paced resync repairs it, so what this costs
+            // is a transient stale window, not a stuck pane. It is preferred to the alternative: ordering
+            // the acknowledgment out of band would let those same racing payloads refuse the snapshot the
+            // lines below read the takeover's outcome from.
             if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false) }
             if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
             errorMessage = nil
@@ -1437,6 +1445,29 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     trace("fetch_state_refused reason=\(reason)")
                     return nil
                 }
+                // What a caller gets back is the reduction's own payload, not the response as it arrived:
+                // it is the response as the reducer actually admitted it, its render update resolved to
+                // the materialized frame where the frame applied and stripped where it did not. A partial
+                // refusal is what makes that distinction load-bearing. A frame at or below the revision
+                // this client already retains in the same owner epoch is refused on its own while the
+                // payload's metadata is ordered separately and genuinely merges, so
+                // `isRefusedOutOfBandPayload` stays false and the check above lets the response through —
+                // with the refused frame still on it. Read from the raw response, that frame is what the
+                // ownership handshake would seed the owner render epoch's bootstrap snapshot from; read
+                // from the reduced payload there is no screen on it at all, and the handshake falls back
+                // to `latestState`, which holds the newer frame the refusal was measured against.
+                //
+                // A nil reduction is no more readable than a refusal, so it answers the same way. The
+                // pipeline reduces every payload it is handed except a `clipboard_write`, which carries an
+                // event and no state — and no `.state` response is stamped with that reason (see
+                // `applyLatestState`), so this is unreachable rather than a fallback. Returning the
+                // unreduced response here would be the one way back to handing out a frame nothing
+                // admitted.
+                guard let reducedPayload = output.reduction?.payload else {
+                    trace("fetch_state_unreduced reason=\(reason)")
+                    return nil
+                }
+                return reducedPayload
             }
             return fetchedState
         } catch {
