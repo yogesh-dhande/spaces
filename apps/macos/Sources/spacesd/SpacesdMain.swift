@@ -404,7 +404,9 @@ enum SpacesDaemonProfileCommandRouting {
             return
         }
         sweepOrphanedWorkspaceSetupDirectories(databasePath: databasePath)
-        trimOversizedRuntimeLogs()
+        #if os(macOS)
+            trimOversizedRuntimeLogs()
+        #endif
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
@@ -476,23 +478,22 @@ enum SpacesDaemonProfileCommandRouting {
         } catch { writeStandardError("spacesd workspace_setup_sweep_error error=\(error)\n") }
     }
 
-    /// One-shot startup maintenance: trims launchd's stdout/stderr redirects and the perf log back to
-    /// a bounded tail once either exceeds `RuntimeLogTrimming.maximumSizeBeforeTrimBytes` (issue #469)
-    /// — nothing else ever rotates them, so they otherwise grow for the life of the profile. The
-    /// launchd log names are macOS-specific (only macOS runs spacesd under launchd); perf.log is
-    /// trimmed on every platform since `TerminalPerformance` writes it whenever `DEBUG=1`.
-    private func trimOversizedRuntimeLogs() {
-        guard let runtimeDirectory = try? SpacesProfile.current().runtimeDirectory else { return }
-        #if os(macOS)
-            let logNames = ["spacesd.launchd.out.log", "spacesd.launchd.err.log", "perf.log"]
-        #else
-            let logNames = ["perf.log"]
-        #endif
-        let runtimeDirectoryURL = URL(fileURLWithPath: runtimeDirectory, isDirectory: true)
-        for name in logNames {
-            RuntimeLogTrimming.trimIfOversized(path: runtimeDirectoryURL.appendingPathComponent(name, isDirectory: false).path)
+    #if os(macOS)
+        /// One-shot startup maintenance: trims launchd's stdout/stderr redirects back to a bounded tail
+        /// once either exceeds `RuntimeLogTrimming.maximumSizeBeforeTrimBytes` (issue #469) — nothing
+        /// else ever rotates them, so they otherwise grow for the life of the profile. Only macOS runs
+        /// spacesd under launchd, so this is macOS-only. `TerminalPerformance`'s perf.log has the same
+        /// unbounded-growth problem but is deliberately excluded: it is not written through an O_APPEND
+        /// descriptor, so `RuntimeLogTrimming`'s in-place-truncate safety argument does not hold for it
+        /// (see that type's doc comment).
+        private func trimOversizedRuntimeLogs() {
+            guard let runtimeDirectory = try? SpacesProfile.current().runtimeDirectory else { return }
+            let runtimeDirectoryURL = URL(fileURLWithPath: runtimeDirectory, isDirectory: true)
+            for name in ["spacesd.launchd.out.log", "spacesd.launchd.err.log"] {
+                RuntimeLogTrimming.trimIfOversized(path: runtimeDirectoryURL.appendingPathComponent(name, isDirectory: false).path)
+            }
         }
-    }
+    #endif
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()

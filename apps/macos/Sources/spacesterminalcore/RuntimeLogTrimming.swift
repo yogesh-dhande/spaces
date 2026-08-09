@@ -1,9 +1,16 @@
 import Foundation
 
 /// Bounds append-only diagnostic log files that nothing else ever rotates: launchd's
-/// StandardOutPath/StandardErrorPath redirects for `spacesd` (opened O_APPEND for the life of the
-/// daemon process) and `TerminalPerformance`'s perf.log. Both grow without limit otherwise (issue
-/// #469): a daemon that has run for a couple of weeks was observed with a multi-megabyte stderr log.
+/// StandardOutPath/StandardErrorPath redirects for `spacesd`, opened O_APPEND for the life of the
+/// daemon process. Left alone, they grow without limit (issue #469): a daemon that has run for a
+/// couple of weeks was observed with a multi-megabyte stderr log.
+///
+/// `TerminalPerformance`'s perf.log is deliberately NOT trimmed here even though it has the same
+/// unbounded-growth problem: it is written through an ordinary `FileHandle` that seeks to the
+/// file's end on each append rather than an O_APPEND descriptor, so the in-place-truncate safety
+/// argument below does not hold for it. A perf-log append racing this trim can seek to an
+/// offset that predates the truncate, then write there, recreating a large sparse file instead
+/// of appending to the trimmed tail.
 public enum RuntimeLogTrimming {
     /// A file is left untouched until it exceeds this size, so a normal, actively-small log is never
     /// rewritten on a routine startup.
@@ -17,11 +24,12 @@ public enum RuntimeLogTrimming {
     /// missing, unreadable, or already at or under `maximumSizeBeforeTrimBytes`.
     ///
     /// Rewrites through the SAME path (truncate + write), never a temp-file-and-rename: a writer that
-    /// holds an O_APPEND descriptor open across this call (launchd, or an in-process appender like
-    /// `TerminalPerformance`) always seeks to the file's current end before each write. A rename would
-    /// replace the inode the path points at, leaving that descriptor writing into an unlinked file
-    /// nobody reads again. Truncating the existing inode in place keeps the descriptor and the path
-    /// pointing at the same file, so the writer's next append lands right after the new, shorter end.
+    /// holds an O_APPEND descriptor open across this call (launchd) always seeks to the file's current
+    /// end before each write. A rename would replace the inode the path points at, leaving that
+    /// descriptor writing into an unlinked file nobody reads again. Truncating the existing inode in
+    /// place keeps the descriptor and the path pointing at the same file, so the writer's next append
+    /// lands right after the new, shorter end. This safety argument is specific to an O_APPEND writer —
+    /// see the type doc for why perf.log, whose writer is not one, is excluded from callers of this.
     public static func trimIfOversized(path: String, fileManager: FileManager = .default) {
         guard let attributes = try? fileManager.attributesOfItem(atPath: path), let size = attributes[.size] as? Int,
             size > maximumSizeBeforeTrimBytes

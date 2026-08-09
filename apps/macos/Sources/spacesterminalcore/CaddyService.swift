@@ -38,15 +38,22 @@ import Foundation
         /// reloaded gracefully; otherwise it is started fresh. Returns true when a new process was
         /// launched.
         ///
-        /// A reload that a confirmed-live Caddy rejects (bad config) or never answers (wedged) does not
-        /// throw: a live Caddy that refuses the new config would otherwise keep serving the previous
-        /// route table indefinitely, with nothing to prompt a retry until some later, unrelated
-        /// reconcile pass happens to succeed. Instead this stops that instance (the same ladder `stop()`
-        /// uses) and falls through to the fresh-start path below with the config already written, so
-        /// routes recover within this call. The original reload failure is not lost: it is written to
-        /// stderr (`CaddyServiceError.reloadFailed`'s description carries the child's exit status and a
-        /// bounded tail of its stderr) so the reason is diagnosable even though recovery means nothing
-        /// is thrown. Only a fresh start that itself fails to come up still throws, unchanged from before.
+        /// A reload that a confirmed-live Caddy rejects (bad config) or never answers (wedged) is only
+        /// recovered by stopping that instance when the just-written config is itself confirmed good:
+        /// if the config is what's actually broken, a fresh `caddy run` against that same config could
+        /// not come up either, so stopping the live instance first would convert a stale-but-working
+        /// route table into a total outage that persists across reconciles. So before stopping anything,
+        /// the config is checked with `caddy validate`:
+        /// - validate fails (nonzero exit, or times out/never launches — anything but exit 0 counts as
+        ///   "not confirmed good"): the live instance is left running and this throws
+        ///   `CaddyServiceError.reloadFailed` instead, so the previous route table keeps being served.
+        /// - validate succeeds: the config is fine, so the reload failure means the instance itself is
+        ///   wedged. This stops it (the same ladder `stop()` uses) and falls through to the fresh-start
+        ///   path below with the config already written, so routes recover within this call.
+        /// Either way the failure is diagnosable: `CaddyServiceError.reloadFailed`'s description carries
+        /// the reload's exit status and a bounded stderr tail (preferring validate's stderr when it is
+        /// more specific about what's wrong with the config). Only a fresh start that itself fails to
+        /// come up still throws, unchanged from before.
         @discardableResult public static func ensureRunning(configJSON: Data, timeout: TimeInterval = 5) throws -> Bool {
             let configPath = try configFilePath()
             let socketPath = try adminSocketPath()
@@ -60,6 +67,12 @@ import Foundation
                 // generous bound (like the reload above) instead of the caller's startup budget,
                 // which tests legitimately set near zero.
                 if adminSocketHasOwner(socketPath, timeout: 10) {
+                    let validateResult = runValidate(configPath: configPath, timeout: 2)
+                    guard validateResult.exitStatus == 0 else {
+                        throw CaddyServiceError.reloadFailed(
+                            configPath: configPath, exitStatus: reloadResult.exitStatus,
+                            stderr: validateResult.stderr.isEmpty ? reloadResult.stderr : validateResult.stderr)
+                    }
                     logReloadFailureRecovery(configPath: configPath, result: reloadResult)
                     stop(timeout: timeout)
                 } else {
@@ -110,6 +123,14 @@ import Foundation
             guard let executableURL = try? resolveExecutableURL() else { return CaddyProcessResult(exitStatus: nil, stderr: "") }
             return runCaddy(
                 executableURL: executableURL, arguments: ["reload", "--config", configPath, "--address", "unix//\(socketPath)"], timeout: timeout)
+        }
+
+        /// Confirms whether `configPath` is a config Caddy would accept, independent of any running
+        /// instance. Used to gate `ensureRunning`'s recovery: only a config validate confirms good may
+        /// justify stopping a live router (see that function's doc comment).
+        private static func runValidate(configPath: String, timeout: TimeInterval) -> CaddyProcessResult {
+            guard let executableURL = try? resolveExecutableURL() else { return CaddyProcessResult(exitStatus: nil, stderr: "") }
+            return runCaddy(executableURL: executableURL, arguments: ["validate", "--config", configPath], timeout: timeout)
         }
 
         /// Writes the recovered-from reload failure to stderr so the daemon log carries why Caddy
