@@ -519,8 +519,20 @@
 
         /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
         /// while this is pending is already covered by it, so it must not stack a competing timer. Cleared
-        /// when it fires, when a frame lands (`applyReducedState`), and when the host is torn down
+        /// when it sends, when a frame lands (`applyReducedState`), and when the host is torn down
         /// (`deinit`), alongside the pane's other pending tasks — so a dead host can never dial the device.
+        ///
+        /// The request stays owed until a fetch genuinely starts. A `.state` read already in flight refuses
+        /// this one (`directStateFetchInFlight`), and that read was issued before this resync was owed, so
+        /// it can answer with no render update and repair nothing; treating the refusal as delivery is how
+        /// the owed request would go missing. So a retry that lands on one waits out another full window
+        /// instead — no spin, and the pacing is unchanged since nothing was sent.
+        ///
+        /// The mirror case needs no machinery: an in-flight fetch that completes frameless while nothing is
+        /// armed owes nothing, because nothing has failed to reduce since it was issued. Whatever payload
+        /// next fails asks again through `requestRenderUpdateStateResync`, and a session that goes quiet
+        /// with no payload at all is covered on the far side — the daemon holds its subscriber-baseline arm
+        /// until a broadcast actually carries a full frame.
         private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
             guard pendingRenderUpdateResyncTask == nil else { return }
             pendingRenderUpdateResyncTask = Task { @MainActor [weak self] in
@@ -530,6 +542,10 @@
                 // An ended pane showing its own scrollback replay renders from the transcript, not from
                 // session state, so a fetch here would repair nothing it displays.
                 guard !self.isEndedScrollbackReplayActive else { return }
+                guard !self.directStateFetchInFlight else {
+                    self.scheduleTrailingRenderUpdateResync(after: self.renderUpdateResyncInterval)
+                    return
+                }
                 self.lastRenderUpdateResyncAt = Date()
                 self.requestDirectStateFetch()
             }

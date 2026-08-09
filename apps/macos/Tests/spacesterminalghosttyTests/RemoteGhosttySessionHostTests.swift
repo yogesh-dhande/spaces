@@ -2509,6 +2509,49 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the retried frame paints") { host.snapshotText() == "alpha" }
     }
 
+    /// The trailing retry must survive firing into a fetch that is already in flight.
+    ///
+    /// The `.state` read a resync would make is refused while another one is in flight, and that other
+    /// read was issued before this resync was owed — it can come back with no render update and repair
+    /// nothing. Consuming the retry on that refusal puts the pane back in the state the retry exists to
+    /// prevent: baseline-less, with nothing left to ask again. So a retry that finds a fetch in flight
+    /// stays owed and waits out another window instead.
+    @MainActor func testTrailingResyncRetryFiringIntoAnInFlightFetchStaysOwed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-resync-retry-in-flight"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        // The held first read answers with no render update; only a later read carries the frame.
+        let sender = HeldStateRequestSender(payloads: [framelessPayload(for: fixture), fixture.payload])
+        defer { sender.releaseHeldState() }
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        host.renderUpdateResyncIntervalForTesting = 0.2
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        // The attach's eager resync stamps the throttle and its read is held open.
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
+
+        // A delta the host has no baseline for lands inside the throttle window and arms the retry.
+        subscriber.emit(try deltaPayloadWithoutABaseline(sessionID: sessionID, runtimeState: fixture.payload.runtimeState))
+        // Past the boundary, so the retry fires while the held read is still in flight.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(sender.stateRequestCount, 1, "the in-flight read is what the retry ran into")
+
+        // The held read finally answers, with nothing to paint, and the session goes quiet.
+        sender.releaseHeldState()
+
+        waitForCondition("the still-owed resync fires once the link is free") { sender.stateRequestCount >= 2 }
+        waitForCondition("the retried frame paints") { host.snapshotText() == "alpha" }
+    }
+
     /// The other direction: a trailing retry is owed only while the pane still needs it. A full frame that
     /// lands before the boundary repairs the chain, so the armed retry must be dropped rather than firing
     /// a `.state` read for a frame the host already has.
@@ -2543,6 +2586,54 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
     private func stateRequestCount(_ recorder: DirectTerminalServiceRecorder) -> Int {
         recorder.requests().filter { if case .state = $0.command { return true } else { return false } }.count
+    }
+
+    /// A request sender whose first `.state` read is held open until the test releases it, so a fetch can
+    /// still be in flight when the resync throttle's window expires. Later reads answer immediately, in
+    /// order, repeating the last payload — the same serving rule as `DirectTerminalServiceRecorder`.
+    private final class HeldStateRequestSender: @unchecked Sendable {
+        private let lock = NSLock()
+        private var payloads: [GhosttyRemoteSessionStatePayload]
+        private var requestCount = 0
+        private let heldRead = DispatchSemaphore(value: 0)
+        private var isReleased = false
+
+        init(payloads: [GhosttyRemoteSessionStatePayload]) { self.payloads = payloads }
+
+        var stateRequestCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return requestCount
+        }
+
+        /// Idempotent so the test's `defer` can guarantee the held send is never left blocking a thread.
+        func releaseHeldState() {
+            lock.lock()
+            let alreadyReleased = isReleased
+            isReleased = true
+            lock.unlock()
+            guard !alreadyReleased else { return }
+            heldRead.signal()
+        }
+
+        func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            switch request.command {
+            case .state:
+                lock.lock()
+                requestCount += 1
+                let isFirst = requestCount == 1
+                lock.unlock()
+                if isFirst { heldRead.wait() }
+                lock.lock()
+                let payload = payloads.count > 1 ? payloads.removeFirst() : payloads.first
+                lock.unlock()
+                return TerminalServiceResponse(ok: true, message: "state", sessionState: payload)
+            case .control:
+                return TerminalServiceResponse(
+                    ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
+            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.commandName)'.")
+            }
+        }
     }
 
     /// A `.state` response with no render update: what the session exports when its capture holds nothing
