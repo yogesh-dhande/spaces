@@ -220,6 +220,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// The one delayed `.state` request owed to a resync the throttle turned away; see
     /// `scheduleTrailingRenderUpdateResync`.
     private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+    /// What a landing frame must cover for that delayed request to count as answered. Non-nil exactly
+    /// while `pendingRenderUpdateResyncTask` is armed; see `TerminalResyncOwedOrdering` for why a frame
+    /// alone is not proof.
+    private var owedRenderUpdateResyncOrdering: TerminalResyncOwedOrdering?
     /// How long one resync request paces the next. Only a test overrides it
     /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its boundary
     /// instead of waiting out a real second.
@@ -2080,14 +2084,26 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
         // Covers a resync inherited from an output the apply mailbox coalesced away: the superseded frame
         // is not worth drawing, but the full frame its failed delta could not build is.
-        if output.requestsResync { requestRenderUpdateResync() }
-        // A materialized frame repaired the chain, so any delayed resync still armed for the gap it filled
-        // is no longer owed. `frameToApply` is the signal rather than the stored payload's snapshot: the
-        // stored payload carries a frame forward through every merge, including the frameless payloads
-        // that follow a break, while this is non-nil only for a payload whose own render update decoded and
-        // applied. Ordered after the request above so an output that both carries a frame and inherits a
-        // coalesced-away resync retires that request rather than leaving it armed.
-        if reduction.frameToApply != nil { cancelTrailingRenderUpdateResync() }
+        //
+        // The ordering the resync is owed at comes from this output's own decoded update even when the
+        // request was inherited from an output the mailbox coalesced away: the surviving output is never
+        // older than the one it replaced, so its target is at or past the failure's, and an output with no
+        // decodable target records `unknown`, which no frame retires.
+        if output.requestsResync { requestRenderUpdateResync(owedBy: .forFailedUpdate(reduction.decodedUpdate)) }
+        // A materialized frame that covers the failure the pending resync was armed for repaired the chain,
+        // so that resync is no longer owed. `frameToApply` is the signal rather than the stored payload's
+        // snapshot: the stored payload carries a frame forward through every merge, including the frameless
+        // payloads that follow a break, while this is non-nil only for a payload whose own render update
+        // decoded and applied. Covering the failure is what makes the retirement sound — a fetch answered
+        // before the failure was owed lands a frame that applies and yet leaves the client behind the
+        // session (see `TerminalResyncOwedOrdering`). Ordered after the request above so an output that
+        // both carries a frame and inherits a coalesced-away resync retires that request rather than
+        // leaving it armed.
+        if let frame = reduction.frameToApply, let owed = owedRenderUpdateResyncOrdering,
+            owed.isSatisfied(byFrameOwnerEpoch: frame.ownerEpoch, sessionRevision: frame.sessionRevision)
+        {
+            cancelTrailingRenderUpdateResync()
+        }
         latestState = reduction.storedPayload
         // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
         // read was answered, which is before whatever superseded it — a handoff, or this device's own
@@ -2225,11 +2241,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Dropping it there would leave a session that emits one delta and goes quiet showing a stale grid
     /// until some unrelated later event, so a suppressed request arms exactly one delayed retry at the
     /// window boundary instead.
-    private func requestRenderUpdateResync() {
+    private func requestRenderUpdateResync(owedBy ordering: TerminalResyncOwedOrdering) {
         if let lastRenderUpdateResyncAt {
             let elapsed = Date().timeIntervalSince(lastRenderUpdateResyncAt)
             if elapsed < renderUpdateResyncInterval {
-                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed)
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed, owedBy: ordering)
                 return
             }
         }
@@ -2238,33 +2254,44 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // nothing. Letting it stand in for this request would consume the request unsent, so arm the
         // trailing retry instead, exactly as a throttled request does.
         guard !isRenderUpdateResyncFetchInFlight else {
-            scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+            scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval, owedBy: ordering)
             return
         }
         sendRenderUpdateResyncFetch()
     }
 
-    /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
-    /// while this is pending is already covered by it, so it must not stack a competing timer. Cancelled
-    /// when a materialized frame lands (`applyReducedState`), when the session ends, on stop, and when a
-    /// revoked pairing tears the viewer down (`handleAuthenticationFailure`) — so a viewer the user has
-    /// left, one whose pane is already repaired, or one the device no longer authenticates, never dials
-    /// the device.
+    /// Arms the one delayed request a throttled resync is owed, and records the ordering that request has
+    /// to be answered at. Coalesced: a second suppressed request while this is pending is already covered
+    /// by the same timer, so it must not stack a competing one — it only raises the debt to whichever
+    /// failure is later (`TerminalResyncOwedOrdering.merged`).
+    ///
+    /// Cancelled when a materialized frame covering the recorded ordering lands (`applyReducedState`),
+    /// when the session ends, on stop, and when a revoked pairing tears the viewer down
+    /// (`handleAuthenticationFailure`) — so a viewer the user has left, one whose pane is already
+    /// repaired, or one the device no longer authenticates, never dials the device.
+    private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval, owedBy ordering: TerminalResyncOwedOrdering) {
+        owedRenderUpdateResyncOrdering = owedRenderUpdateResyncOrdering?.merged(with: ordering) ?? ordering
+        armTrailingRenderUpdateResync(after: delay)
+    }
+
+    /// The timer behind a request already recorded as owed.
     ///
     /// The request stays owed until a fetch genuinely starts. A resync read already in flight refuses this
     /// one, and that read was issued before this resync was owed, so treating the refusal as delivery is
     /// how the owed request would go missing. A retry that lands on one waits out another full window
-    /// instead — no spin, and the pacing is unchanged since nothing was sent.
-    private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
+    /// instead — no spin, the pacing is unchanged since nothing was sent, and the recorded ordering rides
+    /// along untouched because the same debt is still outstanding.
+    private func armTrailingRenderUpdateResync(after delay: TimeInterval) {
         guard pendingRenderUpdateResyncTask == nil else { return }
         pendingRenderUpdateResyncTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }
             pendingRenderUpdateResyncTask = nil
             guard !isRenderUpdateResyncFetchInFlight else {
-                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                armTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
                 return
             }
+            owedRenderUpdateResyncOrdering = nil
             sendRenderUpdateResyncFetch()
         }
     }
@@ -2272,6 +2299,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func cancelTrailingRenderUpdateResync() {
         pendingRenderUpdateResyncTask?.cancel()
         pendingRenderUpdateResyncTask = nil
+        owedRenderUpdateResyncOrdering = nil
     }
 
     /// Stamps the throttle and sends the resync read. Both the stamp and the in-flight mark are set before

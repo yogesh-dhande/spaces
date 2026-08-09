@@ -91,6 +91,35 @@
             func current() -> SpacesDeviceAPIResponse { response }
         }
 
+        /// A `.state` mock whose first read is held open until the test releases it, so a fetch can still
+        /// be in flight while the payloads that arrive behind it fail to reduce. Every later read answers
+        /// immediately with `later`.
+        private actor HeldTerminalStateResponder {
+            private let first: SpacesDeviceAPIResponse
+            private let later: SpacesDeviceAPIResponse
+            private var answeredCount = 0
+            private var isReleased = false
+            private var waiter: CheckedContinuation<Void, Never>?
+
+            init(first: SpacesDeviceAPIResponse, later: SpacesDeviceAPIResponse) {
+                self.first = first
+                self.later = later
+            }
+
+            func answer() async -> SpacesDeviceAPIResponse {
+                answeredCount += 1
+                guard answeredCount == 1 else { return later }
+                if !isReleased { await withCheckedContinuation { waiter = $0 } }
+                return first
+            }
+
+            func release() {
+                isReleased = true
+                waiter?.resume()
+                waiter = nil
+            }
+        }
+
         private actor DeviceAPIRequestRecorder {
             private var requests: [SpacesDeviceAPIRequest] = []
 
@@ -1323,6 +1352,62 @@
             XCTAssertEqual(stateRequestCount, 2, "six unappliable payloads must cost one read plus one coalesced retry")
         }
 
+        /// The resync read in flight when a NEW failure arms the trailing retry was issued before that
+        /// failure, so it answers with the screen as the daemon captured it beforehand. That frame still
+        /// applies — it is newer than the baseline the failure broke — so retiring the retry on any frame
+        /// at all cancels a request for a gap this frame does not cover. The viewer is then parked on the
+        /// older revision while the session sits at a newer one, and a session that goes quiet leaves the
+        /// pane stale indefinitely. Only a frame at or past the failed delta's target retires the retry.
+        func testAResyncResponseOlderThanTheFailureItRacedDoesNotRetireTheTrailingRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // The held read answers for revision 6, the screen as it was before either delta below failed;
+            // the retry's read answers for revision 50, which covers both.
+            let responder = HeldTerminalStateResponder(
+                first: Self.terminalStateResponse(
+                    try Self.framedState(text: "raced", sessionRevision: 6, ownerEpoch: 1, emittedAt: "2026-06-04T14:24:00Z")),
+                later: Self.terminalStateResponse(
+                    try Self.framedState(text: "fresh", sessionRevision: 50, ownerEpoch: 1, emittedAt: "2026-06-04T14:24:10Z")))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await responder.answer()
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+            defer { model.stop() }
+            // The frame the viewer holds, and the chain the deltas below break.
+            await model.applyLatestState(
+                try Self.framedState(text: "start", sessionRevision: 5, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            // The first delta fails and sends the resync read, which the mock holds open.
+            await model.applyLatestState(
+                try Self.unappliableDeltaState(baseRevision: 40, targetRevision: 41, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:46Z"),
+                isOutOfBand: false)
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the first unappliable delta must send the resync read")
+
+            // A second delta, targeting a higher revision, fails while that read is still in flight: the
+            // retry it arms is owed a frame at or past revision 42.
+            await model.applyLatestState(
+                try Self.unappliableDeltaState(baseRevision: 41, targetRevision: 42, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:47Z"),
+                isOutOfBand: false)
+
+            // The held read finally answers, with the pre-failure screen.
+            await responder.release()
+
+            let didRetry = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didRetry, "a frame older than the failure the retry was armed for must leave that retry owed")
+            // The retry answered with revision 50, which covers revision 42, so the cycle ends there. Past
+            // two more windows, so a retry left armed by the covering frame would have fired by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 2, "a frame that covers the failure retires the retry")
+        }
+
         /// A revoked pairing tears the viewer down and sends the user to re-pair. A trailing resync armed
         /// before that revocation would dial the device again afterwards, fail authentication a second
         /// time, and ask the user to re-pair twice for one revocation, so the teardown cancels it.
@@ -1679,6 +1764,21 @@
                 sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil,
                 attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
                 renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        }
+
+        /// A payload carrying a delta computed against a baseline this viewer does not hold, so its
+        /// reduction fails and asks for a resync. `targetRevision` is the ordering that failure owes.
+        private nonisolated static func unappliableDeltaState(baseRevision: UInt64, targetRevision: UInt64, ownerEpoch: UInt64, emittedAt: String)
+            throws -> GhosttyRemoteSessionStatePayload
+        {
+            let delta = GhosttyRenderDeltaFrame(
+                baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: 5, rows: 1, cursorColumn: 0,
+                cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0, changedCellCount: 0)
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt,
+                sessionStateRevision: targetRevision, sessionStateFlags: 1, screenStateRevision: targetRevision, runtimeState: nil,
+                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.delta(delta)))
         }
 
         private nonisolated static func snapshot(text: String) -> GhosttyTerminalSnapshot {

@@ -2688,8 +2688,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     }
 
     /// The other direction: a trailing retry is owed only while the pane still needs it. A full frame that
-    /// lands before the boundary repairs the chain, so the armed retry must be dropped rather than firing
-    /// a `.state` read for a frame the host already has.
+    /// covers the failed delta's target and lands before the boundary repairs the chain, so the armed
+    /// retry must be dropped rather than firing a `.state` read for a frame the host already has. That is
+    /// the session's own recovery: the forced full-frame broadcast a resync request provokes describes the
+    /// screen the failed delta was building toward, so it is never behind that delta's target.
     @MainActor func testTrailingResyncRetryIsCancelledByAFullFrameThatLandsFirst() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2710,13 +2712,71 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the attach's state fetch lands") { self.stateRequestCount(recorder) == 1 }
 
         subscriber.emit(try deltaPayloadWithoutABaseline(sessionID: sessionID, runtimeState: fixture.payload.runtimeState))
-        // The session's own full frame arrives before the window expires.
-        subscriber.emit(fixture.payload)
+        // The session's own full frame arrives before the window expires, at revision 9 — past the
+        // revision 8 the failed delta targeted.
+        subscriber.emit(
+            try fullFramePayload(
+                sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "alpha", sessionRevision: 9, emittedAt: "2026-08-09T00:00:05Z"
+            ))
         waitForCondition("the streamed frame paints") { host.snapshotText() == "alpha" }
 
         // Well past the boundary the retry would have fired at.
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         XCTAssertEqual(stateRequestCount(recorder), 1, "a repaired chain owes no retry")
+    }
+
+    /// The limit of that rule: the frame has to cover the failure the retry was armed for.
+    ///
+    /// A `.state` read still in flight when a delta fails was issued before that failure was owed, so it
+    /// answers with the screen the session captured beforehand. That frame applies — the failure nilled
+    /// the baseline, so nothing refuses a newer revision — and retiring the retry on it cancels a request
+    /// for a gap it does not fill. The pane is then parked behind the session, and a session that goes
+    /// quiet leaves it there indefinitely.
+    @MainActor func testTrailingResyncRetryOutlivesAFrameOlderThanTheFailureThatArmedIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-resync-retry-older-frame"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        // The held read answers for revision 3 — the screen as it was before the delta below failed — and
+        // only the retry's read carries revision 9, which covers that delta's target of 8.
+        let sender = HeldStateRequestSender(payloads: [
+            try fullFramePayload(sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "charl", sessionRevision: 3),
+            try fullFramePayload(sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "delta", sessionRevision: 9),
+        ])
+        defer { sender.releaseHeldState() }
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        host.renderUpdateResyncIntervalForTesting = 0.2
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        // The attach's eager resync stamps the throttle and its read is held open.
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
+
+        // The frame the pane holds when the delta fails against it.
+        subscriber.emit(
+            try fullFramePayload(
+                sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "bravo", sessionRevision: 2, emittedAt: "2026-08-09T00:00:05Z"
+            ))
+        waitForCondition("the streamed frame paints") { host.snapshotText() == "bravo" }
+        // A delta for revision 8, which this pane has no baseline for: it fails and arms the retry.
+        subscriber.emit(try deltaPayloadWithoutABaseline(sessionID: sessionID, runtimeState: fixture.payload.runtimeState))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        // The held read finally answers, with the pre-failure screen, and the session goes quiet.
+        sender.releaseHeldState()
+
+        waitForCondition("the still-owed retry fires") { sender.stateRequestCount >= 2 }
+        waitForCondition("the covering frame paints") { host.snapshotText() == "delta" }
+        // Well past two more boundaries, so a retry the covering frame failed to retire would have fired.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        XCTAssertEqual(sender.stateRequestCount, 2, "a frame that covers the failure retires the retry")
     }
 
     private func stateRequestCount(_ recorder: DirectTerminalServiceRecorder) -> Int {
