@@ -348,6 +348,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
+        // First, before anything concurrent exists: the trim reads, truncates, and rewrites the daemon's
+        // own launchd-redirected stdout/stderr files, and that sequence is only atomic against other
+        // writers by not having any. Here no server, Device API, or timer has started, so nothing else
+        // can append mid-trim; moved any later, a request handler's diagnostic write could land between
+        // the tail snapshot and the rewrite and be lost.
+        #if os(macOS)
+            trimOversizedRuntimeLogs()
+        #endif
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
         // after its engine snapshot escape termination and `startSharedServices()` can restart services
@@ -404,9 +412,6 @@ enum SpacesDaemonProfileCommandRouting {
             return
         }
         sweepOrphanedWorkspaceSetupDirectories(databasePath: databasePath)
-        #if os(macOS)
-            trimOversizedRuntimeLogs()
-        #endif
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
