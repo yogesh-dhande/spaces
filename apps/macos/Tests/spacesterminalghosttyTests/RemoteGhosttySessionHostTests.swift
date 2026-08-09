@@ -2509,6 +2509,49 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("the retried frame paints") { host.snapshotText() == "alpha" }
     }
 
+    /// A `.state` response describes the screen as it was when the session answered, so one that arrives
+    /// after the subscription has already painted something newer is stale by construction. Applying it
+    /// walks the pane backwards to a picture the session has moved past, and the render-update applier has
+    /// no monotonicity check to stop it: a full frame replaces the baseline whatever revision it carries.
+    /// The eager attach fetch makes that overlap ordinary, so a response is dropped when a frame applied
+    /// while it was in flight.
+    @MainActor func testStateResponseThatLandsAfterANewerFrameIsDiscarded() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-stale-state-response"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        // The held read answers with the screen as it was at attach time; the subscription paints a newer
+        // one while it is still in flight.
+        let sender = HeldStateRequestSender(payloads: [
+            try fullFramePayload(sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "alpha", sessionRevision: 1)
+        ])
+        defer { sender.releaseHeldState() }
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        waitForCondition("the attach's state fetch is in flight") { sender.stateRequestCount == 1 }
+
+        subscriber.emit(
+            try fullFramePayload(
+                sessionID: sessionID, runtimeState: fixture.payload.runtimeState, text: "bravo", sessionRevision: 2, emittedAt: "2026-08-09T00:00:05Z"
+            ))
+        waitForCondition("the streamed frame paints") { host.snapshotText() == "bravo" }
+
+        sender.releaseHeldState()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        XCTAssertEqual(host.snapshotText(), "bravo", "a response older than what the pane already shows must not walk it backwards")
+        XCTAssertEqual(sender.stateRequestCount, 1, "a frame applied, so nothing is owed and no retry is armed")
+    }
+
     /// The trailing retry must survive firing into a fetch that is already in flight.
     ///
     /// The `.state` read a resync would make is refused while another one is in flight, and that other
@@ -2684,6 +2727,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             sessionID: fixture.launchConfiguration.sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-08-09T00:00:03Z",
             sessionStateRevision: 1, sessionStateFlags: 1, screenStateRevision: 1, runtimeState: fixture.payload.runtimeState,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil)
+    }
+
+    /// A payload carrying one full frame of `text`.
+    private func fullFramePayload(
+        sessionID: String, runtimeState: TerminalSessionRuntimeState?, text: String, sessionRevision: UInt64,
+        emittedAt: String = "2026-08-09T00:00:03Z"
+    ) throws -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
+            sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: runtimeState,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: text, sessionRevision: sessionRevision))
     }
 
     /// A delta whose baseline this host never saw, so its reduction fails and asks for a resync.

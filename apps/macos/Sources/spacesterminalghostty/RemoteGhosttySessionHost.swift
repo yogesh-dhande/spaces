@@ -110,6 +110,10 @@
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
+        /// Counts the render frames this host has applied. A `.state` fetch snapshots it when it is issued
+        /// and discards its response if the count moved while the read was in flight; see
+        /// `requestDirectStateFetch`.
+        private var appliedRenderFrameGeneration: UInt64 = 0
         private var lastRenderUpdateResyncAt: Date?
         /// The one delayed `.state` request owed to a resync the throttle turned away; see
         /// `scheduleTrailingRenderUpdateResync`.
@@ -569,6 +573,7 @@
             guard !directStateFetchInFlight else { return }
             directStateFetchInFlight = true
             let sessionID = launchConfiguration.sessionID
+            let issuedAtRenderFrameGeneration = appliedRenderFrameGeneration
             Task { @MainActor [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     Self.fetchDirectState(sessionID: sessionID, requestSender: terminalServiceRequestSender)
@@ -577,12 +582,23 @@
                 self.directStateFetchInFlight = false
                 switch result {
                 case .success(let fetchResult):
+                    // The agent signals are independent of the session's screen state, so they are applied
+                    // and acknowledged whatever happens to the render payload below — dropping them would
+                    // lose events no later broadcast repeats.
+                    self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
+                    // A response describes the screen as it was when the session answered. If a frame
+                    // applied while this read was in flight, the response is redundant by construction: the
+                    // pane is not blank, and the baseline it holds came from the stream, so it already
+                    // matches the one the session's deltas are computed against. Applying it anyway would
+                    // walk the pane back to an older picture — the applier takes any full frame, whatever
+                    // revision it carries — and a screen change newer than this response always has its own
+                    // broadcast on the way, so dropping it loses no terminal state. Nothing is owed either:
+                    // the same apply that moved the generation retired any delayed resync.
+                    guard self.appliedRenderFrameGeneration == issuedAtRenderFrameGeneration else { return }
                     // Through the same pipeline as the subscription's payloads: a fetched full frame is
                     // the head of a new render-update chain, so it must not overtake a delta already
-                    // queued behind it. The agent signals it came with are independent of the session's
-                    // screen state and are applied here rather than waiting on the reduction.
+                    // queued behind it.
                     self.submitToStatePipeline(fetchResult.payload)
-                    self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
                         "terminal_remote_state_fetch", target: "session=\(sessionID)", elapsedMS: 0, success: false,
@@ -681,7 +697,11 @@
             // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
             // filled is no longer owed. Ordered after the request above so an output that both carries a
             // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
-            if frameForUpdate != nil { cancelTrailingRenderUpdateResync() }
+            // The generation bump is what makes an in-flight `.state` read know it was overtaken.
+            if frameForUpdate != nil {
+                appliedRenderFrameGeneration &+= 1
+                cancelTrailingRenderUpdateResync()
+            }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
