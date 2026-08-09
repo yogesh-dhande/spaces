@@ -221,7 +221,7 @@
             await model.sendComposedMessage()
             XCTAssertTrue(model.isSendingComposedMessage)
 
-            await model.applyLatestState(terminatedState())
+            await model.applyLatestState(terminatedState(), isOutOfBand: false)
             try await Task.sleep(for: .milliseconds(100))
 
             XCTAssertEqual(model.phase, .ended)

@@ -77,7 +77,7 @@
             try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
 
-                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied text"))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied text"), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "copied text")
             }
@@ -90,7 +90,8 @@
                 let (model, _) = try await makeOwnerModel(pasteboard)
                 pasteboard.string = "what the user had"
 
-                await model.applyLatestState(clipboardPayload(targetClientID: "someone-elses-client", text: "not for this device"))
+                await model.applyLatestState(
+                    clipboardPayload(targetClientID: "someone-elses-client", text: "not for this device"), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "what the user had")
             }
@@ -103,7 +104,7 @@
                 let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
                 pasteboard.string = "stale copy"
 
-                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: ""))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: ""), isOutOfBand: false)
 
                 XCTAssertNil(pasteboard.string)
             }
@@ -120,7 +121,7 @@
                 let installedEmittedAt = model.latestState?.emittedAt
                 let installedTitle = model.latestState?.title
 
-                await model.applyLatestState(staleSnapshotClipboardPayload(targetClientID: ownerClientID, text: "copied text"))
+                await model.applyLatestState(staleSnapshotClipboardPayload(targetClientID: ownerClientID, text: "copied text"), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "copied text")
                 XCTAssertTrue(model.isOwner, "an event's stale snapshot must not take ownership away from this device")
@@ -135,11 +136,11 @@
         func testALaterPayloadDoesNotRepeatTheWrite() async throws {
             try await withPasteboard { pasteboard in
                 let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
-                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied once"))
+                await model.applyLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied once"), isOutOfBand: false)
                 XCTAssertEqual(pasteboard.string, "copied once")
 
                 pasteboard.string = "what the user copied next"
-                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output))
+                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output), isOutOfBand: false)
 
                 XCTAssertEqual(pasteboard.string, "what the user copied next")
                 // The second payload carries no attachment snapshot of its own, so this must come from

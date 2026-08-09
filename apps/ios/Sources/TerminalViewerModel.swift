@@ -211,6 +211,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
+    /// When the last resync `.state` read was sent, and whether one is still outstanding. Only the resync
+    /// route is tracked here: it is the one a failing session can fire per payload, and the pacing below
+    /// is what keeps that from becoming one read per payload.
+    private var lastRenderUpdateResyncAt: Date?
+    private var isRenderUpdateResyncFetchInFlight = false
+    /// The one delayed `.state` request owed to a resync the throttle turned away; see
+    /// `scheduleTrailingRenderUpdateResync`.
+    private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+    /// How long one resync request paces the next. Only a test overrides it
+    /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its boundary
+    /// instead of waiting out a real second.
+    private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
+    var renderUpdateResyncIntervalForTesting: TimeInterval?
+    private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
     @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) {
         [weak self] batch, finish in
         guard let self else {
@@ -465,6 +479,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         reconnectTask = nil
         streamHandle?.cancel()
         streamHandle = nil
+        cancelTrailingRenderUpdateResync()
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -544,7 +559,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // before it, corrupting the delta baseline the chain depends on staying in submission order.
             // `isBusy` and `isAwaitingTakeoverConfirmation` are held across the wait by design, so the UI
             // stays in its "taking over" state for the whole ride rather than settling early on stale state.
-            if let takeoverState { await applyLatestState(takeoverState) }
+            // In-band, unlike every other response this model reads state out of: this payload is the
+            // acknowledgment of a mutation this client just made, and it carries the attachment snapshot
+            // naming this device the owner — the state the lines below decide the takeover's outcome
+            // from. The out-of-band ordering exists for a response that describes a session the stream has
+            // moved past, which this one cannot be; applying that rule here would let a stream payload
+            // that raced it refuse the snapshot on `emittedAt` alone and leave a successful takeover
+            // reading as unconfirmed.
+            if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false) }
             if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
             errorMessage = nil
             if !isOwner {
@@ -605,6 +627,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// so the available (nil) owner state is fine to pass. A full-frame recording always replaces the
     /// prior frame in the state reducer, so the refreshed grid's frame renders without any revision
     /// bookkeeping.
+    ///
+    /// That last part is why this response alone is applied in-band: each recorded grid is an independent
+    /// capture with its own revisions and owner epoch, not one session's chain, so a viewport that shrinks
+    /// back to a smaller grid asks for a recording the out-of-band ordering would read as a delayed
+    /// response and refuse — leaving the wide recording on a narrow screen. Nothing races this read
+    /// either: the demo stream emits its recording once and never updates.
     private func applyDemoViewportResize(columns: Int, rows: Int) async {
         do {
             try await bridgeClient.resize(
@@ -615,7 +643,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // place, so there is nothing to recover.
             trace("demo_viewport_resize_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
         }
-        await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "demo_viewport_resize")
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, applyToLatestState: false, reason: "demo_viewport_resize")
+        if let refreshedState { await applyLatestState(refreshedState, isOutOfBand: false) }
     }
 
     func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {
@@ -1327,7 +1357,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 // second under a streaming agent — and everything expensive about a payload (decoding the
                 // render update, applying it to the baseline, re-encoding the full frame) happens in the
                 // pipeline, off this actor.
-                submitLatestState(payload)
+                submitLatestState(payload, isOutOfBand: false)
             } onDisconnect: { [weak self] error in
                 Task { @MainActor [weak self] in await self?.handleDisconnect(error) }
             }
@@ -1335,11 +1365,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             errorMessage = nil
             reconnectTask = nil
             trace("connect_subscribe_success")
-            if !isOwner {
-                let refreshedState = await refreshLatestState(
-                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
-                if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
-            }
+            // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
+            // here on a reconnect — at first connect `latestState` is nil and the fallback snapshot cannot
+            // name this model's freshly minted client ID as the owner — and that is exactly the case that
+            // needs the read: an owner whose stream dropped and reconnected silently would otherwise resume
+            // the new subscription's deltas on the frame it still holds, with nothing confirming that
+            // baseline is still the one the daemon is sending deltas against. The reducer's guards would
+            // catch a divergent delta and drive a resync, but only after a wrong-frame window plus a round
+            // trip this read avoids. The response is ordered out-of-band, so one that lands behind the new
+            // subscription's initial refuses instead of regressing what the stream already delivered.
+            let refreshedState = await refreshLatestState(
+                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
+            // Only a non-owner settles `isConnecting` on a bootstrap that answered nothing: an owner
+            // reconnects silently, so it never raised the flag in the first place.
+            if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
         } catch {
             reconnectTask = nil
             isConnecting = false
@@ -1372,7 +1411,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // hold their own transitional flag across the wait by design (`isConnecting` for the connect
             // bootstrap, `isBusy` for takeover confirmation), so the UI does not settle out of that state
             // until the fetched payload has actually landed.
-            if applyToLatestState { await applyLatestState(fetchedState) }
+            //
+            // Out-of-band: every fetch that reaches here — the connect bootstrap, a resync, the ownership
+            // handshake's owner-bootstrap read, the ended/stopped-state recovery refreshes — is a response
+            // describing the session as it was when it was asked, re-entering beside a subscription that
+            // never stopped. The reducer orders it against what it has already reduced, so one that was
+            // overtaken by the stream refuses rather than regressing the screen or the metadata.
+            if applyToLatestState { await applyLatestState(fetchedState, isOutOfBand: true) }
             return fetchedState
         } catch {
             trace(
@@ -1936,9 +1981,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Hands one payload to the reduction pipeline without waiting for it to be applied. The live
     /// subscription's callback uses this: it runs at the session's flush rate, and nothing it does next
     /// depends on the payload having landed.
-    func submitLatestState(_ payload: GhosttyRemoteSessionStatePayload) {
+    ///
+    /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
+    ///   response to a direct `.state` read, which the reducer orders against what it has already reduced
+    ///   so a delayed response cannot walk this viewer back to a screen it is already past. Stated by every
+    ///   call site rather than defaulted: nothing on the wire distinguishes a fetch response from a
+    ///   subscriber's initial, and the routes into this model disagree — the takeover response is a read
+    ///   answer that must nonetheless apply in-band (see `takeOver`).
+    func submitLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool) {
         submittedStateCount += 1
-        statePipeline.submit(payload)
+        statePipeline.submit(payload, isOutOfBand: isOutOfBand)
     }
 
     /// Submits `payload` and returns once the pipeline has applied it (or folded it into a later apply).
@@ -1946,9 +1998,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// `submitLatestState`: takeover asks whether it actually became the owner, and the connect
     /// bootstrap asks whether it is still connecting, and an apply that had not landed yet would answer
     /// both from the state the payload was meant to replace.
-    func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload) async {
+    func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool) async {
         let target = submittedStateCount + 1
-        submitLatestState(payload)
+        submitLatestState(payload, isOutOfBand: isOutOfBand)
         await withCheckedContinuation { continuation in
             // Defensive, not a race guard: `withCheckedContinuation` inherits the caller's main-actor
             // isolation, so this body runs synchronously in the same run as `submitLatestState` above, and
@@ -2004,6 +2056,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Covers a resync inherited from an output the apply mailbox coalesced away: the superseded frame
         // is not worth drawing, but the full frame its failed delta could not build is.
         if output.requestsResync { requestRenderUpdateResync() }
+        // A materialized frame repaired the chain, so any delayed resync still armed for the gap it filled
+        // is no longer owed. `frameToApply` is the signal rather than the stored payload's snapshot: the
+        // stored payload carries a frame forward through every merge, including the frameless payloads
+        // that follow a break, while this is non-nil only for a payload whose own render update decoded and
+        // applied. Ordered after the request above so an output that both carries a frame and inherits a
+        // coalesced-away resync retires that request rather than leaving it armed.
+        if reduction.frameToApply != nil { cancelTrailingRenderUpdateResync() }
         latestState = reduction.storedPayload
         if payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
@@ -2014,6 +2073,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             streamHandle = nil
             reconnectTask?.cancel()
             reconnectTask = nil
+            cancelTrailingRenderUpdateResync()
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()
@@ -2118,10 +2178,75 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
     /// The fetched payload re-enters through the same pipeline, so it cannot overtake a delta already
-    /// queued behind it.
+    /// queued behind it, and it is ordered there as an out-of-band response.
+    ///
+    /// Each read costs the daemon a unicast full-frame export, and a session that keeps producing
+    /// unappliable payloads (a device-side restart window, say) asks for one per payload, so the reads
+    /// are paced: an unthrottled retry loop floods the daemon without converging, and the stream's own
+    /// recovery — the forced full-frame broadcast — needs room to land in between.
+    ///
+    /// The throttle paces requests; it never discards one. A `.state` read can answer with no render
+    /// update at all — the session exports none while its capture holds nothing visible — and it stamps
+    /// the throttle just the same, so the next resync can fall inside a window that repaired nothing.
+    /// Dropping it there would leave a session that emits one delta and goes quiet showing a stale grid
+    /// until some unrelated later event, so a suppressed request arms exactly one delayed retry at the
+    /// window boundary instead.
     private func requestRenderUpdateResync() {
+        if let lastRenderUpdateResyncAt {
+            let elapsed = Date().timeIntervalSince(lastRenderUpdateResyncAt)
+            if elapsed < renderUpdateResyncInterval {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed)
+                return
+            }
+        }
+        // The open-throttle path owes the same guarantee as the throttled one: a resync read already in
+        // flight was issued before this resync was owed, so it can answer with no render update and repair
+        // nothing. Letting it stand in for this request would consume the request unsent, so arm the
+        // trailing retry instead, exactly as a throttled request does.
+        guard !isRenderUpdateResyncFetchInFlight else {
+            scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+            return
+        }
+        sendRenderUpdateResyncFetch()
+    }
+
+    /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
+    /// while this is pending is already covered by it, so it must not stack a competing timer. Cancelled
+    /// when a materialized frame lands (`applyReducedState`), when the session ends, and on stop — so a
+    /// viewer the user has left, or one whose pane is already repaired, never dials the device.
+    ///
+    /// The request stays owed until a fetch genuinely starts. A resync read already in flight refuses this
+    /// one, and that read was issued before this resync was owed, so treating the refusal as delivery is
+    /// how the owed request would go missing. A retry that lands on one waits out another full window
+    /// instead — no spin, and the pacing is unchanged since nothing was sent.
+    private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
+        guard pendingRenderUpdateResyncTask == nil else { return }
+        pendingRenderUpdateResyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            pendingRenderUpdateResyncTask = nil
+            guard !isRenderUpdateResyncFetchInFlight else {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                return
+            }
+            sendRenderUpdateResyncFetch()
+        }
+    }
+
+    private func cancelTrailingRenderUpdateResync() {
+        pendingRenderUpdateResyncTask?.cancel()
+        pendingRenderUpdateResyncTask = nil
+    }
+
+    /// Stamps the throttle and sends the resync read. Both the stamp and the in-flight mark are set before
+    /// the request is started, so a burst of failing payloads arriving in the same turn as this one sees
+    /// the window already open rather than each sending a read of its own.
+    private func sendRenderUpdateResyncFetch() {
+        lastRenderUpdateResyncAt = Date()
+        isRenderUpdateResyncFetchInFlight = true
         Task { [weak self] in
             await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
+            self?.isRenderUpdateResyncFetchInFlight = false
         }
     }
 
@@ -2266,7 +2391,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
             workingDirectory: session.workingDirectory, outputByteCount: 0)
-        await applyLatestState(payload)
+        await applyLatestState(payload, isOutOfBand: false)
         // A real apply that turns this client into the owner (`wasOwner` false going in) schedules the
         // live ownership-synchronization round trip the owner-bootstrap path always runs after taking
         // over — see the `scheduleOwnershipSynchronization()` call in `applyReducedState`. That round

@@ -1233,9 +1233,9 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
 
-            model.submitLatestState(Self.outputState(title: "first", emittedAt: "2026-06-04T14:23:31Z"))
-            model.submitLatestState(Self.outputState(title: "second", emittedAt: "2026-06-04T14:23:32Z"))
-            await model.applyLatestState(Self.outputState(title: "third", emittedAt: "2026-06-04T14:23:33Z"))
+            model.submitLatestState(Self.outputState(title: "first", emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            model.submitLatestState(Self.outputState(title: "second", emittedAt: "2026-06-04T14:23:32Z"), isOutOfBand: false)
+            await model.applyLatestState(Self.outputState(title: "third", emittedAt: "2026-06-04T14:23:33Z"), isOutOfBand: false)
 
             XCTAssertEqual(model.latestState?.title, "third")
             XCTAssertEqual(model.latestState?.emittedAt, "2026-06-04T14:23:33Z")
@@ -1280,6 +1280,137 @@
             XCTAssertEqual(stateRequestCount, 1)
         }
 
+        /// A session producing payloads that cannot be reduced — a device-side restart window, say — asks
+        /// for a resync on every one of them, and each of those `.state` reads costs the daemon a unicast
+        /// full-frame export. The reads are paced at one per window, and the pacing discards nothing: the
+        /// requests suppressed inside a window arm exactly one coalesced retry at its boundary, so a burst
+        /// costs one read plus one retry rather than one read per payload.
+        func testABurstOfUnappliablePayloadsCostsOneResyncReadPlusOneTrailingRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resyncResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await resyncResponse.current()
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+            await resyncResponse.set(Self.terminalStateResponse(try XCTUnwrap(model.latestState)))
+
+            for index in 0..<6 {
+                let payload = Self.outputState(title: "unappliable-\(index)", emittedAt: "2026-06-04T14:23:4\(index)Z")
+                let stored = try XCTUnwrap(model.latestState).merged(with: payload)
+                model.applyReducedStateForTesting(
+                    TerminalRemoteStateReductionOutput(
+                        incomingPayload: payload,
+                        reduction: TerminalRemoteStateReductionResult(
+                            payload: payload, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: "missing_baseline",
+                            didRequestResync: true), reduceMS: 0))
+            }
+
+            let didRetry = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didRetry, "the resyncs the throttle suppressed must still be answered by a retry at the window boundary")
+            // Past two more windows, so a throttle that merely delayed the suppressed requests rather than
+            // coalescing them would have sent the rest by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 2, "six unappliable payloads must cost one read plus one coalesced retry")
+        }
+
+        /// A `.state` response describes the session as it was when it was asked, and it re-enters beside a
+        /// subscription that never stopped, so one that lands after the stream has already carried the
+        /// viewer further is stale by construction. Applying it would walk the pane and its metadata
+        /// backwards, so the refresh route submits out of band and the reducer refuses it.
+        func testADelayedStateResponseDoesNotWalkTheViewerBackToOlderState() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                // The takeover is accepted but answers with no state, so the confirmation refresh below is
+                // what carries the (stale) `.state` response into the model.
+                if case .state = request.command {
+                    return Self.terminalStateResponse(Self.outputState(title: "older", emittedAt: "2026-06-04T14:23:30Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            // A starting session, so the viewer never auto-takes-over and the takeover below is the only
+            // one: the automatic attempt would otherwise be in flight and turn this one into a no-op.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            // `takeOver` awaits its confirmation refresh, so the stale response has landed by the time this
+            // returns — no settling window to wait out.
+            await model.takeOver()
+
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1, "the takeover confirmation must have actually read state")
+            XCTAssertEqual(model.latestState?.title, "newest", "a response older than what the stream already delivered must not be applied")
+        }
+
+        /// The takeover response is the exception: it is the acknowledgment of a mutation this client just
+        /// made and the only carrier of the attachment snapshot that names this device the owner, so it is
+        /// submitted in band. Ordered as a `.state` response would be, a stream payload that raced it would
+        /// refuse it on its timestamp alone and leave a successful takeover reading as unconfirmed.
+        func testATakeoverResponseAppliesEvenWhenItIsStampedOlderThanTheStreamState() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:31Z"))
+            }
+            // A starting session, for the same reason as the test above: no automatic takeover races this
+            // one.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:46Z"), isOutOfBand: false)
+
+            await model.takeOver()
+
+            XCTAssertTrue(model.isOwner, "the takeover's own attachment snapshot must apply however it is stamped")
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 0, "a takeover that applied needs no confirmation read")
+        }
+
+        /// An owner whose stream drops reconnects silently, and the new subscription's deltas are computed
+        /// against the daemon's baseline rather than the frame this viewer still holds. Nothing confirms
+        /// those agree, so every connect bootstraps from a direct read — the owner's included, which is the
+        /// only way `isOwner` can be true this early. Without it the divergence surfaces only when a delta
+        /// fails, costing a wrong-frame window plus the resync round trip.
+        func testAnOwnerReconnectBootstrapsFromADirectStateRead() async throws {
+            let streamServer = try HoldOpenTCPServer()
+            defer { streamServer.stop() }
+            var settings = settings()
+            settings.port = streamServer.port
+            let recorder = DeviceAPIRequestRecorder()
+            let bootstrapResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await bootstrapResponse.current() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await bootstrapResponse.set(Self.terminalStateResponse(try XCTUnwrap(model.latestState)))
+            XCTAssertTrue(model.isOwner)
+            defer { model.stop() }
+
+            model.start()
+
+            let didBootstrap = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didBootstrap, "an owner's reconnect must confirm its baseline with a direct read")
+            XCTAssertTrue(model.isOwner, "the bootstrap read must not disturb ownership")
+        }
+
         /// A viewer that has been stopped has already released its stream, its queued input, and its
         /// attachment. A payload the pipeline was still reducing when that happened must land nowhere:
         /// installing it would put the session's attachment back and leave the next visit believing it is
@@ -1293,7 +1424,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            await model.applyLatestState(Self.outputState(title: "before-stop", emittedAt: "2026-06-04T14:23:36Z"))
+            await model.applyLatestState(Self.outputState(title: "before-stop", emittedAt: "2026-06-04T14:23:36Z"), isOutOfBand: false)
 
             model.stop()
             let afterStop = Self.outputState(title: "after-stop", emittedAt: "2026-06-04T14:23:37Z")
@@ -1321,7 +1452,7 @@
             let payload = Self.outputState(title: "after-stop-wait", emittedAt: "2026-06-04T14:23:38Z")
             let waiterBox = WaiterReleaseBox()
             let waitingTask = Task {
-                await model.applyLatestState(payload)
+                await model.applyLatestState(payload, isOutOfBand: false)
                 waiterBox.released = true
             }
 
@@ -1351,6 +1482,19 @@
             GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
                 sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+                workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        /// A payload whose attachment snapshot names `clientID` the session's owner, as a takeover response
+        /// does.
+        private nonisolated static func ownedState(clientID: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+            let owner = TerminalClient(
+                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:23:30Z")
+            let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [owner], attachments: [attachment]), title: "terminal",
                 workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
