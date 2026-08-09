@@ -67,6 +67,121 @@ extension ProcessProfileEnvironmentSuites {
                     paneIsFocused: true, paneIsInSelectedTab: true, paneHoldsOwnerAttachedSurface: false))
         }
 
+        /// A programmatic launch (`spaces workspace start`, its MCP tool, or a restart they trigger) must
+        /// never move the window the user is working in, whether or not that session had a pane already:
+        /// a session with no pane gets one on an unselected tab, and a session that already has one is
+        /// left exactly where it sits.
+        @Test func programmaticOpenInstallsOrKeepsThePaneWithoutMovingFocus() {
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                    == .installUnselectedTab)
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                    == .leaveExistingPaneInPlace)
+        }
+
+        /// A user asking for a terminal (`spaces terminal show`, a `spaces://` link, a sidebar click) gets
+        /// the pane brought forward and focused, which is the behavior every caller inherits by default.
+        @Test func userRequestedOpenFocusesThePane() {
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .focus) == .openFocusedTab)
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: false, focusIntent: .focus) == .focusExistingPane)
+        }
+
+        /// A restart's replacement takes over the pane its predecessor held rather than arriving at the end
+        /// of the tab strip, whichever order the close and the open arrive in: the close landing first
+        /// leaves the pane held and still placed, and the open landing first finds it still placed. Both
+        /// reduce to the same input here, which is what makes the outcome order-independent.
+        @Test func replacementClaimsThePaneOfTheSessionItReplaces() {
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: true, focusIntent: .withoutFocus)
+                    == .claimReplacedPane)
+        }
+
+        /// A replacement whose predecessor's pane is gone (the user closed it mid-restart) has nothing to
+        /// claim, so it installs like any other programmatic launch. And a session that somehow already has
+        /// its own pane keeps it: re-opening a placed session must never go move a different pane.
+        @Test func replacementFallsBackToInstallingAndNeverStealsAnotherPane() {
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: false, hasReplaceablePane: false, focusIntent: .withoutFocus)
+                    == .installUnselectedTab)
+            #expect(
+                AppKitController.terminalPaneOpenAction(hasExistingPane: true, hasReplaceablePane: true, focusIntent: .withoutFocus)
+                    == .leaveExistingPaneInPlace)
+        }
+
+        /// The disposition is required. A missing, blank, or unrecognized value is a malformed IPC and
+        /// decodes to nil, the same as a missing session ID, so the handler drops the notification instead
+        /// of guessing what the poster meant.
+        @Test func closeIPCWithoutAStatedDispositionDecodesToNil() {
+            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: nil) == nil)
+            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "  ") == nil)
+            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "sideways") == nil)
+            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "teardown") == .teardown)
+            #expect(AppKitController.terminalPaneCloseDisposition(ipcRawValue: "awaitReplacement") == .awaitReplacement)
+        }
+
+        /// The intent has to survive the async credential preparation, which finishes long after the pane
+        /// is installed and re-activates the panel's focused pane. By then the user has had that whole
+        /// window to click into the sidebar or another pane, so a programmatic launch's late completion
+        /// must not take the caret.
+        @Test func programmaticOpenStillDoesNotMoveFocusWhenItsPreparationFinishes() {
+            #expect(AppKitController.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: false) == .none)
+            #expect(
+                AppKitController.terminalPanePreparationFocusAction(focusIntent: .focus, preparedPaneHoldsKeyboardFocus: false)
+                    == .activatePanelFocusedPane)
+        }
+
+        /// The one case a non-focusing open must still put the caret somewhere: the user clicked into the
+        /// pane while it was still preparing, so the placeholder holds the caret and swapping it out would
+        /// drop it. Restoring focus the user gave this pane is not stealing it.
+        @Test func aPaneTheUserClickedIntoWhilePreparingKeepsTheCaret() {
+            #expect(
+                AppKitController.terminalPanePreparationFocusAction(focusIntent: .withoutFocus, preparedPaneHoldsKeyboardFocus: true)
+                    == .restoreToPreparedPane)
+        }
+
+        /// A restart's replacement takes over the pane its predecessor occupied, and that pane can be the
+        /// one the user is typing in. Swapping the content tears the predecessor's view out and the first
+        /// responder goes with it, so the caret moves across rather than being dropped. Every other
+        /// retarget touches focus not at all.
+        @Test func aRetargetCarriesTheCaretOnlyWhenThePaneAlreadyHadIt() {
+            #expect(AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: true))
+            #expect(!AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: false))
+        }
+
+        /// A user waiting on a terminal they asked for is owed the error in front of them. A background
+        /// launch failing is not a reason to interrupt them: its pane reports the failure in place.
+        ///
+        /// The rule governs every way an open can fail, not only the credential-preparation error it was
+        /// first written for: content construction throwing after preparation succeeded, and the owning
+        /// device refusing the install, both route through `reportTerminalPaneOpenFailure` and ask this.
+        @Test func onlyAUserRequestedOpenReportsItsFailureWithAModal() {
+            #expect(AppKitController.terminalPaneOpenFailureUsesModalAlert(focusIntent: .focus))
+            #expect(!AppKitController.terminalPaneOpenFailureUsesModalAlert(focusIntent: .withoutFocus))
+        }
+
+        /// A close the daemon drove (a stop, a restart, an exited process, a pruned session) is not a user
+        /// action, so it leaves the caret alone. A programmatic `workspace restart` closes every pane of a
+        /// workspace in a row, and moving focus on each would walk the caret through the survivors.
+        /// Closing a pane the user closed still hands focus on, because they are working in that panel.
+        @Test func daemonDrivenPaneCloseLeavesTheCaretWhereItIs() {
+            #expect(!AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: true))
+            #expect(AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: false))
+        }
+
+        /// The intent is required. A missing, blank, or unrecognized value is a malformed IPC and decodes
+        /// to nil, the same as a missing session ID, so the handler drops the notification instead of
+        /// guessing what the poster meant.
+        @Test func openIPCWithoutAStatedIntentDecodesToNil() {
+            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: nil) == nil)
+            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "   ") == nil)
+            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "sideways") == nil)
+            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "focus") == .focus)
+            #expect(AppKitController.terminalOpenFocusIntent(ipcRawValue: "without_focus") == .withoutFocus)
+        }
+
         @Test func activeSpaceSummonAddsMoveToActiveSpaceBehavior() {
             let behavior = NSWindow.CollectionBehavior.fullScreenAuxiliary
 

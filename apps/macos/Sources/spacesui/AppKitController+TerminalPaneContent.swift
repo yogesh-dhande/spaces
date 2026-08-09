@@ -44,7 +44,7 @@ extension AppKitController {
         guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
         presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
             guard let self, let request else { return }
-            self.panelCoordinator.openOrFocusTerminalPane(request)
+            self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
         }
     }
 
@@ -121,11 +121,19 @@ extension AppKitController {
     /// terminal-session keep-set so dead sessions drop before the panel materializes. Uses the same
     /// contract as live pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell
     /// survives relaunch exactly as it survives a live overview refresh.
-    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String) -> PanelLayout? {
+    /// - Parameter additionalKeepSessionIDs: Sessions this particular restoration must not prune, beyond
+    ///   the recorded holds. A replacement's open restores the panel itself, and when it is processed
+    ///   before its predecessor's close there is no hold yet: the open passes its own predecessor here so
+    ///   it protects the pane it is about to claim whichever order the two messages arrive in. Scoped to
+    ///   the call rather than recorded, so `panesHeldForReplacement` keeps meaning only what the daemon
+    ///   asked the client to hold.
+    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String, additionalKeepSessionIDs: Set<String> = []) -> PanelLayout? {
         guard let json = try? clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
             let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(json.utf8)), layout.version == PanelLayout.currentVersion
         else { return nil }
-        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overview: overview(forWorkspaceID: workspaceID))
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
+            overview: overview(forWorkspaceID: workspaceID),
+            heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement.union(additionalKeepSessionIDs))
         return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
     }
 }
@@ -169,12 +177,39 @@ extension AppKitController {
     /// its session to, so an unreachable device's panes stay pending for the outage even
     /// though it keeps its overview — and because the record is only ever deferred, its
     /// panes are never pruned against a catalog the outage made unavailable.
+    /// Points a still-pending global panel window's persisted pane at a replacement session.
+    ///
+    /// A window whose devices are not all loaded is deferred rather than restored, so a restart of a
+    /// process whose pane lives there has no in-memory placement for the ordinary claim to retarget. The
+    /// same `PanelLayoutEngine.retargetPane` runs against the record's stored layout instead, so the pane
+    /// keeps its window, tab, and split and comes back carrying the replacement once the window restores.
+    /// Answers false when no pending record holds that session, leaving the caller on its install path.
+    func retargetPendingPanelWindowPane(replacing oldSessionID: String, with content: PaneContentDescriptor) -> Bool {
+        if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
+        guard let pending = pendingPanelWindowRestores else { return false }
+        let decoder = JSONDecoder()
+        for (index, record) in pending.enumerated() {
+            guard let layout = try? decoder.decode(PanelLayout.self, from: Data(record.layoutJSON.utf8)),
+                let paneID = PanelLayoutEngine.allPanes(in: layout).first(where: { $0.content.terminalSessionID == oldSessionID })?.id
+            else { continue }
+            let retargeted = PanelLayoutEngine.retargetPane(paneID: paneID, to: content, in: layout)
+            guard let json = try? JSONEncoder().encode(retargeted) else { return false }
+            let updated = SpacesClientDatabase.PanelWindowRecord(
+                id: record.id, layoutJSON: String(decoding: json, as: UTF8.self), frame: record.frame)
+            pendingPanelWindowRestores?[index] = updated
+            try? clientDatabase().upsertPanelWindow(updated)
+            return true
+        }
+        return false
+    }
+
     func reopenPersistedPanelWindowsIfPossible() {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }
         let readySections = deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
-        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overviews: readySections.map(\.overview))
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
+            overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
             switch Self.panelWindowRestoreDecision(

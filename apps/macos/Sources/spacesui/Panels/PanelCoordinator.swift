@@ -26,6 +26,55 @@ import spacesterminalcore
     /// Live content controllers keyed by terminal session id.
     private var contentControllers: [String: any TerminalPaneContentHosting] = [:]
     private var contentPreparationTasks: [String: Task<Void, Never>] = [:]
+    /// Sessions the daemon closed as `awaitReplacement`: their panes are held where they are until the
+    /// replacement's open claims them, so a restart's new session lands in the tab, split, and window the
+    /// user arranged rather than at the end of the tab strip.
+    ///
+    /// Held by session id rather than by placement, because a hold has to outlive not having a pane in
+    /// memory at all. The common programmatic restart is of a workspace the user is not currently
+    /// viewing, whose panel was never materialized this launch: there is no in-memory pane to point at,
+    /// only a persisted layout. Recording the id alone lets both pruning paths honor the hold, so the
+    /// persisted pane survives until the replacement's open restores the layout and claims it in place.
+    ///
+    /// Exactly one of three things removes an entry: the replacement claims it, a plain teardown close
+    /// releases it (which the daemon guarantees for every reservation its relaunch did not claim), or the
+    /// pane is closed some other way. Both live and restore-time pruning skip a held session, because the
+    /// stop deleted its row and pruning would otherwise drop the pane out from under the replacement that
+    /// is on its way.
+    private var panesHeldForReplacement: Set<String> = []
+
+    /// The sessions whose panes are being held for a replacement, for the restore-time pruning that would
+    /// otherwise drop them before the replacement arrives.
+    var sessionIDsHeldForReplacement: Set<String> { panesHeldForReplacement }
+
+    /// Sessions whose release arrived before their hold did.
+    ///
+    /// The two messages are independent IPCs, so a replacement's open can be processed before the close
+    /// it replaces. If that open then fails, its release runs against a session that is not held yet, and
+    /// dropping it silently would strand the hold the close is about to record: the daemon consumed the
+    /// reservation when it launched the replacement, so nothing else would ever settle it. The intent is
+    /// recorded here instead and the arriving hold converts straight to a teardown.
+    ///
+    /// An entry is cleared the moment it is consumed, by the hold it was waiting for or by a claim. The
+    /// cap bounds the one case nothing consumes: a close that never arrives at all, which needs both a
+    /// client-side open failure and a daemon that then died before closing. A set this size means those
+    /// closes are not coming, so keeping the newest entries and dropping the rest cannot strand a
+    /// replacement that is still in flight.
+    private var pendingReplacementReleases: Set<String> = []
+
+    /// Sessions whose claim arrived before their hold did, the mirror of the case above.
+    ///
+    /// A replacement open processed before its predecessor's close finds the predecessor still placed and
+    /// retargets its pane straight away, so the pane already belongs to the replacement by the time the
+    /// close lands. Without this the arriving hold would record an id whose pane has moved on, and
+    /// nothing would ever settle it: the daemon considers the reservation consumed. Worse, treating that
+    /// hold as ordinary and tearing it down would kill the pane the replacement is now living in, so the
+    /// marker makes the late hold a pure no-op.
+    ///
+    /// Same lifecycle and bound as the release markers: consumed by the message it was waiting for, and
+    /// capped so a close that never arrives cannot grow the set without bound.
+    private var pendingReplacementClaims: Set<String> = []
+    private static let pendingReplacementMarkerLimit = 64
     /// Window shells for materialized global panels, keyed by panel window id.
     private var panelWindows: [String: PanelWindowController] = [:]
     /// Runtime-target titles resolved during the current title pass (see
@@ -135,9 +184,21 @@ import spacesterminalcore
     /// already-terminating session, so no terminate/close request is sent to the daemon for
     /// the gone session. Call only with a successfully received catalog for `deviceID`; see
     /// `OpenPanePruning.sessionsToClose`.
+    /// A pane held for a replacement is skipped: the restart's stop already deleted its row, so the
+    /// catalog cannot carry it, and pruning it would close the pane out from under the replacement the
+    /// daemon is about to open into it.
+    /// Accepted race: an overview that reflects the stop's row deletion can, in principle, be applied
+    /// before the `awaitReplacement` close IPC records the hold, in which case this prunes the
+    /// predecessor and the replacement installs as a fresh unselected tab instead of reclaiming the
+    /// slot. That is the same fallback an app relaunch between stop and claim takes: the pane's saved
+    /// position is lost, nothing else. The close IPC is posted before the deletion commits and both
+    /// arrive on the same main-actor hop, so the hold wins in practice; an acknowledgment protocol to
+    /// close the window entirely is not worth the coupling.
     func pruneOpenPanes(deviceID: String, catalogSessionIDs: Set<String>) {
         let sessionIDs = OpenPanePruning.sessionsToClose(openPanes: openPanes(), deviceID: deviceID, catalogSessionIDs: catalogSessionIDs)
-        for sessionID in sessionIDs { closePane(forSessionID: sessionID, sessionIsTerminating: true) }
+        for sessionID in sessionIDs where !panesHeldForReplacement.contains(sessionID) {
+            closePane(forSessionID: sessionID, sessionIsTerminating: true)
+        }
     }
 
     private func scopeSortKey(_ scope: PanelScope) -> String {
@@ -180,21 +241,165 @@ import spacesterminalcore
     /// available through an outage, while installing a pane the layout does not have yet is refused
     /// — before the layout is mutated and persisted — because it can only work by attaching to the
     /// owning daemon.
-    @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+    ///
+    /// `openIntent.focus` crosses that line rather than replacing it: a `.withoutFocus` open still
+    /// installs a missing pane (and is still refused when the device cannot service it), it just leaves
+    /// the panel's selection, ordering, and keyboard focus untouched. `openIntent.replacesSessionID`
+    /// claims the named session's pane instead of installing a second one.
+    /// Answers what it did, not merely that it worked, because the caller has to tell a real claim from a
+    /// fallback install: an open that installed a fresh pane leaves any hold on its named predecessor
+    /// untouched and still owing a release. Nil means the open failed.
+    @discardableResult func openOrFocusTerminalPane(
+        _ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent
+    ) -> AppKitController.TerminalPaneOpenAction? {
+        let focusIntent = openIntent.focus
         // Adopt the workspace's persisted layout first: on a fresh launch a session
         // opened before its panel was ever shown (command palette, focus IPC) is not
         // yet in an in-memory panel, so without this the placement search misses it and
         // openSessionInNewTab would overwrite the saved tabs/splits with a one-tab layout.
         // It also decides which of the two operations below this is: a persisted pane is an
         // existing one, so a cold launch focuses it instead of trying to install a second.
-        if let scope = workspaceScope(forWorkspaceID: request.workspaceID) { restoreLayoutIfNeeded(scope: scope) }
-        let existingPlacement = placement(forSessionID: request.sessionID)
-        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return false }
-        if let existingPlacement {
-            focus(placement: existingPlacement)
-            return true
+        // The restore materializes content controllers of its own, whose preparation completes
+        // asynchronously, so it inherits this open's intent: a non-focusing open must not move the caret
+        // through the panel it had to adopt on the way in either.
+        // The restore protects this open's own predecessor: processed before that session's close, there is
+        // no hold recorded yet, and the stop already dropped its row from the overview, so an unprotected
+        // restore would prune the very pane this open is about to claim.
+        if let scope = workspaceScope(forWorkspaceID: request.workspaceID) {
+            restoreLayoutIfNeeded(scope: scope, focusIntent: focusIntent, protectingSessionID: openIntent.replacesSessionID)
         }
-        return openSessionInNewTab(request)
+        let existingPlacement = placement(forSessionID: request.sessionID)
+        // The pane this open takes over, if the launch named a predecessor that still occupies one. Read
+        // from the layout rather than from the held-pane table, so the claim works whichever order the
+        // close and the open IPCs arrive in: the close having landed first leaves the pane held and still
+        // placed, and the open landing first finds it still placed and simply retargets it, after which
+        // the late close finds no placement for the predecessor and does nothing.
+        let replacedPlacement = openIntent.replacesSessionID.flatMap { placement(forSessionID: $0) }
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement, focusIntent: focusIntent) else { return nil }
+        switch AppKitController.terminalPaneOpenAction(
+            hasExistingPane: existingPlacement != nil, hasReplaceablePane: replacedPlacement != nil, focusIntent: focusIntent)
+        {
+        case .focusExistingPane:
+            // Reached only when `hasExistingPane` was true, so the placement is there.
+            if let existingPlacement { focus(placement: existingPlacement) }
+            return .focusExistingPane
+        // The session re-targets into the pane it already occupies; nothing to install, nothing to move.
+        case .leaveExistingPaneInPlace: return .leaveExistingPaneInPlace
+        case .claimReplacedPane:
+            // Reached only when `hasReplaceablePane` was true, so both are there.
+            guard let replacedSessionID = openIntent.replacesSessionID, let replacedPlacement else { return nil }
+            return claimReplacedPane(replacedSessionID: replacedSessionID, placement: replacedPlacement, request: request, focusIntent: focusIntent)
+                ? .claimReplacedPane : nil
+        case .openFocusedTab: return openSessionInNewTab(request) ? .openFocusedTab : nil
+        case .installUnselectedTab:
+            // A predecessor whose pane lives in a global panel window still waiting on an offline device
+            // has no in-memory placement to claim, and installing a workspace tab here would leave that
+            // window's saved slot to be pruned when it finally restores. Retarget the pending record's
+            // persisted layout instead, which is the same retarget applied to the representation the pane
+            // currently lives in, and install nothing: the pane reappears with the window, in its slot.
+            //
+            // Not gated on a hold being recorded: the same open-before-close ordering reaches here too, and
+            // the named predecessor is the only precondition that matters. `replacesSessionID` is set by a
+            // restart and nothing else, so a pending record naming it is always the pane to take over.
+            if let replacedSessionID = openIntent.replacesSessionID,
+                host.retargetPendingPanelWindowPane(replacing: replacedSessionID, with: paneContentDescriptor(for: request))
+            {
+                noteReplacedPaneClaimed(replacedSessionID)
+                return .claimReplacedPane
+            }
+            return installSessionInUnselectedTab(request) ? .installUnselectedTab : nil
+        }
+    }
+
+    /// The descriptor a request's pane would carry, resolved without building any content: the pending
+    /// global-window retarget rewrites a persisted layout the client is not hosting yet, so it needs the
+    /// descriptor alone.
+    private func paneContentDescriptor(for request: AppKitController.DeviceTerminalOpenRequest) -> PaneContentDescriptor {
+        .terminalSession(deviceID: request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID) ?? "", sessionID: request.sessionID)
+    }
+
+    /// Points a predecessor's pane at the replacement session, keeping its tab, its position in any
+    /// split, and its window. Nothing is selected, brought forward, or focused: a replacement lands in
+    /// the pane the user already had, and if that pane happened to be the visible one it simply starts
+    /// showing the new session.
+    private func claimReplacedPane(
+        replacedSessionID: String, placement: PanePlacement, request: AppKitController.DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent
+    ) -> Bool {
+        guard let content = ensureContentController(request: request, focusIntent: focusIntent) else { return false }
+        noteReplacedPaneClaimed(replacedSessionID)
+        // Read before the swap: tearing the predecessor's view out takes the first responder with it, so
+        // afterwards there is no way to tell the user was typing in this pane.
+        let replacedHeldKeyboardFocus =
+            NSApp.keyWindow?.firstResponder.map { contentControllers[replacedSessionID]?.owns(responder: $0) ?? false } ?? false
+        // Tear the predecessor's client down now rather than at close time: holding the pane kept its
+        // ended output on screen through the relaunch, and this is the moment that output is replaced.
+        if let previous = contentControllers.removeValue(forKey: replacedSessionID) {
+            contentPreparationTasks.removeValue(forKey: replacedSessionID)?.cancel()
+            previous.closeForSessionTermination()
+        }
+        mutateLayout(scope: placement.scope) { PanelLayoutEngine.retargetPane(paneID: placement.paneID, to: content.descriptor, in: $0) }
+        if let pane = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope)) {
+            activateContentIfVisible(scope: placement.scope, pane: pane)
+        }
+        // A replacement that is still preparing takes the caret on its placeholder; the preparation
+        // completion then carries it across the second swap by the same rule.
+        if AppKitController.terminalPaneRetargetMovesKeyboardFocusToReplacement(replacedPaneHoldsKeyboardFocus: replacedHeldKeyboardFocus) {
+            _ = content.makeContentFirstResponder()
+        }
+        return true
+    }
+
+    /// Holds a pane for the replacement the daemon is about to launch, instead of tearing it down. A
+    /// materialized pane keeps showing the ended session's final output until the replacement claims it;
+    /// a workspace whose panel has never been shown this launch has only its persisted layout, and the
+    /// hold is what keeps restore-time pruning from dropping that pane before the replacement arrives to
+    /// claim it. Deliberately does not require a placement, since the second case has none.
+    private func holdPaneForReplacement(sessionID: String) { panesHeldForReplacement.insert(sessionID) }
+
+    /// Tears down a pane whose replacement never arrived, as the ordinary terminating close it would have
+    /// been had the restart not asked for the hold: the session is already stopped, so the caret stays
+    /// where it is. Acting only on a pane that is genuinely held makes this safe to call on any path out
+    /// of a failed open, including ones where the replacement did claim the pane or where no hold was
+    /// ever placed.
+    func releasePaneHeldForReplacement(sessionID: String) {
+        // An earlier open already claimed this predecessor, so its pane belongs to the replacement now
+        // and there is nothing of the predecessor's left to release. Clearing the marker settles it.
+        if pendingReplacementClaims.remove(sessionID) != nil { return }
+        guard panesHeldForReplacement.contains(sessionID) else {
+            // Nothing held yet: this release beat the close that will place the hold. Remember the
+            // intent so that hold converts to a teardown on arrival instead of waiting for a settling
+            // message the daemon has already stopped sending.
+            recordPendingReplacementMarker(sessionID, in: &pendingReplacementReleases)
+            return
+        }
+        closePane(forSessionID: sessionID, sessionIsTerminating: true, disposition: .teardown)
+    }
+
+    /// Settles a predecessor whose pane a replacement just took over, from either claim route (an
+    /// in-memory retarget, or a pending global window's persisted layout).
+    ///
+    /// A claim with nothing held is a claim that beat its close: the predecessor was still placed because
+    /// the hold has not arrived yet. Remembering that makes the late close a no-op instead of a hold for a
+    /// pane that has already moved on. Both routes go through here so the marker cannot be recorded by one
+    /// of them and forgotten by the other.
+    private func noteReplacedPaneClaimed(_ replacedSessionID: String) {
+        let wasHeld = panesHeldForReplacement.remove(replacedSessionID) != nil
+        pendingReplacementReleases.remove(replacedSessionID)
+        if !wasHeld { recordPendingReplacementMarker(replacedSessionID, in: &pendingReplacementClaims) }
+    }
+
+    /// Records an out-of-order marker, dropping the set when it grows past the point where its entries
+    /// could still be waiting on a message that is coming. Both marker sets share this so their
+    /// lifecycle, and the reasoning behind the bound, stay in one place.
+    /// Accepted at the bound: clearing discards any marker whose close really is still in flight, and
+    /// a discarded claim's late `awaitReplacement` then records a hold nothing will release, keeping a
+    /// dead pane until the app relaunches (holds are not persisted, so relaunch prunes it). Reaching
+    /// the bound takes that many restarts each losing the close/claim race at once, which does not
+    /// happen under real usage; the bound exists so a peer that stops sending closes cannot grow the
+    /// sets without limit.
+    private func recordPendingReplacementMarker(_ sessionID: String, in markers: inout Set<String>) {
+        if markers.count >= Self.pendingReplacementMarkerLimit { markers.removeAll() }
+        markers.insert(sessionID)
     }
 
     /// Re-shows a session whose pane is already the focused, owner-attached pane the user is looking at:
@@ -228,13 +433,18 @@ import spacesterminalcore
     /// because installing appends the pane to the layout and persists it before credentials are
     /// prepared, so an admitted pane is saved as a permanently failed one that no reconnect retries.
     /// Moving or focusing a pane that already exists is client-side and always allowed.
-    private func mayActOnTerminalPane(request: AppKitController.DeviceTerminalOpenRequest, existingPlacement: PanePlacement?) -> Bool {
+    /// - Parameter focusIntent: Decides how a refusal is reported. The install doors a user drives (a new
+    ///   tab, a move to its own window, filling a split) are always focusing and owe the user a modal; a
+    ///   programmatic launch refused because its device went unreachable must not interrupt them.
+    private func mayActOnTerminalPane(
+        request: AppKitController.DeviceTerminalOpenRequest, existingPlacement: PanePlacement?, focusIntent: TerminalOpenFocusIntent
+    ) -> Bool {
         guard
             AppKitController.canOpenOrFocusTerminalPane(
                 hasExistingPane: existingPlacement != nil,
                 deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forTerminalOpenRequest: request))
         else {
-            host.showTerminalOpenRequestDeviceUnavailableError(request)
+            host.showTerminalOpenRequestDeviceUnavailableError(request, focusIntent: focusIntent)
             return false
         }
         return true
@@ -245,7 +455,7 @@ import spacesterminalcore
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
         guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID) else { return false }
-        guard let content = ensureContentController(request: request) else { return false }
+        guard let content = ensureContentController(request: request, focusIntent: .focus) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
         mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
         host.showPanelScope(resolvedScope)
@@ -253,18 +463,42 @@ import spacesterminalcore
         return true
     }
 
+    /// Installs a session as a new tab in its workspace's panel without selecting it, without bringing
+    /// the panel forward, and without touching keyboard focus: the pane a programmatically launched
+    /// process lands in, waiting on an unselected tab until the user goes looking for it.
+    ///
+    /// The one exception is a panel that had no tabs at all, where the layout normalizer selects the
+    /// first tab because a panel must always show one. That still moves nothing the user was using: the
+    /// panel had nothing to show, and it is not brought forward or focused either way.
+    private func installSessionInUnselectedTab(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+        guard let scope = workspaceScope(forWorkspaceID: request.workspaceID) else { return false }
+        guard let content = ensureContentController(request: request, focusIntent: .withoutFocus) else { return false }
+        let pane = Pane(id: UUID().uuidString, content: content.descriptor)
+        mutateLayout(scope: scope) { PanelLayoutEngine.appendUnselectedTab(tabID: UUID().uuidString, pane: pane, to: $0) }
+        // Matches how a restored layout activates its panes: visible content runs, hidden content stays
+        // parked. Without this the freshly built controller is left in neither state.
+        activateContentIfVisible(scope: scope, pane: pane)
+        return true
+    }
+
     /// Adopts a persisted layout for a workspace panel the first time it is shown,
     /// materializing content controllers for its still-live sessions.
-    func restoreLayoutIfNeeded(scope: PanelScope) {
+    ///
+    /// `focusIntent` is the intent of whatever caused the adoption, carried down to the restored panes'
+    /// asynchronous preparation.
+    /// - Parameter protectingSessionID: A predecessor the adopting open is about to claim, kept out of the
+    ///   restoration prune even when no hold has been recorded for it yet.
+    func restoreLayoutIfNeeded(scope: PanelScope, focusIntent: TerminalOpenFocusIntent, protectingSessionID: String? = nil) {
         guard panels[scope] == nil, case .workspace(let deviceID, let workspaceID) = scope,
-            let layout = host.restoredWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID), !layout.isEmpty
+            let layout = host.restoredWorkspacePanelLayout(
+                deviceID: deviceID, workspaceID: workspaceID, additionalKeepSessionIDs: protectingSessionID.map { [$0] } ?? []), !layout.isEmpty
         else { return }
         panels[scope] = PanelState(layout: layout, view: nil)
         for pane in PanelLayoutEngine.allPanes(in: layout) {
             guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil,
                 let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
             else { continue }
-            _ = ensureContentController(request: request)
+            _ = ensureContentController(request: request, focusIntent: focusIntent)
         }
     }
 
@@ -291,7 +525,7 @@ import spacesterminalcore
         let existingPlacement = placement(forSessionID: request.sessionID)
         // A session with no pane yet would have one installed here — and persisted as a `panel_windows`
         // row — for a daemon that cannot be attached to.
-        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return }
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement, focusIntent: .focus) else { return }
         if let existing = existingPlacement {
             if case .globalWindow = existing.scope, isLonePane(scope: existing.scope) {
                 focus(placement: existing)
@@ -299,7 +533,7 @@ import spacesterminalcore
             }
             mutateLayout(scope: existing.scope) { PanelLayoutEngine.removePane(paneID: existing.paneID, from: $0) }
         }
-        guard let content = ensureContentController(request: request) else { return }
+        guard let content = ensureContentController(request: request, focusIntent: .focus) else { return }
         let scope = PanelScope.globalWindow(panelWindowID: UUID().uuidString)
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
         mutateLayout(scope: scope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
@@ -357,7 +591,11 @@ import spacesterminalcore
             guard let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
                 let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
             else { continue }
-            _ = ensureContentController(request: request)
+            // `.focus`: a restored window re-activates its focused pane when preparation completes,
+            // and the shell is shown without becoming key, so that re-activation stays inside this
+            // window instead of taking the caret from the one the user is in. The no-steal promise
+            // above is the shell's, not the panes'.
+            _ = ensureContentController(request: request, focusIntent: .focus)
         }
         showPanelWindow(panelWindowID: panelWindowID, frame: frame, makeKey: false)
         restoreSelection(scope: scope)
@@ -451,22 +689,65 @@ import spacesterminalcore
         activateFocusedPane(scope: scope)
     }
 
-    func closePane(scope: PanelScope, paneID: String) {
-        if let pane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) { closeContent(for: pane) }
+    /// A user closing a pane (its close button, `Cmd+W`, dragging it away): the caret follows to
+    /// whichever pane takes its place, because the user is working in this panel.
+    func closePane(scope: PanelScope, paneID: String) { removePane(scope: scope, paneID: paneID, movingKeyboardFocus: true) }
+
+    /// Removes a pane and, only when the close came from the user, hands the caret to the pane the
+    /// layout focuses next. The remaining panes are activated either way: `mutateLayout` re-activates
+    /// them whenever the removal changed which tab is selected, so a pane that becomes visible still
+    /// runs. Withholding the caret withholds exactly that and nothing else.
+    private func removePane(scope: PanelScope, paneID: String, movingKeyboardFocus: Bool) {
+        if let pane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) {
+            // A pane the user closed while it was being held for a replacement takes the hold with it, so
+            // the table cannot outlive the pane it describes.
+            if let sessionID = pane.content.terminalSessionID { panesHeldForReplacement.remove(sessionID) }
+            closeContent(for: pane)
+        }
         mutateLayout(scope: scope) { PanelLayoutEngine.removePane(paneID: paneID, from: $0) }
+        guard movingKeyboardFocus else { return }
         activateFocusedPane(scope: scope)
     }
 
     /// Closes a session's pane wherever it lives. `sessionIsTerminating` marks a
     /// daemon-driven close (the session is already stopping), so the client detach —
     /// and with it the attachment-driven unattached ad hoc cleanup — is skipped.
-    func closePane(forSessionID sessionID: String, sessionIsTerminating: Bool = false) {
-        guard let placement = placement(forSessionID: sessionID) else { return }
-        if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) {
-            contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
-            content.closeForSessionTermination()
+    ///
+    /// It also marks a close the user did not ask for, which is why it decides whether the caret moves:
+    /// a stop, a restart, an exited process, or a pruned session must not pull focus out of wherever the
+    /// user is and into a terminal. A programmatic `workspace restart` closes every one of a workspace's
+    /// panes in a row, so the alternative is the caret hopping through each survivor in turn.
+    func closePane(forSessionID sessionID: String, sessionIsTerminating: Bool = false, disposition: TerminalPaneCloseDisposition = .teardown) {
+        // Every close by session id ends this session, so its in-flight content preparation is work for a
+        // session that is already gone. Cancelled here, once, ahead of the disposition branch: a hold
+        // keeps the pane but not the session, and a preparation left running would land after the stop
+        // and, carrying the original open's intent, move the caret or raise a failure modal for a
+        // terminal that no longer exists.
+        contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
+        if disposition == .awaitReplacement {
+            switch AppKitController.terminalPaneHoldAction(
+                hasPendingClaim: pendingReplacementClaims.contains(sessionID), hasPendingRelease: pendingReplacementReleases.contains(sessionID))
+            {
+            case .consumeClaim:
+                pendingReplacementClaims.remove(sessionID)
+                return
+            case .hold:
+                // Recorded before the placement lookup: the workspace being restarted is usually one the
+                // user is not viewing, whose panel has no in-memory pane to find, and the hold is exactly
+                // what protects its persisted pane until the replacement claims it.
+                holdPaneForReplacement(sessionID: sessionID)
+                return
+            // Falls through to the ordinary teardown below.
+            case .teardown: break
+            }
         }
-        closePane(scope: placement.scope, paneID: placement.paneID)
+        pendingReplacementReleases.remove(sessionID)
+        panesHeldForReplacement.remove(sessionID)
+        guard let placement = placement(forSessionID: sessionID) else { return }
+        if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) { content.closeForSessionTermination() }
+        removePane(
+            scope: placement.scope, paneID: placement.paneID,
+            movingKeyboardFocus: AppKitController.terminalPaneCloseMovesKeyboardFocus(sessionIsTerminating: sessionIsTerminating))
     }
 
     /// Detaches every open pane's terminal client at app termination without stopping
@@ -535,12 +816,12 @@ import spacesterminalcore
         let existingPlacement = placement(forSessionID: request.sessionID)
         // A picked target whose session is not open anywhere would have its pane installed here, so the
         // split obeys the same rule the other install doors do.
-        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return }
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement, focusIntent: .focus) else { return }
         if let existing = existingPlacement {
             guard existing.paneID != paneID else { return }
             mutateLayout(scope: existing.scope) { PanelLayoutEngine.removePane(paneID: existing.paneID, from: $0) }
         }
-        guard let content = ensureContentController(request: request) else { return }
+        guard let content = ensureContentController(request: request, focusIntent: .focus) else { return }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
         mutateLayout(scope: scope) { layout in
             PanelLayoutEngine.splitPane(paneID: paneID, direction: direction, newPane: pane, newSplitID: UUID().uuidString, in: layout) ?? layout
@@ -572,7 +853,11 @@ import spacesterminalcore
 
     // MARK: - Content lifecycle
 
-    private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> (any TerminalPaneContentHosting)? {
+    /// - Parameter focusIntent: The intent of the open that needs this content, carried into the
+    ///   asynchronous preparation so its completion knows whether it may move the caret.
+    private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) -> (
+        any TerminalPaneContentHosting
+    )? {
         if let existing = contentControllers[request.sessionID] { return existing }
         if request.preparedCredentials == nil {
             // The placeholder holds the device its pane will connect to; with no known owner
@@ -580,10 +865,10 @@ import spacesterminalcore
             guard let deviceID = request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID) else { return nil }
             let content = TerminalPanePlaceholderContentController(request: request, deviceID: deviceID)
             installContentController(content, sessionID: request.sessionID)
-            scheduleTerminalPaneContentPreparation(request: request)
+            scheduleTerminalPaneContentPreparation(request: request, focusIntent: focusIntent)
             return content
         }
-        guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
+        guard let content = host.makeTerminalPaneContent(request: request, focusIntent: focusIntent) else { return nil }
         installContentController(content, sessionID: request.sessionID)
         return content
     }
@@ -598,7 +883,7 @@ import spacesterminalcore
         contentControllers[sessionID] = content
     }
 
-    private func scheduleTerminalPaneContentPreparation(request: AppKitController.DeviceTerminalOpenRequest) {
+    private func scheduleTerminalPaneContentPreparation(request: AppKitController.DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) {
         let sessionID = request.sessionID
         guard contentPreparationTasks[sessionID] == nil else { return }
         contentPreparationTasks[sessionID] = Task { @MainActor [weak self] in
@@ -610,21 +895,31 @@ import spacesterminalcore
             guard self.contentControllers[sessionID] is TerminalPanePlaceholderContentController else { return }
             switch result {
             case .success(let preparedRequest):
-                guard let content = self.host.makeTerminalPaneContent(request: preparedRequest) else {
+                guard let content = self.host.makeTerminalPaneContent(request: preparedRequest, focusIntent: focusIntent) else {
                     (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(message: "Terminal pane failed to open.")
                     return
                 }
-                self.replacePreparingContent(content, sessionID: sessionID)
+                self.replacePreparingContent(content, sessionID: sessionID, focusIntent: focusIntent)
             case .failure(let error):
+                // The pane itself is the report: `fail` turns it into a "Terminal unavailable" pane
+                // carrying the message, which is the app's existing in-place error surface and is where a
+                // user goes looking when a background launch did not come up. The modal on top of it is
+                // for an open the user is waiting on; raising one for a launch a script triggered would
+                // interrupt whatever they were doing to announce a pane they never asked to see.
                 (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(error: error)
-                self.host.showError(error)
+                self.host.reportTerminalPaneOpenFailure(error, focusIntent: focusIntent)
             }
         }
     }
 
-    private func replacePreparingContent(_ content: TerminalPaneContentController, sessionID: String) {
+    /// Swaps a ready terminal in for its placeholder. Ownership is reclaimed if the open asked for it,
+    /// and the pane runs if it is visible, both regardless of focus intent: only the caret is withheld.
+    private func replacePreparingContent(_ content: TerminalPaneContentController, sessionID: String, focusIntent: TerminalOpenFocusIntent) {
         guard let previous = contentControllers[sessionID] as? TerminalPanePlaceholderContentController else { return }
         let requestsOwnership = previous.requestsOwnershipWhenReady
+        // Read before the swap: replacing the placeholder tears its view out, taking the first responder
+        // with it, so afterwards there is no way to tell whether the user had clicked into this pane.
+        let previousHeldKeyboardFocus = NSApp.keyWindow?.firstResponder.map { previous.owns(responder: $0) } ?? false
         installContentController(content, sessionID: sessionID)
         if requestsOwnership { content.requestOwnershipIfNeeded() }
         previous.close()
@@ -633,7 +928,13 @@ import spacesterminalcore
         if let pane = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope)) {
             activateContentIfVisible(scope: placement.scope, pane: pane)
         }
-        activateFocusedPane(scope: placement.scope)
+        switch AppKitController.terminalPanePreparationFocusAction(
+            focusIntent: focusIntent, preparedPaneHoldsKeyboardFocus: previousHeldKeyboardFocus)
+        {
+        case .none: return
+        case .restoreToPreparedPane: _ = content.makeContentFirstResponder()
+        case .activatePanelFocusedPane: activateFocusedPane(scope: placement.scope)
+        }
     }
 
     /// Recomputes every tab's title for a visible panel in place (the lightweight

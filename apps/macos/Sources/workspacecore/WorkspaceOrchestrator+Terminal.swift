@@ -341,8 +341,11 @@ extension WorkspaceOrchestrator {
         #endif
     }
 
+    /// - Parameter openIntent: What the client should do with the window and the layout when the pane
+    ///   opens. Stated at every call site rather than defaulted, because its focus half is the difference
+    ///   between a launch a user is waiting to type into and one a script triggered behind their back.
     func launchSpacesTerminalSession(
-        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
+        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode, openIntent: TerminalPaneOpenIntent,
         backend: TerminalSessionBackendKind = .ghosttyEmbedded, readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID,
         sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String, kind: TerminalSessionKind = .shell
     ) throws -> SpacesTerminalSessionHandle {
@@ -351,7 +354,7 @@ extension WorkspaceOrchestrator {
             sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
             shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601(), workspaceID: workspaceID, kind: kind)
 
-        builtInTerminalWindowOpener(sessionID, showMode)
+        builtInTerminalWindowOpener(sessionID, showMode, openIntent)
         let waitStartedAt = currentDate()
         let sessionSummary: TerminalServiceSessionSummary
         do {
@@ -365,7 +368,7 @@ extension WorkspaceOrchestrator {
             logTerminalPerfMetric(
                 "terminal_session_wait_ready", target: "session=\(sessionID)", detail: "policy=\(readinessPolicy.rawValue)",
                 elapsedMS: elapsedMS(since: waitStartedAt), success: false)
-            builtInTerminalWindowCloser(sessionID)
+            builtInTerminalWindowCloser(sessionID, .teardown)
             throw error
         }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -482,10 +485,42 @@ extension WorkspaceOrchestrator {
         return try? TerminalSessionPersistence.readRuntimeState(paths: paths)
     }
 
-    func terminateBuiltInTerminalSession(_ sessionID: String?) {
+    func terminateBuiltInTerminalSession(_ sessionID: String?, closeDisposition: TerminalPaneCloseDisposition = .teardown) {
         guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else { return }
-        builtInTerminalWindowCloser(sessionID)
+        builtInTerminalWindowCloser(sessionID, closeDisposition)
         builtInTerminalSessionTerminator(sessionID)
+    }
+
+    /// The live configured-process sessions whose panes a restart should hold for their replacements,
+    /// captured before the stop deletes the rows that name them. Keyed by the process each row belongs
+    /// to, which is the only thing that survives a full restart: the stop deletes the process rows and
+    /// the launch mints fresh row, window, and session ids, so nothing else pairs an old session with the
+    /// one that takes its place.
+    /// An orchestrator whose opener reaches no client captures nothing, so it can never ask for a hold it
+    /// could not release. That single check is what keeps the hold and the replacement's open wired
+    /// together; see `deliversTerminalWindowOpens`.
+    func replacedTerminalSessionReservations(workspaceID: String) throws -> ReplacedTerminalSessionReservations {
+        guard deliversTerminalWindowOpens else { return ReplacedTerminalSessionReservations(sessionIDsByProcessKey: [:]) }
+        var sessionIDsByProcessKey: [String: String] = [:]
+        for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
+            guard let sessionID = normalizedTerminalSessionID(process.terminalTrackingID) else { continue }
+            sessionIDsByProcessKey[runningProcessMatchKey(name: process.templateName)] = sessionID
+        }
+        return ReplacedTerminalSessionReservations(sessionIDsByProcessKey: sessionIDsByProcessKey)
+    }
+
+    /// The session a single-process restart's replacement takes over from, or nil when this orchestrator
+    /// cannot post the replacement's open. Same gate as the workspace restart's reservations.
+    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? {
+        guard deliversTerminalWindowOpens else { return nil }
+        return normalizedTerminalSessionID(process.terminalTrackingID)
+    }
+
+    /// Releases every pane this restart is still holding: held by the stop, and never claimed by a
+    /// replacement. Only emitted holds are released, so a stop that failed before sending them cannot
+    /// close a pane whose session is still running.
+    func releaseUnclaimedReplacedTerminalSessions(_ reservations: ReplacedTerminalSessionReservations) {
+        for sessionID in reservations.unclaimedHeldSessionIDs { builtInTerminalWindowCloser(sessionID, .teardown) }
     }
 
     func liveAdHocBuiltInTerminalSessionIDs(workspaceID: String) throws -> [String] {
@@ -630,8 +665,8 @@ extension WorkspaceOrchestrator {
         return launchConfiguration
     }
 
-    func terminateBuiltInTerminalSession(for process: RunningProcessRecord) {
-        terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process))
+    func terminateBuiltInTerminalSession(for process: RunningProcessRecord, closeDisposition: TerminalPaneCloseDisposition = .teardown) {
+        terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process), closeDisposition: closeDisposition)
     }
 
     func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {

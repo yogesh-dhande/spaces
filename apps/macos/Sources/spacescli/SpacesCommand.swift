@@ -1211,6 +1211,7 @@ struct TerminalShowCommand: ParsableCommand {
                 userInfo: [
                     IPCNotification.terminalSessionIDUserInfoKey: sessionID,
                     IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                    IPCNotification.terminalOpenFocusIntentUserInfoKey: TerminalOpenFocusIntent.focus.rawValue,
                     IPCNotification.focusRequestIDUserInfoKey: requestID,
                 ])
             print("Requested owner terminal window for session \(sessionID)")

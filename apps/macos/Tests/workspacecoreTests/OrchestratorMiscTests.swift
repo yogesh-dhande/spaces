@@ -957,7 +957,7 @@ extension OrchestratorTests {
         let childPIDWritten = DispatchSemaphore(value: 0)
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()

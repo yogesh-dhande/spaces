@@ -2008,10 +2008,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return value
     }
 
+    /// The window opener is a no-op for every Device API request: the caller may be an iPhone, another
+    /// Mac, or the local app itself, and a request arriving over the wire is never authority to open a
+    /// pane on this machine's desktop. Clients that want a pane ask for one themselves once the
+    /// mutation's refreshed overview comes back.
+    ///
+    /// `deliversTerminalWindowOpens: false` follows from that and has to be stated, because the closer is
+    /// wired independently and does post real IPC. Without it a restart served here would close a pane as
+    /// held for a replacement whose open this orchestrator can never send, and the client would keep
+    /// showing the terminated session forever.
     private func deviceOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
         WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+            builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
     }
 
     private func finishReservedWorkspaceTerminalLaunchInBackground(_ reservation: WorkspaceOrchestrator.WorkspaceTerminalLaunchReservation) {
@@ -2022,8 +2031,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             do {
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 let orchestrator = WorkspaceOrchestrator(
-                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
-                    builtInTerminalSessionLauncher: launcher)
+                    store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+                    builtInTerminalSessionTerminator: terminator, builtInTerminalSessionLauncher: launcher)
                 try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
             } catch {
                 guard traceEnabled else { return }
@@ -2231,8 +2240,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             do {
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 let orchestrator = WorkspaceOrchestrator(
-                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
-                    builtInTerminalSessionLauncher: launcher)
+                    store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+                    builtInTerminalSessionTerminator: terminator, builtInTerminalSessionLauncher: launcher)
                 try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
             } catch {
                 guard traceEnabled else { return }
