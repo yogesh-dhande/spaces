@@ -128,6 +128,27 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(reduction.storedPayload.renderSnapshot)
     }
 
+    /// A frame the caller refuses (its grid disagrees with the runtime state a resize is still settling
+    /// into) leaves the client with no frame to draw, exactly like a frame that failed to apply — and
+    /// unlike an apply failure it also leaves the stored payload carrying no render update for a later
+    /// attach to repaint from. So it has to ask the session for a fresh full frame too; without the
+    /// request nothing else on the client ever asks, and the pane keeps whatever partial picture it had
+    /// until the session happens to send another full frame.
+    func testReducerRequestsResyncWhenTheResizeGridVetoDropsTheFrame() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+
+        let reduction = reducer.reduce(
+            incomingPayload: payload, previousPayload: nil, shouldUseFrame: { _, _ in false }, requestResyncOnApplyFailure: true)
+
+        XCTAssertNil(reduction.frameToApply)
+        XCTAssertEqual(reduction.dropReason, "stale_resize_grid")
+        XCTAssertTrue(reduction.didRequestResync)
+    }
+
     func testReducerReportsDecodeFailureForCorruptRenderUpdate() {
         var reducer = TerminalRemoteStateReducer()
         let payload = GhosttyRemoteSessionStatePayload(

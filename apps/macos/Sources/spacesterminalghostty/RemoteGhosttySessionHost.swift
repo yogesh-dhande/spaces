@@ -235,7 +235,18 @@
             // surface was released and recreated between detach and this attach, repaint the replay
             // viewport so the recreated surface is not left blank.
             if !isEndedScrollbackReplayActive {
-                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+                let frame = currentRenderFrameForRenderUpdate()
+                terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+                // Attaching with no frame means there is nothing to paint and no baseline for the deltas
+                // the stream carries, which describe only the cells that changed. It happens whenever the
+                // subscriber's own full frame has not landed yet (this host is built lazily, after its
+                // pane's state model has been streaming) and whenever an owner change scrubbed the render
+                // update out of the stored payload. Nothing else on this path would ask: the owner
+                // attach's viewport resize below announces nothing when the grid has not moved, and a
+                // delta that fails to apply is the only other trigger. So ask here instead of waiting for
+                // that failure. Throttled with every other resync request and satisfied by the `.state`
+                // response, so a re-attach while one is in flight adds nothing.
+                if frame == nil { requestRenderUpdateStateResync() }
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
@@ -449,8 +460,9 @@
             requestDirectStateFetch()
         }
 
-        /// A resync means a frame-bearing payload failed to apply (missing baseline, revision or
-        /// owner-epoch mismatch). Each direct `.state` fetch opens a transient connection on the
+        /// A resync means this host has no full frame to draw from: a frame-bearing payload failed to
+        /// apply (missing baseline, revision or owner-epoch mismatch), its frame was refused as stale, or
+        /// an attach found no frame at all. Each direct `.state` fetch opens a transient connection on the
         /// daemon's subscription socket, so an unthrottled retry loop floods the daemon with
         /// unicast initial exports without converging; space the retries so the stream's own
         /// recovery (the forced full-frame broadcast) can land in between.

@@ -2438,6 +2438,65 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
     }
 
+    /// A host attaches before any frame has reached it: the subscription it joined carries deltas, and a
+    /// delta is meaningless without the full frame it was computed against. Nothing else on the attach
+    /// path asks for one — the attach's own viewport resize is dropped when the grid has not moved, and a
+    /// delta failing to apply is the only other trigger — so the pane would sit blank until the session
+    /// happened to send a full frame. The attach has to ask for one itself.
+    @MainActor func testAttachWithoutARenderFrameAsksTheSessionForAFullFrame() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-attach-without-baseline"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+        XCTAssertFalse(recorder.requests().contains { if case .state = $0.command { return true } else { return false } })
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+
+        waitForCondition("attach requests a full frame") {
+            recorder.requests().contains { request in
+                if case .state(let payload) = request.command { return payload.sessionID == sessionID }
+                return false
+            }
+        }
+    }
+
+    /// The other half of the rule: an attach that already holds a full frame paints from it and asks the
+    /// session for nothing. A `.state` fetch per attach would put a grid-sized export on the daemon every
+    /// time a pane is focused.
+    @MainActor func testAttachWithARenderFrameAsksTheSessionForNothing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-attach-with-baseline"
+        let fixture = try makeRunningSessionFixture(sessionID: sessionID, root: root)
+        let recorder = DirectTerminalServiceRecorder(payload: fixture.payload)
+        let subscriber = RecordingStateStreamSubscriber()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: recorder.send,
+            stateStreamSubscriber: subscriber.subscribe)
+        waitForCondition("host subscribes to the state stream") { subscriber.isSubscribed }
+        subscriber.emit(fixture.payload)
+        waitForCondition("host renders the streamed frame") { host.snapshotText() == "alpha" }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:02Z"),
+            mode: .owner, into: NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        XCTAssertFalse(recorder.requests().contains { if case .state = $0.command { return true } else { return false } })
+    }
+
     /// A subscription's payloads reach the host on the stream's own thread and are reduced off the main
     /// actor, so what this proves is that the whole chained series still lands, in order, on the mirror:
     /// a full frame followed by deltas each built against the one before it renders the last frame's

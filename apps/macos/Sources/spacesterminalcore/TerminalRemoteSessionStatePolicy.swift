@@ -120,9 +120,14 @@ public struct TerminalRemoteStateReducer: Sendable {
             dropReason = dropReason ?? "decode_failed"
         }
         let storedPayload = previousPayload?.merged(with: payload) ?? payload
+        // Every drop asks for a resync, the caller's veto above included: whichever way the frame was
+        // lost, the client is left with a picture the session has already moved past and nothing on the
+        // client ever rebuilds it on its own. The request is the only thing that makes the session
+        // re-send a full frame; the caller paces it (see `RemoteGhosttySessionHost`'s once-per-second
+        // throttle), so a run of vetoed frames costs one round trip, not one each.
         return TerminalRemoteStateReductionResult(
             payload: payload, storedPayload: storedPayload, decodedUpdate: resolved.decodedUpdate, frameToApply: frameToApply, dropReason: dropReason,
-            didRequestResync: requestResyncOnApplyFailure && resolved.dropReason != nil)
+            didRequestResync: requestResyncOnApplyFailure && dropReason != nil)
     }
 
     private mutating func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
