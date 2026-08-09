@@ -202,7 +202,9 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         let outputs = collector.recorded
         XCTAssertEqual(outputs[1].frameText, "frame-1")
         XCTAssertNil(outputs[2].frameText, "the response lost the race and must not repaint an older screen")
-        XCTAssertEqual(outputs[2].dropReason, "stale_out_of_band_state")
+        // Only its render update is refused; this response is stamped later than the frame it lost to, so
+        // its metadata is ordered on its own terms and lands.
+        XCTAssertEqual(outputs[2].dropReason, "stale_out_of_band_frame")
         XCTAssertFalse(outputs[2].requestsResync, "the baseline is newer than the refused frame, so nothing is owed")
         XCTAssertEqual(outputs[2].renderText, outputs[1].renderText, "the stored state keeps the newer screen")
     }

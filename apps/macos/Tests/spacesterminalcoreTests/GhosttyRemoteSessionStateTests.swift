@@ -285,6 +285,26 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(deltaReduction.dropReason)
     }
 
+    /// A response whose frame the client is already past still carries metadata that can be genuinely
+    /// newer: screen revisions only advance with screen content, and a quiet terminal renames its title or
+    /// changes its working directory without painting anything. So the refusal narrows to the render
+    /// update, and whether the rest lands is decided by the ordering that already owns metadata.
+    func testReducerMergesMetadataFromAnOutOfBandResponseWhoseFrameIsRedundant() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let streamed = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", title: "current")
+        let streamedReduction = reducer.reduce(incomingPayload: streamed, previousPayload: nil)
+
+        let response = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:05Z", title: "renamed")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: streamedReduction.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertNil(reduction.frameToApply, "the screen is already current, so the frame is the redundant part")
+        XCTAssertEqual(reduction.dropReason, "stale_out_of_band_frame")
+        XCTAssertFalse(reduction.didRequestResync, "the retained frame is current; nothing is owed")
+        XCTAssertEqual(reduction.storedPayload.title, "renamed", "metadata that moved on must still land")
+        XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "and the retained screen is carried forward untouched")
+    }
+
     /// `emittedAt` is millisecond-resolution, so a tie says the session answered in the same instant it
     /// broadcast — not that the response repeats it. Ties are kept, matching the ordering guard the device
     /// state model applies to the same field.
