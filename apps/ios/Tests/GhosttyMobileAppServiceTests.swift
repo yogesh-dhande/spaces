@@ -1742,10 +1742,7 @@
         func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
-            hostView.debugTapLinkHandlerForTesting = { _ in
-                XCTFail("link probe should be skipped while the mirror captures the mouse")
-                return false
-            }
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
             hostView.debugMouseCapturedForTesting = true
             var sentButtons: [(button: UInt8, pressed: Bool)] = []
             hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
@@ -1756,10 +1753,32 @@
             XCTAssertEqual(sentButtons.map(\.pressed), [true, false])
 
             hostView.debugMouseCapturedForTesting = false
-            hostView.debugTapLinkHandlerForTesting = { _ in false }
             sentButtons.removeAll()
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
             XCTAssertTrue(sentButtons.isEmpty)
+        }
+
+        /// A tap on a URL opens the link on the phone even while the session's application is tracking
+        /// the mouse, and that tap never reaches the application: on a phone a URL tap means "read this
+        /// link here", and the application keeps every tap that does not land on a link.
+        func testRemoteTerminalHostViewTapOnLinkOpensLocallyInsteadOfClickingTheTrackingApplication() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugMouseCapturedForTesting = true
+            var probedPoints: [CGPoint] = []
+            hostView.debugTapLinkHandlerForTesting = { point in
+                probedPoints.append(point)
+                return point.y < 100
+            }
+            var sentButtons: [(button: UInt8, pressed: Bool)] = []
+            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink)
+            XCTAssertEqual(probedPoints, [CGPoint(x: 12, y: 18)])
+            XCTAssertTrue(sentButtons.isEmpty, "a tap that opened a link must not also click the application")
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .sentClick)
+            XCTAssertEqual(sentButtons.map(\.pressed), [true, false], "a tap off a link still drives the application")
         }
 
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {

@@ -665,14 +665,20 @@ import Foundation
             _ = handleTapToActivateInput(at: recognizer.location(in: self))
         }
 
+        /// A link under the tap wins over the application tracking the mouse. The probe runs entirely
+        /// against this device's mirror surface and never reaches the session, so the only cost is that
+        /// an application tracking the mouse loses the taps that land on a URL while keeping every
+        /// other one. That is the right trade on a phone: coding agents track the mouse for their whole
+        /// session, and a URL tap there means the user wants to read the link on the device in their
+        /// hand rather than click that cell on the machine running the session.
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
+            if openTerminalLink(at: location) { return .openedLink }
             if sendMouseButtonClickIfCaptured(at: location) {
                 // A tap that drives the application still needs the keyboard: without this, tapping
                 // vim's mouse=a on a phone would move the cursor while leaving nothing to type with.
                 if acceptsTerminalInput, !isFirstResponder { becomeFirstResponder() }
                 return .sentClick
             }
-            if openTerminalLink(at: location) { return .openedLink }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
             return .focused
@@ -939,7 +945,7 @@ import Foundation
             if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
             guard let surface = mirrorSurface() else { return false }
             let position = Self.ghosttyMousePosition(for: location)
-            let mods = Self.linkActivationMouseModifiers()
+            let mods = linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
             openedLinkDuringTapProbe = false
             defer { tapLinkProbeDepth -= 1 }
@@ -971,7 +977,17 @@ import Foundation
             return true
         }
 
-        private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
+        /// The modifiers the tap's link probe synthesizes. Super is what Ghostty's URL link requires to
+        /// match. Shift rides along while the mirror carries the session's mouse tracking, because a
+        /// tracking terminal refreshes link hover state only for a shift-held mouse position and then
+        /// drops shift again before matching the link's own modifiers: shift is Ghostty's "this click
+        /// is for the terminal, not the application" release, the same one a cmd+shift+click uses in a
+        /// Mac pane. Without it the probe finds nothing in any pane running a coding agent, which
+        /// tracks the mouse for its whole session.
+        private func linkActivationMouseModifiers() -> ghostty_input_mods_e {
+            guard mirrorCapturesMouse else { return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
+            return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
+        }
 
         private func updateSurfaceGeometry() {
             guard let mirror, let surface = mirrorSurface() else { return }
