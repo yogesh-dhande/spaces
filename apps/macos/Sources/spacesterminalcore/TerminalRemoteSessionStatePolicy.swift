@@ -93,10 +93,18 @@ public struct TerminalRemoteStateReductionResult: Sendable {
 
 public struct TerminalRemoteStateReducer: Sendable {
     private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
+    /// Where the last frame this reducer actually handed back sits in the session's order.
+    ///
+    /// Deliberately not the same thing as `renderUpdateBaseline`. The baseline advances for every frame
+    /// that decodes and applies, including one the caller then vetoes (`shouldUseFrame`) — it has to, since
+    /// it is what the session's next delta is computed against. The caller never received that frame, so
+    /// ordering an out-of-band response against the baseline would refuse the resync the veto itself asked
+    /// for, which is the only thing that can repair the pane. This moves only when a frame is genuinely
+    /// handed over, so it answers the question the staleness check actually asks: is this response older
+    /// than what the client is holding?
+    private var retainedFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)?
 
     public init(renderUpdateBaseline: GhosttyRenderUpdateBaseline? = nil) { self.renderUpdateBaseline = renderUpdateBaseline }
-
-    public mutating func resetRenderUpdateBaseline() { renderUpdateBaseline = nil }
 
     /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
     ///   response to a direct `.state` read. Such a payload was captured at request time and can reach
@@ -122,6 +130,7 @@ public struct TerminalRemoteStateReducer: Sendable {
         if let frame = resolved.frame {
             if shouldUseFrame(frame, payload) {
                 frameToApply = frame
+                retainedFrameOrdering = (frame.sessionRevision, frame.ownerEpoch)
             } else {
                 payload = payload.replacingRenderUpdate(nil)
                 dropReason = dropReason ?? "stale_resize_grid"
@@ -151,8 +160,11 @@ public struct TerminalRemoteStateReducer: Sendable {
     ///
     /// A carried full frame is stale when it belongs to an older owner epoch (epochs only advance, so a
     /// lower one describes a session generation that has been handed off) or when it sits at or below the
-    /// baseline's revision in the same epoch (the daemon advances revisions monotonically per session and
-    /// never lets two different screens share one, so equal means identical content). Anything else is
+    /// revision of the last frame the client RETAINED in the same epoch (the daemon advances revisions
+    /// monotonically per session and never lets two different screens share one, so equal means identical
+    /// content). The comparison is against `retainedFrameOrdering` rather than the delta baseline for the
+    /// reason recorded there: a vetoed frame advances the baseline without ever reaching the client, and
+    /// the resync that veto asks for carries exactly that frame and revision back. Anything else is
     /// applied — a strictly newer revision matters because a `.state` export flushes pending output into
     /// the session's surface without broadcasting, making that response the only carrier of the screen it
     /// describes.
@@ -178,8 +190,11 @@ public struct TerminalRemoteStateReducer: Sendable {
         guard incomingPayload.runtimeState?.state.isInteractive != false else { return nil }
         let isStale: Bool
         if incomingPayload.hasRenderUpdate {
-            guard let baseline = renderUpdateBaseline, let frame = incomingPayload.decodedRenderUpdate?.fullFrame else { return nil }
-            isStale = Self.isStale(frame: frame, against: baseline)
+            // With no baseline there is no chain to protect from regression, and this response is the head
+            // of the next one — refusing it would strand the client with nothing to apply deltas to.
+            guard renderUpdateBaseline != nil else { return nil }
+            guard let retained = retainedFrameOrdering, let frame = incomingPayload.decodedRenderUpdate?.fullFrame else { return nil }
+            isStale = Self.isStale(frame: frame, against: retained)
         } else {
             isStale = Self.isStaleMetadata(incomingPayload, against: previousPayload)
         }
@@ -189,12 +204,12 @@ public struct TerminalRemoteStateReducer: Sendable {
             didRequestResync: false)
     }
 
-    private static func isStale(frame: GhosttyRenderFrame, against baseline: GhosttyRenderUpdateBaseline) -> Bool {
-        if frame.ownerEpoch != baseline.ownerEpoch { return frame.ownerEpoch < baseline.ownerEpoch }
+    private static func isStale(frame: GhosttyRenderFrame, against retained: (sessionRevision: UInt64?, ownerEpoch: UInt64)) -> Bool {
+        if frame.ownerEpoch != retained.ownerEpoch { return frame.ownerEpoch < retained.ownerEpoch }
         // An unrevisioned frame on either side cannot be ordered, so it is left to apply as it did before
         // this guard existed.
-        guard let frameRevision = frame.sessionRevision, let baselineRevision = baseline.sessionRevision else { return false }
-        return frameRevision <= baselineRevision
+        guard let frameRevision = frame.sessionRevision, let retainedRevision = retained.sessionRevision else { return false }
+        return frameRevision <= retainedRevision
     }
 
     private static func isStaleMetadata(_ payload: GhosttyRemoteSessionStatePayload, against previousPayload: GhosttyRemoteSessionStatePayload)

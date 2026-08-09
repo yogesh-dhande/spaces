@@ -241,6 +241,50 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(reduction.storedPayload.renderText, "bravo", "a metadata-only merge carries the stored screen forward")
     }
 
+    /// A frame the caller vetoes still advances the delta baseline — that is how the chain stays
+    /// consistent with the daemon's — but nothing was retained or painted, so the resync the veto asks for
+    /// must be allowed to repair it. That response commonly carries the very frame that was vetoed, at the
+    /// same revision, so comparing it against the baseline would refuse the only thing that can repair the
+    /// pane. The comparison is against the last frame the client actually kept instead.
+    func testReducerAppliesAnOutOfBandFrameThatRepairsAVetoedResize() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let seeded = try payload(text: "alpha", sessionRevision: 1, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:01Z")
+        let seededReduction = reducer.reduce(incomingPayload: seeded, previousPayload: nil)
+        XCTAssertEqual(seededReduction.frameToApply?.snapshot, snapshot(text: "alpha"))
+
+        let resize = try payload(
+            text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:02Z", reason: TerminalRemoteSessionStateReason.resize)
+        let vetoed = reducer.reduce(
+            incomingPayload: resize, previousPayload: seededReduction.storedPayload, shouldUseFrame: { _, _ in false },
+            requestResyncOnApplyFailure: true)
+        XCTAssertNil(vetoed.frameToApply)
+        XCTAssertEqual(vetoed.dropReason, "stale_resize_grid")
+        XCTAssertTrue(vetoed.didRequestResync, "the veto is what asks for the response below")
+
+        // The resync answers with the same frame and revision the veto refused.
+        let response = try payload(text: "bravo", sessionRevision: 2, ownerEpoch: 4, emittedAt: "2026-08-09T00:00:03Z")
+        let reduction = reducer.reduce(
+            incomingPayload: response, previousPayload: vetoed.storedPayload, requestResyncOnApplyFailure: true, isOutOfBand: true)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "bravo"), "the response is the only thing that repairs the veto")
+        XCTAssertNil(reduction.dropReason)
+
+        // And the chain still runs: a delta built on that frame applies against the baseline it left.
+        let next = GhosttyRenderFrame(sessionRevision: 3, ownerEpoch: 4, snapshot: snapshot(text: "charl"))
+        let delta = GhosttyRenderUpdateFactory.makeUpdate(
+            target: next,
+            baseline: GhosttyRenderUpdateBaseline(frame: GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))))
+        XCTAssertEqual(delta.kind, .delta)
+        let deltaPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-08-09T00:00:04Z", sessionStateRevision: 3,
+            sessionStateFlags: 1, screenStateRevision: 3, runtimeState: nil, attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+        let deltaReduction = reducer.reduce(
+            incomingPayload: deltaPayload, previousPayload: reduction.storedPayload, requestResyncOnApplyFailure: true)
+        XCTAssertEqual(deltaReduction.frameToApply?.snapshot, snapshot(text: "charl"))
+        XCTAssertNil(deltaReduction.dropReason)
+    }
+
     /// `emittedAt` is millisecond-resolution, so a tie says the session answered in the same instant it
     /// broadcast — not that the response repeats it. Ties are kept, matching the ordering guard the device
     /// state model applies to the same field.
@@ -281,14 +325,15 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(reduction.dropReason)
     }
 
-    private func payload(text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t") throws
-        -> GhosttyRemoteSessionStatePayload
-    {
+    private func payload(
+        text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, title: String = "t",
+        reason: String = TerminalRemoteSessionStateReason.initial
+    ) throws -> GhosttyRemoteSessionStatePayload {
         let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
         return GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt, sessionStateRevision: sessionRevision,
-            sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil, attachmentSnapshot: nil, title: title,
-            workingDirectory: "/tmp/alpha", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+            sessionID: "session-1", reason: reason, emittedAt: emittedAt, sessionStateRevision: sessionRevision, sessionStateFlags: 1,
+            screenStateRevision: sessionRevision, runtimeState: nil, attachmentSnapshot: nil, title: title, workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
     }
 
     private func metadataPayload(emittedAt: String, title: String) -> GhosttyRemoteSessionStatePayload {
