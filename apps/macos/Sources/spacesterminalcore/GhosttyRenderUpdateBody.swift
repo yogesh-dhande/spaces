@@ -32,6 +32,16 @@ final class GhosttyRenderUpdateBody: @unchecked Sendable {
 
     init(materialized update: GhosttyRenderUpdate) { source = .materialized(update) }
 
+    /// The update's kind without decoding its grid: the value's own kind for a materialized body, a
+    /// header read for an encoded one (see `GhosttyRenderUpdateBinaryCodec.encodedKind(of:)`). Nil when an
+    /// encoded body is not something this build can decode at all.
+    var kind: GhosttyRenderUpdateKind? {
+        switch source {
+        case .materialized(let update): update.kind
+        case .encoded(let data): GhosttyRenderUpdateBinaryCodec.encodedKind(of: data)
+        }
+    }
+
     /// The decoded update: the value itself for a materialized body, a memoized binary decode for an
     /// encoded one (see `GhosttyRenderUpdateDecodeCache`).
     var decodedUpdate: GhosttyRenderUpdate? {

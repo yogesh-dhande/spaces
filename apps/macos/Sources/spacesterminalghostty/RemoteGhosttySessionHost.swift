@@ -92,11 +92,34 @@
             shouldUseFrame: { frame, payload in
                 Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
             }, apply: { [weak self] output in self?.applyReducedState(output) })
+        /// Whether a payload carrying a full frame is in the pipeline and has not been applied yet.
+        ///
+        /// The pipeline reduces off the main actor, so a host that is built and attached within one
+        /// main-actor turn — the lazy pane open, whose registration with the session's state model replays
+        /// that model's cached frame synchronously — holds no frame at attach time even though one is
+        /// already on its way. Without this, every such open would ask the device for a frame it is about
+        /// to receive and pay for a grid-sized export.
+        ///
+        /// Cleared by ANY apply the pipeline delivers rather than by matching the payload that set it: the
+        /// apply mailbox collapses runs of outputs, so the apply that lands can describe a later payload
+        /// than the one marked here. Since every submitted payload still produces an apply — its own, or
+        /// the one it was collapsed into — clearing on any apply cannot leave this stuck set, and clearing
+        /// it early (on an apply for an older payload) costs at most the one resync it exists to avoid.
+        private let pendingFullFrameSubmission = PendingFullFrameSubmission()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
         private var lastRenderUpdateResyncAt: Date?
+        /// The one delayed `.state` request owed to a resync the throttle turned away; see
+        /// `scheduleTrailingRenderUpdateResync`.
+        private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+        /// How long one resync request paces the next. Only a test overrides it
+        /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its
+        /// boundary instead of waiting out a real second.
+        private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
+        var renderUpdateResyncIntervalForTesting: TimeInterval?
+        private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
         /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
@@ -183,6 +206,7 @@
                 directStateStreamClient?.stop()
                 pendingViewportSettleTask?.cancel()
                 pendingViewportResizeTask?.cancel()
+                pendingRenderUpdateResyncTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
             }
@@ -235,7 +259,19 @@
             // surface was released and recreated between detach and this attach, repaint the replay
             // viewport so the recreated surface is not left blank.
             if !isEndedScrollbackReplayActive {
-                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+                let frame = currentRenderFrameForRenderUpdate()
+                terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+                // Attaching with no frame, and none on the way, leaves nothing to paint and no baseline for
+                // the deltas the stream carries — they describe only the cells that changed. That happens
+                // when the subscriber's own full frame has not landed yet (this host is built lazily, after
+                // its pane's state model has been streaming) and when an owner change scrubbed the render
+                // update out of the stored payload. Nothing else on this path would ask: the owner attach's
+                // viewport resize below announces nothing when the grid has not moved, and a delta failing
+                // to apply is the only other trigger. So ask here instead of waiting for that failure —
+                // unless a full frame is already queued for this host, which is the ordinary lazy pane open
+                // (see `pendingFullFrameSubmission`). Throttled with every other resync request and
+                // satisfied by the `.state` response, so a re-attach while one is in flight adds nothing.
+                if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync() }
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
@@ -412,7 +448,7 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             let client = GhosttyRemoteSessionStateStreamClient(
-                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.statePipeline.submit(payload) },
+                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.submitToStatePipeline(payload) },
                 onDisconnect: { [weak self] in self?.handleStreamDisconnect() })
             do {
                 try client.start()
@@ -433,7 +469,13 @@
                 // without a main-actor hop at all. The capture is weak so a client that outlives this
                 // host cannot keep the pipeline reducing frames for an owner that is gone.
                 let client = try stateStreamSubscriber(
-                    launchConfiguration.sessionID, { [weak statePipeline = statePipeline] payload in statePipeline?.submit(payload) },
+                    launchConfiguration.sessionID,
+                    { [weak statePipeline = statePipeline, pendingFullFrameSubmission] payload in
+                        // `submitToStatePipeline`'s body, inlined because this callback deliberately does
+                        // not touch `self` (see the capture note above); the marking rule is the same.
+                        if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+                        statePipeline?.submit(payload)
+                    },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
                             self?.directStateStreamClient = nil
@@ -449,16 +491,77 @@
             requestDirectStateFetch()
         }
 
-        /// A resync means a frame-bearing payload failed to apply (missing baseline, revision or
-        /// owner-epoch mismatch). Each direct `.state` fetch opens a transient connection on the
+        /// A resync means this host has no full frame to draw from: a frame-bearing payload failed to
+        /// apply (missing baseline, revision or owner-epoch mismatch), its frame was refused as stale, or
+        /// an attach found no frame at all. Each direct `.state` fetch opens a transient connection on the
         /// daemon's subscription socket, so an unthrottled retry loop floods the daemon with
         /// unicast initial exports without converging; space the retries so the stream's own
         /// recovery (the forced full-frame broadcast) can land in between.
+        ///
+        /// The throttle paces requests; it never discards one. A `.state` read can answer with no render
+        /// update at all — the session exports none while its capture holds nothing visible — and it stamps
+        /// the throttle just the same, so the next reducer-required resync can land inside a window that
+        /// repaired nothing. Dropping it there would leave a session that emits one delta and goes quiet
+        /// with a blank pane until some unrelated later event, so a suppressed request arms exactly one
+        /// delayed retry at the window boundary instead.
         private func requestRenderUpdateStateResync() {
             let now = Date()
-            if let lastRenderUpdateResyncAt, now.timeIntervalSince(lastRenderUpdateResyncAt) < 1 { return }
+            if let lastRenderUpdateResyncAt {
+                let elapsed = now.timeIntervalSince(lastRenderUpdateResyncAt)
+                if elapsed < renderUpdateResyncInterval {
+                    scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed)
+                    return
+                }
+            }
+            // The open-throttle path owes the same guarantee as the throttled one: a fetch already in
+            // flight was issued before this resync was owed, so stamping the throttle and letting
+            // `requestDirectStateFetch` refuse on `directStateFetchInFlight` would consume the request
+            // unsent. Arm the trailing retry instead, exactly as a throttled request does.
+            guard !directStateFetchInFlight else {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                return
+            }
             lastRenderUpdateResyncAt = now
             requestDirectStateFetch()
+        }
+
+        /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
+        /// while this is pending is already covered by it, so it must not stack a competing timer. Cleared
+        /// when it sends, when a frame lands (`applyReducedState`), and when the host is torn down
+        /// (`deinit`), alongside the pane's other pending tasks — so a dead host can never dial the device.
+        ///
+        /// The request stays owed until a fetch genuinely starts. A `.state` read already in flight refuses
+        /// this one (`directStateFetchInFlight`), and that read was issued before this resync was owed, so
+        /// it can answer with no render update and repair nothing; treating the refusal as delivery is how
+        /// the owed request would go missing. So a retry that lands on one waits out another full window
+        /// instead — no spin, and the pacing is unchanged since nothing was sent.
+        ///
+        /// The mirror case needs no machinery: an in-flight fetch that completes frameless while nothing is
+        /// armed owes nothing, because nothing has failed to reduce since it was issued. Whatever payload
+        /// next fails asks again through `requestRenderUpdateStateResync`, and a session that goes quiet
+        /// with no payload at all is covered on the far side — the daemon holds its subscriber-baseline arm
+        /// until a broadcast actually carries a full frame.
+        private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
+            guard pendingRenderUpdateResyncTask == nil else { return }
+            pendingRenderUpdateResyncTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                self.pendingRenderUpdateResyncTask = nil
+                // An ended pane showing its own scrollback replay renders from the transcript, not from
+                // session state, so a fetch here would repair nothing it displays.
+                guard !self.isEndedScrollbackReplayActive else { return }
+                guard !self.directStateFetchInFlight else {
+                    self.scheduleTrailingRenderUpdateResync(after: self.renderUpdateResyncInterval)
+                    return
+                }
+                self.lastRenderUpdateResyncAt = Date()
+                self.requestDirectStateFetch()
+            }
+        }
+
+        private func cancelTrailingRenderUpdateResync() {
+            pendingRenderUpdateResyncTask?.cancel()
+            pendingRenderUpdateResyncTask = nil
         }
 
         private func requestDirectStateFetch() {
@@ -474,12 +577,15 @@
                 self.directStateFetchInFlight = false
                 switch result {
                 case .success(let fetchResult):
+                    // The agent signals are independent of the session's screen state, so they are applied
+                    // and acknowledged whatever happens to the render payload below — dropping them would
+                    // lose events no later broadcast repeats.
+                    self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
                     // Through the same pipeline as the subscription's payloads: a fetched full frame is
                     // the head of a new render-update chain, so it must not overtake a delta already
-                    // queued behind it. The agent signals it came with are independent of the session's
-                    // screen state and are applied here rather than waiting on the reduction.
-                    self.statePipeline.submit(fetchResult.payload)
-                    self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
+                    // queued behind it. Marked out-of-band so the reducer can refuse it if the stream has
+                    // already carried the session past what this read captured.
+                    self.submitToStatePipeline(fetchResult.payload, isOutOfBand: true)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
                         "terminal_remote_state_fetch", target: "session=\(sessionID)", elapsedMS: 0, success: false,
@@ -526,6 +632,18 @@
             lastSubscriptionAttemptAt = Date()
         }
 
+        /// Hands a payload to the reduction pipeline, noting first whether it carries a full frame this
+        /// host has yet to apply (see `pendingFullFrameSubmission`). The note is taken *before* the submit
+        /// because the apply that retires it can land as soon as the payload is in.
+        ///
+        /// `isOutOfBand` marks the response to a direct `.state` read, which the reducer orders against its
+        /// own baseline when the payload reaches the head of the queue — the only place that can see a
+        /// newer stream payload submitted ahead of it and still reducing.
+        private func submitToStatePipeline(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool = false) {
+            if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+            statePipeline.submit(payload, isOutOfBand: isOutOfBand)
+        }
+
         private func isInteractiveRuntimeStateForControl() -> Bool {
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
@@ -542,6 +660,9 @@
         /// view, the state the clipboard one-shot reads, the resync request, the metrics, and the
         /// notifications.
         private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+            // Any apply at all retires the pending-full-frame note, whichever payload it describes; see
+            // `pendingFullFrameSubmission` for why matching them would be the wrong rule.
+            pendingFullFrameSubmission.clear()
             let incomingPayload = output.incomingPayload
             // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
             // whichever route delivered it may have done so out of order with respect to the state
@@ -564,6 +685,10 @@
             if output.requestsResync { requestRenderUpdateStateResync() }
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
+            // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
+            // filled is no longer owed. Ordered after the request above so an output that both carries a
+            // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
+            if frameForUpdate != nil { cancelTrailingRenderUpdateResync() }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
@@ -1173,5 +1298,19 @@
             if hasMatchingLastRequestedSize, runtimeSize == nil, !force { return false }
             return true
         }
+    }
+
+    /// One host's note that a full frame is in its reduction pipeline, unapplied. Lock-guarded because the
+    /// state stream submits payloads from its own thread while the main actor reads and clears it. See
+    /// `RemoteGhosttySessionHost.pendingFullFrameSubmission` for the rule it encodes.
+    private final class PendingFullFrameSubmission: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending = false
+
+        var isPending: Bool { lock.withLock { pending } }
+
+        func mark() { lock.withLock { pending = true } }
+
+        func clear() { lock.withLock { pending = false } }
     }
 #endif

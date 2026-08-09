@@ -49,9 +49,7 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
     /// stale grid routes here too despite reducing to no frame at all. "A newer frame renders everything
     /// an older frame would have" only holds when the newer output has one — `ApplyMailbox.mayCollapse`
     /// is what checks that before actually collapsing.
-    var isCoalescibleOnApply: Bool {
-        TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason: incomingPayload.reason)
-    }
+    var isCoalescibleOnApply: Bool { TerminalRemoteSessionStateNotificationRouting.isOutputShaped(reason: incomingPayload.reason) }
 
     /// This output, carrying forward the one-shot effects of the older output it replaces. Nothing
     /// else is merged: the reduction chain already folded the skipped payload's state into this one's
@@ -99,7 +97,14 @@ public struct TerminalRemoteStateReductionOutput: Sendable {
 /// per-payload metrics do not survive; the surviving apply reports how many were folded into it
 /// (`coalescedAwayCount`).
 public final class TerminalRemoteStateReductionPipeline: Sendable {
-    private let continuation: AsyncStream<GhosttyRemoteSessionStatePayload>.Continuation
+    /// One queued payload and where it came from: the session's stream, or a direct `.state` read whose
+    /// response has to prove it is not stale when it reaches the reducer (see `TerminalRemoteStateReducer`).
+    private struct QueuedPayload: Sendable {
+        let payload: GhosttyRemoteSessionStatePayload
+        let isOutOfBand: Bool
+    }
+
+    private let continuation: AsyncStream<QueuedPayload>.Continuation
     private let consumer: Task<Void, Never>
 
     /// - Parameters:
@@ -121,13 +126,14 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
         shouldUseFrame: @escaping @Sendable (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool,
         apply: @escaping @MainActor @Sendable (TerminalRemoteStateReductionOutput) -> Void, didSubmitForTesting: (@Sendable () -> Void)? = nil
     ) {
-        let (stream, continuation) = AsyncStream<GhosttyRemoteSessionStatePayload>.makeStream(bufferingPolicy: .unbounded)
+        let (stream, continuation) = AsyncStream<QueuedPayload>.makeStream(bufferingPolicy: .unbounded)
         self.continuation = continuation
         let mailbox = ApplyMailbox(apply: apply)
         consumer = Task.detached(priority: .userInitiated) {
             var reducer = TerminalRemoteStateReducer()
             var previousPayload: GhosttyRemoteSessionStatePayload?
-            for await incomingPayload in stream {
+            for await queued in stream {
+                let incomingPayload = queued.payload
                 let output: TerminalRemoteStateReductionOutput
                 // A `clipboard_write` payload exports no screen state, and its runtime/attachment
                 // snapshot is a repeat of the output turn that carried the escape sequence, so it is
@@ -140,7 +146,7 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
                     let reduceStartedAt = Date()
                     let reduction = reducer.reduce(
                         incomingPayload: incomingPayload, previousPayload: previousPayload, shouldUseFrame: shouldUseFrame,
-                        requestResyncOnApplyFailure: true)
+                        requestResyncOnApplyFailure: true, isOutOfBand: queued.isOutOfBand)
                     previousPayload = reduction.storedPayload
                     output = TerminalRemoteStateReductionOutput(
                         incomingPayload: incomingPayload, reduction: reduction, reduceMS: TerminalPerformance.elapsedMS(since: reduceStartedAt))
@@ -159,7 +165,14 @@ public final class TerminalRemoteStateReductionPipeline: Sendable {
     }
 
     /// Enqueues one payload. Callable from any thread; payloads are reduced in call order.
-    public func submit(_ payload: GhosttyRemoteSessionStatePayload) { continuation.yield(payload) }
+    ///
+    /// - Parameter isOutOfBand: True for the response to a direct `.state` read, which re-enters here
+    ///   beside a stream that never stopped and so must prove at the head of the queue that it is not
+    ///   stale. Ordering it anywhere earlier — at the request's completion, say — cannot see a newer
+    ///   stream payload that is already submitted and still reducing.
+    public func submit(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool = false) {
+        continuation.yield(QueuedPayload(payload: payload, isOutOfBand: isOutOfBand))
+    }
 }
 
 /// The ordered, coalescing hand-off from the reduce loop to the main actor.

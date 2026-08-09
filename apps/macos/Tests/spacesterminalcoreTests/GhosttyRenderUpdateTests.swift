@@ -92,6 +92,53 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
     }
 
+    /// The header peek exists so a caller can ask "is this a full frame?" without paying a grid decode,
+    /// which means it has to answer exactly what a decode would — for every kind, and for anything that is
+    /// not a render update at all. A blob it cannot classify reads as nil, which every caller treats as
+    /// "not a full frame": the safe direction, since mistaking a delta for a full frame hands a client a
+    /// screen it never received.
+    func testEncodedKindPeekAgreesWithAFullDecode() throws {
+        let previous = makeSnapshot(lines: ["hello"])
+        let target = makeSnapshot(lines: ["hullo"])
+        let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 1, ownerEpoch: 1)
+        let updates: [GhosttyRenderUpdate] = [
+            .full(frame), GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline),
+            .resyncRequired(sessionRevision: 2, ownerEpoch: 1, columns: target.columns, rows: target.rows),
+        ]
+        XCTAssertEqual(updates.map(\.kind), [.full, .delta, .resyncRequired], "the fixture must cover every kind on the wire")
+
+        for update in updates {
+            let encoded = try GhosttyRenderUpdateBinaryCodec.encode(update)
+            XCTAssertEqual(
+                GhosttyRenderUpdateBinaryCodec.encodedKind(of: encoded), try GhosttyRenderUpdateBinaryCodec.decode(encoded).kind,
+                "the peek must agree with the decode for a \(update.kind) update")
+        }
+
+        let encodedFull = try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: Data()), "empty")
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: Data(encodedFull.prefix(5))), "too short to hold the header")
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: Data([0x00, 0x01, 0x02, 0x03, 0x04, 0x05])), "wrong magic")
+        var wrongVersion = Data(encodedFull)
+        wrongVersion[4] = UInt8(GhosttyRenderUpdate.currentVersion + 1)
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: wrongVersion), "a version this build cannot decode")
+        var unknownKind = Data(encodedFull)
+        unknownKind[5] = 0x7F
+        XCTAssertNil(GhosttyRenderUpdateBinaryCodec.encodedKind(of: unknownKind), "a kind byte this build does not know")
+    }
+
+    /// The peek reads the same header a decode does, including through a slice whose start index is not
+    /// zero — the shape a render update takes when it arrives inside a larger buffer.
+    func testEncodedKindPeekReadsASliceWithNonZeroStartIndex() throws {
+        let frame = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: makeSnapshot(lines: ["hello"]))
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
+        var padded = Data([0x11, 0x22, 0x33])
+        padded.append(encoded)
+        let slice = padded[3..<(3 + encoded.count)]
+
+        XCTAssertEqual(GhosttyRenderUpdateBinaryCodec.encodedKind(of: slice), .full)
+    }
+
     func testDecodeAcceptsDataSliceWithNonZeroStartIndex() throws {
         let snapshot = makeSnapshot(lines: ["hello", "world"])
         let frame = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot)

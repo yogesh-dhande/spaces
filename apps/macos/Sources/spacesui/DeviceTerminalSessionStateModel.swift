@@ -330,9 +330,36 @@
             let id = UUID()
             listeners.append(Listener(id: id, onUpdate: onUpdate, onDisconnect: onDisconnect))
             // Replay the last known payload so a late subscriber renders immediately.
-            if let latestRemoteStatePayload { onUpdate(latestRemoteStatePayload) }
+            if let replayPayload = replayPayloadForNewListener() { onUpdate(replayPayload) }
             ensureSubscriptionStarted()
             return ListenerHandle(detach: { [weak self] in Task { @MainActor [weak self] in self?.removeListener(id: id) } })
+        }
+
+        /// The cached payload as a listener joining mid-stream may consume it.
+        ///
+        /// The cache is the wire payload, and in steady state the render update on the wire is a delta:
+        /// absolute values for the cells that changed and nothing for the rest. A listener registering now
+        /// holds no baseline to apply that to, so the delta cannot paint anything — the applier refuses it
+        /// outright — and handing it over only starts the listener's render chain with a failure and the
+        /// resync round trip that failure costs. So the render update is handed over exactly when it is a
+        /// full frame; otherwise the payload is replayed without it, and the render host asks the device
+        /// for a full frame when it attaches without one (see `RemoteGhosttySessionHost.attach`).
+        ///
+        /// Everything else in the payload is still replayed: runtime state, ownership, title, and working
+        /// directory are what tell a fresh listener what session it is looking at, and none of them
+        /// depends on holding a render baseline. The cache itself is left alone — the delta is still the
+        /// state the next payload merges onto for the listeners that do have the baseline for it.
+        ///
+        /// The classification reads the update's header (`renderUpdateKind`) and never decodes its cells:
+        /// this runs on the main actor during listener registration, and a grid decode here is precisely
+        /// the work the off-main reduction pipeline exists to keep off it. A blob whose header cannot be
+        /// classified is treated as not-a-full-frame and stripped, which is the safe direction — the
+        /// listener resyncs rather than being handed something it cannot use.
+        private func replayPayloadForNewListener() -> GhosttyRemoteSessionStatePayload? {
+            guard let latestRemoteStatePayload else { return nil }
+            guard latestRemoteStatePayload.hasRenderUpdate else { return latestRemoteStatePayload }
+            guard latestRemoteStatePayload.renderUpdateKind != .full else { return latestRemoteStatePayload }
+            return latestRemoteStatePayload.replacingRenderUpdate(nil)
         }
 
         fileprivate func removeListener(id: UUID) {

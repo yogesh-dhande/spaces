@@ -2405,6 +2405,10 @@
                 target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
                 nativeScrollRects: nativeScrollRects)
             let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
+            // What actually goes out, which is `update` except where a delta that could not be applied
+            // locally is replaced below. The pending-baseline promise is answered against this rather than
+            // against `update`, so both readings agree with what the subscriber received.
+            var emittedUpdate = update
             switch update.kind {
             case .full:
                 if shouldUpdateStreamBaseline, let fullFrame = update.fullFrame {
@@ -2414,14 +2418,18 @@
                 if let appliedBaseline = try? GhosttyRenderUpdateApplier.apply(update, to: lastRenderUpdateBaseline) {
                     lastRenderUpdateBaseline = appliedBaseline
                 } else {
-                    let fullUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
+                    emittedUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
                     if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
-                    return fullUpdate
                 }
             case .resyncRequired: if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = nil }
             }
-            if hasPendingSubscriberBaselineReset { forceNextBroadcastFullRenderUpdate = false }
-            return update
+            // The arm is a promise to a subscriber whose initial carried no render update, and only a full
+            // frame keeps it. A scroll is excluded from `forceFullForSubscriberBaseline` on purpose — its
+            // delta rewrites the viewport through scroll rects and a full frame would waste that — but a
+            // delta hands the subscriber nothing to apply, so spending the promise on one would leave it
+            // with a frame it can only drop and a resync round trip before the pane shows anything.
+            if hasPendingSubscriberBaselineReset, emittedUpdate.kind == .full { forceNextBroadcastFullRenderUpdate = false }
+            return emittedUpdate
         }
 
         private func renderFrameRevision(for snapshot: GhosttyTerminalSnapshot) -> UInt64 {

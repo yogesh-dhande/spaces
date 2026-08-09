@@ -176,6 +176,39 @@ final class TerminalRemoteStateReductionPipelineTests: XCTestCase {
         XCTAssertTrue(collector.recorded.allSatisfy { $0.coalescedAwayCount == 0 })
     }
 
+    /// The ordering an out-of-band `.state` response has to survive: it is submitted while a newer stream
+    /// frame is already queued ahead of it and still reducing off the main actor. Nothing at the request's
+    /// completion can see that frame — it has not applied yet — so the staleness decision belongs here, at
+    /// the head of the queue, where the baseline is authoritative. Both payloads are submitted before
+    /// either is drained, which is exactly the window a completion-time comparison misses.
+    func testOutOfBandResponseSubmittedBehindANewerStreamFrameIsRefusedInOrder() async throws {
+        let sessionID = "pipeline-out-of-band-order"
+        let collector = OutputCollector()
+        let target = ApplyTarget(collector: collector)
+        let pipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { _, _ in true }, apply: { [weak target] output in target?.apply(output) })
+
+        let older = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "frame-0"))
+        let newer = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "frame-1"))
+        // Seed the chain, then submit the newer stream frame and the older response back to back.
+        pipeline.submit(payload(sessionID: sessionID, sequence: 0, reason: TerminalRemoteSessionStateReason.output, update: .full(older)))
+        try await waitUntil("seed applied") { collector.recorded.count == 1 }
+
+        pipeline.submit(payload(sessionID: sessionID, sequence: 1, reason: TerminalRemoteSessionStateReason.output, update: .full(newer)))
+        pipeline.submit(
+            payload(sessionID: sessionID, sequence: 2, reason: TerminalRemoteSessionStateReason.initial, update: .full(older)), isOutOfBand: true)
+
+        try await waitUntil("both applied") { collector.recorded.count == 3 }
+        let outputs = collector.recorded
+        XCTAssertEqual(outputs[1].frameText, "frame-1")
+        XCTAssertNil(outputs[2].frameText, "the response lost the race and must not repaint an older screen")
+        // Only its render update is refused; this response is stamped later than the frame it lost to, so
+        // its metadata is ordered on its own terms and lands.
+        XCTAssertEqual(outputs[2].dropReason, "stale_out_of_band_frame")
+        XCTAssertFalse(outputs[2].requestsResync, "the baseline is newer than the refused frame, so nothing is owed")
+        XCTAssertEqual(outputs[2].renderText, outputs[1].renderText, "the stored state keeps the newer screen")
+    }
+
     /// A burst of frames the main actor could not keep up with collapses to one apply carrying the
     /// newest frame. The newest frame is only correct if every delta in the burst still reduced in
     /// order against the baseline it was built against, so this pins the reduce/apply split as a whole.
