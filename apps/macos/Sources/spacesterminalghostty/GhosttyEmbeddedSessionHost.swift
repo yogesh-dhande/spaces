@@ -1862,11 +1862,13 @@
                 currentBellAt = TerminalSessionTimestamp.string(from: bellAt)
                 refreshRuntimeState(force: true)
                 return
-            case .openURL(_, let value):
-                // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
-                // this is effectively a no-op there, but keep it correct via an async engine→main hop
-                // rather than blocking the engine actor on the main actor.
-                Task { @MainActor in _ = GhosttyTerminalLinkOpener.open(value) }
+            case .openURL:
+                // Dropped: the daemon never opens a URL. It runs as a launchd GUI-session agent, so an
+                // open here would launch this host's browser for input that may have arrived from a
+                // phone or another Mac, which is not where the user is looking. Every client mirrors
+                // the session locally and runs its own link detection, so the link opens on the device
+                // the user activated it from. `action_cb` still reports the action as handled, which
+                // keeps Ghostty's own shell-out fallback from opening it here instead.
                 return
             case .mouseOverLink, .startSearch, .endSearch, .searchTotal, .searchSelected: return
             }
