@@ -1050,6 +1050,93 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A reflow report that matches the armed grid but arrives while a newer reflow has already moved the
+    /// terminal must not spend the arm.
+    ///
+    /// Rapid resizes revisit grids (A → B → A). The first A reflow's report matches the arm the second A
+    /// request left, so dimensions alone cannot tell it from the genuine final report, and shipping on it
+    /// broadcasts whatever grid the terminal holds by the time the frame is captured (B), which the pane
+    /// vetoes as `stale_resize_grid` while the real A report finds nothing armed. The pane stays blank
+    /// until its paced resync. Verifying the captured frame before disarming is what closes that: a
+    /// capture at the wrong grid leaves the arm for the report that can keep it.
+    func testResizeReflowReportAtAStaleGridKeepsTheArmForTheFrameThatMatches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-resize-reflow-alias-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-08-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        // Grid A is what the owner asked for; grid B is the intervening resize the terminal is still on
+        // when the stale report lands. Distinct dimensions AND distinct content, so the shipped frame is
+        // identifiable either way.
+        let gridAColumns = 5
+        let gridARows = 2
+        let gridASnapshot = Self.snapshot(text: "aaaaa\naaaaa")
+        let gridBSnapshot = Self.snapshot(text: "bbbbbbb\nbbbbbbb")
+        XCTAssertEqual([gridASnapshot.columns, gridASnapshot.rows], [gridAColumns, gridARows])
+        XCTAssertNotEqual([gridBSnapshot.columns, gridBSnapshot.rows], [gridAColumns, gridARows])
+
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(gridBSnapshot)
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in capturedSnapshotBox.value }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        // `resize` only exports screen state for a local-window or remote-viewer owner.
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        // The owner's resize to grid A arms the broadcast, and a reflow report for grid A arrives while the
+        // terminal is still on grid B: the alias.
+        try await TerminalEngineActor.run {
+            host.core.debugArmPendingResizeBroadcastGridForTesting(columns: gridAColumns, rows: gridARows)
+            host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows)
+        }
+
+        // A fence rather than a sleep: the stream delivers in order, so once this scroll broadcast has been
+        // received, any resize broadcast the reflow above produced would already be in hand.
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll } }
+        XCTAssertEqual(
+            receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }.count, 0,
+            "a report whose captured frame is still on the previous grid must ship nothing")
+
+        // The terminal finishes reflowing and the genuine grid-A report lands. The arm has to have survived
+        // for it, and the frame it ships has to be the grid-A one.
+        capturedSnapshotBox.value = gridASnapshot
+        try await TerminalEngineActor.run { host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize } }
+
+        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }
+        XCTAssertEqual(resizePayloads.count, 1, "the arm must be spent exactly once, on the report whose frame matches")
+        let resizeUpdate = try XCTUnwrap(try XCTUnwrap(resizePayloads.first).decodedRenderUpdate)
+        let resizeFrame = try XCTUnwrap(resizeUpdate.fullFrame, "a resize always ships a forced-full frame")
+        XCTAssertEqual([resizeFrame.snapshot.columns, resizeFrame.snapshot.rows], [gridAColumns, gridARows])
+        XCTAssertTrue(GhosttyTerminalSnapshotGrid.fullPlainText(for: resizeFrame.snapshot).contains("aaaaa"))
+    }
+
     func testResizeRenderUpdatesStaySelfContainedWhenCoalesced() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

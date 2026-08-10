@@ -1540,8 +1540,32 @@
         /// Only the grid of the LATEST accepted resize broadcasts. Two resizes in quick succession leave the
         /// second one armed, and the first one's report is dropped here rather than shipping a frame at a
         /// grid the pane has already moved off.
+        ///
+        /// The report's dimensions alone cannot decide that, because a rapid sequence can revisit a grid
+        /// (80x24 → 79x24 → 80x24): the FIRST 80x24 report matches the arm the LAST 80x24 request left, and
+        /// by the time this turn captures a frame the intervening 79x24 reflow may have applied. That ships
+        /// a 79x24 frame under an 80x24 runtime state, which the pane vetoes as `stale_resize_grid`, and the
+        /// genuine final report then finds nothing armed, leaving the blank pane this broadcast prevents.
+        /// Nothing in the report distinguishes the two: ghostty's callback carries dimensions only, and one
+        /// resize request can produce any number of reports (`resizeCellGrid` measures and rescales in a
+        /// loop), so counting them cannot identify the last one either.
+        ///
+        /// So the frame that would actually ship is captured and verified here before the arm is spent. The
+        /// probe runs the broadcast's own capture path, which takes the renderer mutex the reflow ran under
+        /// and is therefore the only authority on the reflowed terminal's grid (the surface size leads the
+        /// reflow, which is what makes it useless here). A capture that does not carry the armed grid leaves
+        /// the arm in place for the report that will. The extra export costs a capture per reflow report,
+        /// paid only on resizes, and drains ghostty's pending scroll rects a turn early; the resize frame is
+        /// forced-full and ignores them, and a skipped report only costs a later delta its scroll-rect
+        /// shortcut, never correctness.
         private func handleTerminalGridReflow(columns: Int, rows: Int) {
             guard let pending = pendingResizeBroadcastGrid, pending.columns == columns, pending.rows == rows else { return }
+            let capturedSnapshot = captureLiveSessionScreenState().snapshot
+            let capturedGrid = capturedSnapshot.map { (columns: $0.columns, rows: $0.rows) }
+            guard let capturedGrid, capturedGrid.columns == columns, capturedGrid.rows == rows else {
+                trace("resize_reflow_capture_skip columns=\(columns) rows=\(rows) captured=\(traceSize(capturedGrid))")
+                return
+            }
             pendingResizeBroadcastGrid = nil
             trace("resize_reflow_broadcast columns=\(columns) rows=\(rows)")
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
@@ -2557,6 +2581,12 @@
             foregroundProcessResolver = resolver
         }
         func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
+        /// Test-only: arms the pending resize broadcast exactly as an accepted resize control request does.
+        /// The real arm sits behind `resizeCellGrid`, which needs a live ghostty surface, so this is what
+        /// lets a test drive `handleTerminalGridReflow` against a stubbed capture.
+        func debugArmPendingResizeBroadcastGridForTesting(columns: Int, rows: Int) { pendingResizeBroadcastGrid = (columns, rows) }
+        /// Test-only: delivers a terminal-reflow report the way ghostty's host-managed resize callback does.
+        func debugHandleTerminalGridReflowForTesting(columns: Int, rows: Int) { handleTerminalGridReflow(columns: columns, rows: rows) }
         func debugHandleSessionClosed() { handleSessionClosed() }
         func debugMarkStartedForTesting() { started = true }
 
