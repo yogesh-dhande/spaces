@@ -114,6 +114,10 @@
         /// The one delayed `.state` request owed to a resync the throttle turned away; see
         /// `scheduleTrailingRenderUpdateResync`.
         private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+        /// What a landing frame must cover for that delayed request to count as answered. Non-nil exactly
+        /// while `pendingRenderUpdateResyncTask` is armed; see `TerminalResyncOwedOrdering` for why a
+        /// frame alone is not proof.
+        private var owedRenderUpdateResyncOrdering: TerminalResyncOwedOrdering?
         /// How long one resync request paces the next. Only a test overrides it
         /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its
         /// boundary instead of waiting out a real second.
@@ -271,7 +275,8 @@
                 // unless a full frame is already queued for this host, which is the ordinary lazy pane open
                 // (see `pendingFullFrameSubmission`). Throttled with every other resync request and
                 // satisfied by the `.state` response, so a re-attach while one is in flight adds nothing.
-                if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync() }
+                // Owed by no particular update: this attach found no frame at all, so any frame closes it.
+                if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync(owedBy: .anyFrame) }
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
@@ -504,12 +509,12 @@
         /// repaired nothing. Dropping it there would leave a session that emits one delta and goes quiet
         /// with a blank pane until some unrelated later event, so a suppressed request arms exactly one
         /// delayed retry at the window boundary instead.
-        private func requestRenderUpdateStateResync() {
+        private func requestRenderUpdateStateResync(owedBy ordering: TerminalResyncOwedOrdering) {
             let now = Date()
             if let lastRenderUpdateResyncAt {
                 let elapsed = now.timeIntervalSince(lastRenderUpdateResyncAt)
                 if elapsed < renderUpdateResyncInterval {
-                    scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed)
+                    scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed, owedBy: ordering)
                     return
                 }
             }
@@ -518,42 +523,58 @@
             // `requestDirectStateFetch` refuse on `directStateFetchInFlight` would consume the request
             // unsent. Arm the trailing retry instead, exactly as a throttled request does.
             guard !directStateFetchInFlight else {
-                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval, owedBy: ordering)
                 return
             }
             lastRenderUpdateResyncAt = now
             requestDirectStateFetch()
         }
 
-        /// Arms the one delayed request a throttled resync is owed. Coalesced: a second suppressed request
-        /// while this is pending is already covered by it, so it must not stack a competing timer. Cleared
-        /// when it sends, when a frame lands (`applyReducedState`), and when the host is torn down
-        /// (`deinit`), alongside the pane's other pending tasks — so a dead host can never dial the device.
+        /// Arms the one delayed request a throttled resync is owed, and records the ordering that request
+        /// has to be answered at. Coalesced: a second suppressed request while this is pending is already
+        /// covered by the same timer, so it must not stack a competing one — it only raises the debt to
+        /// whichever failure is later (`TerminalResyncOwedOrdering.merged`).
         ///
-        /// The request stays owed until a fetch genuinely starts. A `.state` read already in flight refuses
-        /// this one (`directStateFetchInFlight`), and that read was issued before this resync was owed, so
-        /// it can answer with no render update and repair nothing; treating the refusal as delivery is how
-        /// the owed request would go missing. So a retry that lands on one waits out another full window
-        /// instead — no spin, and the pacing is unchanged since nothing was sent.
+        /// Cleared when it sends, when a frame covering the recorded ordering lands (`applyReducedState`),
+        /// and when the host is torn down (`deinit`), alongside the pane's other pending tasks — so a dead
+        /// host can never dial the device.
         ///
         /// The mirror case needs no machinery: an in-flight fetch that completes frameless while nothing is
         /// armed owes nothing, because nothing has failed to reduce since it was issued. Whatever payload
         /// next fails asks again through `requestRenderUpdateStateResync`, and a session that goes quiet
         /// with no payload at all is covered on the far side — the daemon holds its subscriber-baseline arm
         /// until a broadcast actually carries a full frame.
-        private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval) {
+        private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval, owedBy ordering: TerminalResyncOwedOrdering) {
+            owedRenderUpdateResyncOrdering = owedRenderUpdateResyncOrdering?.merged(with: ordering) ?? ordering
+            armTrailingRenderUpdateResync(after: delay)
+        }
+
+        /// The timer behind a request already recorded as owed.
+        ///
+        /// The request stays owed until a fetch genuinely starts. A `.state` read already in flight refuses
+        /// this one (`directStateFetchInFlight`), and that read was issued before this resync was owed, so
+        /// it can answer with no render update and repair nothing; treating the refusal as delivery is how
+        /// the owed request would go missing. So a retry that lands on one waits out another full window
+        /// instead — no spin, the pacing is unchanged since nothing was sent, and the recorded ordering
+        /// rides along untouched because the same debt is still outstanding.
+        private func armTrailingRenderUpdateResync(after delay: TimeInterval) {
             guard pendingRenderUpdateResyncTask == nil else { return }
             pendingRenderUpdateResyncTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(delay))
                 guard let self, !Task.isCancelled else { return }
                 self.pendingRenderUpdateResyncTask = nil
                 // An ended pane showing its own scrollback replay renders from the transcript, not from
-                // session state, so a fetch here would repair nothing it displays.
-                guard !self.isEndedScrollbackReplayActive else { return }
-                guard !self.directStateFetchInFlight else {
-                    self.scheduleTrailingRenderUpdateResync(after: self.renderUpdateResyncInterval)
+                // session state, so a fetch here would repair nothing it displays: the request is abandoned
+                // rather than re-armed, and the debt goes with it.
+                guard !self.isEndedScrollbackReplayActive else {
+                    self.owedRenderUpdateResyncOrdering = nil
                     return
                 }
+                guard !self.directStateFetchInFlight else {
+                    self.armTrailingRenderUpdateResync(after: self.renderUpdateResyncInterval)
+                    return
+                }
+                self.owedRenderUpdateResyncOrdering = nil
                 self.lastRenderUpdateResyncAt = Date()
                 self.requestDirectStateFetch()
             }
@@ -562,6 +583,7 @@
         private func cancelTrailingRenderUpdateResync() {
             pendingRenderUpdateResyncTask?.cancel()
             pendingRenderUpdateResyncTask = nil
+            owedRenderUpdateResyncOrdering = nil
         }
 
         private func requestDirectStateFetch() {
@@ -682,13 +704,25 @@
             latestState = reduction.storedPayload
             // Covers a resync the pipeline's apply mailbox inherited from an output it coalesced away:
             // the superseded frame is not worth drawing, but the full frame it could not build is.
-            if output.requestsResync { requestRenderUpdateStateResync() }
+            //
+            // The ordering the resync is owed at comes from this output's own decoded update even when the
+            // request was inherited: the surviving output is never older than the one it replaced, so its
+            // target is at or past the failure's, and an output with no decodable target records `unknown`,
+            // which no frame retires.
+            if output.requestsResync { requestRenderUpdateStateResync(owedBy: .forFailedUpdate(decodedUpdate)) }
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
-            // A frame that applied repaired the chain, so any delayed resync still armed for the gap it
-            // filled is no longer owed. Ordered after the request above so an output that both carries a
-            // frame and inherits a coalesced-away resync retires that request rather than leaving it armed.
-            if frameForUpdate != nil { cancelTrailingRenderUpdateResync() }
+            // A frame that covers the failure the pending resync was armed for repaired the chain, so that
+            // resync is no longer owed. Covering it is what makes the retirement sound — a fetch answered
+            // before the failure was owed lands a frame that applies and yet leaves this host behind the
+            // session (see `TerminalResyncOwedOrdering`). Ordered after the request above so an output that
+            // both carries a frame and inherits a coalesced-away resync retires that request rather than
+            // leaving it armed.
+            if let frameForUpdate, let owed = owedRenderUpdateResyncOrdering,
+                owed.isSatisfied(byFrameOwnerEpoch: frameForUpdate.ownerEpoch, sessionRevision: frameForUpdate.sessionRevision)
+            {
+                cancelTrailingRenderUpdateResync()
+            }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
