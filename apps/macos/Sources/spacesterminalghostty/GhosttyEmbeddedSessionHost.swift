@@ -1550,25 +1550,25 @@
         /// resize request can produce any number of reports (`resizeCellGrid` measures and rescales in a
         /// loop), so counting them cannot identify the last one either.
         ///
-        /// So the frame that would actually ship is captured and verified here before the arm is spent. The
-        /// probe runs the broadcast's own capture path, which takes the renderer mutex the reflow ran under
-        /// and is therefore the only authority on the reflowed terminal's grid (the surface size leads the
-        /// reflow, which is what makes it useless here). A capture that does not carry the armed grid leaves
-        /// the arm in place for the report that will. The extra export costs a capture per reflow report,
-        /// paid only on resizes, and drains ghostty's pending scroll rects a turn early; the resize frame is
-        /// forced-full and ignores them, and a skipped report only costs a later delta its scroll-rect
-        /// shortcut, never correctness.
+        /// So the frame is captured here, and the one capture both decides and ships: it takes the renderer
+        /// mutex the reflow ran under and is therefore the only authority on the reflowed terminal's grid
+        /// (the surface size leads the reflow, which is what makes it useless here), and the same capture is
+        /// handed to the broadcast as the screen state to export. Verifying one capture and then letting the
+        /// broadcast take its own would reopen the race it closes, since a queued reflow can apply in the gap
+        /// between them and ship a grid-B frame under an arm cleared on grid A. A capture that does not carry
+        /// the armed grid leaves the arm in place for the report that will, and costs a later delta nothing
+        /// but its scroll-rect shortcut.
         private func handleTerminalGridReflow(columns: Int, rows: Int) {
             guard let pending = pendingResizeBroadcastGrid, pending.columns == columns, pending.rows == rows else { return }
-            let capturedSnapshot = captureLiveSessionScreenState().snapshot
-            let capturedGrid = capturedSnapshot.map { (columns: $0.columns, rows: $0.rows) }
+            let capturedScreenState = captureLiveSessionScreenState()
+            let capturedGrid = capturedScreenState.snapshot.map { (columns: $0.columns, rows: $0.rows) }
             guard let capturedGrid, capturedGrid.columns == columns, capturedGrid.rows == rows else {
                 trace("resize_reflow_capture_skip columns=\(columns) rows=\(rows) captured=\(traceSize(capturedGrid))")
                 return
             }
             pendingResizeBroadcastGrid = nil
             trace("resize_reflow_broadcast columns=\(columns) rows=\(rows)")
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize, preCapturedScreenState: capturedScreenState)
         }
 
         private func startRuntimeStateTimer() {
@@ -2304,7 +2304,8 @@
         }
 
         private func broadcastCurrentState(
-            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil,
+            preCapturedScreenState: LiveSessionScreenState? = nil
         ) {
             guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
@@ -2316,7 +2317,7 @@
             guard stateStreamServer != nil,
                 let payload = currentRemoteSessionState(
                     reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed,
-                    clipboardWrite: clipboardWrite)
+                    clipboardWrite: clipboardWrite, preCapturedScreenState: preCapturedScreenState)
             else { return }
             broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
         }
@@ -2362,7 +2363,7 @@
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
-            clipboardWrite: TerminalClipboardWritePayload? = nil
+            clipboardWrite: TerminalClipboardWritePayload? = nil, preCapturedScreenState: LiveSessionScreenState? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2386,7 +2387,8 @@
                         "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "runtime_columns": String(runtimeState?.columns ?? 0),
                         "runtime_rows": String(runtimeState?.rows ?? 0),
                     ])
-                let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind)
+                let resolvedScreenState = resolveRemoteScreenState(
+                    runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
                 let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
                 let renderUpdateEncodeStartedAt = Date()
@@ -2508,10 +2510,18 @@
             return renderUpdateRevision
         }
 
-        private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], source: String
-        ) {
-            let liveSessionScreenState = captureLiveSessionScreenState()
+        /// One read of the live terminal: the snapshot (or its text fallback) and the scroll rects ghostty
+        /// had pending when it was taken. Passing one of these back into the export path is what lets a
+        /// caller emit the exact frame it already inspected instead of racing a second capture against it.
+        private typealias LiveSessionScreenState = (
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation]
+        )
+
+        private func resolveRemoteScreenState(
+            runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?,
+            preCapturedScreenState: LiveSessionScreenState? = nil
+        ) -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], source: String) {
+            let liveSessionScreenState = preCapturedScreenState ?? captureLiveSessionScreenState()
             let sessionSnapshot = liveSessionScreenState.snapshot
             let sessionSnapshotText = liveSessionScreenState.snapshotText
             if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
@@ -2524,9 +2534,7 @@
             return (snapshot: nil, snapshotText: nil, scrollRects: [], source: isLiveRuntime ? "session_empty" : "session_unavailable")
         }
 
-        private func captureLiveSessionScreenState() -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation]
-        ) {
+        private func captureLiveSessionScreenState() -> LiveSessionScreenState {
             flushPendingIncomingOutputForStateExport()
             rendererHostStorage.prepareRenderStateExport()
             let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
