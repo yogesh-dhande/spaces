@@ -1050,6 +1050,177 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
     }
 
+    /// A reflow report that matches the armed grid but arrives while a newer reflow has already moved the
+    /// terminal must not spend the arm.
+    ///
+    /// Rapid resizes revisit grids (A → B → A). The first A reflow's report matches the arm the second A
+    /// request left, so dimensions alone cannot tell it from the genuine final report, and shipping on it
+    /// broadcasts whatever grid the terminal holds by the time the frame is captured (B), which the pane
+    /// vetoes as `stale_resize_grid` while the real A report finds nothing armed. The pane stays blank
+    /// until its paced resync. Verifying the captured frame before disarming is what closes that: a
+    /// capture at the wrong grid leaves the arm for the report that can keep it.
+    func testResizeReflowReportAtAStaleGridKeepsTheArmForTheFrameThatMatches() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-resize-reflow-alias-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-08-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        // Grid A is what the owner asked for; grid B is the intervening resize the terminal is still on
+        // when the stale report lands. Distinct dimensions AND distinct content, so the shipped frame is
+        // identifiable either way.
+        let gridAColumns = 5
+        let gridARows = 2
+        let gridASnapshot = Self.snapshot(text: "aaaaa\naaaaa")
+        let gridBSnapshot = Self.snapshot(text: "bbbbbbb\nbbbbbbb")
+        XCTAssertEqual([gridASnapshot.columns, gridASnapshot.rows], [gridAColumns, gridARows])
+        XCTAssertNotEqual([gridBSnapshot.columns, gridBSnapshot.rows], [gridAColumns, gridARows])
+
+        let capturedSnapshotBox = MutableBox<GhosttyTerminalSnapshot?>(gridBSnapshot)
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in capturedSnapshotBox.value }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        // `resize` only exports screen state for a local-window or remote-viewer owner.
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        // The owner's resize to grid A arms the broadcast, and a reflow report for grid A arrives while the
+        // terminal is still on grid B: the alias.
+        try await TerminalEngineActor.run {
+            host.core.debugArmPendingResizeBroadcastGridForTesting(columns: gridAColumns, rows: gridARows)
+            host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows)
+        }
+
+        // A fence rather than a sleep: the stream delivers in order, so once this scroll broadcast has been
+        // received, any resize broadcast the reflow above produced would already be in hand.
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll } }
+        XCTAssertEqual(
+            receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }.count, 0,
+            "a report whose captured frame is still on the previous grid must ship nothing")
+
+        // The terminal finishes reflowing and the genuine grid-A report lands. The arm has to have survived
+        // for it, and the frame it ships has to be the grid-A one.
+        capturedSnapshotBox.value = gridASnapshot
+        try await TerminalEngineActor.run { host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize } }
+
+        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }
+        XCTAssertEqual(resizePayloads.count, 1, "the arm must be spent exactly once, on the report whose frame matches")
+        let resizeUpdate = try XCTUnwrap(try XCTUnwrap(resizePayloads.first).decodedRenderUpdate)
+        let resizeFrame = try XCTUnwrap(resizeUpdate.fullFrame, "a resize always ships a forced-full frame")
+        XCTAssertEqual([resizeFrame.snapshot.columns, resizeFrame.snapshot.rows], [gridAColumns, gridARows])
+        XCTAssertTrue(GhosttyTerminalSnapshotGrid.fullPlainText(for: resizeFrame.snapshot).contains("aaaaa"))
+    }
+
+    /// The capture that verifies the reflow report has to be the capture that ships.
+    ///
+    /// Verifying one capture and letting the broadcast take its own leaves a window between them: a queued
+    /// reflow that applies there moves the terminal off the verified grid, so the arm is cleared on grid A
+    /// while a grid-B frame goes out under an A runtime state. The pane vetoes that as `stale_resize_grid`,
+    /// the genuine A report finds nothing armed, and the pane is blank until its paced resync — the exact
+    /// failure the arm exists to prevent. A capture handler that answers with grid A once and grid B forever
+    /// after makes that window observable: one capture per report is the only way the shipped frame can be
+    /// the verified one.
+    func testResizeReflowBroadcastsTheFrameItVerifiedRatherThanRecapturing() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-resize-reflow-single-capture-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+            workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-08-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        let gridAColumns = 5
+        let gridARows = 2
+        let gridASnapshot = Self.snapshot(text: "aaaaa\naaaaa")
+        let gridBSnapshot = Self.snapshot(text: "bbbbbbb\nbbbbbbb")
+        XCTAssertEqual([gridASnapshot.columns, gridASnapshot.rows], [gridAColumns, gridARows])
+        XCTAssertNotEqual([gridBSnapshot.columns, gridBSnapshot.rows], [gridAColumns, gridARows])
+
+        // The terminal the reflow left on grid A, with the next queued reflow already moving it to grid B:
+        // the first capture taken after the counter is reset sees A, every later one sees B.
+        let captureCallCount = MutableBox<Int>(0)
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in
+            captureCallCount.value += 1
+            return captureCallCount.value == 1 ? gridASnapshot : gridBSnapshot
+        }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        // `resize` only exports screen state for a local-window or remote-viewer owner.
+        let owner = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-08-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-08-09T00:00:00Z")
+
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
+        try client.start()
+        defer { client.stop() }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        // The subscriber handshake's own export is behind us, so the counter can be reset to make the next
+        // capture the reflow's. Arm grid A and deliver the grid-A report.
+        try await TerminalEngineActor.run {
+            captureCallCount.value = 0
+            host.core.debugArmPendingResizeBroadcastGridForTesting(columns: gridAColumns, rows: gridARows)
+            host.core.debugHandleTerminalGridReflowForTesting(columns: gridAColumns, rows: gridARows)
+            XCTAssertEqual(captureCallCount.value, 1, "handling one reflow report must read the terminal once; a second read is the race this closes")
+        }
+
+        // A fence rather than a sleep: the stream delivers in order, so once this scroll broadcast has been
+        // received, the resize broadcast the reflow produced is already in hand.
+        try await TerminalEngineActor.run { host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.scroll) }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.scroll } }
+
+        let resizePayloads = receivedPayloads.snapshot.filter { $0.reason == TerminalRemoteSessionStateReason.resize }
+        XCTAssertEqual(resizePayloads.count, 1, "the verified report ships exactly one resize frame")
+        let resizeUpdate = try XCTUnwrap(try XCTUnwrap(resizePayloads.first).decodedRenderUpdate)
+        let resizeFrame = try XCTUnwrap(resizeUpdate.fullFrame, "a resize always ships a forced-full frame")
+        XCTAssertEqual(
+            [resizeFrame.snapshot.columns, resizeFrame.snapshot.rows], [gridAColumns, gridARows],
+            "the shipped frame must be the one the arm was spent on, not whatever a later capture found")
+        XCTAssertTrue(GhosttyTerminalSnapshotGrid.fullPlainText(for: resizeFrame.snapshot).contains("aaaaa"))
+    }
+
     func testResizeRenderUpdatesStaySelfContainedWhenCoalesced() async throws {
         try await TerminalEngineActor.run {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2551,6 +2722,240 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Reset the shared app-service scheme so dark does not leak into later tests.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
+    }
+
+    /// What a pane is handed by the forced-full `resize` frame the daemon broadcasts when an owner's
+    /// viewport lands on a live session (issue #468: a mostly-blank pane right after clicking into it).
+    ///
+    /// The daemon resizes the surface and broadcasts in the same engine-actor turn, while ghostty applies
+    /// the reflow on its io thread and the child only repaints after SIGWINCH. This drives that exact
+    /// sequence against a real embedded session whose child paints once and then never repaints (the
+    /// default SIGWINCH disposition is ignore, and `sleep` installs no handler), so the frame the daemon
+    /// exports has to carry the session's screen on its own; the probe also records every later broadcast,
+    /// so a frame that some subsequent delta repairs is distinguished from one that is final.
+    ///
+    /// Four outcomes are distinguished, and the probe prints the evidence for whichever it sees:
+    ///   (a) the frame carries the painted content at the requested grid — the export is correct;
+    ///   (b) the frame is at the requested grid but has lost the content — the daemon exported a sparse
+    ///       frame and the pane paints blank;
+    ///   (c) the frame is still at the pre-resize grid — captured before the io-thread reflow, so a pane
+    ///       that just resized vetoes it (`stale_resize_grid`) and keeps whatever it had;
+    ///   (d) no frame at all, or something else.
+    func testResizeExportAfterOwnerAttachCarriesTheSessionScreen() async throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        var results: [ResizeExportProbeResult] = []
+        for iteration in 1...5 { results.append(try await runResizeExportProbe(iteration: iteration)) }
+
+        var tally: [String: Int] = [:]
+        for result in results { tally[result.category, default: 0] += 1 }
+        let tallyDescription = tally.keys.sorted().map { "\($0)=\(tally[$0] ?? 0)" }.joined(separator: " ")
+        print("[resize-export-probe] TALLY runs=\(results.count) \(tallyDescription)")
+
+        for result in results {
+            XCTAssertEqual(
+                result.category, "a",
+                "run \(result.iteration): the forced-full resize frame must reflect the requested grid and preserve the session's visible "
+                    + "content. \(result.summary)")
+        }
+    }
+
+    private struct ResizeExportProbeResult {
+        let iteration: Int
+        let category: String
+        let summary: String
+    }
+
+    private func runResizeExportProbe(iteration: Int) async throws -> ResizeExportProbeResult {
+        let baselineColumns = 40
+        let baselineRows = 12
+        let targetColumns = 80
+        let targetRows = 24
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+
+        // Eight distinct, clearly non-blank rows inside a 40x12 grid, then a child that stays quiet and
+        // ignores SIGWINCH so no repaint can mask a sparse export.
+        let paintedRows = (1...8).map { index in String(format: "row%02d-", index) + String(repeating: "X", count: 24) }
+        let lastPaintedRow = try XCTUnwrap(paintedRows.last)
+        let printfBody = paintedRows.joined(separator: "\\n") + "\\n"
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "resize-export-probe-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+            workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "printf '\(printfBody)'; sleep 30",
+            createdAt: "2026-08-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+
+        let boxes = try await TerminalEngineActor.run { () -> (Box<GhosttyEmbeddedSessionHost>, Box<GhosttyHeadlessRendererHost>) in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try host.startIfNeeded()
+            // Unlike the appearance tests, this probe reads grid geometry and text, never colors, so it
+            // leaves the process-wide ghostty app config where it is rather than re-anchoring it.
+            let rendererHost = try XCTUnwrap(host.rendererHost as? GhosttyHeadlessRendererHost)
+            XCTAssertTrue(rendererHost.resizeCellGrid(columns: baselineColumns, rows: baselineRows))
+            return (Box(host), Box(rendererHost))
+        }
+        let host = boxes.0.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
+
+        // A remote owner: `resize` only exports screen state for a local-window or remote-viewer owner.
+        let ownerClient = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2026-08-09T00:00:00Z")
+        let attachResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(
+                    command: .attach(TerminalControlAttachPayload(client: ownerClient, attachmentMode: .owner, appearance: .light))))
+        }
+        XCTAssertTrue(attachResponse.ok, attachResponse.message)
+
+        // The painted content has to be externally visible through the daemon's own export path before the
+        // resize, or a blank frame afterwards would prove nothing.
+        let preResizePayloadBox = MutableBox<GhosttyRemoteSessionStatePayload?>(nil)
+        try await waitUntil(timeout: 30) {
+            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial),
+                let frame = payload.decodedRenderUpdate?.fullFrame,
+                GhosttyTerminalSnapshotGrid.fullPlainText(for: frame.snapshot).contains(lastPaintedRow)
+            else { return false }
+            preResizePayloadBox.value = payload
+            return true
+        }
+        let preResizePayload = try XCTUnwrap(preResizePayloadBox.value)
+        let preResizeFrame = try XCTUnwrap(preResizePayload.decodedRenderUpdate?.fullFrame)
+        let preResizeBaseline = try Self.renderBaseline(from: preResizePayload, baseline: nil)
+        let preResizeText = GhosttyTerminalSnapshotGrid.fullPlainText(for: preResizeFrame.snapshot)
+
+        // The pane subscribes, then sends its viewport as a separate `resize` control request.
+        let receivedPayloads = RemoteSessionStatePayloadCollector()
+        try await TerminalEngineActor.run { try host.debugStartStateStreamServerForTesting() }
+        defer { TerminalEngineActor.runSynchronously { host.debugStopStateStreamServerForTesting() } }
+        let streamClient = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in
+            receivedPayloads.append(payload)
+        }
+        try streamClient.start()
+        defer { streamClient.stop() }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        receivedPayloads.removeAll()
+
+        let resizeResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(
+                TerminalControlRequest(command: "resize", clientID: ownerClient.id, columns: targetColumns, rows: targetRows, resizeSerial: 1))
+        }
+        XCTAssertTrue(resizeResponse.ok, resizeResponse.message)
+
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.resize } }
+        let resizePayload = try XCTUnwrap(receivedPayloads.snapshot.first { $0.reason == TerminalRemoteSessionStateReason.resize })
+        let resizeUpdate = resizePayload.decodedRenderUpdate
+        let resizeFrame = resizeUpdate?.fullFrame
+
+        // What a pane that just resized to the requested grid would do with the frame: the same veto the
+        // real client applies, so a pre-reflow frame shows up as `stale_resize_grid` here too.
+        var reducer = TerminalRemoteStateReducer(renderUpdateBaseline: preResizeBaseline)
+        let reduction = reducer.reduce(
+            incomingPayload: resizePayload, previousPayload: preResizePayload,
+            shouldUseFrame: { frame, _ in frame.snapshot.columns == targetColumns && frame.snapshot.rows == targetRows },
+            requestResyncOnApplyFailure: true)
+
+        // How far behind the broadcast's capture actually was: how many further export passes it takes
+        // before the daemon's own capture reports the requested grid. Each pass runs the same
+        // `prepareRenderStateExport` (refresh + tick) the broadcast ran, so this dates the reflow in
+        // engine turns rather than in wall-clock waiting.
+        let catchUpStartedAt = Date()
+        let catchUpPassBox = MutableBox<Int>(0)
+        try? await waitUntil(timeout: 10, pollInterval: 0.01) {
+            catchUpPassBox.value += 1
+            guard let frame = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial)?.decodedRenderUpdate?.fullFrame
+            else { return false }
+            return frame.snapshot.columns == targetColumns && frame.snapshot.rows == targetRows
+        }
+        let catchUpPasses = catchUpPassBox.value
+        let catchUpMS = Int(Date().timeIntervalSince(catchUpStartedAt) * 1000)
+
+        // Whether anything the session sends afterwards repairs the picture on its own. The child never
+        // repaints, so this separates "sparse frame repaired later" from "sparse frame is final".
+        try? await Task.sleep(for: .seconds(3))
+        let laterPayloads = receivedPayloads.snapshot.filter { $0.reason != TerminalRemoteSessionStateReason.resize && $0.hasRenderUpdate }
+        var repairedText: String?
+        var laterDescriptions: [String] = []
+        for payload in laterPayloads {
+            let laterReduction = reducer.reduce(incomingPayload: payload, previousPayload: resizePayload)
+            let frame = payload.decodedRenderUpdate?.fullFrame
+            laterDescriptions.append(
+                "reason=\(payload.reason) kind=\(payload.decodedRenderUpdate.map { "\($0.kind)" } ?? "nil") "
+                    + "grid=\(frame.map { "\($0.snapshot.columns)x\($0.snapshot.rows)" } ?? "nil") "
+                    + "applied=\(laterReduction.frameToApply == nil ? 0 : 1) drop=\(laterReduction.dropReason ?? "nil")")
+            if let applied = laterReduction.frameToApply { repairedText = GhosttyTerminalSnapshotGrid.fullPlainText(for: applied.snapshot) }
+        }
+
+        // Does the daemon's export ever catch up to the requested grid on its own, and with what content?
+        // A one-shot read runs the same capture path the broadcast used, so this dates the reflow rather
+        // than any client-side behavior.
+        let settledPayloadBox = MutableBox<GhosttyRemoteSessionStatePayload?>(nil)
+        try? await waitUntil(timeout: 10) {
+            guard let payload = host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial) else { return false }
+            settledPayloadBox.value = payload
+            guard let frame = payload.decodedRenderUpdate?.fullFrame else { return false }
+            return frame.snapshot.columns == targetColumns && frame.snapshot.rows == targetRows
+        }
+        let settledFrame = settledPayloadBox.value?.decodedRenderUpdate?.fullFrame
+        let settledDescription =
+            settledFrame.map {
+                "grid=\($0.snapshot.columns)x\($0.snapshot.rows) non_blank_rows=\(Self.nonBlankRowCount(in: $0.snapshot)) "
+                    + "carries_content=\(GhosttyTerminalSnapshotGrid.fullPlainText(for: $0.snapshot).contains(lastPaintedRow) ? 1 : 0)"
+            } ?? "nil"
+
+        let category: String
+        if let resizeFrame {
+            let text = GhosttyTerminalSnapshotGrid.fullPlainText(for: resizeFrame.snapshot)
+            let atTargetGrid = resizeFrame.snapshot.columns == targetColumns && resizeFrame.snapshot.rows == targetRows
+            let atBaselineGrid = resizeFrame.snapshot.columns == baselineColumns && resizeFrame.snapshot.rows == baselineRows
+            if atTargetGrid { category = text.contains(lastPaintedRow) ? "a" : "b" } else if atBaselineGrid { category = "c" } else { category = "d" }
+        } else {
+            category = "d"
+        }
+
+        let resizeGrid = resizeFrame.map { "\($0.snapshot.columns)x\($0.snapshot.rows)" } ?? "nil"
+        let resizeNonBlank = resizeFrame.map { Self.nonBlankRowCount(in: $0.snapshot) } ?? -1
+        let resizeText = resizeFrame.map { GhosttyTerminalSnapshotGrid.fullPlainText(for: $0.snapshot) } ?? "<no render update>"
+        let summary =
+            "category=\(category) " + "pre_resize[grid=\(preResizeFrame.snapshot.columns)x\(preResizeFrame.snapshot.rows) "
+            + "non_blank_rows=\(Self.nonBlankRowCount(in: preResizeFrame.snapshot))] "
+            + "resize_export[grid=\(resizeGrid) non_blank_rows=\(resizeNonBlank) kind=\(resizeUpdate.map { "\($0.kind)" } ?? "nil") "
+            + "fallback_reason=\(resizeUpdate?.fallbackReason ?? "nil") has_render_update=\(resizePayload.hasRenderUpdate ? 1 : 0)] "
+            + "resize_runtime_state[grid=\(resizePayload.runtimeState?.columns ?? -1)x\(resizePayload.runtimeState?.rows ?? -1)] "
+            + "client[applied=\(reduction.frameToApply == nil ? 0 : 1) drop_reason=\(reduction.dropReason ?? "nil") "
+            + "requested_resync=\(reduction.didRequestResync ? 1 : 0)] " + "catch_up[export_passes=\(catchUpPasses) ms=\(catchUpMS)] "
+            + "later_payloads=\(laterPayloads.count) repaired=\((repairedText?.contains(lastPaintedRow) ?? false) ? 1 : 0) "
+            + "settled_export[\(settledDescription)]"
+
+        print("[resize-export-probe] run=\(iteration) \(summary)")
+        for (index, description) in laterDescriptions.enumerated() { print("[resize-export-probe] run=\(iteration) later[\(index)] \(description)") }
+        print("[resize-export-probe] run=\(iteration) pre_resize_text:\n\(Self.renderedGridDescription(preResizeText))")
+        print("[resize-export-probe] run=\(iteration) resize_export_text:\n\(Self.renderedGridDescription(resizeText))")
+        if let repairedText {
+            print("[resize-export-probe] run=\(iteration) after_later_payloads_text:\n\(Self.renderedGridDescription(repairedText))")
+        }
+
+        return ResizeExportProbeResult(iteration: iteration, category: category, summary: summary)
+    }
+
+    private static func nonBlankRowCount(in snapshot: GhosttyTerminalSnapshot) -> Int {
+        GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+            line.contains(where: { !$0.isWhitespace })
+        }.count
+    }
+
+    /// Renders a grid's plain text with trailing padding stripped and blank rows marked, so a mostly-blank
+    /// frame reads as such in the log instead of as hundreds of spaces.
+    private static func renderedGridDescription(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, line in
+            let trimmed = line.replacingOccurrences(of: " +$", with: "", options: .regularExpression)
+            return String(format: "  %02d|", index) + (trimmed.isEmpty ? "<blank>" : trimmed)
+        }.joined(separator: "\n")
     }
 
     func testControlSetAppearanceRethemesLiveSessionForViewerClient() async throws {
