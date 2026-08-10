@@ -321,6 +321,9 @@
         private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
+        /// The grid of the latest accepted resize request whose forced-full frame has not gone out yet; see
+        /// `handleTerminalGridReflow`.
+        private var pendingResizeBroadcastGrid: (columns: Int, rows: Int)?
         private var lastSessionStateRevision: UInt64?
         private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
         private var lastScreenStateRevision: UInt64?
@@ -438,6 +441,7 @@
                 self.lastKnownSurfaceSize = (columns, rows)
                 self.refreshRuntimeState(force: true)
             }
+            sessionDriver.onTerminalGridReflowed = { [weak self] columns, rows in self?.handleTerminalGridReflow(columns: columns, rows: rows) }
             rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
             rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
             sessionDriver.onSurfaceClosed = { [weak self] in self?.handleSessionClosed() }
@@ -1502,6 +1506,10 @@
             trace(
                 "resize_request client=\(request.clientID ?? "nil") columns=\(columns) rows=\(rows) runtime_before=\(traceSize(currentSize)) owner=\(activeOwnerClientID() ?? "nil")"
             )
+            // Armed BEFORE the surface resize, because ghostty can finish the reflow (and report it) while
+            // `resizeCellGrid` is still measuring the surface; arming afterwards would let that report land
+            // with nothing to match and lose the broadcast.
+            pendingResizeBroadcastGrid = (columns: columns, rows: rows)
             let resized = rendererHostStorage.resizeCellGrid(columns: columns, rows: rows)
             refreshRuntimeState(force: true)
             trace("resize_request_result resized=\(resized ? 1 : 0) runtime_after=\(traceSize(observedSurfaceSize()))")
@@ -1510,9 +1518,33 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: resized, detail: "columns=\(columns) rows=\(rows)")
             if resized {
                 recordAcceptedResizeSerial(from: request)
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
+            } else {
+                // The surface never reached the requested grid, so no reflow will ever be reported for it.
+                // Leaving the arm in place would let an unrelated later reflow that happens to land on this
+                // grid fire a resize broadcast for a request that failed.
+                pendingResizeBroadcastGrid = nil
             }
             return TerminalControlResponse(ok: resized, message: resized ? "Resized terminal." : "Unable to match the requested terminal size.")
+        }
+
+        /// Broadcasts the forced-full `resize` frame once ghostty reports the terminal reflowed to the grid
+        /// the owner asked for.
+        ///
+        /// The broadcast cannot ride the resize control request itself: setting the surface size only queues
+        /// the reflow onto ghostty's io thread, so a frame captured in that turn still carries the old grid
+        /// while the payload's runtime state already reports the new one, and the pane vetoes it as
+        /// `stale_resize_grid` and paints nothing until its throttled resync. Ghostty's host-managed resize
+        /// callback runs after the terminal has been reflowed, so a frame captured from here carries the
+        /// requested grid with the session's screen reflowed onto it.
+        ///
+        /// Only the grid of the LATEST accepted resize broadcasts. Two resizes in quick succession leave the
+        /// second one armed, and the first one's report is dropped here rather than shipping a frame at a
+        /// grid the pane has already moved off.
+        private func handleTerminalGridReflow(columns: Int, rows: Int) {
+            guard let pending = pendingResizeBroadcastGrid, pending.columns == columns, pending.rows == rows else { return }
+            pendingResizeBroadcastGrid = nil
+            trace("resize_reflow_broadcast columns=\(columns) rows=\(rows)")
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
         }
 
         private func startRuntimeStateTimer() {

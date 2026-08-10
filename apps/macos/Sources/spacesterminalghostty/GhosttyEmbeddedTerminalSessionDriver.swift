@@ -112,6 +112,10 @@
         var onClipboardWrite: (@TerminalEngineActor (String) -> Void)?
         var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
         var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
+        /// Reports the grid ghostty finished reflowing the terminal to, which trails the surface size
+        /// `resizeCellGrid` sets: the surface only queues the reflow onto ghostty's io thread. A snapshot
+        /// exported from here on carries the new grid.
+        var onTerminalGridReflowed: (@TerminalEngineActor (Int, Int) -> Void)?
         var onSessionStateChanged: (@TerminalEngineActor (GhosttyEmbeddedSessionStateChange) -> Void)?
 
         init(launchConfiguration: TerminalSessionLaunchConfiguration) { self.launchConfiguration = launchConfiguration }
@@ -233,6 +237,7 @@
             sessionConfig.surface.receive_userdata = Unmanaged.passUnretained(hostPTY).toOpaque()
             sessionConfig.surface.receive_buffer = Self.hostManagedReceiveBufferCallback
             sessionConfig.surface.receive_resize = Self.hostManagedReceiveResizeCallback
+            hostPTY.setGridResizeAppliedHandler { [weak self] columns, rows in self?.onTerminalGridReflowed?(columns, rows) }
 
             let surfaceUserData = GhosttyEmbeddedSurfaceUserData(
                 closeHandler: { [weak self] in self?.handleSurfaceClosed() }, surfaceProvider: { [weak self] in self?.surface },
@@ -689,7 +694,7 @@
             userdata, columns, rows, pixelWidth, pixelHeight in
             guard let userdata, columns > 0, rows > 0 else { return }
             let hostPTY = Unmanaged<HostManagedPTYTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
-            _ = hostPTY.resizeCellGrid(columns: Int(columns), rows: Int(rows), pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            hostPTY.applyGhosttyGridResize(columns: Int(columns), rows: Int(rows), pixelWidth: pixelWidth, pixelHeight: pixelHeight)
         }
 
         private static func takeString(_ raw: ghostty_string_s) -> String? {
