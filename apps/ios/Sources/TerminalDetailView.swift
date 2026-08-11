@@ -98,9 +98,9 @@ struct TerminalDetailView: View {
                                 isShowingComposer = true
                                 return true
                             }
-                        ).accessibilityIdentifier("terminal.surface").allowsHitTesting(model.shouldPresentLiveSurface).accessibilityHidden(
-                            !model.shouldPresentLiveSurface
-                        ).background(Self.surfaceBackground)
+                        ).ignoresSafeArea(.keyboard, edges: .bottom).accessibilityIdentifier("terminal.surface").allowsHitTesting(
+                            model.shouldPresentLiveSurface
+                        ).accessibilityHidden(!model.shouldPresentLiveSurface).background(Self.surfaceBackground)
 
                         if !model.shouldPresentLiveSurface { statusShell.onAppear { renderedText = "" } }
                     }

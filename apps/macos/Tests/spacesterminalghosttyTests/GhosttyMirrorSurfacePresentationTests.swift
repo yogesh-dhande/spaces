@@ -76,6 +76,25 @@ import spacesterminalcore
         waitForCondition("present when the pane comes back") { pane.view.debugSurfacePresentationCount > presentsBefore }
     }
 
+    /// A resize changes the Ghostty render target even when the daemon's frame stays exactly the same.
+    /// The surface has to present its retained state at the new target without waiting for terminal
+    /// output or resetting surface-local selection.
+    func testGeometryGrowthPresentsTheIdleFrame() {
+        let pane = makePane(label: "geometry-growth")
+        defer { pane.view.releaseSurface() }
+        show(pane)
+        waitForCondition("initial present") { pane.view.debugSurfacePresentationCount > 0 }
+        waitForCondition("initial text") { pane.view.debugMirrorSurfaceText?.contains("geometry-growth") == true }
+        let presentsBefore = pane.view.debugSurfacePresentationCount
+
+        pane.container.frame.size.height += 80
+        pane.container.layoutSubtreeIfNeeded()
+        settle()
+
+        waitForCondition("present after geometry growth") { pane.view.debugSurfacePresentationCount > presentsBefore }
+        waitForCondition("retained text after geometry growth") { pane.view.debugMirrorSurfaceText?.contains("geometry-growth") == true }
+    }
+
     /// Same rule across a surface rebuild, which is what a pane row being re-keyed under a live session
     /// produces: the view and its frame survive, the surface does not.
     func testRebuiltSurfacePresentsTheRetainedFrameWithoutANewFrame() {

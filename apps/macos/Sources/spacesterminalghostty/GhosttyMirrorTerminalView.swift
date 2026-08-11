@@ -258,13 +258,14 @@
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
+            let geometryChanged = updateSurfaceGeometry()
             reportViewportSizeIfNeeded()
+            if geometryChanged { scheduleSurfacePresentationRefresh() }
         }
 
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
-            updateSurfaceGeometry()
+            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
         }
 
         override func viewDidChangeEffectiveAppearance() {
@@ -446,7 +447,7 @@
 
         func surfaceCellSize() -> (columns: Int, rows: Int)? {
             ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
+            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
             if let surface = mirrorSurface() {
                 let size = ghostty_surface_size(surface)
                 if size.columns > 0, size.rows > 0 { return (Int(size.columns), Int(size.rows)) }
@@ -845,14 +846,14 @@
             suppressedFocusOnlyMouseButtonNumbers.remove(event.buttonNumber) != nil
         }
 
-        private func updateSurfaceGeometry() {
-            guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return }
+        @discardableResult private func updateSurfaceGeometry() -> Bool {
+            guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return false }
             updateSurfaceOcclusion()
             let scale = Double(window?.backingScaleFactor ?? 2.0)
             let displayID = (window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             let geometry = SurfaceGeometry(
                 width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID, windowNumber: window?.windowNumber)
-            guard geometry != lastGeometry else { return }
+            guard geometry != lastGeometry else { return false }
 
             var host = makeSurfaceHost()
             _ = ghostty_mirror_set_host(mirror, &host)
@@ -861,6 +862,7 @@
             ghostty_surface_set_size(surface, geometry.width, geometry.height)
             ghostty_surface_refresh(surface)
             lastGeometry = geometry
+            return true
         }
 
         /// Tells the surface whether its window is on screen, and presents once it comes back.
