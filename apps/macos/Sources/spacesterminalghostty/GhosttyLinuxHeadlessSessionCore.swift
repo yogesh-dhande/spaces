@@ -1425,7 +1425,7 @@
         /// (`applyThemeAppearance(_:)`), since the headless daemon cannot read the client's OS
         /// appearance. Until a client attaches, the session uses the default (dark) appearance.
         private func makeVTSession(columns: Int, rows: Int) -> OpaquePointer? {
-            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: currentAppearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: currentAppearance), appearance: currentAppearance)
             return withUnsafePointer(to: &theme) { themePointer in
                 spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollbackBytes, themePointer)
             }
@@ -1438,7 +1438,7 @@
             guard appearance != currentAppearance else { return }
             currentAppearance = appearance
             guard let vtSession else { return }
-            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: appearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: appearance), appearance: appearance)
             let applied = withUnsafePointer(to: &theme) { spaces_ghostty_vt_session_set_theme(vtSession, $0) }
             guard applied else { return }
             screenStateRevision &+= 1

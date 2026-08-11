@@ -116,11 +116,15 @@ typedef struct {
 // a remote (Linux daemon) session streams to the client match the app's theme instead of
 // libghostty-vt's built-in palette. Each color is packed 0x00RRGGBB. `palette_rgb` is the 16
 // ANSI colors (0-15); the shim fills indices 16-255 with the standard xterm cube and grayscale.
+// `is_dark` is kept with the palette so a live session can answer color-scheme queries from the same
+// last-writer-wins appearance that supplied its colors.
 typedef struct {
     uint32_t foreground_rgb;
     uint32_t background_rgb;
     uint32_t cursor_rgb;
     uint32_t palette_rgb[16];
+    // The appearance these colors represent, reported to programs that query CSI ? 996 n.
+    bool is_dark;
 } SpacesGhosttyVtTheme;
 
 // Upper bound on one turn's buffered OSC 52 payload. A clipboard write larger than this is dropped

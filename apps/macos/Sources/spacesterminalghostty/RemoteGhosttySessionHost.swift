@@ -1058,7 +1058,8 @@
                     return
                 }
                 let model = await Task.detached(priority: .userInitiated) {
-                    TerminalEndedSessionScrollbackModel(columns: columns, rows: rows, theme: theme, transcript: transcript.data)
+                    TerminalEndedSessionScrollbackModel(
+                        columns: columns, rows: rows, theme: theme, appearance: appearance, transcript: transcript.data)
                 }.value
                 guard generation == self.endedScrollbackGeneration, case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
                 guard let model else {

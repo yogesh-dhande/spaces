@@ -50,6 +50,13 @@ final class ThemeRegistryTests: XCTestCase {
         XCTAssertEqual(ThemeColor(89, 219, 205, alpha: 0.5).packedRGB, 0x59_DB_CD)
     }
 
+    func testTerminalShimThemeCarriesItsAppearance() {
+        let brand = ThemeRegistry.spacesBrand
+
+        XCTAssertFalse(GhosttyVtSessionBridge.packTheme(brand.terminal(for: .light), appearance: .light).is_dark)
+        XCTAssertTrue(GhosttyVtSessionBridge.packTheme(brand.terminal(for: .dark), appearance: .dark).is_dark)
+    }
+
     func testActiveThemeDefaultsToSpacesBrandAndResolvesBoundID() {
         let original = ActiveTheme.id
         defer { ActiveTheme.id = original }
