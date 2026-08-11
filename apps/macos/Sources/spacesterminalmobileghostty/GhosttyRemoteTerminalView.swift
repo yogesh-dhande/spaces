@@ -133,7 +133,10 @@ import Foundation
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.onInputReadinessChanged = { ready in _ = Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { _ = Task { @MainActor in callback() } } }
-            hostView.onViewportSizeChanged = { columns, rows in _ = Task { @MainActor in onViewportSizeChanged(columns, rows) } }
+            // UIKit delivers layout on the main thread. Keeping viewport delivery synchronous preserves
+            // the keyboard transition's measured order: a late smaller grid must not overwrite its final
+            // settled grid after the model has already resized the owner runtime to it.
+            hostView.onViewportSizeChanged = { columns, rows in MainActor.assumeIsolated { onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
@@ -252,6 +255,8 @@ import Foundation
         /// no-op.
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastSurfaceGeometry: SurfaceGeometry?
+        private var keyboardViewportRefreshTask: Task<Void, Never>?
+        private var pendingKeyboardViewportSettlementID: UUID?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
@@ -405,6 +410,9 @@ import Foundation
             let hadRenderedSnapshot = currentRenderedSnapshot != nil
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
+            keyboardViewportRefreshTask?.cancel()
+            keyboardViewportRefreshTask = nil
+            pendingKeyboardViewportSettlementID = nil
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
@@ -552,6 +560,10 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
+            // A keyboard layout guide reports intermediate frames during its animation. Resizing the
+            // remote terminal for those frames makes the daemon reflow through transient grids, so the
+            // keyboard transition owns the one final report below. The local surface still follows each
+            // layout: it has no remote round trip and must never leave a newly exposed area unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -632,6 +644,9 @@ import Foundation
         /// pixels either way — so this is what lets a test see that a repeat layout or a title-only
         /// payload costs no apply.
         public private(set) var renderFrameApplyCountForTesting = 0
+        /// Counts host render passes even when there is no native mirror, which lets keyboard-transition
+        /// tests distinguish local surface updates from remote viewport reports.
+        public private(set) var renderLatestSnapshotCallCountForTesting = 0
 
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
@@ -804,19 +819,30 @@ import Foundation
         }
 
         private func scheduleKeyboardViewportRefresh() {
-            for delayMS in [0, 120, 320] {
-                Task { @MainActor [weak self] in
-                    if delayMS == 0 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(delayMS)) }
-                    guard let self else { return }
-                    self.setNeedsLayout()
-                    self.layoutIfNeeded()
-                    self.reportViewportSizeIfNeeded()
-                    self.renderLatestSnapshot()
-                }
+            keyboardViewportRefreshTask?.cancel()
+            let settlementID = UUID()
+            pendingKeyboardViewportSettlementID = settlementID
+            keyboardViewportRefreshTask = Task { @MainActor [weak self] in
+                // UIKeyboardLayoutGuide exposes the changing geometry but no completion callback for
+                // reloadInputViews(). Keep the established final 320 ms sample as the single settle
+                // point, rather than reporting each intermediate layout-guide frame.
+                try? await Task.sleep(for: .milliseconds(320))
+                guard !Task.isCancelled, let self else { return }
+                self.completeKeyboardViewportSettlement(id: settlementID)
             }
         }
 
+        private func completeKeyboardViewportSettlement(id: UUID) {
+            guard pendingKeyboardViewportSettlementID == id else { return }
+            pendingKeyboardViewportSettlementID = nil
+            keyboardViewportRefreshTask?.cancel()
+            keyboardViewportRefreshTask = nil
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+
         private func reportViewportSizeIfNeeded() {
+            guard pendingKeyboardViewportSettlementID == nil else { return }
             guard scrollInteractionDepth == 0 else {
                 deferredViewportSizeReport = true
                 return
@@ -837,6 +863,7 @@ import Foundation
         }
 
         private func renderLatestSnapshot() {
+            renderLatestSnapshotCallCountForTesting += 1
             guard let latestSnapshot else {
                 currentRenderedSnapshot = nil
                 latestRenderFrame = nil
@@ -1330,8 +1357,6 @@ import Foundation
         func setKeyboardOccludedHeightForTesting(_ height: CGFloat?) {
             keyboardOccludedHeightOverrideForTesting = height
             setNeedsLayout()
-            reportViewportSizeIfNeeded()
-            renderLatestSnapshot()
         }
 
         func setSurfaceViewportSizeForTesting(columns: Int, rows: Int) {
@@ -1343,6 +1368,10 @@ import Foundation
         func viewportSizeForTesting() -> (columns: Int, rows: Int) { viewportSize() }
 
         func visibleRenderBoundsForTesting() -> CGRect { visibleRenderBounds() }
+
+        func keyboardViewportSettlementIDForTesting() -> UUID? { pendingKeyboardViewportSettlementID }
+
+        func completeKeyboardViewportSettlementForTesting(id: UUID) { completeKeyboardViewportSettlement(id: id) }
 
         private var terminalUserInterfaceIdiom: UIUserInterfaceIdiom { userInterfaceIdiomOverrideForTesting ?? traitCollection.userInterfaceIdiom }
 

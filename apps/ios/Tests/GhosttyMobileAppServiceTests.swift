@@ -3720,6 +3720,60 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewSettlesKeyboardViewportOnceAfterReplacingATransition() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setKeyboardOccludedHeightForTesting(0)
+
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+            let baselineViewport = hostView.viewportSizeForTesting()
+            reportedViewports.removeAll()
+            let rendersBeforeTransition = hostView.renderLatestSnapshotCallCountForTesting
+
+            hostView.setSoftwareKeyboardVisible(false)
+            let firstSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
+            hostView.setKeyboardOccludedHeightForTesting(180)
+            hostView.layoutIfNeeded()
+
+            XCTAssertTrue(reportedViewports.isEmpty, "an intermediate keyboard frame must not resize the remote terminal")
+            XCTAssertEqual(
+                hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 1, "the local surface must follow the keyboard layout")
+
+            hostView.setSoftwareKeyboardVisible(true)
+            let secondSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
+            XCTAssertNotEqual(firstSettlement, secondSettlement)
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.layoutIfNeeded()
+
+            XCTAssertTrue(reportedViewports.isEmpty, "the replacement transition must also suppress its interim viewport")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
+
+            hostView.completeKeyboardViewportSettlementForTesting(id: firstSettlement)
+            XCTAssertTrue(reportedViewports.isEmpty, "a cancelled transition must not report after its replacement")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
+
+            hostView.completeKeyboardViewportSettlementForTesting(id: secondSettlement)
+            XCTAssertEqual(reportedViewports.count, 1)
+            let finalReport = try XCTUnwrap(reportedViewports.first)
+            let settledViewport = hostView.viewportSizeForTesting()
+            XCTAssertNotEqual(settledViewport.rows, baselineViewport.rows)
+            XCTAssertEqual(finalReport.columns, settledViewport.columns)
+            XCTAssertEqual(finalReport.rows, settledViewport.rows)
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 3)
+
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.layoutIfNeeded()
+            let restoredViewport = hostView.viewportSizeForTesting()
+            let lastReportedViewport = try XCTUnwrap(reportedViewports.last)
+            XCTAssertEqual(lastReportedViewport.columns, restoredViewport.columns, "ordinary layouts still report outside keyboard transitions")
+            XCTAssertEqual(lastReportedViewport.rows, restoredViewport.rows, "ordinary layouts still report outside keyboard transitions")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 4)
+        }
+
         func testRemoteTerminalHostViewUsesSurfaceRowsForKeyboardHiddenPrompt() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
             let window = UIWindow(frame: phoneBounds)
@@ -3917,6 +3971,30 @@
 
             hostView.update(snapshot: sampleSnapshotWithExclamation(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
             XCTAssertGreaterThan(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "changed content must reach the surface")
+        }
+
+        func testTheMirrorRefreshesGeometryWithoutReapplyingAnUnchangedFrame() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "geometry-growth")
+            defer { hostView.removeFromSuperview() }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+            let appliesAtOriginalGeometry = hostView.renderFrameApplyCountForTesting
+
+            // Hiding the keyboard grows the view without changing the daemon snapshot. The surface
+            // refreshes its retained state at the new geometry without resetting it from that frame.
+            hostView.frame.size.height += 120
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+
+            XCTAssertEqual(
+                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry,
+                "a geometry change must not re-apply an unchanged frame")
         }
 
         /// `TerminalViewerModel.updateOwnerRenderSnapshot` is the steady-streaming path: it keeps the
