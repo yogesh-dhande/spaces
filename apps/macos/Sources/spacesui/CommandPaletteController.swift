@@ -692,6 +692,10 @@ final class CommandPalettePanel: NSPanel {
             NSSound.beep()
             return
         }
+        // A focus request can suspend on daemon or browser work while the palette is
+        // still visible. Keep the first request authoritative so repeated Enter/click
+        // cannot duplicate mutations or replace its saved cancellation focus target.
+        guard pendingSelectionExecution == nil else { return }
         let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
         if let picker = sessionPickerContext {
             guard let choice = picker.choicesByItemID[item.id] else {

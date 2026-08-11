@@ -243,6 +243,7 @@ sleep 0.5
 }
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>>"$PROCESS_FOCUS_LOG"
 wait_for_spaces_frontmost_ready
+METRICS_LOG_START_LINE="$(wc -l <"$APP_LOG" | tr -d ' ')"
 
 for iteration in $(seq 1 "$ITERATIONS"); do
   toggle_pattern="spaces: perf metric=toggle_palette target=action=show .*app_active_before=1 .*success=1 elapsed_ms="
@@ -267,11 +268,12 @@ PY
   wait_for_spaces_frontmost_ready
 done
 
-python3 - "$APP_LOG" "$ITERATIONS" "$TOGGLE_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
+python3 - "$APP_LOG" "$ITERATIONS" "$TOGGLE_WALL_SAMPLES" "$METRICS_PATH" "$METRICS_LOG_START_LINE" <<'PY' >"$SUMMARY_PATH"
 import json, statistics, re, sys
 
-log_path, iterations, wall_samples_path, metrics_path = sys.argv[1:5]
+log_path, iterations, wall_samples_path, metrics_path, metrics_log_start_line = sys.argv[1:6]
 iterations = int(iterations)
+metrics_log_start_line = int(metrics_log_start_line)
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 metrics = {
     "toggle_palette": [],
@@ -283,7 +285,9 @@ metrics = {
 }
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-    for raw_line in handle:
+    for line_number, raw_line in enumerate(handle, start=1):
+        if line_number <= metrics_log_start_line:
+            continue
         line = raw_line.strip()
         match = pattern.match(line)
         if not match or match.group("success") != "1":
