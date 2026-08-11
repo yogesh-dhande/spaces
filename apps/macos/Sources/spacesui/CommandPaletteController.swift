@@ -141,7 +141,6 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteReturnTerminalSessionID = nil
             commandPaletteReturnApplicationProcessID = nil
         }
-        pendingSelectionExecution = nil
     }
 
     func commandPaletteDefaultWorkspaceID() -> String? {
@@ -574,7 +573,11 @@ final class CommandPalettePanel: NSPanel {
         scope: PanelScope, newTerminalWorkspaceID: String, items: [CommandPaletteItem],
         choicesByItemID: [String: AppKitController.SessionPickerChoice], completion: @escaping (AppKitController.SessionPickerChoice?) -> Void
     ) {
-        pendingSelectionExecution = nil
+        guard pendingSelectionExecution == nil else {
+            host.logHotkeyDebug("present_session_picker skipped selection_in_flight")
+            completion(nil)
+            return
+        }
         // A picker opening over a live normal palette cancels it cleanly first.
         if sessionPickerContext != nil { dismissCommandPalette() }
         commandPaletteLoadTask?.cancel()
