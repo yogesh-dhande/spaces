@@ -328,6 +328,19 @@ struct SpacesDeviceAPIClient: Sendable {
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
+    /// Renews an attached remote client's lease without changing its attachment mode. A foreground
+    /// terminal detail uses the `.notFound` response to distinguish an expired client row, which it
+    /// must reattach as a viewer before it can take ownership again, from a transient transport failure.
+    func heartbeat(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
+        async throws
+    {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(.init(action: .heartbeat, sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity)
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
     func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil)
         async throws -> GhosttyRemoteSessionStatePayload?
     {

@@ -130,6 +130,27 @@
             }
         }
 
+        /// Navigation can stop the viewer after the stream receives an OSC 52 event but before the
+        /// reducer's main-actor application runs. The copy is a one-shot addressed to the user who made
+        /// it, so it still reaches that clipboard; only the stale session state is discarded.
+        func testCopyReceivedBeforeNavigationStillReachesTheOwnersClipboard() async throws {
+            try await withPasteboard { pasteboard in
+                let (model, ownerClientID) = try await makeOwnerModel(pasteboard)
+                let installedTitle = model.latestState?.title
+
+                // `submitLatestState` does not await the reducer. This synchronous stop runs before its
+                // queued main-actor apply, exactly like navigation immediately after the stream received
+                // the copy. The following awaited payload only gives the queued apply a deterministic
+                // completion point; stopped state remains inert.
+                model.submitLatestState(clipboardPayload(targetClientID: ownerClientID, text: "copied before navigating"), isOutOfBand: false)
+                model.stop()
+                await model.applyLatestState(payload(reason: TerminalRemoteSessionStateReason.output), isOutOfBand: false)
+
+                XCTAssertEqual(pasteboard.string, "copied before navigating")
+                XCTAssertEqual(model.latestState?.title, installedTitle, "a stale application must not mutate stopped viewer state")
+            }
+        }
+
         /// The write is a one-shot that rides exactly the payload announcing it. The client's stored state
         /// drops the field on merge, so the payloads that follow must not re-paste over whatever the user
         /// has copied since.

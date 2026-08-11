@@ -31,6 +31,7 @@ struct TerminalDetailView: View {
     /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(TerminalFontSizeStorage.key) private var terminalFontSize: TerminalFontSize = .default
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
@@ -112,31 +113,40 @@ struct TerminalDetailView: View {
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
         }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
             .hidden, for: .navigationBar
-        ).task { model.start() }.task(id: session.id) { await refreshRuntimeRowsWhileVisible() }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
-            .task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) {
-                showsTerminalSurface in
-                if showsTerminalSurface { hasMountedTerminalSurface = true }
-                if !showsTerminalSurface { renderedText = "" }
-            }.onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
-                writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
-            }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
-                item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
-            ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
-                TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
-            }.confirmationDialog(
-                pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
-                presenting: pendingStopRow
-            ) { row in
-                Button("Stop", role: .destructive) { Task { await appModel.stop(row: row) } }
-                Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text(StopConfirmationCopy.rowMessage)
-            }.onDisappear { model.stop() }
+        ).task {
+            if scenePhase != .active { model.prepareForBackgrounding() }
+            model.start()
+            if scenePhase == .active { model.resumeAfterBackgrounding() }
+        }.task(id: session.id) { await refreshRuntimeRowsWhileVisible() }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(
+            id: e2eCommandRequestPath
+        ) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
+            if showsTerminalSurface { hasMountedTerminalSurface = true }
+            if !showsTerminalSurface { renderedText = "" }
+        }.onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
+            writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
+        }.onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background: model.prepareForBackgrounding()
+            case .active: model.resumeAfterBackgrounding()
+            case .inactive: break
+            @unknown default: break
+            }
+        }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
+            item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
+        ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
+            TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
+        }.confirmationDialog(
+            pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
+            presenting: pendingStopRow
+        ) { row in
+            Button("Stop", role: .destructive) { Task { await appModel.stop(row: row) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text(StopConfirmationCopy.rowMessage)
+        }.onDisappear { model.stop() }
     }
 
-    private var pendingStopDialogBinding: Binding<Bool> {
-        Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } })
-    }
+    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } }) }
 
     private var linkPreviewBannerOverlay: some View {
         VStack(spacing: 0) {
