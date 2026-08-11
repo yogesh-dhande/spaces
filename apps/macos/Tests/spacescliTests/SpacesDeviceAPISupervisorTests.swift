@@ -238,18 +238,18 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         XCTAssertEqual(relaunchCount, 1)
     }
 
-    func testStatusReportsUnavailableWhenConfiguredPortIsBusy() async throws {
-        try await withTemporaryProfile { _ in
+    func testStatusReportsUnavailableWhenConfiguredPortIsBusy() throws {
+        try withTemporaryProfileSynchronously { root in
             let occupiedSocket = try makeOccupiedPortSocket()
             defer { close(occupiedSocket.fileDescriptor) }
 
             let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)"]
             let supervisor = SpacesDeviceAPISupervisor(
-                settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
+                settingsStore: temporaryProfileSettingsStore(root: root, environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
             defer { supervisor.stop() }
 
-            let response = try await Task.detached { try SpacesDeviceAPIControlClient.status() }.value
+            let response = try controlResponseWhilePumpingMainRunLoop { try SpacesDeviceAPIControlClient.status() }
             XCTAssertFalse(response.ok)
             XCTAssertEqual(response.message, "Device API is not running.")
             XCTAssertEqual(response.status?.port, occupiedSocket.port)
@@ -257,14 +257,14 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         }
     }
 
-    func testOpenPairingWindowReportsUnavailableWhenConfiguredPortIsBusy() async throws {
-        try await withTemporaryProfile { _ in
+    func testOpenPairingWindowReportsUnavailableWhenConfiguredPortIsBusy() throws {
+        try withTemporaryProfileSynchronously { root in
             let occupiedSocket = try makeOccupiedPortSocket()
             defer { close(occupiedSocket.fileDescriptor) }
 
             let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)"]
             let supervisor = SpacesDeviceAPISupervisor(
-                settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
+                settingsStore: temporaryProfileSettingsStore(root: root, environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
             defer { supervisor.stop() }
 
@@ -272,7 +272,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             XCTAssertEqual(status.host, SpacesDeviceAPIDefaults.host)
             XCTAssertEqual(status.port, occupiedSocket.port)
 
-            let response = try await Task.detached { try SpacesDeviceAPIControlClient.openPairingWindow() }.value
+            let response = try controlResponseWhilePumpingMainRunLoop { try SpacesDeviceAPIControlClient.openPairingWindow() }
             XCTAssertFalse(response.ok)
             XCTAssertEqual(response.message, "Device API is not running.")
             XCTAssertEqual(response.status?.port, occupiedSocket.port)
@@ -280,15 +280,15 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         }
     }
 
-    func testOpenPairingWindowDoesNotEmitIPv6WildcardHost() async throws {
-        try await withTemporaryProfile { _ in
+    func testOpenPairingWindowDoesNotEmitIPv6WildcardHost() throws {
+        try withTemporaryProfileSynchronously { root in
             let environment = [SpacesDeviceAPIDefaults.hostEnvironmentVariable: "::", SpacesDeviceAPIDefaults.portEnvironmentVariable: "0"]
             let supervisor = SpacesDeviceAPISupervisor(
-                settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
+                settingsStore: temporaryProfileSettingsStore(root: root, environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
             defer { supervisor.stop() }
 
-            let response = try await Task.detached { try SpacesDeviceAPIControlClient.openPairingWindow() }.value
+            let response = try controlResponseWhilePumpingMainRunLoop { try SpacesDeviceAPIControlClient.openPairingWindow() }
             let linkString = try XCTUnwrap(response.pairingWindow?.linkString)
             let link = try SpacesDevicePairingLink.parse(linkString)
 
@@ -642,8 +642,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         }
     }
 
-    func testRevokeDeviceClosesActiveSubscribeConnection() async throws {
-        try await withTemporaryProfile { _ in
+    func testRevokeDeviceClosesActiveSubscribeConnection() throws {
+        try withTemporaryProfileSynchronously { root in
             let sessionID = "session-revoke-\(UUID().uuidString)"
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             let subscriptionServer = DeviceAPITestSubscriptionServer(socketPath: paths.subscriptionSocketPath)
@@ -651,7 +651,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             defer { subscriptionServer.stop() }
 
             let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(try makeAvailablePort())"]
-            let settingsStore = SpacesDeviceAPISettingsStore(environment: environment)
+            let settingsStore = temporaryProfileSettingsStore(root: root, environment: environment)
 
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-REVOKE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
@@ -670,7 +670,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             XCTAssertTrue(subscriptionServer.waitForAccepted(timeout: 5))
 
-            let response = try await Task.detached { try SpacesDeviceAPIControlClient.revokeDevice(installationID: clientApp.installationID) }.value
+            let response = try controlResponseWhilePumpingMainRunLoop {
+                try SpacesDeviceAPIControlClient.revokeDevice(installationID: clientApp.installationID)
+            }
             XCTAssertTrue(response.ok)
             XCTAssertTrue(waitForConnectionClosure(connection, timeout: 5))
         }
@@ -1211,6 +1213,53 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
         try await body(root)
     }
+
+    private func withTemporaryProfileSynchronously(_ body: (URL) throws -> Void) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimePath = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime").path, 1)
+        defer {
+            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimePath { setenv("SPACES_RUNTIME_DIR", originalRuntimePath, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        try body(root)
+    }
+
+    /// Temporary profiles are explicit development fixtures, not installed profiles or sibling profiles competing for a
+    /// persistent port. The injected root and empty sibling claim set keep startup focused on the fixture instead of
+    /// scanning the machine-wide temporary-directory parent, which can contain an unbounded number of unrelated test roots.
+    private func temporaryProfileSettingsStore(root: URL, environment: [String: String]) -> SpacesDeviceAPISettingsStore {
+        SpacesDeviceAPISettingsStore(
+            environment: environment, profileIsInstalled: { false }, profileRoot: { root.path }, portsClaimedByOtherProfiles: { _ in [] })
+    }
+
+    /// A real daemon pumps its main run loop while the control server synchronously hops to the main actor.
+    /// XCTest does not pump that queue while this main-actor test waits for a blocking client, so do the same
+    /// pump here while the client runs off-main. The deadline is longer than the client's five-second socket
+    /// timeout, so an unanswered request finishes before fixture teardown. It is not a hard bound on work that
+    /// blocks inside the main-actor handler itself; verify's process-level silence watchdog owns that failure.
+    private func controlResponseWhilePumpingMainRunLoop(
+        timeout: TimeInterval = 6, request: @escaping @Sendable () throws -> SpacesDeviceAPIControlResponse
+    ) throws -> SpacesDeviceAPIControlResponse {
+        let finished = DispatchSemaphore(value: 0)
+        let resultBox = DeviceAPISupervisorTestLockedResult<SpacesDeviceAPIControlResponse>()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { finished.signal() }
+            do { resultBox.set(.success(try request())) } catch { resultBox.set(.failure(error)) }
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while finished.wait(timeout: .now()) == .timedOut {
+            guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
+            RunLoop.main.run(until: min(deadline, Date().addingTimeInterval(0.02)))
+        }
+        return try XCTUnwrap(resultBox.result()).get()
+    }
 }
 
 private final class DeviceAPISupervisorTestResultBox: @unchecked Sendable {
@@ -1284,6 +1333,24 @@ private final class DeviceAPISupervisorTestResultBox: @unchecked Sendable {
         let response = storedResponse
         lock.unlock()
         return response
+    }
+}
+
+private final class DeviceAPISupervisorTestLockedResult<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResult: Result<Value, Error>?
+
+    func set(_ result: Result<Value, Error>) {
+        lock.lock()
+        storedResult = result
+        lock.unlock()
+    }
+
+    func result() -> Result<Value, Error>? {
+        lock.lock()
+        let result = storedResult
+        lock.unlock()
+        return result
     }
 }
 
