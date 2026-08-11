@@ -45,6 +45,14 @@ final class CommandPalettePanel: NSPanel {
     var commandPaletteReturnTerminalSessionID: String?
     var commandPaletteReturnApplicationProcessID: pid_t?
 
+    private struct PendingSelectionExecution {
+        let id = UUID()
+        let returnTerminalSessionID: String?
+        let returnApplicationProcessID: pid_t?
+    }
+
+    private var pendingSelectionExecution: PendingSelectionExecution?
+
     /// Non-nil while the palette runs in session-picker mode (filling a pane split):
     /// the rows are "New terminal session" plus existing sessions in scope, Enter
     /// resolves the choice through `completion` instead of focusing a window, and
@@ -133,6 +141,7 @@ final class CommandPalettePanel: NSPanel {
             commandPaletteReturnTerminalSessionID = nil
             commandPaletteReturnApplicationProcessID = nil
         }
+        pendingSelectionExecution = nil
     }
 
     func commandPaletteDefaultWorkspaceID() -> String? {
@@ -241,6 +250,9 @@ final class CommandPalettePanel: NSPanel {
     }
 
     func presentCommandPalette(perfContext: AppKitController.HotkeyPerfContext? = nil) {
+        // A fresh presentation owns its own return-focus contract. Any older async
+        // selection may finish, but it must not dismiss or restore through this panel.
+        pendingSelectionExecution = nil
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
@@ -290,17 +302,12 @@ final class CommandPalettePanel: NSPanel {
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
-        if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
-            let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
-        {
-            host.panelCoordinator.focusPane(forSessionID: returnTerminalSessionID)
-        } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
-            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
-            let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
-        {
-            host.activateReturnApplication(processIdentifier: returnApplicationProcessID)
-        } else if host.rawMainWindowVisibility(), let window = host.window {
-            host.revealTargetedHotkeyWindow(window)
+        // Selection owns the captured return target until execution resolves. Resigning
+        // key while focus is in flight dismisses the panel without racing either outcome.
+        if pendingSelectionExecution == nil {
+            restoreCommandPaletteReturnFocus(
+                terminalSessionID: commandPaletteReturnTerminalSessionID,
+                applicationProcessID: commandPaletteReturnApplicationProcessID)
         }
         isDismissingCommandPalette = false
         host.logHotkeyDebug("dismiss_palette end \(host.hotkeyWindowStateSummary())")
@@ -311,6 +318,21 @@ final class CommandPalettePanel: NSPanel {
         // Dismissing while picking (esc, click-away) resolves the picker as cancelled;
         // Enter takes the context before dismissing, so this only fires for real cancels.
         takeSessionPickerContext()?.completion(nil)
+    }
+
+    private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, applicationProcessID: pid_t?) {
+        if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: terminalSessionID),
+            let terminalSessionID
+        {
+            host.panelCoordinator.focusPane(forSessionID: terminalSessionID)
+        } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
+            returnTerminalSessionID: terminalSessionID, returnApplicationProcessID: applicationProcessID),
+            let applicationProcessID
+        {
+            host.activateReturnApplication(processIdentifier: applicationProcessID)
+        } else if host.rawMainWindowVisibility(), let window = host.window {
+            host.revealTargetedHotkeyWindow(window)
+        }
     }
 
     func ensureCommandPalettePanel() -> NSPanel {
@@ -549,6 +571,7 @@ final class CommandPalettePanel: NSPanel {
         scope: PanelScope, newTerminalWorkspaceID: String, items: [CommandPaletteItem],
         choicesByItemID: [String: AppKitController.SessionPickerChoice], completion: @escaping (AppKitController.SessionPickerChoice?) -> Void
     ) {
+        pendingSelectionExecution = nil
         // A picker opening over a live normal palette cancels it cleanly first.
         if sessionPickerContext != nil { dismissCommandPalette() }
         commandPaletteLoadTask?.cancel()
@@ -679,16 +702,33 @@ final class CommandPalettePanel: NSPanel {
             context?.completion(choice)
             return
         }
-        // Return focus is a cancellation contract. A selected target can make the palette
-        // resign key synchronously while navigation is still in flight, so discard the
-        // captured return targets before that navigation can trigger dismissal.
+        // Return focus is a cancellation contract. Selection keeps a private copy so a
+        // failed execution can still restore it, while the dismissal callback cannot race
+        // a successful target focus.
+        let execution = PendingSelectionExecution(
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID,
+            returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
+        pendingSelectionExecution = execution
         commandPaletteReturnTerminalSessionID = nil
         commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard let action = await self.host.executeWindowFocus(item.focusRequest) else { return }
+            let action = await self.host.executeWindowFocus(item.focusRequest)
+            guard self.pendingSelectionExecution?.id == execution.id else { return }
+            self.pendingSelectionExecution = nil
+            guard let action else {
+                if self.commandPalettePanel?.isVisible == true {
+                    self.commandPaletteReturnTerminalSessionID = execution.returnTerminalSessionID
+                    self.commandPaletteReturnApplicationProcessID = execution.returnApplicationProcessID
+                } else {
+                    self.restoreCommandPaletteReturnFocus(
+                        terminalSessionID: execution.returnTerminalSessionID,
+                        applicationProcessID: execution.returnApplicationProcessID)
+                }
+                return
+            }
             if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
-            self.dismissCommandPalette()
+            self.dismissCommandPaletteForBuiltInWindowNavigation()
             self.host.reloadData()
             self.host.hideAfterSuccessfulExternalWindowAction(action)
         }
