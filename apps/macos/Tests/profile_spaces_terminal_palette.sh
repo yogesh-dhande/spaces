@@ -118,6 +118,38 @@ end tell
 APPLESCRIPT
 }
 
+select_command_palette_item_by_query() {
+  local query="$1"
+  osascript - "$query" <<'APPLESCRIPT'
+on run argv
+  tell application "System Events"
+    keystroke (item 1 of argv)
+    key code 36
+  end tell
+end run
+APPLESCRIPT
+}
+
+focused_terminal_title() {
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" surface-snapshot --spaces-pid "$APP_PID" 2>/dev/null \
+    | python3 -c 'import json, sys; print((json.load(sys.stdin).get("spaces") or {}).get("frontTerminalPaneTitle") or "")' 2>/dev/null \
+    || true
+}
+
+wait_for_focused_terminal_title() {
+  local expected_title="$1"
+  local deadline=$((SECONDS + 15))
+  while (( SECONDS < deadline )); do
+    if [[ "$(focused_terminal_title)" == "$expected_title" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Timed out waiting for focused terminal '$expected_title'; found '$(focused_terminal_title)'" >&2
+  return 1
+}
+
 json_get() {
   local file="$1"
   local expression="$2"
@@ -195,6 +227,24 @@ wait_for_log_pattern_count_greater_than "spaces: perf metric=process_focus .*tar
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>"$PROCESS_FOCUS_LOG"
 wait_for_spaces_frontmost_ready
 
+# Selecting a palette row is navigation, not cancellation. In particular, the
+# terminal focused before the palette opened must not reclaim focus after the
+# selected terminal makes the palette resign key.
+palette_rows_pattern="spaces: hotkey_debug rebuild_palette_rows_done rows=[1-9][0-9]*"
+palette_rows_baseline="$(grep -Ec "$palette_rows_pattern" "$APP_LOG" || true)"
+send_spaces_command_palette_hotkey
+wait_for_log_pattern_count_greater_than "$palette_rows_pattern" "$palette_rows_baseline" 30
+select_command_palette_item_by_query "backend"
+wait_for_focused_terminal_title "backend"
+sleep 0.5
+[[ "$(focused_terminal_title)" == "backend" ]] || {
+  echo "Command palette selection returned focus to '$(focused_terminal_title)' instead of keeping backend focused" >&2
+  exit 1
+}
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>>"$PROCESS_FOCUS_LOG"
+wait_for_spaces_frontmost_ready
+METRICS_LOG_START_LINE="$(wc -l <"$APP_LOG" | tr -d ' ')"
+
 for iteration in $(seq 1 "$ITERATIONS"); do
   toggle_pattern="spaces: perf metric=toggle_palette target=action=show .*app_active_before=1 .*success=1 elapsed_ms="
   terminal_lookup_pattern="spaces: perf metric=toggle_palette_terminal_workspace_lookup target=session=.* success=[01] elapsed_ms="
@@ -218,11 +268,12 @@ PY
   wait_for_spaces_frontmost_ready
 done
 
-python3 - "$APP_LOG" "$ITERATIONS" "$TOGGLE_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
+python3 - "$APP_LOG" "$ITERATIONS" "$TOGGLE_WALL_SAMPLES" "$METRICS_PATH" "$METRICS_LOG_START_LINE" <<'PY' >"$SUMMARY_PATH"
 import json, statistics, re, sys
 
-log_path, iterations, wall_samples_path, metrics_path = sys.argv[1:5]
+log_path, iterations, wall_samples_path, metrics_path, metrics_log_start_line = sys.argv[1:6]
 iterations = int(iterations)
+metrics_log_start_line = int(metrics_log_start_line)
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 metrics = {
     "toggle_palette": [],
@@ -234,7 +285,9 @@ metrics = {
 }
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-    for raw_line in handle:
+    for line_number, raw_line in enumerate(handle, start=1):
+        if line_number <= metrics_log_start_line:
+            continue
         line = raw_line.strip()
         match = pattern.match(line)
         if not match or match.group("success") != "1":

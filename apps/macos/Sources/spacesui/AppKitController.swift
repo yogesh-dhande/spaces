@@ -11822,18 +11822,30 @@ struct CommandPaletteItem: Sendable {
     let focusRequest: AppKitController.WindowFocusRequest
     let recentFocusIdentity: String
 
+    var workspaceContextText: String {
+        let project = projectTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspace = workspaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branch = workspaceBranch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspaceDuplicatesBranch = branch?.isEmpty == false && workspace == branch
+        return [project, workspaceDuplicatesBranch ? nil : workspace].compactMap { value in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }.joined(separator: " › ")
+    }
+
     var secondaryText: String {
-        guard let detail, !detail.isEmpty else { return workspaceTitle }
-        return "\(workspaceTitle)  ·  \(detail)"
+        guard let detail, !detail.isEmpty else { return workspaceContextText }
+        return "\(workspaceContextText)  ·  \(detail)"
     }
 
     var searchCandidate: CommandPaletteFuzzySearch.Candidate<String> {
-        let combinedText = "\(workspaceTitle) \(workspaceBranch ?? "") \(label) \(detail ?? "")"
+        let combinedText = "\(projectTitle) \(workspaceTitle) \(workspaceBranch ?? "") \(label) \(detail ?? "")"
         return CommandPaletteFuzzySearch.Candidate(
             id: id,
             fields: [
-                .init(text: workspaceTitle, weight: 0.92), .init(text: workspaceBranch ?? "", weight: 0.9), .init(text: label, weight: 1.0),
-                .init(text: detail ?? "", weight: 0.78), .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
+                .init(text: projectTitle, weight: 0.92), .init(text: workspaceTitle, weight: 0.92),
+                .init(text: workspaceBranch ?? "", weight: 0.9), .init(text: label, weight: 1.0), .init(text: detail ?? "", weight: 0.78),
+                .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
                 .init(text: Self.searchInitials(for: combinedText), weight: 0.94),
             ])
     }
@@ -12046,7 +12058,7 @@ struct CommandPaletteItem: Sendable {
         }
 
         labelField.stringValue = item.label
-        workspaceField.stringValue = item.workspaceTitle
+        workspaceField.stringValue = item.workspaceContextText
         branchField.stringValue = item.workspaceBranch ?? ""
         branchContainer.isHidden = (item.workspaceBranch?.isEmpty ?? true)
         alertsIndicatorView.isHidden = !item.isAlertsAttention
