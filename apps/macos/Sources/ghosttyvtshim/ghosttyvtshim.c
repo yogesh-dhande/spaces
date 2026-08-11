@@ -145,6 +145,11 @@ enum {
     SPACES_GHOSTTY_VT_FLAG_STRIKE = 1 << 6,
     SPACES_GHOSTTY_VT_FLAG_UNDERLINE = 1 << 7,
     SPACES_GHOSTTY_VT_FLAG_SPACER = 1 << 10,
+    // Row metadata is repeated on every cell because embedded Ghostty restores a row from the
+    // first cell in its frame. Repeating it also keeps a row's wrap state alive when the iterator
+    // leaves its trailing default cells implicit.
+    SPACES_GHOSTTY_VT_FLAG_ROW_WRAP = 1 << 11,
+    SPACES_GHOSTTY_VT_FLAG_ROW_WRAP_CONTINUATION = 1 << 12,
 };
 
 static void *spaces_ghostty_vt_dlopen_path(const char *path) {
@@ -577,7 +582,8 @@ static void spaces_ghostty_vt_fill_default_cells(
     size_t start,
     size_t end,
     uint32_t foreground_rgb,
-    uint32_t background_rgb
+    uint32_t background_rgb,
+    uint16_t flags
 ) {
     // Only ever called on cells the row iterator has not visited, so no cluster can be dropped here.
     if (cells == NULL || end <= start) return;
@@ -585,7 +591,7 @@ static void spaces_ghostty_vt_fill_default_cells(
         cells[index].codepoint = 0;
         cells[index].foreground_rgb = foreground_rgb;
         cells[index].background_rgb = background_rgb;
-        cells[index].flags = 0;
+        cells[index].flags = flags;
         cells[index].grapheme_extra_len = 0;
         cells[index].grapheme_extras = NULL;
     }
@@ -1155,7 +1161,8 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             0,
             cell_count,
             spaces_ghostty_vt_pack_rgb(colors.foreground),
-            spaces_ghostty_vt_pack_rgb(colors.background)
+            spaces_ghostty_vt_pack_rgb(colors.background),
+            0
         );
     }
 
@@ -1166,6 +1173,22 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
 
     size_t cell_index = 0;
     while (cell_index < cell_count && session->symbols.row_iterator_next(session->row_iterator)) {
+        GhosttyRow raw_row = 0;
+        bool row_wraps = false;
+        bool row_is_wrap_continuation = false;
+        if (
+            session->symbols.row_get(session->row_iterator, GHOSTTY_RENDER_STATE_ROW_DATA_RAW, &raw_row) != GHOSTTY_SUCCESS ||
+            raw_row == 0 ||
+            session->symbols.grid_row_get(raw_row, GHOSTTY_ROW_DATA_WRAP, &row_wraps) != GHOSTTY_SUCCESS ||
+            session->symbols.grid_row_get(raw_row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &row_is_wrap_continuation) != GHOSTTY_SUCCESS
+        ) {
+            spaces_ghostty_vt_free_cells(cells, cell_count);
+            return false;
+        }
+        uint16_t row_flags = 0;
+        if (row_wraps) row_flags |= SPACES_GHOSTTY_VT_FLAG_ROW_WRAP;
+        if (row_is_wrap_continuation) row_flags |= SPACES_GHOSTTY_VT_FLAG_ROW_WRAP_CONTINUATION;
+
         if (
             session->symbols.row_get(
                 session->row_iterator,
@@ -1240,7 +1263,7 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
             cells[cell_index].codepoint = codepoint;
             cells[cell_index].foreground_rgb = spaces_ghostty_vt_pack_rgb(foreground);
             cells[cell_index].background_rgb = spaces_ghostty_vt_pack_rgb(background);
-            cells[cell_index].flags = spaces_ghostty_vt_flags_for_style(&style, wide);
+            cells[cell_index].flags = spaces_ghostty_vt_flags_for_style(&style, wide) | row_flags;
             cell_index++;
         }
 
@@ -1250,7 +1273,8 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
                 cell_index,
                 row_end,
                 spaces_ghostty_vt_pack_rgb(colors.foreground),
-                spaces_ghostty_vt_pack_rgb(colors.background)
+                spaces_ghostty_vt_pack_rgb(colors.background),
+                row_flags
             );
             cell_index = row_end;
         }

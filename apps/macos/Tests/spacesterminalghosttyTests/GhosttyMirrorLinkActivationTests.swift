@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import GhosttyKit
 import XCTest
+import ghosttyvtshim
 import spacesterminalcore
 
 @testable import spacesterminalghostty
@@ -51,17 +52,28 @@ import spacesterminalcore
         XCTAssertEqual(try openedLinks(mouseReportingActive: true, modifierFlags: [.command, .shift]), [Self.url])
     }
 
+    /// The Linux daemon and ended-session replay both export this frame through libghostty-vt. The
+    /// mirror must retain its row metadata through the render-update codec so Ghostty's local link
+    /// detector joins the visual rows before opening the URL.
+    func testSoftWrappedLinkFromVTSnapshotActivatesAsCompleteURL() throws {
+        XCTAssertEqual(try openedLinks(snapshot: Self.softWrappedVTSnapshot(), modifierFlags: [.command]), [Self.url])
+    }
+
     // MARK: - Harness
 
     /// Renders a single-line frame holding a URL into a real mirror surface, clicks the URL with the
     /// given modifiers, and returns what the pane was asked to open.
     private func openedLinks(mouseReportingActive: Bool, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
-        let view = makeAttachedView(sessionID: "link-\(mouseReportingActive)-\(modifierFlags.rawValue)")
+        try openedLinks(snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive), modifierFlags: modifierFlags)
+    }
+
+    private func openedLinks(snapshot: GhosttyTerminalSnapshot, modifierFlags: NSEvent.ModifierFlags) throws -> [String] {
+        let view = makeAttachedView(sessionID: "link-\(snapshot.columns)x\(snapshot.rows)-\(modifierFlags.rawValue)")
         defer { view.removeFromSuperview() }
         view.update(
-            snapshot: Self.snapshot(text: Self.url, mouseReportingActive: mouseReportingActive),
-            renderStateKey: "link|\(mouseReportingActive)|\(modifierFlags.rawValue)")
-        _ = try waitForSnapshot(view) { $0.columns >= Self.url.count }
+            snapshot: snapshot,
+            renderStateKey: "link|\(snapshot.columns)x\(snapshot.rows)|\(modifierFlags.rawValue)")
+        _ = try waitForSnapshot(view) { $0.columns == snapshot.columns && $0.rows == snapshot.rows }
 
         var opened: [String] = []
         view.onOpenLink = { opened.append($0) }
@@ -95,6 +107,36 @@ import spacesterminalcore
         return GhosttyTerminalSnapshot(
             columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFF_FFFF,
             defaultBackgroundRGB: 0, cells: cells, mouseReportingActive: mouseReportingActive)
+    }
+
+    /// Build the frame from the real vt exporter, then pass it through the same delta codec and
+    /// applier a remote mirror receives. Do not synthesize row flags here: their absence is the
+    /// original regression this test protects against.
+    private static func softWrappedVTSnapshot() throws -> GhosttyTerminalSnapshot {
+        let columns: UInt16 = 8
+        let rows: UInt16 = 3
+        let session = try XCTUnwrap(spaces_ghostty_vt_session_new(columns, rows, 0, nil))
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        let output = Data(Self.url.utf8)
+        XCTAssertTrue(output.withUnsafeBytes { spaces_ghostty_vt_session_write(session, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) })
+
+        var rawSnapshot = SpacesGhosttyVtSnapshot()
+        XCTAssertTrue(spaces_ghostty_vt_session_copy_snapshot(session, &rawSnapshot))
+        defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
+        let exported = GhosttyVtSessionBridge.snapshot(from: rawSnapshot, mouseReportingActive: false)
+
+        let blank = GhosttyTerminalSnapshot(
+            columns: Int(columns), rows: Int(rows), cursorColumn: 0, cursorRow: 0, cursorVisible: false,
+            defaultForegroundRGB: exported.defaultForegroundRGB, defaultBackgroundRGB: exported.defaultBackgroundRGB,
+            cells: Array(
+                repeating: .init(codepoint: 0, foregroundRGB: exported.defaultForegroundRGB, backgroundRGB: exported.defaultBackgroundRGB, flags: 0),
+                count: Int(columns) * Int(rows)))
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: blank, sessionRevision: 1, ownerEpoch: 1)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(
+            target: GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: exported), baseline: baseline)
+        let decoded = try GhosttyRenderUpdateBinaryCodec.decode(try GhosttyRenderUpdateBinaryCodec.encode(update))
+        return try GhosttyRenderUpdateApplier.apply(decoded, to: baseline).snapshot
     }
 
     /// The click lands a few characters into the URL on the top row of a 640x400 pane.
