@@ -679,7 +679,7 @@ For repeatable profiling of the built-in `Spaces terminal -> command palette -> 
 apps/macos/Tests/e2e.sh terminal --scenario spaces-terminal-palette --samples 3
 ```
 
-That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly opens the command palette with `Cmd+Opt+-`, then dismisses it and refocuses the tracked terminal through the normal workspace-process path while summarizing:
+That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, and verifies that selecting a second tracked process from the command palette while the first process owns focus leaves the selected process focused. It then repeatedly opens the command palette with `Cmd+Opt+-`, dismisses it, and refocuses the tracked terminal through the normal workspace-process path while summarizing:
 - `terminal_to_palette_toggle_wall`
 - `toggle_palette`
 - `toggle_palette_terminal_workspace_lookup`

@@ -679,6 +679,11 @@ final class CommandPalettePanel: NSPanel {
             context?.completion(choice)
             return
         }
+        // Return focus is a cancellation contract. A selected target can make the palette
+        // resign key synchronously while navigation is still in flight, so discard the
+        // captured return targets before that navigation can trigger dismissal.
+        commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnApplicationProcessID = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard let action = await self.host.executeWindowFocus(item.focusRequest) else { return }

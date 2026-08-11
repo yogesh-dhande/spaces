@@ -118,6 +118,38 @@ end tell
 APPLESCRIPT
 }
 
+select_command_palette_item_by_query() {
+  local query="$1"
+  osascript - "$query" <<'APPLESCRIPT'
+on run argv
+  tell application "System Events"
+    keystroke (item 1 of argv)
+    key code 36
+  end tell
+end run
+APPLESCRIPT
+}
+
+focused_terminal_title() {
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" surface-snapshot --spaces-pid "$APP_PID" 2>/dev/null \
+    | python3 -c 'import json, sys; print((json.load(sys.stdin).get("spaces") or {}).get("frontTerminalPaneTitle") or "")' 2>/dev/null \
+    || true
+}
+
+wait_for_focused_terminal_title() {
+  local expected_title="$1"
+  local deadline=$((SECONDS + 15))
+  while (( SECONDS < deadline )); do
+    if [[ "$(focused_terminal_title)" == "$expected_title" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "Timed out waiting for focused terminal '$expected_title'; found '$(focused_terminal_title)'" >&2
+  return 1
+}
+
 json_get() {
   local file="$1"
   local expression="$2"
@@ -193,6 +225,23 @@ wait_for_spaces_frontmost_ready
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" workspace start --workspace "$WORKSPACE_ID" >/dev/null
 wait_for_log_pattern_count_greater_than "spaces: perf metric=process_focus .*target=frontend .*success=1|spaces: perf metric=terminal_window_summon .*mode=owner" 0 30 || true
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>"$PROCESS_FOCUS_LOG"
+wait_for_spaces_frontmost_ready
+
+# Selecting a palette row is navigation, not cancellation. In particular, the
+# terminal focused before the palette opened must not reclaim focus after the
+# selected terminal makes the palette resign key.
+palette_rows_pattern="spaces: hotkey_debug rebuild_palette_rows_done rows=[1-9][0-9]*"
+palette_rows_baseline="$(grep -Ec "$palette_rows_pattern" "$APP_LOG" || true)"
+send_spaces_command_palette_hotkey
+wait_for_log_pattern_count_greater_than "$palette_rows_pattern" "$palette_rows_baseline" 30
+select_command_palette_item_by_query "backend"
+wait_for_focused_terminal_title "backend"
+sleep 0.5
+[[ "$(focused_terminal_title)" == "backend" ]] || {
+  echo "Command palette selection returned focus to '$(focused_terminal_title)' instead of keeping backend focused" >&2
+  exit 1
+}
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>>"$PROCESS_FOCUS_LOG"
 wait_for_spaces_frontmost_ready
 
 for iteration in $(seq 1 "$ITERATIONS"); do
