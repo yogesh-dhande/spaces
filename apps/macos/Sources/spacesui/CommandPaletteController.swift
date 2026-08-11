@@ -250,9 +250,12 @@ final class CommandPalettePanel: NSPanel {
     }
 
     func presentCommandPalette(perfContext: AppKitController.HotkeyPerfContext? = nil) {
-        // A fresh presentation owns its own return-focus contract. Any older async
-        // selection may finish, but it must not dismiss or restore through this panel.
-        pendingSelectionExecution = nil
+        // A selection can perform its focus side effect before its await returns. Do not
+        // present a panel that the older operation could immediately make resign key.
+        guard pendingSelectionExecution == nil else {
+            host.logHotkeyDebug("present_palette skipped selection_in_flight")
+            return
+        }
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
