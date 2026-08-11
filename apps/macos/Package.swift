@@ -245,7 +245,7 @@ let executableTargets: [Target] = [
 #else
     let testTargets: [Target] = [
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
-        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty", "ghosttyvtshim"]),
         .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
         .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
         .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
