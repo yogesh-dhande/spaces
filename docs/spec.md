@@ -93,6 +93,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - a coding-agent terminal hosting a detected coding agent
 - an ad hoc terminal the user opens directly (for example through `New terminal`), rooted at the workspace directory
 
+- A plain-text URL that wraps across terminal rows stays one clickable link in live, remote-attached, and ended-session scrollback panes.
+
 #### Session names
 - Every terminal has a name that identifies it and keeps still: a process terminal takes its name from its configured row, a coding-agent terminal takes the name the agent reports for itself (or `Coding Agent` when it reports none) until renamed, and an ad hoc terminal from a generic shell name (`shell-1`) until the user renames it. What the program inside prints never becomes the name.
 - An ad hoc terminal row and a coding-agent row also show the title the program reports (for example `vim main.swift`) as dimmed secondary text beside the name, so one glance reads both which terminal it is and what it is doing. A terminal whose program has reported no title shows its name alone. A process row shows the command it runs instead, since its name and command already say what it is doing. The Mac sidebar shows this pairing for both row kinds, and so does a bell's row under Alerts on both platforms. The command palette, the session picker, the iPhone session list, and the iPhone workspace rows show it for ad hoc terminals.

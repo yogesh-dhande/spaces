@@ -437,9 +437,11 @@ public enum GhosttyRenderUpdateBinaryCodec {
     private static let nilRevision = UInt64.max
 
     // The two high bits of a cell's wire flags word are reserved by the codec to mark that the cell is
-    // followed by a text payload in its block's sparse section. Style flags occupy bits 0-10 (see
-    // GhosttyTerminalSnapshotGrid), never these, so the encoder writes them from the block's cluster and
-    // link tables and the decoder strips them back off before rebuilding the cell.
+    // followed by a text payload in its block's sparse section. Style flags and the per-row wrap
+    // metadata occupy bits 0-12 (see GhosttyTerminalSnapshotGrid), never these, so the encoder writes
+    // them from the block's cluster and link tables and the decoder strips them back off before
+    // rebuilding the cell. Row metadata stays on every cell through a delta because the embedded
+    // renderer restores each row from column zero.
     private static let clusterPayloadFlag: UInt16 = 1 << 15
     private static let linkPayloadFlag: UInt16 = 1 << 14
     private static let payloadFlagMask: UInt16 = clusterPayloadFlag | linkPayloadFlag

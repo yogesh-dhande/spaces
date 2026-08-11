@@ -38,6 +38,10 @@ public enum GhosttyTerminalSnapshotGrid {
     public static let strikeFlag: UInt16 = 1 << 6
     public static let underlineFlag: UInt16 = 1 << 7
     public static let spacerFlag: UInt16 = 1 << 10
+    /// Row metadata is carried on every cell so a renderer can rebuild the row even if its trailing
+    /// cells are default-filled. The embedded Ghostty apply path reads the flags from column zero.
+    public static let rowWrapFlag: UInt16 = 1 << 11
+    public static let rowWrapContinuationFlag: UInt16 = 1 << 12
 
     public static func resolvedCell(in snapshot: GhosttyTerminalSnapshot, row: Int, column: Int) -> GhosttyTerminalResolvedCell? {
         guard row >= 0, column >= 0, row < snapshot.rows, column < snapshot.columns else { return nil }
