@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 14
+    public static let currentVersion = 15
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -101,10 +101,36 @@ public enum DatabaseSchema {
     /// reader can treat it as a plain string; see `AutomationDraft.validated()`), not by a CHECK constraint,
     /// so a kind switch is a plain column update rather than a row rebuild. `next_fire_time` is the
     /// persisted next-due epoch for a cron automation and doubles as the missed-run anchor a restarted
-    /// daemon reads to decide whether a fire was missed while it was down. Timestamps are stored as REAL
-    /// epoch seconds. Named separately so the fresh-schema SQL and the v11→v12 migration step share one
-    /// definition and can never drift apart.
+    /// daemon reads to decide whether a fire was missed while it was down. `anchor_time_zone_identifier`
+    /// records the zone that produced that absolute instant, so a restart after an offline zone change can
+    /// reinterpret the same wall-clock occurrence in the device's current zone. Timestamps are stored as
+    /// REAL epoch seconds.
     static let automationsSQL = """
+            CREATE TABLE IF NOT EXISTS automations (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              trigger_kind TEXT NOT NULL,
+              cron_expression TEXT,
+              kind TEXT NOT NULL DEFAULT 'script',
+              script TEXT NOT NULL,
+              agent_command TEXT,
+              agent_prompt TEXT,
+              workspace_id TEXT,
+              working_directory TEXT NOT NULL,
+              timeout_seconds INTEGER,
+              concurrency_policy TEXT NOT NULL,
+              missed_run_policy TEXT NOT NULL,
+              next_fire_time REAL,
+              anchor_time_zone_identifier TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+        """
+
+    /// Frozen v14 automation shape, used only by the v13→v14 migration. The next step adds the anchor-zone
+    /// column; using the latest table SQL in the older step would make a serial v13 upgrade add it twice.
+    static let automationsV14SQL = """
             CREATE TABLE IF NOT EXISTS automations (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -462,7 +488,7 @@ public enum DatabaseSchema {
             try migrationExecuteBatch(
                 handle,
                 sql: """
-                    \(automationsSQL)
+                    \(automationsV14SQL)
                     \(automationRunsSQL)
                     CREATE TABLE IF NOT EXISTS terminal_sessions (
                       session_id TEXT PRIMARY KEY,
@@ -503,6 +529,9 @@ public enum DatabaseSchema {
                     DROP TABLE terminal_sessions;
                     ALTER TABLE terminal_sessions_new RENAME TO terminal_sessions;
                     """)
+        },
+        DatabaseMigrationStep(fromVersion: 14, toVersion: 15, description: "Persist automation cron anchor time zones", requiresBackup: true) {
+            handle in try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN anchor_time_zone_identifier TEXT;")
         },
     ]
 

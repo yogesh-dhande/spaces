@@ -1130,10 +1130,12 @@ enum SpacesDaemonErrorClassification {
 
         // Drain a possibly in-flight automation tick before quiescing cores. `handoffInProgress` is already set,
         // so the timer gate stops new ticks; this awaits the one that may already be running so it cannot land
-        // mid-quiesce and misread preserved sessions as dead. AWAITED (not `.sync`-blocked) for the same
-        // one-way-rule reason as the delivery drain above: the tick's executor hops the terminal engine actor
-        // (and thus main), so a blocked main thread would deadlock it.
-        if let automationServiceToDrain { await automationServiceToDrain.waitUntilIdle() }
+        // mid-quiesce and misread preserved sessions as dead. The drain also immediately SIGKILLs any process
+        // group whose timeout/cancel escalation was pending: exec preserves those children but replaces the
+        // service's in-memory pending table, so carrying the grace across the image boundary would lose it.
+        // AWAITED (not `.sync`-blocked) for the same one-way-rule reason as the delivery drain above: the tick's
+        // executor hops the terminal engine actor (and thus main), so a blocked main thread would deadlock it.
+        if let automationServiceToDrain { await automationServiceToDrain.completePendingTerminationsForHandoff() }
         writeStandardError("spacesd handoff_automation_drained\n")
 
         // Quiesce each live core. A nil return means the child already exited — finalize that session

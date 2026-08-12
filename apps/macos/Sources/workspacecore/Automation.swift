@@ -60,6 +60,9 @@ public struct Automation: Equatable, Sendable, Identifiable {
     public let missedRunPolicy: AutomationMissedRunPolicy
     /// The persisted next-due epoch for a cron automation; nil for a manual one or before it is computed.
     public let nextFireTime: Date?
+    /// The device time zone in which `nextFireTime` was computed. Persisted with the anchor so startup can
+    /// reinterpret that same wall-clock occurrence if the device moved while the daemon was stopped.
+    public let anchorTimeZoneIdentifier: String?
     public let createdAt: Date
     public let updatedAt: Date
 
@@ -67,7 +70,7 @@ public struct Automation: Equatable, Sendable, Identifiable {
         id: String, name: String, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, kind: AutomationKind = .script,
         script: String, agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String,
         timeoutSeconds: Int?, concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy, nextFireTime: Date?,
-        createdAt: Date, updatedAt: Date
+        createdAt: Date, updatedAt: Date, anchorTimeZoneIdentifier: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -84,6 +87,7 @@ public struct Automation: Equatable, Sendable, Identifiable {
         self.concurrencyPolicy = concurrencyPolicy
         self.missedRunPolicy = missedRunPolicy
         self.nextFireTime = nextFireTime
+        self.anchorTimeZoneIdentifier = anchorTimeZoneIdentifier
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

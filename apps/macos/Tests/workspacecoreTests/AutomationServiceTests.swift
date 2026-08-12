@@ -223,6 +223,32 @@ import spacesterminalcore
         XCTAssertEqual(hour(of: laFire, in: losAngeles), 9, "the anchor now fires at 09:00 Los_Angeles wall-clock")
     }
 
+    /// A zone change while the daemon is down must reinterpret the persisted next occurrence at the same
+    /// wall-clock time in the new zone before deciding whether it was missed. LA's pending 09:00 is still
+    /// in the future at 10:00 New York as an absolute instant, but New York's 09:00 occurrence has elapsed.
+    func testOfflineTimeZoneChangeAppliesMissedRunPolicyToCurrentZoneOccurrence() throws {
+        let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+        let newYork = TimeZone(identifier: "America/New_York")!
+        let zone = MutableTimeZone(losAngeles)
+        // 2026-01-15 08:00 Los Angeles / 11:00 New York.
+        let clock = MutableClock(start: ISO8601DateFormatter().date(from: "2026-01-15T16:00:00Z")!)
+        let harness = try Harness(self, now: clock.now, timeZone: zone.provide)
+        let automation = try harness.insertAutomation(triggerKind: .cron, cronExpression: "0 9 * * *", missedRunPolicy: .runOnce)
+        try harness.service.computeInitialNextFireTime(automationID: automation.id)
+        XCTAssertEqual(
+            try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime), ISO8601DateFormatter().date(from: "2026-01-15T17:00:00Z"))
+
+        // The daemon is stopped during the move, then starts at 10:00 New York. The same local-date 09:00
+        // occurrence is 14:00Z in New York and therefore needs one catch-up even though 17:00Z is future.
+        zone.set(newYork)
+        clock.advance(by: -60 * 60)
+        harness.makeService().reconcileMissedRunsOnStart()
+
+        let runs = try harness.store.automationRuns(automationID: automation.id)
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs.first?.trigger, .missedCatchUp)
+    }
+
     private func hour(of date: Date, in timeZone: TimeZone) -> Int {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
@@ -1028,6 +1054,27 @@ import spacesterminalcore
         XCTAssertEqual(kill(survivorPID, 0), 0, "the TERM-ignoring child survives the initial SIGTERM")
 
         try harness.assertProcessDies(pid: survivorPID, drivingTicks: harness.service.tick)
+    }
+
+    /// An exec handoff preserves terminal children but replaces the AutomationService, so it must finish
+    /// any pending SIGKILL escalation before the in-memory pending-kill table is discarded.
+    func testHandoffDrainCompletesPendingSIGKILLEscalation() async throws {
+        let harness = try Harness(self, realCommands: true)
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-handoff-survivor-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let script = """
+            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
+            sleep 60
+            """
+        let automation = try harness.insertAutomation(script: script, concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+
+        harness.service.cancelRun(runID: run.id)
+        XCTAssertEqual(kill(survivorPID, 0), 0)
+        await harness.service.completePendingTerminationsForHandoff()
+
+        try harness.assertProcessDies(pid: survivorPID, drivingTicks: {})
     }
 
     // MARK: - Delete terminates live attributed sessions

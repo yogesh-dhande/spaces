@@ -44,11 +44,6 @@ public final class AutomationService: @unchecked Sendable {
     /// Supplies the device's current time zone on demand (rather than a value captured once), so a tick can
     /// notice a zone change. Cron `nextFireDate` is computed in whatever zone this returns at that moment.
     private let timeZone: @Sendable () -> TimeZone
-    /// The time-zone identifier the persisted cron anchors were last computed in. Each tick compares the
-    /// provider's current zone against this and recomputes every enabled cron automation's anchor when it
-    /// changed, so a laptop carried into a new zone fires daily/weekly schedules at the new zone's wall-clock
-    /// time instead of the old one's until a daemon restart.
-    private var anchorTimeZoneIdentifier: String
     private let now: () -> Date
     /// Grace between the SIGTERM sent to a timed-out/canceled run's command process group and the SIGKILL
     /// that follows if it has not exited. Production uses 10s; tests shrink it to exercise escalation fast.
@@ -87,7 +82,6 @@ public final class AutomationService: @unchecked Sendable {
         self.orchestrator = orchestrator
         self.binaryDirectory = binaryDirectory
         self.timeZone = timeZone
-        self.anchorTimeZoneIdentifier = timeZone().identifier
         self.now = now
         self.terminationGrace = terminationGrace
         self.retentionLimit = retentionLimit
@@ -101,6 +95,19 @@ public final class AutomationService: @unchecked Sendable {
     /// Async, and must never be called as a sync block from the main actor: the service's executor hops the
     /// terminal engine actor (and thus main), so a main-actor sync wait would deadlock (the one-way rule).
     public func waitUntilIdle() async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } }
+
+    /// Drains the confinement queue and immediately completes every termination escalation already armed by
+    /// a timeout or cancel. An exec handoff preserves child processes but replaces this service, so letting
+    /// the in-memory pending table cross that boundary would permanently lose its promised SIGKILL.
+    public func completePendingTerminationsForHandoff() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                for pending in self.pendingKills.values where self.pendingKillIsOutstanding(pending) { self.escalateToSIGKILL(pending) }
+                self.pendingKills.removeAll()
+                continuation.resume()
+            }
+        }
+    }
 
     // MARK: - Scheduling entry points
 
@@ -116,7 +123,9 @@ public final class AutomationService: @unchecked Sendable {
         guard let automation = try store.automation(id: automationID), automation.enabled, let schedule = automation.parsedCronSchedule else {
             return
         }
-        try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone()))
+        let zone = timeZone()
+        try store.setAutomationNextFireTime(
+            id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: zone), anchorTimeZoneIdentifier: zone.identifier)
     }
 
     /// One scheduler + executor step: poll running runs for completion/timeout, fire due cron automations,
@@ -142,33 +151,19 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     /// Recomputes every enabled cron automation's next fire time from now when the device's current zone
-    /// differs from the one the persisted anchors were computed in. Anchors are absolute instants, so a zone
-    /// change (e.g. a laptop moved across time zones) would otherwise keep firing daily/weekly schedules at
-    /// the old zone's wall-clock time until the daemon restarts. Caches the new identifier so the recompute
-    /// runs only on an actual change, not every tick.
+    /// differs from the zone persisted beside that anchor. Anchors are absolute instants, so a zone change
+    /// would otherwise keep firing daily/weekly schedules at the old zone's wall-clock time.
     private func recomputeCronAnchorsIfTimeZoneChanged() {
         let zone = timeZone()
-        guard zone.identifier != anchorTimeZoneIdentifier else { return }
-        // The cached identifier is committed only after the whole recompute succeeds — the outer fetch and
-        // every per-automation anchor write. On any failure it is left unchanged so the next tick retries the
-        // whole (idempotent) recompute; caching the new zone before any anchor moved would strand stale-zone
-        // anchors until some later zone change.
-        var recomputeFailed = false
         do {
-            for automation in try store.enabledCronAutomations() {
+            for automation in try store.enabledCronAutomations() where automation.anchorTimeZoneIdentifier.map({ $0 != zone.identifier }) == true {
                 // Scheduler-side: one automation's anchor failing must not wedge the recompute for the rest,
                 // so each is isolated and logged rather than propagated (the command surface propagates).
                 do { try computeInitialNextFireTimeLocked(automationID: automation.id) } catch {
-                    recomputeFailed = true
                     logError("automation_next_fire_time_error id=\(automation.id) error=\(error)")
                 }
             }
-        } catch {
-            recomputeFailed = true
-            logError("automation_timezone_recompute_error error=\(error)")
-        }
-        guard !recomputeFailed else { return }
-        anchorTimeZoneIdentifier = zone.identifier
+        } catch { logError("automation_timezone_recompute_error error=\(error)") }
     }
 
     /// Daemon-start reconciliation: for each enabled cron automation whose persisted `nextFireTime` already
@@ -188,18 +183,47 @@ public final class AutomationService: @unchecked Sendable {
         // handoff, whose service pid is alive) stays `running` and correctly keeps blocking the catch-up.
         pollRunningRuns()
         let currentTime = now()
+        let currentZone = timeZone()
         do {
             for automation in try store.enabledCronAutomations() {
                 guard let schedule = automation.parsedCronSchedule else { continue }
-                if let nextFireTime = automation.nextFireTime, nextFireTime <= currentTime {
+                let dueTime: Date?
+                if let identifier = automation.anchorTimeZoneIdentifier, identifier != currentZone.identifier {
+                    guard let anchorZone = TimeZone(identifier: identifier) else {
+                        throw AutomationValidationError("Invalid persisted automation time zone '\(identifier)'.")
+                    }
+                    dueTime = automation.nextFireTime.flatMap { Self.reinterpretWallClockOccurrence($0, from: anchorZone, to: currentZone) }
+                } else {
+                    // A NULL zone is a v14 anchor. Its absolute due time retains the historical behavior for
+                    // that one upgrade, then the atomic claim below stamps every row with the current zone.
+                    dueTime = automation.nextFireTime
+                }
+                // Claim the next occurrence before launching a catch-up, matching ordinary cron firing's
+                // at-most-once order. The zone and instant land in one UPDATE, so a restart can never see one
+                // half of the anchor context without the other.
+                try store.setAutomationNextFireTime(
+                    id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: currentZone),
+                    anchorTimeZoneIdentifier: currentZone.identifier)
+                if let dueTime, dueTime <= currentTime {
                     switch automation.missedRunPolicy {
                     case .runOnce: _ = fire(automation: automation, trigger: .missedCatchUp)
                     case .skip: _ = try recordSkippedRun(automation: automation, trigger: .missedCatchUp, reason: .missed)
                     }
                 }
-                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone()))
             }
         } catch { logError("automation_missed_run_reconcile_error error=\(error)") }
+    }
+
+    /// Maps an occurrence's local date and clock components from the zone that produced its persisted
+    /// absolute instant into another zone. This preserves the logical cron occurrence across an offline
+    /// device move instead of comparing the old zone's instant to the new zone's wall clock.
+    private static func reinterpretWallClockOccurrence(_ occurrence: Date, from sourceZone: TimeZone, to destinationZone: TimeZone) -> Date? {
+        var sourceCalendar = Calendar(identifier: .gregorian)
+        sourceCalendar.timeZone = sourceZone
+        let components = sourceCalendar.dateComponents([.era, .year, .month, .day, .hour, .minute], from: occurrence)
+        var destinationCalendar = Calendar(identifier: .gregorian)
+        destinationCalendar.timeZone = destinationZone
+        return destinationCalendar.date(from: components)
     }
 
     /// Manual trigger entry point (tests today, Device API later). Fires through the same concurrency gate
@@ -375,7 +399,7 @@ public final class AutomationService: @unchecked Sendable {
         if enabled, triggerKind == .cron {
             try computeInitialNextFireTimeLocked(automationID: automationID)
         } else {
-            try store.setAutomationNextFireTime(id: automationID, nextFireTime: nil)
+            try store.setAutomationNextFireTime(id: automationID, nextFireTime: nil, anchorTimeZoneIdentifier: nil)
         }
     }
 
@@ -394,7 +418,10 @@ public final class AutomationService: @unchecked Sendable {
                 // occurrence, never duplicate a launch (a duplicate agent/script launch is the worse failure).
                 // Which automations fire this tick is still decided by each row's in-memory `nextFireTime` in the
                 // guard above (the loop iterates a pre-fetched list), so the reorder does not change the selection.
-                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone()))
+                let zone = timeZone()
+                try store.setAutomationNextFireTime(
+                    id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: zone),
+                    anchorTimeZoneIdentifier: zone.identifier)
                 _ = fire(automation: automation, trigger: .cron)
             }
         } catch { logError("automation_fire_due_error error=\(error)") }

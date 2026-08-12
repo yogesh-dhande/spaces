@@ -16,7 +16,7 @@ extension SQLiteStore {
 
     private static let automationColumns = """
         id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id, working_directory,
-        timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, created_at, updated_at
+        timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
         """
 
     public func upsertAutomation(_ automation: Automation) throws {
@@ -24,9 +24,9 @@ extension SQLiteStore {
             sql: """
                 INSERT INTO automations(
                   id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id, working_directory,
-                  timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, created_at, updated_at
+                  timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?)
+                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   enabled = excluded.enabled,
@@ -42,6 +42,7 @@ extension SQLiteStore {
                   concurrency_policy = excluded.concurrency_policy,
                   missed_run_policy = excluded.missed_run_policy,
                   next_fire_time = excluded.next_fire_time,
+                  anchor_time_zone_identifier = excluded.anchor_time_zone_identifier,
                   updated_at = excluded.updated_at
                 """,
             bindings: [
@@ -49,7 +50,7 @@ extension SQLiteStore {
                 automation.kind.rawValue, automation.script, automation.agentCommand ?? "", automation.agentPrompt ?? "",
                 automation.workspaceID ?? "", automation.workingDirectory, automation.timeoutSeconds.map(String.init) ?? "",
                 automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue, automation.nextFireTime.map(Self.epochString) ?? "",
-                Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
+                automation.anchorTimeZoneIdentifier ?? "", Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
             ])
     }
 
@@ -70,26 +71,27 @@ extension SQLiteStore {
     /// Persists a cron automation's next-due time (the missed-run anchor a restarted daemon reads). Touches
     /// only `next_fire_time`, never `updated_at`, so the scheduler advancing the anchor is not mistaken for a
     /// user edit.
-    public func setAutomationNextFireTime(id: String, nextFireTime: Date?) throws {
+    public func setAutomationNextFireTime(id: String, nextFireTime: Date?, anchorTimeZoneIdentifier: String?) throws {
         try execute(
-            sql: "UPDATE automations SET next_fire_time = NULLIF(?, '') WHERE id = ?", bindings: [nextFireTime.map(Self.epochString) ?? "", id])
+            sql: "UPDATE automations SET next_fire_time = NULLIF(?, ''), anchor_time_zone_identifier = NULLIF(?, '') WHERE id = ?",
+            bindings: [nextFireTime.map(Self.epochString) ?? "", anchorTimeZoneIdentifier ?? "", id])
     }
 
     public func deleteAutomation(id: String) throws { try execute(sql: "DELETE FROM automations WHERE id = ?", bindings: [id]) }
 
     private static func decodeAutomation(row: [String]) -> Automation? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 18 else { return nil }
         guard let triggerKind = AutomationTriggerKind(rawValue: row[3]) else { return nil }
         guard let kind = AutomationKind(rawValue: row[5]) else { return nil }
         guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: row[12]) else { return nil }
         guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: row[13]) else { return nil }
-        guard let createdAt = date(fromEpoch: row[15]), let updatedAt = date(fromEpoch: row[16]) else { return nil }
+        guard let createdAt = date(fromEpoch: row[16]), let updatedAt = date(fromEpoch: row[17]) else { return nil }
         return Automation(
             id: row[0], name: row[1], enabled: row[2] == "1", triggerKind: triggerKind, cronExpression: row[4].isEmpty ? nil : row[4], kind: kind,
             script: row[6], agentCommand: row[7].isEmpty ? nil : row[7], agentPrompt: row[8].isEmpty ? nil : row[8],
             workspaceID: row[9].isEmpty ? nil : row[9], workingDirectory: row[10], timeoutSeconds: row[11].isEmpty ? nil : Int(row[11]),
             concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy, nextFireTime: date(fromEpoch: row[14]), createdAt: createdAt,
-            updatedAt: updatedAt)
+            updatedAt: updatedAt, anchorTimeZoneIdentifier: row[15].isEmpty ? nil : row[15])
     }
 
     // MARK: - Automation runs
