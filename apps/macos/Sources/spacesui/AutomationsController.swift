@@ -313,8 +313,8 @@ import workspacecore
 
         let device = showDevice ? makeCellLabel(row.deviceName, font: Typography.rowDetail, color: Theme.muted) : nil
         let line = grid.makeRowLine(
-            status: RowPrimitives.statusSlot(RowPrimitives.statusDot(Self.statusDotKind(for: row))), name: name, schedule: scheduleColumn,
-            nextRun: nextRun, device: device, toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
+            status: RowPrimitives.statusSlot(compactStatusDot(for: row)), name: name, schedule: scheduleColumn, nextRun: nextRun, device: device,
+            toggle: toggleColumn, action: makeRowActionButton(row, identifier: identifier))
 
         // Pinned edge to edge: the line carries the grid's own horizontal inset, the same one the header
         // applies, so both start their columns at the same origin.
@@ -381,12 +381,12 @@ import workspacecore
     /// switched off: the row stays listed and operable, but reads as inert.
     private static let disabledRowAlpha: CGFloat = 0.55
 
-    private static func statusDotKind(for row: AutomationTableRow) -> RowPrimitives.StatusKind {
+    private func compactStatusDot(for row: AutomationTableRow) -> CompactStatusDotView {
         switch AutomationsViewModel.rowStatus(for: row) {
-        case .running: .running
-        case .failed: .exited
-        case .ready: .ready
-        case .disabled: .idle
+        case .running: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebarRunningIndicatorColor(), tooltip: "Running")
+        case .failed: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebarFailedIndicatorColor(), tooltip: "Failed")
+        case .ready: RowPrimitives.compactStatusDot(filled: true, tint: host.sidebarRunningIndicatorColor(), tooltip: "Enabled")
+        case .disabled: RowPrimitives.compactStatusDot(filled: false, tint: host.sidebarIdleIndicatorColor(), tooltip: "Disabled")
         }
     }
 

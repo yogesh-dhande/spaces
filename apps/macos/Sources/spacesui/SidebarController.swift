@@ -146,6 +146,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private var automationsDisclosureButton: NSButton?
     /// Whether the running-run children are expanded. Session state; defaults collapsed.
     private var automationsExpanded = false
+    /// A keyboard-selected Automations row expands only as a preview and collapses when navigation
+    /// moves away. Mouse and disclosure expansion stay pinned, matching workspace-row behavior.
+    private var automationsExpandedByKeyboard = false
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -1376,6 +1379,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
                 showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
         else { return false }
+        reconcileAutomationsExpansion(selectingAutomations: target == .automations)
         switch target {
         case .alerts: host.showAlertsDetail(presentation: .userNavigation)
         case .automations: host.showAutomationsDetail()
@@ -1863,9 +1867,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
         // its way out and says nothing the user can act on, so the row reports the delete instead.
         let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
-        statusIndicator.translatesAutoresizingMaskIntoConstraints = false
-        statusIndicator.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = Typography.controlLabel
@@ -1934,11 +1935,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
     private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        let statusIcon = NSImageView()
-        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
-        return statusIcon
+        return RowPrimitives.compactStatusDot(
+            filled: isLifecycleRunning, tint: isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor(),
+            tooltip: isLifecycleRunning ? "Running" : "Stopped")
     }
 
     /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
@@ -1949,6 +1948,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         spinner.controlSize = .mini
         spinner.toolTip = "Deleting…"
         spinner.setAccessibilityIdentifier("sidebar-workspace-deleting-\(workspaceID)")
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10)])
         spinner.startAnimation(nil)
         return spinner
     }
@@ -2793,17 +2794,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         container.translatesAutoresizingMaskIntoConstraints = false
         container.setAccessibilityIdentifier("sidebar-automations")
 
-        let disclosure = NSButton()
-        disclosure.bezelStyle = .regularSquare
-        disclosure.isBordered = false
-        disclosure.imagePosition = .imageOnly
-        disclosure.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Expand")?.withSymbolConfiguration(
-            .init(pointSize: 9, weight: .semibold))
-        disclosure.contentTintColor = .tertiaryLabelColor
-        disclosure.target = self
-        disclosure.action = #selector(automationsDisclosureToggled)
-        disclosure.setContentHuggingPriority(.required, for: .horizontal)
-        disclosure.toolTip = "Show running automations"
+        let disclosure = host.sidebarRowChevronButton(
+            expanded: false, tooltip: "Show running automations", action: #selector(AppKitController.toggleAutomationsSidebarDisclosure))
+        disclosure.setAccessibilityIdentifier("sidebar-automations-disclosure")
         automationsDisclosureButton = disclosure
 
         let icon = NSImageView()
@@ -2828,7 +2821,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
         automationsRowBadge = badge
 
-        let header = NSStackView(views: [disclosure, icon, titleLabel, NSView(), badge])
+        let header = NSStackView(views: [icon, titleLabel, NSView(), badge, disclosure])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 6
@@ -2837,7 +2830,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         header.layer?.cornerRadius = UIRadius.regular
         header.translatesAutoresizingMaskIntoConstraints = false
         automationsHeaderStack = header
-        // The header (not the disclosure triangle) opens the detail pane; the triangle only expands. The
+        // The header opens the detail pane and toggles the running-run children, matching a project or
+        // workspace row click; the right-edge disclosure toggles without changing selection. The
         // recognizer is attached to the whole header stack (not just the title/icon) so the badge, spacer,
         // padding, and row background are all clickable too. A container-level recognizer would otherwise
         // also swallow clicks meant for the disclosure button (a container recognizer gets first crack at
@@ -2881,16 +2875,44 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return container
     }
 
-    @objc private func automationsDisclosureToggled() {
+    func toggleAutomationsExpanded() {
+        guard automationsDisclosureButton?.isHidden == false else { return }
         automationsExpanded.toggle()
+        automationsExpandedByKeyboard = false
+        updateAutomationsSidebarRow()
+    }
+
+    /// Reconciles leader navigation with the keyboard-owned preview. Only this path may create a preview;
+    /// generic pane presentation must not reopen a list explicitly collapsed with the mouse.
+    private func reconcileAutomationsExpansion(selectingAutomations: Bool) {
+        let expansion = AppKitController.sidebarAutomationExpansionAfterSelection(
+            isExpanded: automationsExpanded, wasExpandedByKeyboard: automationsExpandedByKeyboard, selectingAutomations: selectingAutomations,
+            canExpand: automationsDisclosureButton?.isHidden == false)
+        guard expansion.isExpanded != automationsExpanded || expansion.wasExpandedByKeyboard != automationsExpandedByKeyboard else { return }
+        automationsExpanded = expansion.isExpanded
+        automationsExpandedByKeyboard = expansion.wasExpandedByKeyboard
+        updateAutomationsSidebarRow()
+    }
+
+    /// Mouse and programmatic navigation away from Automations bypasses leader navigation, so the common
+    /// pane transition uses this collapse-only operation to dismiss a keyboard preview without touching a
+    /// mouse-pinned expansion or creating a fresh preview during an Automations refresh.
+    func collapseTransientAutomationsExpansion() {
+        guard automationsExpandedByKeyboard else { return }
+        automationsExpanded = false
+        automationsExpandedByKeyboard = false
         updateAutomationsSidebarRow()
     }
 
     /// Refreshes the automations row: the running-run count badge, the disclosure state, and (when expanded)
     /// the running-run children across every device. Each child opens its run's live terminal on click.
     func updateAutomationsSidebarRow() {
-        guard let container = automationsRowContainer else { return }
+        guard automationsRowContainer != nil else { return }
         let runningRuns = AutomationsViewModel.runningRuns(from: host.automationDeviceInputs())
+        if runningRuns.isEmpty {
+            automationsExpanded = false
+            automationsExpandedByKeyboard = false
+        }
 
         if let badge = automationsRowBadge {
             badge.stringValue = "\(runningRuns.count)"
@@ -2899,7 +2921,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         automationsDisclosureButton?.isHidden = runningRuns.isEmpty
         automationsDisclosureButton?.image = NSImage(
             systemSymbolName: automationsExpanded ? "chevron.down" : "chevron.right",
-            accessibilityDescription: automationsExpanded ? "Collapse" : "Expand")?.withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            accessibilityDescription: automationsExpanded ? "Collapse" : "Expand")?.withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        let disclosureLabel = automationsExpanded ? "Hide running automations" : "Show running automations"
+        automationsDisclosureButton?.toolTip = disclosureLabel
+        automationsDisclosureButton?.setAccessibilityLabel(disclosureLabel)
 
         updateAutomationsRowAppearance()
 
@@ -2921,7 +2946,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func makeAutomationRunningChildRow(_ row: AutomationRunTableRow, showDevice: Bool) -> NSView {
-        let dot = RowPrimitives.statusDot(.running)
+        let dot = RowPrimitives.compactStatusDot(filled: true, tint: sidebarRunningIndicatorColor(), tooltip: "Running")
         dot.setContentHuggingPriority(.required, for: .horizontal)
         let name = row.run.automationName ?? "Automation"
         let label = NSTextField(labelWithString: showDevice ? "\(name) — \(row.deviceName)" : name)
@@ -3057,6 +3082,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
+        // Reserve the same trailing slot occupied by Automations' disclosure chevron. This keeps the
+        // right edges of the Alerts and Automations counts aligned while the chevron stays at row edge.
+        let disclosureSlot = NSView()
+        disclosureSlot.translatesAutoresizingMaskIntoConstraints = false
+        disclosureSlot.setContentHuggingPriority(.required, for: .horizontal)
+        disclosureSlot.setContentCompressionResistancePriority(.required, for: .horizontal)
+        disclosureSlot.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        stack.addArrangedSubview(disclosureSlot)
         alertsRowStack = stack
 
         row.addSubview(stack)
@@ -3098,8 +3131,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
 extension SidebarController: NSGestureRecognizerDelegate {
     /// The automations header row's click recognizer is attached to the whole `header` stack so the badge,
-    /// spacer, and padding all open the detail pane, not just the title/icon. A container-level recognizer
-    /// would otherwise also capture clicks on the disclosure triangle nested inside it, which must keep
+    /// spacer, and padding all open the detail pane and toggle expansion, not just the title/icon. A
+    /// container-level recognizer would otherwise also capture clicks on the disclosure triangle, which must keep
     /// toggling expand/collapse instead. Refuse recognition for events that land inside the disclosure
     /// button's frame so its own click target handles those.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {

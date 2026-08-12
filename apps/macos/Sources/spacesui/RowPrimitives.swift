@@ -27,6 +27,13 @@ enum RowPrimitives {
     /// halo that matches the CSS `box-shadow: 0 0 0 3px rgba(green, 0.22)`.
     @MainActor static func statusDot(_ kind: StatusKind) -> StatusDotView { StatusDotView(kind: kind) }
 
+    /// The compact filled/hollow status mark used by identity rows in the sidebar and dense tables.
+    /// Keeping its symbol and 10-point geometry here prevents workspace and automation rows from
+    /// drifting into similar-but-different status indicators.
+    @MainActor static func compactStatusDot(filled: Bool, tint: NSColor, tooltip: String) -> CompactStatusDotView {
+        CompactStatusDotView(filled: filled, tint: tint, tooltip: tooltip)
+    }
+
     /// Fixed-width leading slot for a status indicator. When `content` is nil,
     /// the empty slot preserves shortcut alignment across rows.
     @MainActor static func statusSlot(_ content: NSView? = nil) -> NSView {
@@ -222,6 +229,26 @@ enum RowPrimitives {
         image.accessibilityDescription = "Git project"
         return image
     }()
+}
+
+/// A 10×10 filled or hollow SF Symbol circle for compact identity rows.
+@MainActor final class CompactStatusDotView: NSImageView {
+    private(set) var isFilled: Bool
+
+    init(filled: Bool, tint: NSColor, tooltip: String) {
+        isFilled = filled
+        super.init(frame: .zero)
+        image = NSImage(systemSymbolName: filled ? "circle.fill" : "circle", accessibilityDescription: tooltip)
+        contentTintColor = tint
+        toolTip = tooltip
+        imageScaling = .scaleProportionallyDown
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 10), heightAnchor.constraint(equalToConstant: 10)])
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 10, height: 10) }
 }
 
 // MARK: - Row click helper

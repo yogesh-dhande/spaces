@@ -4476,7 +4476,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     // MARK: - Automations
 
-    @objc func automationsRowClicked() { automations.showAutomationsDetail() }
+    @objc func automationsRowClicked() {
+        sidebar.toggleAutomationsExpanded()
+        automations.showAutomationsDetail()
+    }
+    @objc func toggleAutomationsSidebarDisclosure() { sidebar.toggleAutomationsExpanded() }
     func showAutomationsDetail() { automations.showAutomationsDetail() }
     func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
 
@@ -5474,6 +5478,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// switching away from a workspace also clears the workspace-only titlebar tab strip, and the user
     /// navigating to different content dismisses the free-standing add/settings form windows.
     func presentDetailPane(_ pane: DetailPane, presentation: DetailPanePresentation = .backgroundRefresh) {
+        if !pane.isAutomations { sidebar.collapseTransientAutomationsExpansion() }
         if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
             clearActiveAddFormStateAndCloseWindows()
         }
@@ -10785,6 +10790,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         if let hiddenWorkspaceID = hiddenWorkspaceIDs.first { return .workspace(hiddenWorkspaceID) }
         return nil
+    }
+
+    /// Automation children follow workspace keyboard-preview semantics: entering the row expands a
+    /// collapsed list transiently, leaving collapses only that transient expansion, and a mouse-pinned
+    /// expansion survives keyboard navigation.
+    nonisolated static func sidebarAutomationExpansionAfterSelection(
+        isExpanded: Bool, wasExpandedByKeyboard: Bool, selectingAutomations: Bool, canExpand: Bool
+    ) -> (isExpanded: Bool, wasExpandedByKeyboard: Bool) {
+        if selectingAutomations {
+            guard canExpand, !isExpanded else { return (isExpanded, wasExpandedByKeyboard) }
+            return (true, true)
+        }
+        if wasExpandedByKeyboard { return (false, false) }
+        return (isExpanded, false)
     }
 
     private func handleGlobalHotkey(id: UInt32) {

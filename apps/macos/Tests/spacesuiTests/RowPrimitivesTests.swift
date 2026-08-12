@@ -26,6 +26,18 @@ import Testing
         #expect(dot.kind == .waiting)
     }
 
+    @Test func compactStatusDotUsesWorkspaceRowGeometryAndFillStyle() {
+        let running = RowPrimitives.compactStatusDot(filled: true, tint: .systemGreen, tooltip: "Running")
+        let stopped = RowPrimitives.compactStatusDot(filled: false, tint: .systemGray, tooltip: "Stopped")
+
+        #expect(running.intrinsicContentSize == NSSize(width: 10, height: 10))
+        #expect(stopped.intrinsicContentSize == NSSize(width: 10, height: 10))
+        #expect(running.isFilled)
+        #expect(!stopped.isFilled)
+        #expect(running.toolTip == "Running")
+        #expect(stopped.toolTip == "Stopped")
+    }
+
     @Test func emptyStatusSlotPreservesFixedWidth() {
         let slot = RowPrimitives.statusSlot()
         let parent = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
