@@ -1064,7 +1064,7 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
-                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), s.root_directory,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''), s.root_directory,
                            r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
                            COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
@@ -1078,10 +1078,10 @@ public enum TerminalSessionPersistence {
                     """, bindings: interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 31 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
-            guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
-            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
+            guard row.count >= 32 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
         }
     }
 
@@ -1110,7 +1110,7 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT s.session_id, s.backend, s.lifetime_policy, s.workspace_id, s.kind, s.title, s.working_directory, s.shell,
-                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), s.root_directory,
+                           COALESCE(s.command, ''), s.created_at, COALESCE(s.user_title, ''), COALESCE(s.automation_run_id, ''), s.root_directory,
                            r.session_id, r.backend, r.service_pid, COALESCE(r.child_pid, ''), COALESCE(r.title, ''),
                            COALESCE(r.working_directory, ''), COALESCE(r.columns, ''), COALESCE(r.rows, ''), r.state, r.updated_at,
                            COALESCE(r.exited_at, ''), COALESCE(r.foreground_pid, ''), COALESCE(r.foreground_executable_path, ''),
@@ -1124,10 +1124,10 @@ public enum TerminalSessionPersistence {
                     """, bindings: sessionIDList + interactiveStates)
         }
         return try rows.compactMap { row in
-            guard row.count >= 31 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
-            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<11]))
-            guard let runtimeState = try? decodeRuntimeState(row: Array(row[12...])) else { return nil }
-            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[11], runtimeState: runtimeState)
+            guard row.count >= 32 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+            let launchConfiguration = try decodeLaunchConfiguration(row: Array(row[0..<12]))
+            guard let runtimeState = try? decodeRuntimeState(row: Array(row[13...])) else { return nil }
+            return KnownTerminalSessionRuntime(launchConfiguration: launchConfiguration, rootDirectory: row[12], runtimeState: runtimeState)
         }
     }
 

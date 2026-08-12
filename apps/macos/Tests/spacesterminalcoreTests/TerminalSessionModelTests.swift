@@ -170,6 +170,28 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.listKnownSessions().map(\.launchConfiguration), [configuration])
     }
 
+    func testAutomationRunIDSurvivesBatchedRuntimeReads() throws {
+        let runningID = "session-automation-running"
+        let endedID = "session-automation-ended"
+        for (sessionID, state) in [(runningID, TerminalSessionState.running), (endedID, .exited)] {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, title: "automation", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "backup.sh",
+                    createdAt: "2026-05-08T00:00:00Z", workspaceID: nil, kind: .automation, automationRunID: "run-42"), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-08T00:00:01Z",
+                    exitedAt: state == .exited ? "2026-05-08T00:00:01Z" : nil), paths: paths)
+        }
+
+        let running = try XCTUnwrap(try TerminalSessionPersistence.listInteractiveSessionRuntimeStates().first { $0.sessionID == runningID })
+        let ended = try XCTUnwrap(try TerminalSessionPersistence.endedSessionRuntimes(sessionIDs: [endedID]).first)
+
+        XCTAssertEqual(running.launchConfiguration.automationRunID, "run-42")
+        XCTAssertEqual(ended.launchConfiguration.automationRunID, "run-42")
+    }
+
     func testLaunchConfigurationPersistenceRoundTripsWorkspaceIDAndKind() throws {
         let sessionID = "session-metadata"
         let sessionPaths = try TerminalSessionPaths.forSession(id: sessionID)

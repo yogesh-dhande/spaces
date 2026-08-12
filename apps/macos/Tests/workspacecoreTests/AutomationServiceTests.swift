@@ -1039,6 +1039,23 @@ import spacesterminalcore
         try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
     }
 
+    func testCancelDelegatesTeardownWhenChildHasNoSafeProcessGroup() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(run.terminalSessionID)
+        // The test process is provably not a safe child-owned group: it is either not its group leader or
+        // its group is the daemon/test runner's own. The fake session terminator records delegation without
+        // actually signaling this process.
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: getpid())
+
+        _ = try harness.service.cancelAutomationRun(runID: run.id)
+
+        XCTAssertTrue(
+            harness.host.terminated.contains(sessionID),
+            "a child in the daemon's process group is torn down by its owning session instead of arming a delayed raw-PID kill")
+    }
+
     /// Canceling a run whose finalization makes it immediately prunable returns the run's `canceled` final
     /// state without throwing: converting an old queued run to a terminal status can push it past the
     /// retention cap (enough newer terminal rows already exist), so a naive re-fetch after the cancel would
@@ -1566,6 +1583,14 @@ import spacesterminalcore
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
                 createdAt: TerminalSessionTimestamp.string(from: createdAt), workspaceID: workspaceID, kind: kind, automationRunID: runID),
             paths: paths)
+    }
+
+    func setRuntimeChildPID(sessionID: String, childPID: Int32) throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: childPID, state: .running,
+                updatedAt: "2026-06-06T00:00:01Z", title: "cmd", workingDirectory: "/tmp"), paths: paths)
     }
 
     /// Writes an attributed coding-agent terminal session (workspace-scoped, stamped with the run id) plus

@@ -62,14 +62,13 @@ public final class AutomationService: @unchecked Sendable {
     /// run id so escalation continues on later ticks even after the run row reached its terminal status.
     private struct PendingKill {
         let automationID: String
-        let childPID: Int32
         /// The command's process group id captured at SIGTERM time, when the child was its own group leader
-        /// and that group was not the daemon's own; nil otherwise. Escalation signals THIS stored group
+        /// and that group was not the daemon's own. Escalation signals THIS stored group
         /// rather than recomputing `getpgid(childPID)` at the deadline: once the shell group leader exits,
         /// `getpgid` would fail (or, after pid reuse, name the wrong group), so a descendant that ignored
         /// SIGTERM would never receive SIGKILL. Tracking the group keeps the kill outstanding — and reaches
         /// the survivor — after the leader is gone.
-        let processGroupID: Int32?
+        let processGroupID: Int32
         let sigkillDeadline: Date
     }
     private var pendingKills: [String: PendingKill] = [:]
@@ -884,22 +883,22 @@ public final class AutomationService: @unchecked Sendable {
         }
 
         guard terminate, let ownSessionID else { return }
-        if let runtimeState = try? terminalRuntimeState(sessionID: ownSessionID), let childPID = runtimeState.childPID, childPID > 0 {
+        if let runtimeState = try? terminalRuntimeState(sessionID: ownSessionID), let childPID = runtimeState.childPID, childPID > 0,
+            let processGroupID = signalableProcessGroupID(childPID: childPID)
+        {
             // Preferred path: signal the command's own process group so the transcript keeps flowing until the
             // command exits (the session host stays up and drains output), with SIGKILL escalation tracked in
             // `pendingKills`. The group id is read ONCE, before SIGTERM: a leader that dies on the signal would
             // make a second getpgid fail, storing no group and dropping the escalation while a SIGTERM-ignoring
             // descendant survives. The signal and the pending kill must see the same group.
-            let processGroupID = signalableProcessGroupID(childPID: childPID)
             signalProcessGroup(childPID: childPID, processGroupID: processGroupID, signal: SIGTERM)
             pendingKills[run.id] = PendingKill(
-                automationID: run.automationID, childPID: childPID, processGroupID: processGroupID,
-                sigkillDeadline: now().addingTimeInterval(terminationGrace))
+                automationID: run.automationID, processGroupID: processGroupID, sigkillDeadline: now().addingTimeInterval(terminationGrace))
         } else {
-            // Fallback for the no-PID window: under write-behind persistence the runtime row (or its childPID)
-            // can be absent while the session is genuinely live — a cancel, or a short timeout expiring while
-            // the session is still starting. Terminating the whole session through the daemon's machinery kills
-            // its process tree, so a run finalized canceled/timedOut can never leave its own session running.
+            // Fallback for either the no-PID write-behind window or a child that does not own a safely
+            // signalable process group. The session driver owns the child's identity and teardown lifecycle;
+            // delegating avoids arming a delayed raw-PID kill that could target an unrelated process after PID
+            // reuse, while still ensuring a canceled/timed-out run cannot leave its session running.
             orchestrator.automationTerminateSession(sessionID: ownSessionID)
         }
     }
@@ -1046,29 +1045,20 @@ public final class AutomationService: @unchecked Sendable {
         }
     }
 
-    /// A pending kill stays outstanding while EITHER the group leader OR (when a group was captured) any
-    /// process in that group is still alive. The group check is what keeps the escalation armed after the
-    /// shell leader exits but a descendant that ignored SIGTERM is still running — otherwise the leader's
-    /// death would drop the pending kill and leave the survivor running.
-    private func pendingKillIsOutstanding(_ pending: PendingKill) -> Bool {
-        if Self.isProcessAlive(pid: pending.childPID) { return true }
-        guard let processGroupID = pending.processGroupID else { return false }
-        return Self.isProcessGroupAlive(processGroupID: processGroupID)
-    }
+    /// A pending kill stays outstanding while any process in the captured group is still alive. This keeps
+    /// escalation armed after the shell leader exits but a descendant that ignored SIGTERM is still running.
+    private func pendingKillIsOutstanding(_ pending: PendingKill) -> Bool { Self.isProcessGroupAlive(processGroupID: pending.processGroupID) }
 
-    /// SIGKILLs the captured process group (guarded against the daemon's own group) and the leader pid. The
-    /// group id is the one captured at SIGTERM time and is never recomputed here: by escalation time the
-    /// leader may be gone, so `getpgid(childPID)` could fail or name a reused pid's group.
-    private func escalateToSIGKILL(_ pending: PendingKill) {
-        if let processGroupID = pending.processGroupID, processGroupID != getpgrp() { kill(-processGroupID, SIGKILL) }
-        kill(pending.childPID, SIGKILL)
-    }
+    /// SIGKILLs the captured process group (guarded against the daemon's own group). The group id is the one
+    /// captured at SIGTERM time and is never recomputed here: by escalation time the leader may be gone, so
+    /// `getpgid(childPID)` could fail or name a reused pid's group.
+    private func escalateToSIGKILL(_ pending: PendingKill) { if pending.processGroupID != getpgrp() { kill(-pending.processGroupID, SIGKILL) } }
 
     /// Signals a command's process group (and the leader itself). `processGroupID` is the caller's
     /// already-captured `signalableProcessGroupID` — passed in rather than recomputed so the signaled group
     /// and the one stored for SIGKILL escalation can never diverge.
-    private func signalProcessGroup(childPID: Int32, processGroupID: Int32?, signal signalNumber: Int32) {
-        if let processGroupID { kill(-processGroupID, signalNumber) }
+    private func signalProcessGroup(childPID: Int32, processGroupID: Int32, signal signalNumber: Int32) {
+        kill(-processGroupID, signalNumber)
         kill(childPID, signalNumber)
     }
 
@@ -1079,12 +1069,6 @@ public final class AutomationService: @unchecked Sendable {
         let processGroupID = getpgid(childPID)
         guard processGroupID > 0, processGroupID == childPID, processGroupID != getpgrp() else { return nil }
         return processGroupID
-    }
-
-    private static func isProcessAlive(pid: Int32) -> Bool {
-        guard pid > 0 else { return false }
-        if kill(pid, 0) == 0 { return true }
-        return errno == EPERM
     }
 
     /// Whether any process remains in a process group. A group persists as long as one member is alive, even
