@@ -19,6 +19,7 @@ import spacesterminalcore
     static let toggle: CGFloat = 36
     static let action: CGFloat = 88
     static let nameMinimum: CGFloat = 110
+    static let nameMaximum: CGFloat = 320
     static let spacing: CGFloat = 10
     /// Compact enough to scan a long list, tall enough for the enable switch and a 13 pt name.
     static let rowHeight: CGFloat = 30
@@ -36,25 +37,26 @@ import spacesterminalcore
     func makeHeaderLine(status: NSView, name: NSView, schedule: NSView, nextRun: NSView, device: NSView?, toggle: NSView, action: NSView)
         -> NSStackView
     {
-        // The flexible columns hold their preferred width only while the name column keeps its floor, and
-        // give way before it does. With the device column shown, the preferred widths alone exceed a
-        // default-width window's line, so without this give the name column would be the one to collapse.
-        flexWidth(schedule, preferred: Self.schedule, minimum: 120)
+        // Schedule holds its preferred width while space is tight, then absorbs the surplus after Name
+        // reaches its readable cap. This keeps the trailing status and action columns from bunching at
+        // the table's right edge in a wide pane.
+        growableWidth(schedule, preferred: Self.schedule, minimum: 120)
         fixWidth(nextRun, Self.nextRun)
         if let device { flexWidth(device, preferred: Self.device, minimum: 78) }
         fixWidth(toggle, Self.toggle)
         fixWidth(action, Self.action)
 
         name.translatesAutoresizingMaskIntoConstraints = false
-        // The name column is the only one with no upper bound, so it absorbs whatever the others leave and
-        // truncates rather than pushing the grid.
+        // Name gets the first claim on available width, up to a readable cap, and truncates rather than
+        // pushing the rest of the grid after that.
         name.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         name.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         // Outranks the flexible columns' preferred widths (so they shrink first) while staying below
         // required (so an impossibly narrow pane degrades without unsatisfiable-constraint breakage).
         let minimumName = name.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.nameMinimum)
         minimumName.priority = NSLayoutConstraint.Priority(900)
-        minimumName.isActive = true
+        let maximumName = name.widthAnchor.constraint(lessThanOrEqualToConstant: Self.nameMaximum)
+        NSLayoutConstraint.activate([minimumName, maximumName])
 
         headerColumns = Self.columnOrder(
             status: status, name: name, schedule: schedule, nextRun: nextRun, device: device, toggle: toggle, action: action)
@@ -114,6 +116,15 @@ import spacesterminalcore
 
     /// A column that prefers `preferred` but shrinks toward `minimum` when the line runs out of room.
     private func flexWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat) {
+        sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: true)
+    }
+
+    /// A column that prefers `preferred`, shrinks toward `minimum`, and absorbs wider-window surplus.
+    private func growableWidth(_ view: NSView, preferred: CGFloat, minimum: CGFloat) {
+        sizeFlexibleColumn(view, preferred: preferred, minimum: minimum, capsAtPreferredWidth: false)
+    }
+
+    private func sizeFlexibleColumn(_ view: NSView, preferred: CGFloat, minimum: CGFloat, capsAtPreferredWidth: Bool) {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: .horizontal)
         view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: .horizontal)
@@ -123,8 +134,8 @@ import spacesterminalcore
         // Below the name column's floor (900): when even the floors cannot all hold, these give way and
         // the name is the last column standing, not the first to collapse.
         floor.priority = NSLayoutConstraint.Priority(850)
-        let cap = view.widthAnchor.constraint(lessThanOrEqualToConstant: preferred)
-        NSLayoutConstraint.activate([preferredWidth, floor, cap])
+        NSLayoutConstraint.activate([preferredWidth, floor])
+        if capsAtPreferredWidth { view.widthAnchor.constraint(lessThanOrEqualToConstant: preferred).isActive = true }
     }
 }
 

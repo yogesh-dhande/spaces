@@ -6160,13 +6160,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let nameLabel = NSTextField(labelWithString: name)
         nameLabel.font = Typography.rowLabel
 
-        let hintLabel = NSTextField(labelWithString: hint)
-        hintLabel.font = Typography.metadata
-        hintLabel.textColor = .secondaryLabelColor
-        hintLabel.lineBreakMode = .byWordWrapping
-        hintLabel.maximumNumberOfLines = 2
-        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
         control.translatesAutoresizingMaskIntoConstraints = false
         control.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -6175,7 +6168,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.alignment = .leading
         stack.spacing = 6
         stack.addArrangedSubview(nameLabel)
-        stack.addArrangedSubview(hintLabel)
+        if !hint.isEmpty {
+            let hintLabel = NSTextField(labelWithString: hint)
+            hintLabel.font = Typography.metadata
+            hintLabel.textColor = .secondaryLabelColor
+            hintLabel.lineBreakMode = .byWordWrapping
+            hintLabel.maximumNumberOfLines = 2
+            hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(hintLabel)
+        }
         stack.addArrangedSubview(control)
         control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack

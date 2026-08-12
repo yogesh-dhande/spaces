@@ -129,10 +129,10 @@ import workspacecore
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        addRow(host.settingsLabeledField(name: "Name", hint: "Shown in the automations list.", control: makeNameField(seed: seed)), to: stack)
+        addRow(host.settingsLabeledField(name: "Name", hint: "", control: makeNameField(seed: seed)), to: stack)
 
         if editingAutomationID == nil {
-            addRow(host.settingsLabeledField(name: "Device", hint: "The device this automation runs on.", control: makeDevicePopUp()), to: stack)
+            addRow(host.settingsLabeledField(name: "Device", hint: "", control: makeDevicePopUp()), to: stack)
         } else {
             let deviceName = deviceInputs.first(where: { $0.deviceID == deviceID })?.deviceName ?? "this device"
             let label = NSTextField(labelWithString: deviceName)
@@ -141,13 +141,10 @@ import workspacecore
             addRow(host.settingsLabeledField(name: "Device", hint: "An automation stays on its device.", control: label), to: stack)
         }
 
-        addRow(
-            host.settingsLabeledField(name: "Type", hint: "Spawn a coding agent, or run a shell script.", control: makeKindControl(seed: seed)),
-            to: stack)
+        addRow(host.settingsLabeledField(name: "Type", hint: "", control: makeKindControl(seed: seed)), to: stack)
 
         // Agent-kind rows.
-        let workspaceRow = host.settingsLabeledField(
-            name: "Workspace", hint: "The workspace the coding agent spawns into.", control: makeWorkspacePopUp(seed: seed))
+        let workspaceRow = host.settingsLabeledField(name: "Workspace", hint: "", control: makeWorkspacePopUp(seed: seed))
         addRow(workspaceRow, to: stack)
         self.workspaceRow = workspaceRow
         let agentCommandRow = host.settingsLabeledField(
@@ -164,14 +161,11 @@ import workspacecore
         let scriptRow = host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed))
         addRow(scriptRow, to: stack)
         self.scriptRow = scriptRow
-        let workingDirectoryRow = host.settingsLabeledField(
-            name: "Working directory", hint: "Directory the command runs in.", control: makeWorkingDirectoryControl(seed: seed))
+        let workingDirectoryRow = host.settingsLabeledField(name: "Working directory", hint: "", control: makeWorkingDirectoryControl(seed: seed))
         addRow(workingDirectoryRow, to: stack)
         self.workingDirectoryRow = workingDirectoryRow
 
-        addRow(
-            host.settingsLabeledField(name: "Trigger", hint: "Run manually or on a cron schedule.", control: makeTriggerControl(seed: seed)),
-            to: stack)
+        addRow(host.settingsLabeledField(name: "Trigger", hint: "", control: makeTriggerControl(seed: seed)), to: stack)
         appendCronSection(to: stack, seed: seed)
 
         addRow(
@@ -327,7 +321,7 @@ import workspacecore
         let opensAdvanced: Bool = if case .advanced = seededPreset { true } else { seededPreset == nil ? false : false }
         modeSegmented.selectedSegment = opensAdvanced ? CronMode.advanced.rawValue : CronMode.builder.rawValue
         cronModeSegmented = modeSegmented
-        let modeRow = host.settingsLabeledField(name: "Schedule", hint: "Build a schedule or enter a raw cron expression.", control: modeSegmented)
+        let modeRow = host.settingsLabeledField(name: "Schedule", hint: "", control: modeSegmented)
         addRow(modeRow, to: stack)
         cronSectionRows.append(modeRow)
 
@@ -339,7 +333,7 @@ import workspacecore
         kindPopUp.target = self
         kindPopUp.action = #selector(presetKindChanged(_:))
         presetKindPopUp = kindPopUp
-        let kindRow = host.settingsLabeledField(name: "Preset", hint: "Choose a schedule shape.", control: kindPopUp)
+        let kindRow = host.settingsLabeledField(name: "Preset", hint: "", control: kindPopUp)
         addRow(kindRow, to: stack)
         cronSectionRows.append(kindRow)
         builderRows.append(kindRow)

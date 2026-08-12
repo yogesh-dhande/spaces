@@ -58,10 +58,11 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Use monospaced text selectively for paths, commands, branches, shortcuts, ports, and scripts. Its roles ride the same scale: `monoRowLabel` and `monoBody` (12), `monoMetadata` (11), and `monoCaption`, `monoBadge`, and `monoBadgeStrong` (10).
 - Digits that have to align rather than reflow, such as two version numbers set side by side, take `Typography.tabularDigits(_:)` over the role the call site already picked. It changes only the digit advance, so the role still decides size and weight and the scale stays the one place a size is chosen.
 - Terminal content is not chrome. It is sized by the terminal's own font setting and takes no chrome token.
-- Favor short labels and concise helper text over long explanatory copy inside the interface.
+- Favor short labels and concise helper text over long explanatory copy inside the interface. Omit helper text when the field label and control already make the input's purpose clear; reserve it for behavior, constraints, or consequences the control does not communicate.
 
 ## Spacing And Density
 - Preserve tight, intentional spacing.
+- In wide data tables, cap leading identity columns at a readable width and give surplus space to a descriptive middle column so fixed trailing controls do not bunch together.
 - Use a small set of repeated spacing rhythms so the app feels coherent.
 - Avoid oversized empty regions, especially in information-dense workflows.
 
