@@ -127,7 +127,8 @@ extension ProcessProfileEnvironmentSuites {
             // connection for a request the daemon would also reject. Point at a closed port so any attempt to
             // actually send would fail loudly instead of silently succeeding.
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: Self.closedPort, certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64))
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: Self.closedPort, certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64)))
             let clientApp = Self.makeClientApp(installationID: "INSTALLATION-LINK-GUARD")
 
             do {
@@ -146,7 +147,8 @@ extension ProcessProfileEnvironmentSuites {
 
         @Test func readTerminalLinkChunkWithoutALinkIDThrowsWithoutIssuingADeviceAPIRequest() throws {
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: Self.closedPort, certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64))
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: Self.closedPort, certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64)))
             let clientApp = Self.makeClientApp(installationID: "INSTALLATION-CHUNK-GUARD")
 
             do {
@@ -187,7 +189,8 @@ extension ProcessProfileEnvironmentSuites {
             defer { server.stop() }
             let clientApp = Self.makeClientApp(installationID: "INSTALLATION-LINK-\(UUID().uuidString)")
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
             try body(pairingStore, clientApp, requestClient)
         }
 

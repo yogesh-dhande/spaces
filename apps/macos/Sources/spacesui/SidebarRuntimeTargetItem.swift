@@ -13,9 +13,10 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// (e.g. `process:<id>`, `terminal:<sessionID>`, `browser:<url>`).
     let key: String
     let title: String
-    /// Dimmed secondary text trailing the title. Only ad hoc shells carry one — the title the program
-    /// inside them last reported — because only they are named generically; a configured process or
-    /// agent is identified by the name its config entry gives it.
+    /// Dimmed secondary text trailing the title: the title the row's terminal last reported. Ad hoc
+    /// shells and coding agents carry one, since both run whatever the user is working on and their names
+    /// say nothing about it. A process row is described by the command its config entry names, so it
+    /// carries none.
     let detail: String?
     let kind: AppKitController.WorkspaceRunShortcutTarget.Kind
     /// `nil` for browser targets: whether a browser session is "open" is a Chrome-side
@@ -32,14 +33,6 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     let processKey: String?
     let processTemplateID: String?
     let agentID: String?
-    let launcherName: String?
-    let launcherID: String?
-    /// Whether the daemon reports the coding-agent row behind this item as a configured launcher's row.
-    /// Only the agent kinds carry a meaningful value (an `.agentLauncher` row exists only for a config
-    /// entry, so it is always configured); the other kinds report `false` and never read it. Rename
-    /// routing reads this rather than inferring from `launcherID`, which on an unconfigured row is the
-    /// agent's own claim and can name a launcher deleted or recreated while the agent kept running.
-    let isConfigured: Bool
     let browserTargetURL: String?
 }
 
@@ -48,7 +41,6 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
 enum SidebarRuntimeTargetRenameDestination: Equatable, Sendable {
     case terminalSession(sessionID: String)
     case agentSession(agentID: String)
-    case configuredAgentLauncher
     case configuredProcess
     case configuredBrowserSession
     /// Nothing to store: the name is unchanged, an empty name arrived on a row whose config entry must
@@ -79,7 +71,7 @@ extension AppKitController {
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? targetURL, detail: nil, kind: .browser, runState: nil, shortcutIndex: shortcutIndex, sessionID: nil,
                 canRun: false, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil,
-                launcherName: nil, launcherID: nil, isConfigured: false, browserTargetURL: targetURL)
+                browserTargetURL: targetURL)
         case .process:
             guard let processID = target.processID, let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }) else {
                 return nil
@@ -87,37 +79,28 @@ extension AppKitController {
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: nil, kind: .process, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: processID,
-                processKey: row.name, processTemplateID: row.templateID, agentID: nil, launcherName: nil, launcherID: nil, isConfigured: false,
-                browserTargetURL: nil)
+                processKey: row.name, processTemplateID: row.templateID, agentID: nil, browserTargetURL: nil)
         case .window:
             guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
             let row = detail.terminalRows[index]
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.title, detail: row.liveTitle, kind: .window, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: nil, launcherName: nil, launcherID: nil, isConfigured: false, browserTargetURL: nil)
+                processTemplateID: nil, agentID: nil, browserTargetURL: nil)
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
             return SidebarRuntimeTargetItem(
-                key: key, title: title ?? row.name, detail: nil, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
-                sessionID: row.sessionID, canRun: row.canRun, canStop: row.canStop, canRestart: row.canRestart, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: agentWindow.id, launcherName: row.name, launcherID: row.launcherID, isConfigured: row.isConfigured,
-                browserTargetURL: nil)
+                key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
+                sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
+                processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? processKey, detail: nil, kind: .missingConfiguredProcess, runState: .notStarted,
                 shortcutIndex: shortcutIndex, sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: processKey,
-                processTemplateID: templateID, agentID: nil, launcherName: nil, launcherID: nil, isConfigured: false, browserTargetURL: nil)
-        case .agentLauncher:
-            guard let launcherName = target.launcherName else { return nil }
-            let launcherID = detail.config.agentLaunchers.first { normalizedRunRowName($0.name) == normalizedRunRowName(launcherName) }?.id
-            return SidebarRuntimeTargetItem(
-                key: key, title: title ?? launcherName, detail: nil, kind: .agentLauncher, runState: .notStarted, shortcutIndex: shortcutIndex,
-                sessionID: nil, canRun: true, canStop: false, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil,
-                agentID: nil, launcherName: launcherName, launcherID: launcherID, isConfigured: true, browserTargetURL: nil)
+                processTemplateID: templateID, agentID: nil, browserTargetURL: nil)
         }
     }
 }
@@ -167,13 +150,7 @@ extension AppKitController {
                 try SpacesDeviceClient.runWorkspaceProcess(
                     workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID, device: device, clientApp: clientApp)
             }
-        case .agent, .agentLauncher:
-            guard let launcherName = item.launcherName else { return }
-            runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.runCodingAgent(
-                    workspaceID: workspaceID, agentName: launcherName, agentLauncherID: item.launcherID, device: device, clientApp: clientApp)
-            }
-        case .browser, .window: return
+        case .agent, .browser, .window: return
         }
     }
 
@@ -186,17 +163,16 @@ extension AppKitController {
                     device: device, clientApp: clientApp)
             }
         case .agent:
+            guard let agentID = item.agentID else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.stopCodingAgent(
-                    workspaceID: workspaceID, agentID: item.agentID, agentName: item.launcherName, agentLauncherID: item.launcherID, device: device,
-                    clientApp: clientApp)
+                try SpacesDeviceClient.stopCodingAgent(workspaceID: workspaceID, agentID: agentID, device: device, clientApp: clientApp)
             }
         case .window:
             guard let sessionID = item.sessionID else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.stopWorkspaceTerminal(workspaceID: workspaceID, sessionID: sessionID, device: device, clientApp: clientApp)
             }
-        case .browser, .missingConfiguredProcess, .agentLauncher: return
+        case .browser, .missingConfiguredProcess: return
         }
     }
 
@@ -208,13 +184,7 @@ extension AppKitController {
                     workspaceID: workspaceID, processID: item.processID, processKey: item.processKey, processTemplateID: item.processTemplateID,
                     device: device, clientApp: clientApp)
             }
-        case .agent:
-            runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.restartCodingAgent(
-                    workspaceID: workspaceID, agentID: item.agentID, agentName: item.launcherName, agentLauncherID: item.launcherID, device: device,
-                    clientApp: clientApp)
-            }
-        case .browser, .window, .missingConfiguredProcess, .agentLauncher: return
+        case .agent, .browser, .window, .missingConfiguredProcess: return
         }
     }
 
@@ -237,11 +207,10 @@ extension AppKitController {
         }
     }
 
-    /// Renames a sidebar runtime target. Rows whose name lives on a session — an ad hoc terminal, and a
-    /// coding agent with no configured launcher behind it — rename through their dedicated Device API
-    /// command; configured processes, agent launchers, and browser sessions rename their workspace-config
-    /// entry (so a running process picks the new name up on restart, matching how config edits behave
-    /// elsewhere).
+    /// Renames a sidebar runtime target. Rows whose name lives on a session — an ad hoc terminal and a
+    /// coding agent — rename through their dedicated Device API command; configured processes and browser
+    /// sessions rename their workspace-config entry (so a running process picks the new name up on
+    /// restart, matching how config edits behave elsewhere).
     ///
     /// Submitting an empty name clears a session-stored rename, handing the row back to the name
     /// underneath it (an ad hoc terminal's launch title, an agent's reported label). A config entry must
@@ -260,7 +229,6 @@ extension AppKitController {
                 try SpacesDeviceClient.renameAgentSession(
                     workspaceID: workspaceID, agentID: agentID, title: title, device: device, clientApp: clientApp)
             }
-        case .configuredAgentLauncher: renameConfiguredAgentLauncher(workspaceID: workspaceID, item: item, title: title)
         case .configuredProcess:
             do {
                 try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
@@ -290,43 +258,20 @@ extension AppKitController {
     {
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title != item.title else { return .discard }
-        // A launcher-backed agent is named by its config entry, so its rename edits that entry. Most live
-        // agents have no launcher behind them — registered by an agent's own hooks, detected in a
-        // terminal's foreground, or spawned through `spaces agent spawn` — and nothing in the config names
-        // them, so their rename is stored on the agent session instead. The daemon decides which of the two
-        // a row is and reports it as `isConfigured`; `launcherID` is not a substitute for that, because on
-        // an unconfigured row it is the agent's own launcher claim, which can name a launcher that was
-        // deleted or recreated while the agent kept running.
-        let storesRenameOnSession = item.kind == .window || (item.kind == .agent && !item.isConfigured)
+        // Agents and ad hoc terminals are live sessions nothing in the workspace config names, so their
+        // rename is stored on the session and an empty name clears it back to the name underneath.
+        let storesRenameOnSession = item.kind == .window || item.kind == .agent
         guard !title.isEmpty || storesRenameOnSession else { return .discard }
         switch item.kind {
         case .window:
             guard let sessionID = item.sessionID else { return .discard }
             return .terminalSession(sessionID: sessionID)
         case .agent:
-            guard !item.isConfigured else { return .configuredAgentLauncher }
             guard let agentID = item.agentID else { return .discard }
             return .agentSession(agentID: agentID)
-        case .agentLauncher: return .configuredAgentLauncher
         case .process, .missingConfiguredProcess: return .configuredProcess
         case .browser: return .configuredBrowserSession
         }
-    }
-
-    /// Renames the workspace-config launcher entry a row is named by, matched by id and falling back to
-    /// the row's name for a not-started launcher row, whose id is itself resolved from that name.
-    private func renameConfiguredAgentLauncher(workspaceID: String, item: SidebarRuntimeTargetItem, title: String) {
-        do {
-            try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
-                guard
-                    let index = settings.agentLaunchers.firstIndex(where: {
-                        if let launcherID = item.launcherID { return $0.id == launcherID }
-                        return Self.normalizedRunRowName($0.name) == Self.normalizedRunRowName(item.launcherName ?? "")
-                    })
-                else { return }
-                settings.agentLaunchers[index].name = title
-            }
-        } catch { showError(error) }
     }
 
     /// The configured browser session a sidebar row targets. The row's `browserTargetURL` is the

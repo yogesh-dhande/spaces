@@ -7,7 +7,8 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         let document = try SpacesYAMLService.decode(
             """
             processes:
-              - command: npm run api
+              - name: api
+                command: npm run api
             """)
 
         XCTAssertEqual(document.version, 1)
@@ -15,10 +16,28 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertNil(document.stopScript)
         XCTAssertTrue(document.services.isEmpty)
         XCTAssertEqual(document.processes.first?.command, "npm run api")
-        XCTAssertNil(document.processes.first?.name)
+        XCTAssertEqual(document.processes.first?.name, "api")
         XCTAssertEqual(document.processes.first?.onExit, ProcessExitAction.none)
         XCTAssertTrue(document.browserSessions.isEmpty)
-        XCTAssertTrue(document.agentLaunchers.isEmpty)
+    }
+
+    /// A spaces.yaml written before configured coding agents were removed still carries `agent_launchers:`.
+    /// The decoder ignores keys it does not know, so such a file keeps importing with the rest of its
+    /// configuration intact rather than failing the whole import.
+    func testDecodeIgnoresRetiredAgentLaunchersKey() throws {
+        let document = try SpacesYAMLService.decode(
+            """
+            stop_script: npm stop
+            processes:
+              - name: api
+                command: npm run api
+            agent_launchers:
+              - name: Codex
+                command: codex
+            """)
+
+        XCTAssertEqual(document.stopScript, "npm stop")
+        XCTAssertEqual(document.processes.first?.command, "npm run api")
     }
 
     func testDecodeServicesList() throws {
@@ -58,13 +77,43 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         }
     }
 
+    /// Configured processes must always have an explicit name (spec.md): a spaces.yaml process entry
+    /// without one is rejected at import, naming the offending entry by its command so the user can find
+    /// it in the file.
+    func testDecodeRejectsUnnamedProcess() throws {
+        XCTAssertThrowsError(
+            try SpacesYAMLService.decode(
+                """
+                processes:
+                  - command: npm run api
+                """)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("npm run api"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("missing a name"))
+        }
+    }
+
+    /// Same contract for browser sessions, named by URL since that is the one thing an unnamed session is
+    /// guaranteed to have.
+    func testDecodeRejectsUnnamedBrowserSession() throws {
+        XCTAssertThrowsError(
+            try SpacesYAMLService.decode(
+                """
+                browser_sessions:
+                  - url: http://localhost:3000
+                """)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("http://localhost:3000"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("missing a name"))
+        }
+    }
+
     func testEncodeExportsCanonicalFieldsWithoutInternalIDs() throws {
         let project = ProjectRecord(
             id: "project-id", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, setupScript: "npm install",
             stopScript: "npm stop", ports: [ServiceDefinition(id: "service-id", name: "web")],
             processes: [ProcessTemplate(id: "process-id", name: "api", command: "npm run api", onExit: .notify)],
-            browserSessions: [BrowserSession(name: "app", url: "http://localhost:3000")],
-            agentLaunchers: [AgentLauncher(name: "Codex", command: "codex")])
+            browserSessions: [BrowserSession(name: "app", url: "http://localhost:3000")])
 
         let yaml = try SpacesYAMLService.encode(SpacesYAMLDocument(project: project))
 
@@ -77,7 +126,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertTrue(yaml.contains("on_exit: notify"))
         XCTAssertFalse(yaml.contains("execution_mode"))
         XCTAssertTrue(yaml.contains("browser_sessions:"))
-        XCTAssertTrue(yaml.contains("agent_launchers:"))
+        XCTAssertFalse(yaml.contains("agent_launchers"))
         XCTAssertFalse(yaml.contains("project-id"))
         XCTAssertFalse(yaml.contains("service-id"))
         XCTAssertFalse(yaml.contains("process-id"))
@@ -87,7 +136,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         let original = SpacesYAMLDocument(
             setupScript: "npm install", stopScript: "npm stop", services: ["web"],
             processes: [.init(name: "api", command: "npm run api", onExit: .restart)],
-            browserSessions: [.init(name: "app", url: "http://localhost:3000")], agentLaunchers: [.init(name: "Codex", command: "codex")])
+            browserSessions: [.init(name: "app", url: "http://localhost:3000")])
 
         let decoded = try SpacesYAMLService.decode(try SpacesYAMLService.encode(original))
 

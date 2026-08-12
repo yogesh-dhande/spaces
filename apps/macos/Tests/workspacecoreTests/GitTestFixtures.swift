@@ -137,17 +137,20 @@ private let gitExecutablePath = "/usr/bin/git"
 func makeTestOrchestrator(
     store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
     notificationDeliverer: ((String, String, String?) -> Void)? = nil,
-    builtInTerminalWindowOpener: WorkspaceOrchestrator.BuiltInTerminalWindowOpener? = nil,
+    builtInTerminalWindowOpener: WorkspaceOrchestrator.BuiltInTerminalWindowOpener? = nil, deliversTerminalWindowOpens: Bool = true,
     builtInTerminalWindowFocuser: WorkspaceOrchestrator.BuiltInTerminalWindowFocuser? = nil,
     builtInTerminalWindowCloser: WorkspaceOrchestrator.BuiltInTerminalWindowCloser? = nil,
     builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
     builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+    builtInTerminalForegroundProcessSampler: WorkspaceOrchestrator.BuiltInTerminalForegroundProcessSampler? = nil,
     daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
     WorkspaceOrchestrator(
         store: store, projectsRootDirectory: projectsRootDirectory, workspacesRootDirectory: workspacesRootDirectory,
         git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
-        builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
-        builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress, currentDate: currentDate)
+        builtInTerminalWindowOpener: builtInTerminalWindowOpener, deliversTerminalWindowOpens: deliversTerminalWindowOpens,
+        builtInTerminalWindowFocuser: builtInTerminalWindowFocuser, builtInTerminalWindowCloser: builtInTerminalWindowCloser,
+        builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+        builtInTerminalForegroundProcessSampler: builtInTerminalForegroundProcessSampler, daemonHandoffInProgress: daemonHandoffInProgress,
+        currentDate: currentDate)
 }

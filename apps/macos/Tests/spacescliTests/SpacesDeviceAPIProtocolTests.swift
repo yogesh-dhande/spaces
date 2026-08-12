@@ -214,11 +214,23 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(
                 command: .runWorkspaceProcess(.init(workspaceID: "workspace-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
-            SpacesDeviceAPIRequest(
-                command: .runCodingAgent(.init(workspaceID: "workspace-1", agentName: "Codex", agentLauncherID: "launcher-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
+    /// The conditional stop a closed owner pane sends. It names the same session as the unconditional
+    /// stop and, like it, must not be replayed after an ambiguous failure: a replay could catch the
+    /// terminal at a prompt it was busy at the first time.
+    func testStopWorkspaceTerminalIfBareShellRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: "workspace-1", sessionID: "session-1")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "stopWorkspaceTerminalIfBareShell")
+        XCTAssertEqual(request.sessionID, "session-1")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
     func testRenameTerminalSessionRequestRoundTripsAndIsNotReplaySafe() throws {
@@ -321,9 +333,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                 command: .restartWorkspaceProcess(
                     .init(workspaceID: "workspace-1", processID: "process-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
-            SpacesDeviceAPIRequest(
-                command: .restartCodingAgent(
-                    .init(workspaceID: "workspace-1", agentID: "agent-1", agentName: "Codex", agentLauncherID: "launcher-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request) }
@@ -335,7 +345,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             runState: .running, canRun: false, canStop: true, canRestart: true)
         let agentRow = SpacesDeviceWorkspaceCodingAgentRow(
             id: "agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-runtime-1", sessionID: "session-2",
-            isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true, canRestart: true)
+            runState: .running, activityState: .spinning, canStop: true)
         let terminalRow = SpacesDeviceWorkspaceTerminalRow(
             id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
             canOpenTerminal: true, canStop: true)

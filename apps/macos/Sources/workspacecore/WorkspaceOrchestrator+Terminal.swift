@@ -29,7 +29,7 @@ extension WorkspaceOrchestrator {
     /// agent rows — the not-yet-signaled fallback inside `killAgentSession`, which both the local
     /// `.agentKill` command and the remote `killAgentSession` Device API command route through when the
     /// session has no agent row for `stopCodingAgent` to target. Only a session launched with the
-    /// `.agent` kind (`agent spawn`, an agent launcher)
+    /// `.agent` kind (`agent spawn`)
     /// qualifies: `agent kill` addresses coding agents, and without the kind gate a mistyped or wrong
     /// session id naming an ordinary shell or process terminal would silently destroy it. Returns
     /// false for a non-agent or untracked session, which the caller surfaces as a loud error rather
@@ -73,6 +73,71 @@ extension WorkspaceOrchestrator {
         try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspaceID)
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
         return true
+    }
+
+    /// Stops an ad hoc built-in terminal session whose owning pane the user just closed, but only when
+    /// the terminal is sitting at a bare prompt with nothing left holding it. Returns whether the session
+    /// was terminated; `false` means it was kept and stays recoverable in the sidebar.
+    ///
+    /// Three things have to be true, in this order:
+    ///  1. the session has no configured owner, so `agent spawn` sessions and configured process
+    ///     terminals are refused outright (closing their panes only ever detaches);
+    ///  2. no live owner-mode attachment remains. The closing client detaches before asking, so an owner
+    ///     attachment still standing means ownership transferred to another local pane or another device
+    ///     already owns it, and that owner keeps the session;
+    ///  3. its foreground is a bare shell AND that shell is holding no child process, both read fresh from
+    ///     the OS at this instant rather than from the ~1s-old sample on persisted runtime state: a command
+    ///     started just before the close must never be killed by a decision made against a foreground that
+    ///     predates it. The child check is what separates an idle prompt from a shell holding work it is
+    ///     not in the foreground of (a background or stopped job, a `wait`), which reports the same
+    ///     executable and argv as an idle prompt, and it survives an uninspectable foreground: a shell pid
+    ///     that resolved but could not be inspected (a zombie process-group leader in the instant before
+    ///     the shell reaps it) is treated as bare-equivalent only once the child check has cleared it,
+    ///     never on the strength of the missing reading alone. A session with no reading at all (no live
+    ///     core here, or a dead pid) is bare: there is no process left to protect, and a fresh-open close
+    ///     race resolves toward stopping rather than leaking a shell.
+    ///
+    /// There is deliberately no sweep behind this: a session closed while a program ran stays alive after
+    /// that program exits, so the user can reopen it and see why. Closing it at the prompt is the only
+    /// termination trigger.
+    @discardableResult public func stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(workspaceID: String, sessionID: String) throws -> Bool {
+        // During an exec-in-place handoff the session terminator no-ops and live sessions are carried into
+        // the successor daemon, so deleting this session's product rows here would orphan a live terminal.
+        // A quiet `false` here, rather than the `throw WorkspaceError.daemonHandoffInProgress` the sibling
+        // handoff gates use, is deliberate: this call is driven by a routine pane close, not an explicit
+        // user action on the handoff-sensitive operation itself, so it should not surface an error, and the
+        // next explicit close against the successor daemon succeeds normally.
+        guard !daemonHandoffInProgress() else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+            guard !builtInTerminalSessionHasConfiguredOwner(ownership) else { return false }
+            guard !builtInTerminalSessionHasLiveOwnerAttachment(sessionID: sessionID) else { return false }
+            guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID) else { return false }
+            if let reading = builtInTerminalForegroundProcessSampler(sessionID) {
+                guard !reading.shellHasChildProcesses else { return false }
+                if let process = reading.process {
+                    guard
+                        TerminalBareShellForeground.isBareShell(
+                            executableName: process.executableName, argv: process.argv, launchShell: launchConfiguration.shell)
+                    else { return false }
+                }
+            }
+            return try stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: workspaceID, sessionID: sessionID)
+        }
+    }
+
+    /// Whether some client still holds the session's owner attachment, judged by the same lease rule the
+    /// daemon applies everywhere (`liveAttachments`), so a remote viewer whose lease lapsed without ever
+    /// sending a detach does not count.
+    ///
+    /// Fails closed: a session whose paths or attachment snapshot cannot be read is presumed owned. This
+    /// answer gates a termination, and the two mistakes are not symmetric: a wrongful stop destroys a
+    /// terminal the user cannot get back, while a session wrongly kept costs one more close.
+    func builtInTerminalSessionHasLiveOwnerAttachment(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return true }
+        guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: currentDate()) else { return true }
+        return liveAttachments.contains { $0.mode == .owner }
     }
 
     func stopAdHocBuiltInTerminalSessionUnlocked(workspaceID: String, sessionID: String) throws -> Bool {
@@ -276,8 +341,11 @@ extension WorkspaceOrchestrator {
         #endif
     }
 
+    /// - Parameter openIntent: What the client should do with the window and the layout when the pane
+    ///   opens. Stated at every call site rather than defaulted, because its focus half is the difference
+    ///   between a launch a user is waiting to type into and one a script triggered behind their back.
     func launchSpacesTerminalSession(
-        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
+        title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode, openIntent: TerminalPaneOpenIntent,
         backend: TerminalSessionBackendKind = .ghosttyEmbedded, readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID,
         sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String, kind: TerminalSessionKind = .shell
     ) throws -> SpacesTerminalSessionHandle {
@@ -286,7 +354,7 @@ extension WorkspaceOrchestrator {
             sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
             shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601(), workspaceID: workspaceID, kind: kind)
 
-        builtInTerminalWindowOpener(sessionID, showMode)
+        builtInTerminalWindowOpener(sessionID, showMode, openIntent)
         let waitStartedAt = currentDate()
         let sessionSummary: TerminalServiceSessionSummary
         do {
@@ -300,7 +368,7 @@ extension WorkspaceOrchestrator {
             logTerminalPerfMetric(
                 "terminal_session_wait_ready", target: "session=\(sessionID)", detail: "policy=\(readinessPolicy.rawValue)",
                 elapsedMS: elapsedMS(since: waitStartedAt), success: false)
-            builtInTerminalWindowCloser(sessionID)
+            builtInTerminalWindowCloser(sessionID, .teardown)
             throw error
         }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -418,10 +486,42 @@ extension WorkspaceOrchestrator {
         return try? TerminalSessionPersistence.readRuntimeState(paths: paths)
     }
 
-    func terminateBuiltInTerminalSession(_ sessionID: String?) {
+    func terminateBuiltInTerminalSession(_ sessionID: String?, closeDisposition: TerminalPaneCloseDisposition = .teardown) {
         guard let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else { return }
-        builtInTerminalWindowCloser(sessionID)
+        builtInTerminalWindowCloser(sessionID, closeDisposition)
         builtInTerminalSessionTerminator(sessionID)
+    }
+
+    /// The live configured-process sessions whose panes a restart should hold for their replacements,
+    /// captured before the stop deletes the rows that name them. Keyed by the process each row belongs
+    /// to, which is the only thing that survives a full restart: the stop deletes the process rows and
+    /// the launch mints fresh row, window, and session ids, so nothing else pairs an old session with the
+    /// one that takes its place.
+    /// An orchestrator whose opener reaches no client captures nothing, so it can never ask for a hold it
+    /// could not release. That single check is what keeps the hold and the replacement's open wired
+    /// together; see `deliversTerminalWindowOpens`.
+    func replacedTerminalSessionReservations(workspaceID: String) throws -> ReplacedTerminalSessionReservations {
+        guard deliversTerminalWindowOpens else { return ReplacedTerminalSessionReservations(sessionIDsByProcessKey: [:]) }
+        var sessionIDsByProcessKey: [String: String] = [:]
+        for process in try store.runningProcesses(workspaceID: workspaceID) where isManagedTerminalApp(process.terminalApp) {
+            guard let sessionID = normalizedTerminalSessionID(process.terminalTrackingID) else { continue }
+            sessionIDsByProcessKey[runningProcessMatchKey(name: process.templateName)] = sessionID
+        }
+        return ReplacedTerminalSessionReservations(sessionIDsByProcessKey: sessionIDsByProcessKey)
+    }
+
+    /// The session a single-process restart's replacement takes over from, or nil when this orchestrator
+    /// cannot post the replacement's open. Same gate as the workspace restart's reservations.
+    func replacedTerminalSessionID(for process: RunningProcessRecord) -> String? {
+        guard deliversTerminalWindowOpens else { return nil }
+        return normalizedTerminalSessionID(process.terminalTrackingID)
+    }
+
+    /// Releases every pane this restart is still holding: held by the stop, and never claimed by a
+    /// replacement. Only emitted holds are released, so a stop that failed before sending them cannot
+    /// close a pane whose session is still running.
+    func releaseUnclaimedReplacedTerminalSessions(_ reservations: ReplacedTerminalSessionReservations) {
+        for sessionID in reservations.unclaimedHeldSessionIDs { builtInTerminalWindowCloser(sessionID, .teardown) }
     }
 
     func liveAdHocBuiltInTerminalSessionIDs(workspaceID: String) throws -> [String] {
@@ -567,8 +667,8 @@ extension WorkspaceOrchestrator {
         return launchConfiguration
     }
 
-    func terminateBuiltInTerminalSession(for process: RunningProcessRecord) {
-        terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process))
+    func terminateBuiltInTerminalSession(for process: RunningProcessRecord, closeDisposition: TerminalPaneCloseDisposition = .teardown) {
+        terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process), closeDisposition: closeDisposition)
     }
 
     func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {

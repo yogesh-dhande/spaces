@@ -53,6 +53,8 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private var handlerDeliveriesInFlight = 0
     private var handlerDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
     private var onSessionClosed: (@TerminalEngineActor () -> Void)?
+    /// Reports the grid ghostty finished reflowing the terminal to; see `applyGhosttyGridResize`.
+    private var onGridResizeApplied: (@TerminalEngineActor (Int, Int) -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     /// The SESSION is over: input is refused and a handoff snapshot returns nil. Set by `terminate()` and by
     /// the read loop reaching EOF. It says nothing about the child — see `childPIDValue`.
@@ -115,6 +117,29 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.lock()
         onSessionClosed = handler
         lock.unlock()
+    }
+
+    func setGridResizeAppliedHandler(_ handler: (@TerminalEngineActor (Int, Int) -> Void)?) {
+        lock.lock()
+        onGridResizeApplied = handler
+        lock.unlock()
+    }
+
+    /// Carries out a resize ghostty has already applied to the terminal: the PTY's winsize follows the
+    /// new grid, and the applied grid is reported onward to `onGridResizeApplied`.
+    ///
+    /// Ghostty calls this from `Termio.resize` on its io thread, once the terminal has been reflowed
+    /// under the renderer mutex. That makes it the first moment a snapshot export (which takes the same
+    /// mutex) observes the new grid, which is what the session core keys its
+    /// forced-full `resize` broadcast on: setting the surface size only queues the reflow, so a frame
+    /// captured when the surface size lands still carries the pre-reflow grid.
+    func applyGhosttyGridResize(columns: Int, rows: Int, pixelWidth: UInt32, pixelHeight: UInt32) {
+        _ = resizeCellGrid(columns: columns, rows: rows, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        lock.lock()
+        let handler = onGridResizeApplied
+        lock.unlock()
+        guard let handler else { return }
+        Task { @TerminalEngineActor in handler(columns, rows) }
     }
 
     func startIfNeeded() throws {

@@ -16,6 +16,3 @@ processes:
 browser_sessions:
 - name: web
   url: $SPACES_WEB_URL
-agent_launchers:
-- name: codex
-  command: codex --yolo

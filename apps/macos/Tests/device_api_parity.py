@@ -11,7 +11,11 @@ from pathlib import Path
 
 
 PROCESS_NAME = "parity-process"
-AGENT_NAME = "parity-agent"
+# A coding agent exists only as a live session: something that signals the Spaces agent hooks is
+# running in a workspace terminal. The fixture repo each lane commits carries `parity-agent`, a script
+# that signals init/working and then stays alive, so running it in a workspace terminal is the whole
+# flow the product offers.
+AGENT_COMMAND = "./parity-agent"
 REMOTE_WEB_SESSION_NAME = "remote-web"
 
 # Terminal background colors the Spaces theme (spaces-brand) exports per appearance, packed as
@@ -543,35 +547,64 @@ def wait_for_process_row(args: argparse.Namespace, app: dict, workspace_id: str,
         raise TimeoutError(f"{error} ({detail})") from None
 
 
-def wait_for_agent_row(args: argparse.Namespace, app: dict, workspace_id: str, state: str) -> dict:
+def agent_row_for_session(workspace: dict, session_id: str) -> dict | None:
+    # A live agent row is addressed by the terminal session the agent runs in, not by a name: a row
+    # registered from hook signals is named by whatever label the agent gives itself, and by the
+    # materialized default name when it gives none.
+    for row in workspace.get("codingAgentRows") or []:
+        if row.get("sessionID") == session_id:
+            return row
+    return None
+
+
+def wait_for_agent_row(args: argparse.Namespace, app: dict, workspace_id: str, session_id: str, state: str) -> dict:
     # Same ambiguity as wait_for_process_row: distinguish a missing row from a row in another state.
     observed: dict = {}
 
     def attempt():
         workspace = workspace_overview(args, app, workspace_id)
         observed["codingAgentRows"] = [
-            {"name": row.get("name"), "runState": row.get("runState")} for row in workspace.get("codingAgentRows") or []
+            {"name": row.get("name"), "sessionID": row.get("sessionID"), "runState": row.get("runState")}
+            for row in workspace.get("codingAgentRows") or []
         ]
-        row = find_named_row(workspace, "codingAgentRows", AGENT_NAME)
+        row = agent_row_for_session(workspace, session_id)
         if row and row.get("runState") == state:
             return row
         return None
 
     try:
-        return wait_for(attempt, f"{AGENT_NAME} row state {state}")
+        return wait_for(attempt, f"coding-agent row for session {session_id} state {state}")
     except TimeoutError as error:
         rows = observed.get("codingAgentRows")
         detail = "no codingAgentRows at all" if rows == [] else f"codingAgentRows={json.dumps(rows, sort_keys=True)}"
         raise TimeoutError(f"{error} ({detail})") from None
 
 
-def require_config_rows(args: argparse.Namespace, app: dict, workspace_id: str) -> tuple[dict, dict]:
+def wait_for_no_agent_row(args: argparse.Namespace, app: dict, workspace_id: str, session_id: str) -> None:
+    # Stopping a live coding agent destroys its row outright — there is no configured slot left behind
+    # for it to fall back to — so the proof the stop landed is the row's absence.
+    observed: dict = {}
+
+    def attempt():
+        workspace = workspace_overview(args, app, workspace_id)
+        observed["codingAgentRows"] = [
+            {"name": row.get("name"), "sessionID": row.get("sessionID"), "runState": row.get("runState")}
+            for row in workspace.get("codingAgentRows") or []
+        ]
+        return True if agent_row_for_session(workspace, session_id) is None else None
+
+    try:
+        wait_for(attempt, f"coding-agent row for session {session_id} to disappear")
+    except TimeoutError as error:
+        raise TimeoutError(f"{error} (codingAgentRows={json.dumps(observed.get('codingAgentRows'), sort_keys=True)})") from None
+
+
+def require_config_process_row(args: argparse.Namespace, app: dict, workspace_id: str) -> dict:
     workspace = workspace_overview(args, app, workspace_id)
     process_row = find_named_row(workspace, "processRows", PROCESS_NAME)
-    agent_row = find_named_row(workspace, "codingAgentRows", AGENT_NAME)
-    if not process_row or not agent_row:
-        raise AssertionError(f"workspace missing parity rows: {json.dumps(workspace, indent=2, sort_keys=True)}")
-    return process_row, agent_row
+    if not process_row:
+        raise AssertionError(f"workspace missing parity process row: {json.dumps(workspace, indent=2, sort_keys=True)}")
+    return process_row
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -618,7 +651,7 @@ def run(args: argparse.Namespace) -> dict:
     workspace_id = created_workspace.get("workspaceID")
     if not workspace_id:
         raise AssertionError(f"createWorkspace did not return workspaceID: {json.dumps(created_workspace, indent=2, sort_keys=True)}")
-    require_config_rows(args, app, workspace_id)
+    require_config_process_row(args, app, workspace_id)
 
     terminal_open_started = time.perf_counter()
     terminal_mutation = mutation(send("openWorkspaceTerminal", {"workspaceID": workspace_id}, args, app), "openWorkspaceTerminal")
@@ -723,12 +756,19 @@ def run(args: argparse.Namespace) -> dict:
     )
     wait_for_process_row(args, app, workspace_id, "notStarted")
 
-    agent_run = mutation(
-        send("runCodingAgent", {"workspaceID": workspace_id, "agentName": AGENT_NAME, "agentLauncherID": None}, args, app),
-        "runCodingAgent",
+    # Coding agent: open a plain workspace terminal and run the fixture's hook-signaling agent script
+    # in it. That is the only way an agent row comes into existence, so it is also the only way to
+    # reach the agent-addressed commands below.
+    agent_terminal = mutation(send("openWorkspaceTerminal", {"workspaceID": workspace_id}, args, app), "openWorkspaceTerminal")
+    agent_session_id = agent_terminal.get("sessionID")
+    if not agent_session_id:
+        raise AssertionError(f"openWorkspaceTerminal did not return an agent sessionID: {json.dumps(agent_terminal, indent=2, sort_keys=True)}")
+    wait_for_terminal_state(args, app, agent_session_id)
+    require_ok(
+        send("sendTerminalInput", {"sessionID": agent_session_id, "text": AGENT_COMMAND, "appendNewline": True}, args, app),
+        "sendTerminalInput agent command",
     )
-    agent_session_id = agent_run.get("sessionID")
-    agent_row = wait_for_agent_row(args, app, workspace_id, "running")
+    agent_row = wait_for_agent_row(args, app, workspace_id, agent_session_id, "running")
     agent_id = agent_row.get("agentID")
 
     # Orchestration surface (`spaces agent … --device`): the running coding agent registered a Spaces
@@ -756,36 +796,13 @@ def run(args: argparse.Namespace) -> dict:
     if spawn_rejected.get("ok") is not False:
         raise AssertionError(f"spawnAgentSession accepted an unsupported command: {json.dumps(spawn_rejected, indent=2, sort_keys=True)}")
 
+    # Stop is the one lifecycle control a coding agent has, and it is addressed purely by the agent id
+    # its overview row carries.
     mutation(
-        send(
-            "restartCodingAgent",
-            {
-                "workspaceID": workspace_id,
-                "agentID": agent_row.get("agentID"),
-                "agentName": AGENT_NAME,
-                "agentLauncherID": agent_row.get("launcherID"),
-            },
-            args,
-            app,
-        ),
-        "restartCodingAgent",
-    )
-    agent_row = wait_for_agent_row(args, app, workspace_id, "running")
-    mutation(
-        send(
-            "stopCodingAgent",
-            {
-                "workspaceID": workspace_id,
-                "agentID": agent_row.get("agentID"),
-                "agentName": AGENT_NAME,
-                "agentLauncherID": agent_row.get("launcherID"),
-            },
-            args,
-            app,
-        ),
+        send("stopCodingAgent", {"workspaceID": workspace_id, "agentID": agent_id}, args, app),
         "stopCodingAgent",
     )
-    wait_for_agent_row(args, app, workspace_id, "notStarted")
+    wait_for_no_agent_row(args, app, workspace_id, agent_session_id)
 
     overview_final = current_overview(args, app)
     final_workspace = find_workspace(overview_final, workspace_id) or {}

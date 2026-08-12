@@ -60,28 +60,43 @@ import XCTest
             XCTAssertEqual(resolved.path, caddyTarget.path)
         }
 
-        func testEnsureRunningDoesNotUnlinkLiveAdminSocketWhenReloadFails() throws {
+        /// Reload against a confirmed-live admin socket ("confirmed-live" here means the socket has an
+        /// open owner `lsof` can see, which is why the test binds it directly rather than relying on the
+        /// fake `caddy` binary — the reload/run subcommands are short-lived children, not something that
+        /// can genuinely hold the socket open the way a real Caddy would) must not throw: `ensureRunning`
+        /// stops the wedged instance and starts fresh with the same config instead of leaving stale
+        /// routes served indefinitely (issue #422).
+        func testEnsureRunningRecoversFromReloadFailureAgainstLiveOwner() throws {
             let directory = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(
                 "caddy-live-socket-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: directory) }
 
             let fakeCaddy = directory.appendingPathComponent("caddy", isDirectory: false)
+            let runMarker = directory.appendingPathComponent("started", isDirectory: false)
             try Data(
                 """
                 #!/bin/sh
                 if [ "$1" = "run" ]; then
                   /usr/bin/touch "$SPACES_TEST_CADDY_RUN_MARKER"
+                  /usr/bin/touch "$SPACES_TEST_CADDY_SOCKET"
+                  exit 0
                 fi
-                exit 1
+                if [ "$1" = "reload" ]; then
+                  echo "sample_upstream: dial tcp 127.0.0.1:9: connect: connection refused" 1>&2
+                  exit 1
+                fi
+                if [ "$1" = "validate" ]; then
+                  exit 0
+                fi
+                exit 0
                 """.utf8
             ).write(to: fakeCaddy)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCaddy.path)
 
-            let marker = directory.appendingPathComponent("started", isDirectory: false)
             let environmentKeys = [
                 SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
-                CaddyService.executableEnvironmentVariable, "SPACES_TEST_CADDY_RUN_MARKER",
+                CaddyService.executableEnvironmentVariable, "SPACES_TEST_CADDY_RUN_MARKER", "SPACES_TEST_CADDY_SOCKET",
             ]
             let originalEnvironment = environmentKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
             defer {
@@ -91,21 +106,104 @@ import XCTest
             setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
             setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, directory.path, 1)
             setenv(CaddyService.executableEnvironmentVariable, fakeCaddy.path, 1)
-            setenv("SPACES_TEST_CADDY_RUN_MARKER", marker.path, 1)
+            setenv("SPACES_TEST_CADDY_RUN_MARKER", runMarker.path, 1)
             SpacesProfile.resetCacheForTesting()
 
             let socketPath = try CaddyService.adminSocketPath()
+            setenv("SPACES_TEST_CADDY_SOCKET", socketPath, 1)
+            let socketFD = try bindUnixSocket(at: socketPath)
+            defer {
+                // `stop()` unlinks the path as the last rung of its ladder regardless of whether anything
+                // answered `caddy stop`, and the fake `caddy`'s `run` branch then recreates a plain file
+                // at the same path — a different filesystem entry from the one `socketFD` was bound to.
+                // Closing `socketFD` is safe either way: it only releases this test's own descriptor and
+                // never touches whatever now occupies the path.
+                close(socketFD)
+                unlink(socketPath)
+            }
+
+            let launchedNewInstance = try CaddyService.ensureRunning(configJSON: Data("{}".utf8), timeout: 2)
+
+            XCTAssertTrue(launchedNewInstance)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: runMarker.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+        }
+
+        /// A reload that fails against a confirmed-live admin socket must not be treated as proof the
+        /// *instance* is wedged when the just-written config is itself the problem: stopping a live
+        /// Caddy over its own invalid config would leave nothing able to come back up, converting a
+        /// stale-but-working route table into a total outage (issue #422 follow-up). The fake `caddy`
+        /// here fails both `reload` and `validate`, so `ensureRunning` must leave the live instance
+        /// running (no `run` invocation, live socket left in place) and throw instead.
+        func testEnsureRunningThrowsWhenReloadAndValidateBothFailAgainstLiveOwner() throws {
+            let directory = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(
+                "caddy-invalid-config-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let fakeCaddy = directory.appendingPathComponent("caddy", isDirectory: false)
+            let runMarker = directory.appendingPathComponent("started", isDirectory: false)
+            try Data(
+                """
+                #!/bin/sh
+                if [ "$1" = "run" ]; then
+                  /usr/bin/touch "$SPACES_TEST_CADDY_RUN_MARKER"
+                  /usr/bin/touch "$SPACES_TEST_CADDY_SOCKET"
+                  exit 0
+                fi
+                if [ "$1" = "reload" ]; then
+                  echo "sample_upstream: dial tcp 127.0.0.1:9: connect: connection refused" 1>&2
+                  exit 1
+                fi
+                if [ "$1" = "validate" ]; then
+                  echo "adapting config using caddyfile: unrecognized directive" 1>&2
+                  exit 1
+                fi
+                exit 0
+                """.utf8
+            ).write(to: fakeCaddy)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCaddy.path)
+
+            let environmentKeys = [
+                SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
+                CaddyService.executableEnvironmentVariable, "SPACES_TEST_CADDY_RUN_MARKER", "SPACES_TEST_CADDY_SOCKET",
+            ]
+            let originalEnvironment = environmentKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+            defer {
+                for (name, value) in originalEnvironment { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+                SpacesProfile.resetCacheForTesting()
+            }
+            setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
+            setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, directory.path, 1)
+            setenv(CaddyService.executableEnvironmentVariable, fakeCaddy.path, 1)
+            setenv("SPACES_TEST_CADDY_RUN_MARKER", runMarker.path, 1)
+            SpacesProfile.resetCacheForTesting()
+
+            let socketPath = try CaddyService.adminSocketPath()
+            setenv("SPACES_TEST_CADDY_SOCKET", socketPath, 1)
             let socketFD = try bindUnixSocket(at: socketPath)
             defer {
                 close(socketFD)
                 unlink(socketPath)
             }
 
-            XCTAssertThrowsError(try CaddyService.ensureRunning(configJSON: Data("{}".utf8), timeout: 0.1)) { error in
-                guard case CaddyServiceError.reloadFailed = error else { return XCTFail("Expected reloadFailed, got \(error)") }
+            XCTAssertThrowsError(try CaddyService.ensureRunning(configJSON: Data("{}".utf8), timeout: 2)) { error in
+                guard case CaddyServiceError.reloadFailed = error else { return XCTFail("expected reloadFailed, got \(error)") }
             }
+
+            XCTAssertFalse(FileManager.default.fileExists(atPath: runMarker.path))
             XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
-            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        }
+
+        func testReloadFailedErrorDescriptionCarriesExitStatusAndStderr() throws {
+            let error = CaddyServiceError.reloadFailed(
+                configPath: "/tmp/caddy.json", exitStatus: 1, stderr: "sample_upstream: dial tcp 127.0.0.1:9: connect: connection refused")
+            let description = try XCTUnwrap(error.errorDescription)
+            XCTAssertTrue(description.contains("exit 1"), description)
+            XCTAssertTrue(description.contains("connection refused"), description)
+
+            let timedOutError = CaddyServiceError.reloadFailed(configPath: "/tmp/caddy.json", exitStatus: nil, stderr: "")
+            XCTAssertTrue(try XCTUnwrap(timedOutError.errorDescription).contains("timed out"))
         }
 
         private func bindUnixSocket(at path: String) throws -> Int32 {

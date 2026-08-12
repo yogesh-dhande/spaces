@@ -22,6 +22,8 @@
 - When planning a new feature (whether or not in plan mode), ask me lots of questions until we align on intent, design, UX, and implementation. Ask me questions to help me figure out my unknowns and better think through the feature, its intent, scope, and desired outcome. Don't present a plan until I explicitly ask you to.
 - For all coding tasks use your judgement to decide an appropriate lower power model and run that in a subagent.
 - When user instruction contradicts previous instructions or documentation, explicitly ask for clarification before proceeding.
+- Before making a non-trivial UI change (for new or existing features), present options as HTML mockups including the current design/state and 3-4 updated designs. Wait for a pick before implementing.
+- When fixing a bug or performance issue for the mac app, consider whether a similar or related fix is needed for iOS and vice versa; the clients share data flow and UI patterns, so an issue in one often has a sibling in the other.
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
 - When making breaking changes, explicitly ask whether backwards compatibility is needed. Do not make the decision on supporting or not supporting backwards compatibility without explicit approval.
@@ -46,6 +48,8 @@
         - Rare edge cases under normal usage patterns can be ignored. 
         - Issues that self heal quickly during normal usage can be ignored. 
     - Issues that are of reasonable frequency but low impact and require disproportionately high code complexity for the necessary fix can be deferred by creating a github issue for it. Make sure there isn’t an existing issue for it. 
+    - Issues that are not relevant to how the product actually works (e.g. code paths in the ghostty fork that are unreachable given how Spaces uses it) are resolved with a code comment at the decision site explaining why the finding does not apply. Do not create a github issue for them.
+    - Issues with a won’t-fix disposition are documented as accepted behavior/risk (code comment or spec note as appropriate), never written up as a github issue. Github issues are only for work we intend to do.
 
 - When fixing a bug, reproduce it first by writing a failing test and/or using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical.
 - Use the e2e test scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.

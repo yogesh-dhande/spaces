@@ -50,9 +50,18 @@
             let snapshot: GhosttyTerminalSnapshot?
         }
 
+        private struct FrameApplyRetry {
+            let identity: AppliedRenderFrameIdentity
+            var attempts: Int
+        }
+
         private static let searchUpBindingAction = "navigate_search:next"
         private static let searchDownBindingAction = "navigate_search:previous"
         private static let shortSearchQueryDebounceDelay: Duration = .milliseconds(300)
+        /// How many times one frame the surface refused is re-offered to it. Bounded because not every
+        /// refusal is transient: a snapshot the surface can never take is refused every time, and an
+        /// unbounded retry would wake the main actor once per display interval for the life of the pane.
+        private static let frameApplyRetryLimit = 3
 
         private let launchConfiguration: TerminalSessionLaunchConfiguration
         private let surfaceHostView = GhosttyMirrorSurfaceHostView(frame: .zero)
@@ -72,14 +81,18 @@
         private var latestFrame: GhosttyRenderFrame?
         private var renderStateKey = ""
         private var lastGeometry: SurfaceGeometry?
+        private var lastPushedSurfaceOcclusion: Bool?
         private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
+        private var frameApplyRetry: FrameApplyRetry?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
-        private var renderedText = ""
         private var pendingSurfacePresentationTask: Task<Void, Never>?
+        private var pendingFrameApplyRetryTask: Task<Void, Never>?
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
         private var pendingSearchQueryTask: Task<Void, Never>?
         private var mouseTrackingArea: NSTrackingArea?
         private var windowVisibilityObservation: NSKeyValueObservation?
+        private var windowOcclusionObserver: (any NSObjectProtocol)?
+        private var actionHandlerToken: GhosttyMirrorActionHandlerToken?
         private var searchTotal: Int?
         private var searchSelected: Int?
         private var submittedSearchQuery: String?
@@ -100,6 +113,15 @@
         private(set) var debugRecordedMouseEvents: [String] = []
         var debugRenderFrameApplyHandler: (@MainActor (GhosttyRenderFrame, String) -> Bool)?
         private(set) var debugRenderFrameApplyCount = 0
+        /// How many times this pane has told a surface its occlusion state. Occlusion cannot be read back
+        /// out of a surface, so this is how a test tells a pane that re-stated it from one that did not.
+        private(set) var debugSurfaceOcclusionPushCount = 0
+        /// The occlusion state this pane last pushed; nil before it has pushed one at the current surface.
+        var debugLastPushedSurfaceOcclusion: Bool? { lastPushedSurfaceOcclusion }
+        /// How many times this pane has presented. Presenting leaves no trace a test can read off the
+        /// surface — the cells were already there — so the count is what distinguishes a pane that
+        /// painted its applied frame from one that only applied it.
+        private(set) var debugSurfacePresentationCount = 0
         var debugOpenURLHandler: (@MainActor (URL) -> Bool)?
 
         /// Per-pane link router installed by `RemoteGhosttySessionHost`. When set it fully replaces the
@@ -135,7 +157,9 @@
                 pendingFirstResponderRestoreTask?.cancel()
                 pendingSearchQueryTask?.cancel()
                 pendingSurfacePresentationTask?.cancel()
-                if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
+                pendingFrameApplyRetryTask?.cancel()
+                if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
+                GhosttyMirrorAppService.shared.unregisterActionHandler(actionHandlerToken)
                 if let mirror { ghostty_mirror_free(mirror) }
             }
         }
@@ -164,6 +188,7 @@
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             observeWindowVisibility()
+            observeWindowOcclusion()
             applyDisplayState()
         }
 
@@ -187,6 +212,30 @@
             windowVisibilityObservation = window?.observe(\.isVisible) { [weak self] _, _ in MainActor.assumeIsolated { self?.applyDisplayState() } }
         }
 
+        /// A window's occlusion state changes with no geometry, hierarchy, or visibility event of any
+        /// kind: it is covered by another window, uncovered again, or simply corrected by AppKit a beat
+        /// after the window was ordered in — which is what a pane whose surface is rebuilt during a
+        /// structural update can be caught by. `updateSurfaceGeometry` samples occlusion, so without
+        /// this the sample taken at that instant is the only one the surface ever gets.
+        private func observeWindowOcclusion() {
+            if let windowOcclusionObserver { NotificationCenter.default.removeObserver(windowOcclusionObserver) }
+            windowOcclusionObserver = nil
+            guard let window else { return }
+            // No queue, so AppKit's main-thread post is handled inline rather than a turn later, when the
+            // pane may already have been torn down.
+            windowOcclusionObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // AppKit states that the window's occlusion changed, so the surface is re-told
+                    // regardless of what this view last pushed at it.
+                    self.lastPushedSurfaceOcclusion = nil
+                    self.updateSurfaceOcclusion()
+                }
+            }
+        }
+
         private func applyDisplayState() {
             guard isDisplayed else {
                 lastGeometry = nil
@@ -200,18 +249,23 @@
             reportViewportSizeIfNeeded()
             applyLatestFrameIfPossible()
             restoreFirstResponderIfWindowReady()
+            // A pane coming back on screen — or one whose surface was just rebuilt under it — holds a
+            // frame it has already applied, so nothing on the frame path will present it. The session
+            // may stay idle indefinitely, so this transition is the pane's only chance to paint.
+            scheduleSurfacePresentationRefresh()
         }
 
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
+            let geometryChanged = updateSurfaceGeometry()
             reportViewportSizeIfNeeded()
+            if geometryChanged { scheduleSurfacePresentationRefresh() }
         }
 
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
-            updateSurfaceGeometry()
+            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
         }
 
         override func viewDidChangeEffectiveAppearance() {
@@ -348,10 +402,8 @@
         }
 
         func update(frame: GhosttyRenderFrame?, renderStateKey: String) {
-            if self.renderStateKey != renderStateKey { renderedText = "" }
             self.renderStateKey = renderStateKey
             latestFrame = frame
-            renderedText = frame.map { GhosttyTerminalSnapshotGrid.fullPlainText(for: $0.snapshot) } ?? ""
             ensureMirrorIfNeeded()
             applyLatestFrameIfPossible()
             restoreFirstResponderIfWindowReady()
@@ -367,9 +419,11 @@
             return latestFrame?.snapshot
         }
 
+        /// Flattens the pane's current grid to text on demand. Deliberately not precomputed when a frame
+        /// arrives: extracting a full grid allocates a string per row on a path that runs at the session's
+        /// flush rate, while its readers (the ended-pane copy buffer, debug and test dumps) ask rarely.
         func snapshotText() -> String? {
             if let surfaceText = GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()), !surfaceText.isEmpty { return surfaceText }
-            if !renderedText.isEmpty { return renderedText }
             guard let snapshot = latestFrame?.snapshot else { return nil }
             return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot)
         }
@@ -393,7 +447,7 @@
 
         func surfaceCellSize() -> (columns: Int, rows: Int)? {
             ensureMirrorIfNeeded()
-            updateSurfaceGeometry()
+            if updateSurfaceGeometry() { scheduleSurfacePresentationRefresh() }
             if let surface = mirrorSurface() {
                 let size = ghostty_surface_size(surface)
                 if size.columns > 0, size.rows > 0 { return (Int(size.columns), Int(size.rows)) }
@@ -500,7 +554,6 @@
         func releaseSurface() {
             freeMirror()
             latestFrame = nil
-            renderedText = ""
             GhosttyMirrorSurfaceMRU.shared.forget(self)
             removeFromSuperview()
         }
@@ -516,13 +569,18 @@
             resetSearchOverlay(restoreFocus: false)
             pendingSurfacePresentationTask?.cancel()
             pendingSurfacePresentationTask = nil
-            if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
+            pendingFrameApplyRetryTask?.cancel()
+            pendingFrameApplyRetryTask = nil
+            GhosttyMirrorAppService.shared.unregisterActionHandler(actionHandlerToken)
+            actionHandlerToken = nil
             if let mirror {
                 ghostty_mirror_free(mirror)
                 self.mirror = nil
             }
             lastGeometry = nil
+            lastPushedSurfaceOcclusion = nil
             lastAppliedRenderFrameIdentity = nil
+            frameApplyRetry = nil
         }
 
         private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
@@ -684,11 +742,15 @@
                 guard mirror != nil else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_mirror_new failed") }
                 surfaceGeneration &+= 1
                 lastGeometry = nil
+                lastPushedSurfaceOcclusion = nil
                 lastAppliedRenderFrameIdentity = nil
+                frameApplyRetry = nil
                 updateSurfaceGeometry()
                 updateSurfaceFocus()
                 if let surface = mirrorSurface() {
-                    GhosttyMirrorAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
+                    actionHandlerToken = GhosttyMirrorAppService.shared.registerActionHandler(for: surface) { [weak self] event in
+                        self?.applyActionEvent(event)
+                    }
                 }
             } catch { fputs("spaces: ghostty mirror creation failed for session \(launchConfiguration.sessionID): \(error)\n", stderr) }
         }
@@ -784,22 +846,47 @@
             suppressedFocusOnlyMouseButtonNumbers.remove(event.buttonNumber) != nil
         }
 
-        private func updateSurfaceGeometry() {
-            guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return }
+        @discardableResult private func updateSurfaceGeometry() -> Bool {
+            guard let mirror, let surface = mirrorSurface(), let backingSize = backingPixelSize() else { return false }
+            updateSurfaceOcclusion()
             let scale = Double(window?.backingScaleFactor ?? 2.0)
             let displayID = (window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             let geometry = SurfaceGeometry(
                 width: backingSize.width, height: backingSize.height, scale: scale, displayID: displayID, windowNumber: window?.windowNumber)
-            guard geometry != lastGeometry else { return }
+            guard geometry != lastGeometry else { return false }
 
             var host = makeSurfaceHost()
             _ = ghostty_mirror_set_host(mirror, &host)
             ghostty_surface_set_content_scale(surface, scale, scale)
             if let displayID { ghostty_surface_set_display_id(surface, displayID) }
             ghostty_surface_set_size(surface, geometry.width, geometry.height)
-            ghostty_surface_set_occlusion(surface, window?.occlusionState.contains(.visible) ?? true)
             ghostty_surface_refresh(surface)
             lastGeometry = geometry
+            return true
+        }
+
+        /// Tells the surface whether its window is on screen, and presents once it comes back.
+        ///
+        /// Occlusion is not part of the surface's geometry, which is why this sits outside
+        /// `updateSurfaceGeometry`'s change gate: a window's occlusion moves with no size, scale, screen,
+        /// or window change at all. Ghostty's render thread stops rebuilding cells while a surface is
+        /// occluded and its draw returns early, so a surface left latched occluded goes on presenting the
+        /// cells it last built while frames keep applying underneath it — the pane freezes at a stale
+        /// picture with a live session behind it, until something happens to change its geometry.
+        ///
+        /// Pushed only on a change because pushing wakes the render thread, and this runs on the
+        /// per-frame geometry pass: pushing every time would defeat the presentation cadence
+        /// `scheduleSurfacePresentationRefresh` exists to hold. Coming back visible schedules a present
+        /// because the render thread's own draw on that transition is skipped under vsync, which would
+        /// leave the cells it rebuilds unpresented.
+        private func updateSurfaceOcclusion() {
+            guard let surface = mirrorSurface() else { return }
+            let visible = window?.occlusionState.contains(.visible) ?? true
+            guard visible != lastPushedSurfaceOcclusion else { return }
+            lastPushedSurfaceOcclusion = visible
+            debugSurfaceOcclusionPushCount += 1
+            ghostty_surface_set_occlusion(surface, visible)
+            if visible { scheduleSurfacePresentationRefresh() }
         }
 
         private func backingPixelSize() -> (width: UInt32, height: UInt32)? {
@@ -831,44 +918,97 @@
             let identity = appliedRenderFrameIdentity(for: frame)
             guard identity != lastAppliedRenderFrameIdentity else { return }
             if let debugRenderFrameApplyHandler {
-                guard debugRenderFrameApplyHandler(frame, renderStateKey) else { return }
+                guard debugRenderFrameApplyHandler(frame, renderStateKey) else {
+                    scheduleFrameApplyRetry(for: identity)
+                    return
+                }
                 lastAppliedRenderFrameIdentity = identity
+                frameApplyRetry = nil
                 debugRenderFrameApplyCount += 1
                 return
             }
             guard let mirror else { return }
             updateSurfaceGeometry()
             let applyStartedAt = Date()
-            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
+            // The draw-free apply: this view presents on its own cadence (see
+            // `scheduleSurfacePresentationRefresh`), so the applying call must not block on the swap
+            // chain for a present nothing here consumes.
+            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame_no_draw(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-            let attributes = GhosttyRenderFrameMetrics.attributes(
-                frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
-                targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
-            SpacesDeviceTerminalPerformanceLogger.emit(
-                .init(
-                    sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,
-                    attributes: attributes))
-            TerminalPerformance.logMetric(
-                "terminal_render_frame_mirror_apply", target: "session=\(launchConfiguration.sessionID)", elapsedMS: applyMS, success: applied,
-                detail: GhosttyRenderFrameMetrics.detailString(attributes))
+            // Built only when something is listening: this runs once per applied frame, and the
+            // dictionary plus its sorted-and-joined detail string cost more than the frame's own apply.
+            let deviceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            if deviceLoggingEnabled || TerminalPerformance.isEnabled {
+                let attributes = GhosttyRenderFrameMetrics.attributes(
+                    frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
+                    targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
+                if deviceLoggingEnabled {
+                    SpacesDeviceTerminalPerformanceLogger.emit(
+                        .init(
+                            sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,
+                            attributes: attributes))
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_render_frame_mirror_apply", target: "session=\(launchConfiguration.sessionID)", elapsedMS: applyMS, success: applied,
+                    detail: GhosttyRenderFrameMetrics.detailString(attributes))
+            }
             guard applied else {
                 fputs("spaces: ghostty mirror frame apply failed for session \(launchConfiguration.sessionID)\n", stderr)
+                scheduleFrameApplyRetry(for: identity)
                 return
             }
             lastAppliedRenderFrameIdentity = identity
-            GhosttyMirrorAppService.shared.tick()
-            presentSurfaceNow()
+            frameApplyRetry = nil
             GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
-            surfaceHostView.displayIfNeeded()
-            window?.displayIfNeeded()
             scheduleSurfacePresentationRefresh()
         }
 
+        /// Re-offers a frame the surface refused.
+        ///
+        /// A refused frame records no applied identity, so nothing in this view ever comes back to it on
+        /// its own: later frames are deduped against the last *applied* one, and an idle session sends no
+        /// later frame at all. Without this the pane would sit at the last picture that did apply while
+        /// its session went on running underneath — the same freeze an occluded surface produces, reached
+        /// a different way. Each frame gets its own retry budget, so a newer frame is never held back by
+        /// an older one having exhausted its own.
+        private func scheduleFrameApplyRetry(for identity: AppliedRenderFrameIdentity) {
+            var retry = frameApplyRetry ?? FrameApplyRetry(identity: identity, attempts: 0)
+            if retry.identity != identity { retry = FrameApplyRetry(identity: identity, attempts: 0) }
+            guard retry.attempts < Self.frameApplyRetryLimit else { return }
+            retry.attempts += 1
+            frameApplyRetry = retry
+            guard pendingFrameApplyRetryTask == nil else { return }
+            pendingFrameApplyRetryTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(16))
+                guard let self, !Task.isCancelled else { return }
+                self.pendingFrameApplyRetryTask = nil
+                self.applyLatestFrameIfPossible()
+            }
+        }
+
+        /// Presents whatever the mirror last applied, once per display interval at most.
+        ///
+        /// A mirror surface is driven entirely from the outside: nothing in it decides when to paint on
+        /// its own. Applying a frame updates the surface's terminal state and nothing else: building
+        /// cells is a separate step that runs on the render thread only when woken by
+        /// `ghostty_surface_refresh`. This refresh is what presents an applied frame: it wakes the
+        /// rebuild and draws its result, roughly 16&nbsp;ms after the apply that needed it. It is
+        /// *deferred* rather than run inline because `ghostty_surface_draw` blocks on the swap chain,
+        /// and a session under steady output flushes faster than the display refreshes, so an inline
+        /// present per applied frame would accumulate those waits into multi-second stalls. The apply
+        /// itself takes the draw-free entry point for the same reason: its draw would present the
+        /// previously built cells (a frame this cadence replaces) at the price of one more GPU wait.
+        ///
+        /// A pending refresh is therefore left alone rather than cancelled and rescheduled: rescheduling
+        /// per apply is what would let a steady producer push the refresh past every frame it was meant
+        /// to cover. The last frame of a burst is always presented: it either finds no pending task and
+        /// schedules one, or finds one that has not run yet and will build and draw the surface it just
+        /// applied to.
         private func scheduleSurfacePresentationRefresh() {
-            pendingSurfacePresentationTask?.cancel()
+            guard pendingSurfacePresentationTask == nil else { return }
             pendingSurfacePresentationTask = Task { @MainActor [weak self] in
-                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(16))
                 guard let self, !Task.isCancelled else { return }
                 self.pendingSurfacePresentationTask = nil
                 guard let surface = self.mirrorSurface() else { return }
@@ -878,13 +1018,8 @@
                 self.surfaceHostView.needsDisplay = true
                 self.surfaceHostView.displayIfNeeded()
                 self.window?.displayIfNeeded()
+                self.debugSurfacePresentationCount += 1
             }
-        }
-
-        private func presentSurfaceNow() {
-            guard let surface = mirrorSurface() else { return }
-            ghostty_surface_refresh(surface)
-            ghostty_surface_draw(surface)
         }
 
         private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {

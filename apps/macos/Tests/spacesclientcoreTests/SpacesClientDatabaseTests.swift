@@ -91,9 +91,12 @@ final class SpacesClientDatabaseTests: XCTestCase {
         }
 
         // The failed open must not have touched the file: restoring the marker (no data rewrite)
-        // reveals the paired-device row is exactly as it was left.
+        // reveals the paired-device row is exactly as it was left. The marker goes back to the version
+        // the file is actually at, so reopening reads it rather than migrating a current-shape schema.
         try withRawSQLiteConnection(path: path) { handle in
-            XCTAssertEqual(sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (1);", nil, nil, nil), SQLITE_OK)
+            XCTAssertEqual(
+                sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (\(SpacesClientDatabase.currentVersion));", nil, nil, nil),
+                SQLITE_OK)
         }
         let reopened = try SpacesClientDatabase(path: path)
         XCTAssertEqual(try reopened.pairedDevice(id: record.id), record)
@@ -460,34 +463,188 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-b")
     }
 
-    // A version-1 database (this build's first shipped schema) upgrades to version 2 by adding the
-    // terminal owner client id table while carrying every existing row forward untouched.
+    // A version-1 database (this build's first shipped schema) reaches the current version through
+    // every intermediate step, carrying its paired-device row forward untouched and gaining the
+    // terminal owner client id table the 1 -> 2 step adds.
     func testMigratesVersionOneDatabaseToTerminalOwnerClientIDs() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let path = root.appendingPathComponent("spaces-client.db").path
+        let path = try temporaryDatabasePath()
 
-        // Open at version 1 with no migration steps and seed a device. `createSchema` writes the whole
-        // current schema, so drop the terminal table by hand to reproduce a genuine pre-version-2
-        // on-disk database that lacks it.
-        let versionOne = try SpacesClientDatabase(path: path, currentVersion: 1, migrationSteps: [])
-        let record = device(id: "device-carried-forward")
-        try versionOne.upsert(device: record)
+        // `createSchema` writes the whole current schema, so the pre-version-2 shape is reproduced by
+        // hand: drop the terminal table, and put `paired_devices` back in its single-host form.
+        _ = try SpacesClientDatabase(path: path, currentVersion: 1, migrationSteps: [])
         try withRawSQLiteConnection(path: path) { handle in
             XCTAssertEqual(sqlite3_exec(handle, "DROP TABLE terminal_owner_client_ids;", nil, nil, nil), SQLITE_OK)
+            try seedSingleHostPairedDevice(handle: handle, id: "device-carried-forward", host: "studio.local")
         }
 
-        // Reopening at the current version runs the 1 -> 2 step, which recreates the table.
         let upgraded = try SpacesClientDatabase(path: path)
-        XCTAssertEqual(try upgraded.pairedDevice(id: record.id), record)
+        XCTAssertEqual(try upgraded.pairedDevice(id: "device-carried-forward"), device(id: "device-carried-forward"))
         try upgraded.setTerminalOwnerClientID(deviceID: "local", sessionID: "session-1", clientID: "client-a")
         XCTAssertEqual(try upgraded.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-a")
     }
 
+    // A version-2 database stored exactly one address per device. Upgrading turns it into that
+    // device's single candidate, with no address proven yet, and leaves every other field alone.
+    func testMigratesVersionTwoDatabaseToHostCandidateList() throws {
+        let path = try temporaryDatabasePath()
+
+        _ = try SpacesClientDatabase(path: path, currentVersion: 2, migrationSteps: [])
+        try withRawSQLiteConnection(path: path) { handle in
+            try seedSingleHostPairedDevice(handle: handle, id: "device-carried-forward", host: "studio.local")
+        }
+
+        let upgraded = try SpacesClientDatabase(path: path)
+        let migrated = try XCTUnwrap(try upgraded.pairedDevice(id: "device-carried-forward"))
+        XCTAssertEqual(migrated.hosts, ["studio.local"])
+        XCTAssertNil(migrated.activeHost)
+        XCTAssertEqual(migrated, device(id: "device-carried-forward"))
+    }
+
+    func testActiveHostIsRecordedWithoutReorderingTheDeviceList() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["192.168.1.24", "100.86.197.104"]
+        try database.upsert(device: record)
+
+        try database.setActiveHost(deviceID: record.id, host: "100.86.197.104")
+
+        let stored = try XCTUnwrap(try database.pairedDevice(id: record.id))
+        XCTAssertEqual(stored.activeHost, "100.86.197.104")
+        XCTAssertEqual(stored.dialHost, "100.86.197.104")
+        XCTAssertEqual(stored.hosts, ["192.168.1.24", "100.86.197.104"])
+        // Proving an address is not the user selecting the device, and `last_selected_at` orders the
+        // device list, so it must be left where it was.
+        XCTAssertEqual(stored.lastSelectedAt, record.lastSelectedAt)
+        XCTAssertNotEqual(stored.updatedAt, record.updatedAt)
+    }
+
+    // The daemon's current view is the fresh truth: its addresses lead, in its own order, and an
+    // address only this client still remembers is demoted behind them rather than dropped.
+    func testMergingAdvertisedHostsLeadsWithDaemonOrderAndDemotesStaleStoredAddresses() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["studio.local", "192.168.1.24"]
+        try database.upsert(device: record)
+
+        let merged = try XCTUnwrap(try database.mergeAdvertisedHosts(deviceID: record.id, advertised: ["192.168.1.24", "100.86.197.104"]))
+
+        XCTAssertEqual(merged.hosts, ["192.168.1.24", "100.86.197.104", "studio.local"])
+        XCTAssertEqual(merged.dialHost, "192.168.1.24")
+        XCTAssertEqual(try database.pairedDevice(id: record.id)?.hosts, merged.hosts)
+    }
+
+    func testMergingAdvertisedHostsTrimsWhitespaceAndDropsEmptyEntries() throws {
+        let database = try makeTemporaryClientDatabase()
+        try database.upsert(device: device(id: "device-1"))
+
+        let merged = try XCTUnwrap(try database.mergeAdvertisedHosts(deviceID: "device-1", advertised: ["  100.86.197.104 ", "", "   "]))
+
+        XCTAssertEqual(merged.hosts, ["100.86.197.104", "studio.local"])
+    }
+
+    // An empty advertised list means the daemon reported nothing, not that it has no addresses.
+    func testMergingAnEmptyAdvertisedListLeavesStoredHostsUntouched() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["studio.local", "192.168.1.24"]
+        try database.upsert(device: record)
+
+        let merged = try XCTUnwrap(try database.mergeAdvertisedHosts(deviceID: record.id, advertised: []))
+
+        XCTAssertEqual(merged.hosts, ["studio.local", "192.168.1.24"])
+    }
+
+    // The cap trims from the tail and the daemon's own addresses lead, so every address it currently
+    // reports survives and only the stored leftovers are dropped.
+    func testMergingAdvertisedHostsCapsTheListByDroppingStoredLeftovers() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["stored-1", "stored-2", "stored-3", "stored-4"]
+        try database.upsert(device: record)
+
+        let merged = try XCTUnwrap(
+            try database.mergeAdvertisedHosts(deviceID: record.id, advertised: ["daemon-1", "daemon-2", "daemon-3", "daemon-4"]))
+
+        XCTAssertEqual(merged.hosts, ["daemon-1", "daemon-2", "daemon-3", "daemon-4", "stored-1", "stored-2"])
+        XCTAssertEqual(merged.hosts.count, SpacesPairedDeviceRecord.maxHostCandidates)
+    }
+
+    // Learning new addresses must not throw away the address a connection already proved: while it
+    // survives the merge, the next connect still dials it first.
+    func testMergingAdvertisedHostsKeepsTheProvenAddressActive() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["studio.local", "192.168.1.24"]
+        record.activeHost = "192.168.1.24"
+        try database.upsert(device: record)
+
+        let merged = try XCTUnwrap(try database.mergeAdvertisedHosts(deviceID: record.id, advertised: ["100.86.197.104"]))
+
+        XCTAssertEqual(merged.hosts, ["100.86.197.104", "studio.local", "192.168.1.24"])
+        XCTAssertEqual(merged.activeHost, "192.168.1.24")
+        XCTAssertEqual(merged.dialHost, "192.168.1.24")
+    }
+
+    // A proven address the daemon no longer reports is a stored leftover, so the cap can trim it away;
+    // the record then stops claiming an active host and the next connect re-evaluates from the top.
+    func testMergingAdvertisedHostsClearsAnActiveHostItTrimmedAway() throws {
+        let database = try makeTemporaryClientDatabase()
+        var record = device(id: "device-1")
+        record.hosts = ["stored-1", "stored-2"]
+        record.activeHost = "stored-2"
+        try database.upsert(device: record)
+
+        let advertised = ["daemon-1", "daemon-2", "daemon-3", "daemon-4", "daemon-5", "daemon-6"]
+        let merged = try XCTUnwrap(try database.mergeAdvertisedHosts(deviceID: record.id, advertised: advertised))
+
+        XCTAssertEqual(merged.hosts, advertised)
+        XCTAssertNil(merged.activeHost)
+        XCTAssertEqual(merged.dialHost, "daemon-1")
+        XCTAssertNil(try database.pairedDevice(id: record.id)?.activeHost)
+    }
+
+    func testMergingAdvertisedHostsReportsNoRecordForAnUnknownDevice() throws {
+        let database = try makeTemporaryClientDatabase()
+        XCTAssertNil(try database.mergeAdvertisedHosts(deviceID: "missing", advertised: ["studio.local"]))
+    }
+
+    /// Writes `paired_devices` in its pre-version-3 shape (one `host` column) carrying one row, so a
+    /// migration test starts from a genuine on-disk layout rather than the current schema.
+    private func seedSingleHostPairedDevice(handle: OpaquePointer, id: String, host: String) throws {
+        let sql = """
+            DROP TABLE paired_devices;
+            CREATE TABLE paired_devices (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              platform TEXT NOT NULL,
+              host TEXT NOT NULL,
+              port INTEGER NOT NULL,
+              certificate_fingerprint TEXT NOT NULL,
+              ssh_host TEXT,
+              ssh_user TEXT,
+              ssh_port INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_selected_at TEXT
+            );
+            INSERT INTO paired_devices VALUES (
+              '\(id)', 'Studio Mac', 'macos', '\(host)', 7443, 'SHA256:abc', 'studio.local', 'yogesh', 22,
+              '2026-06-17T00:00:00Z', '2026-06-17T00:00:00Z', '2026-06-17T00:01:00Z'
+            );
+            """
+        XCTAssertEqual(sqlite3_exec(handle, sql, nil, nil, nil), SQLITE_OK, String(cString: sqlite3_errmsg(handle)))
+    }
+
+    private func temporaryDatabasePath() throws -> String {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root.appendingPathComponent("spaces-client.db").path
+    }
+
     private func device(id: String) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
-            id: id, name: "Studio Mac", platform: "macos", host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc",
+            id: id, name: "Studio Mac", platform: "macos", hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc",
             sshHost: "studio.local", sshUser: "yogesh", sshPort: 22, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
     }

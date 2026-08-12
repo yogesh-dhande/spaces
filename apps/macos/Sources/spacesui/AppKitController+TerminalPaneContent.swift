@@ -44,7 +44,7 @@ extension AppKitController {
         guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
         presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
             guard let self, let request else { return }
-            self.panelCoordinator.openOrFocusTerminalPane(request)
+            self.panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
         }
     }
 
@@ -121,11 +121,19 @@ extension AppKitController {
     /// terminal-session keep-set so dead sessions drop before the panel materializes. Uses the same
     /// contract as live pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell
     /// survives relaunch exactly as it survives a live overview refresh.
-    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String) -> PanelLayout? {
+    /// - Parameter additionalKeepSessionIDs: Sessions this particular restoration must not prune, beyond
+    ///   the recorded holds. A replacement's open restores the panel itself, and when it is processed
+    ///   before its predecessor's close there is no hold yet: the open passes its own predecessor here so
+    ///   it protects the pane it is about to claim whichever order the two messages arrive in. Scoped to
+    ///   the call rather than recorded, so `panesHeldForReplacement` keeps meaning only what the daemon
+    ///   asked the client to hold.
+    func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String, additionalKeepSessionIDs: Set<String> = []) -> PanelLayout? {
         guard let json = try? clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
             let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(json.utf8)), layout.version == PanelLayout.currentVersion
         else { return nil }
-        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overview: overview(forWorkspaceID: workspaceID))
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
+            overview: overview(forWorkspaceID: workspaceID),
+            heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement.union(additionalKeepSessionIDs))
         return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
     }
 }
@@ -169,12 +177,39 @@ extension AppKitController {
     /// its session to, so an unreachable device's panes stay pending for the outage even
     /// though it keeps its overview — and because the record is only ever deferred, its
     /// panes are never pruned against a catalog the outage made unavailable.
+    /// Points a still-pending global panel window's persisted pane at a replacement session.
+    ///
+    /// A window whose devices are not all loaded is deferred rather than restored, so a restart of a
+    /// process whose pane lives there has no in-memory placement for the ordinary claim to retarget. The
+    /// same `PanelLayoutEngine.retargetPane` runs against the record's stored layout instead, so the pane
+    /// keeps its window, tab, and split and comes back carrying the replacement once the window restores.
+    /// Answers false when no pending record holds that session, leaving the caller on its install path.
+    func retargetPendingPanelWindowPane(replacing oldSessionID: String, with content: PaneContentDescriptor) -> Bool {
+        if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
+        guard let pending = pendingPanelWindowRestores else { return false }
+        let decoder = JSONDecoder()
+        for (index, record) in pending.enumerated() {
+            guard let layout = try? decoder.decode(PanelLayout.self, from: Data(record.layoutJSON.utf8)),
+                let paneID = PanelLayoutEngine.allPanes(in: layout).first(where: { $0.content.terminalSessionID == oldSessionID })?.id
+            else { continue }
+            let retargeted = PanelLayoutEngine.retargetPane(paneID: paneID, to: content, in: layout)
+            guard let json = try? JSONEncoder().encode(retargeted) else { return false }
+            let updated = SpacesClientDatabase.PanelWindowRecord(
+                id: record.id, layoutJSON: String(decoding: json, as: UTF8.self), frame: record.frame)
+            pendingPanelWindowRestores?[index] = updated
+            try? clientDatabase().upsertPanelWindow(updated)
+            return true
+        }
+        return false
+    }
+
     func reopenPersistedPanelWindowsIfPossible() {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }
         let readySections = deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
-        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overviews: readySections.map(\.overview))
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(
+            overviews: readySections.map(\.overview), heldForReplacementSessionIDs: panelCoordinator.sessionIDsHeldForReplacement)
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
             switch Self.panelWindowRestoreDecision(
@@ -203,10 +238,6 @@ extension AppKitController {
         /// picking it starts the process via the Device API and completes with the resulting
         /// session's open request. Mirrors `DeviceWindowShortcutResolution.runProcess`.
         case startProcess(workspaceID: String, processKey: String, processTemplateID: String?)
-        /// An agent launcher that hasn't been started: picking it launches the agent via the
-        /// Device API and completes with the resulting session's open request. Mirrors
-        /// `DeviceWindowShortcutResolution.runCodingAgent`.
-        case startCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
     }
 
     /// Presents the command palette in session-picker mode for filling a pane split or
@@ -244,19 +275,6 @@ extension AppKitController {
                         await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
                             try SpacesDeviceClient.runWorkspaceProcess(
                                 workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                        })
-                }
-            case .startCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-                guard let self else {
-                    completion(nil)
-                    return
-                }
-                Task { @MainActor in
-                    completion(
-                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
-                            try SpacesDeviceClient.runCodingAgent(
-                                workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
                                 clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                         })
                 }
@@ -317,7 +335,7 @@ extension AppKitController {
     /// Live and exited targets resolve to an open request exactly as
     /// `windowShortcutTargetResolution` does — an exited target intentionally still shows,
     /// so picking it reproduces its sidebar row's ended-state pane. Not-started configured
-    /// processes and agent launchers carry a start choice and are always listed.
+    /// processes carry a start choice and are always listed.
     /// `nonisolated static` so it's testable without a live `AppKitController`.
     nonisolated static func sessionPickerPresentation(
         newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?, scopedWorkspaces: [SessionPickerWorkspaceContext],
@@ -360,10 +378,8 @@ extension AppKitController {
                 configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindowRecords)
             let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
             let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindowRecords)
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindowRecords)
             let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindowRecords, trackedWindows: windows)
-            let configuredAgentByName = Dictionary(uniqueKeysWithValues: settings.agentLaunchers.map { ($0.name, $0) })
 
             for (offset, target) in shortcutTargets.enumerated() {
                 // Browser targets can't live in a terminal pane, so the picker never offers them.
@@ -389,11 +405,6 @@ extension AppKitController {
                     label = processKey
                     detailText = nil
                     status = .idle
-                case .agentLauncher:
-                    guard let launcherName = target.launcherName else { continue }
-                    label = launcherName
-                    detailText = configuredAgentByName[launcherName]?.command
-                    status = .none
                 case .agent:
                     guard let agentWindow = target.agentWindow else { continue }
                     label = agentWindow.label?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
@@ -409,8 +420,6 @@ extension AppKitController {
                     choice = .existingSession(request)
                 case .runProcess(let ws, let processKey, let processTemplateID):
                     choice = .startProcess(workspaceID: ws, processKey: processKey, processTemplateID: processTemplateID)
-                case .runCodingAgent(let ws, let agentName, let agentLauncherID):
-                    choice = .startCodingAgent(workspaceID: ws, agentName: agentName, agentLauncherID: agentLauncherID)
                 case .openURL, .noWorkspace, .noMatch: continue
                 }
 

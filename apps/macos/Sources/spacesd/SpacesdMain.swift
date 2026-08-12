@@ -426,6 +426,14 @@ enum SpacesDaemonErrorClassification {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
+        // First, before anything concurrent exists: the trim reads, truncates, and rewrites the daemon's
+        // own launchd-redirected stdout/stderr files, and that sequence is only atomic against other
+        // writers by not having any. Here no server, Device API, or timer has started, so nothing else
+        // can append mid-trim; moved any later, a request handler's diagnostic write could land between
+        // the tail snapshot and the rewrite and be lost.
+        #if os(macOS)
+            trimOversizedRuntimeLogs()
+        #endif
         // Startup is the one lifecycle transition NOT excluded against teardown (issue #391). A signal
         // landing in the adoption suspension below runs `shutdownOnce()` concurrently, so cores adopted
         // after its engine snapshot escape termination and `startSharedServices()` can restart services
@@ -460,6 +468,11 @@ enum SpacesDaemonErrorClassification {
         // mutation (including the handoff-resume inserts that ran before this), so there is nothing to seed
         // here — and reading `sessionCores` from this main-actor context would be an illegal sync wait on
         // the engine actor.
+        // Installed before either server accepts a request: the orchestrator a request builds resolves
+        // these overrides at construction time, so a request that lands before the install would run
+        // against the no-op defaults (a nil foreground sample reads as a bare shell, a handoff reads as
+        // not in progress).
+        installProcessWideOrchestratorHooks()
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
@@ -472,11 +485,11 @@ enum SpacesDaemonErrorClassification {
     /// filesystem/process state into the database; `databaseDidChange` reconciles
     /// their watcher/observer sets when projects or running processes change.
     private func startDeviceRuntimeServices() {
-        installProcessWideOrchestratorHooks()
         guard let databasePath = try? DatabaseLocator.defaultPath() else {
             writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
             return
         }
+        sweepOrphanedWorkspaceSetupDirectories(databasePath: databasePath)
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
@@ -593,6 +606,38 @@ enum SpacesDaemonErrorClassification {
         } catch { writeStandardError("spacesd automation_service_error error=\(error)\n") }
     }
 
+    /// One-shot startup maintenance: removes `workspace-setup` run directories that no longer belong
+    /// to any workspace in the store (see `WorkspaceSetupDirectorySweep`, issue #423). Best-effort —
+    /// this is diagnostic-file cleanup, not part of the daemon's operational path, so a failure here
+    /// only gets logged.
+    private func sweepOrphanedWorkspaceSetupDirectories(databasePath: String) {
+        do {
+            let store = try SQLiteStore(path: databasePath)
+            let knownWorkspaceIDs = Set(try store.projects().flatMap { project in try store.workspaces(projectID: project.id).map(\.id) })
+            let setupDirectory = URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true).appendingPathComponent(
+                "workspace-setup", isDirectory: true
+            ).path
+            WorkspaceSetupDirectorySweep.sweep(workspaceSetupDirectory: setupDirectory, knownWorkspaceIDs: knownWorkspaceIDs)
+        } catch { writeStandardError("spacesd workspace_setup_sweep_error error=\(error)\n") }
+    }
+
+    #if os(macOS)
+        /// One-shot startup maintenance: trims launchd's stdout/stderr redirects back to a bounded tail
+        /// once either exceeds `RuntimeLogTrimming.maximumSizeBeforeTrimBytes` (issue #469) — nothing
+        /// else ever rotates them, so they otherwise grow for the life of the profile. Only macOS runs
+        /// spacesd under launchd, so this is macOS-only. `TerminalPerformance`'s perf.log has the same
+        /// unbounded-growth problem but is deliberately excluded: it is not written through an O_APPEND
+        /// descriptor, so `RuntimeLogTrimming`'s in-place-truncate safety argument does not hold for it
+        /// (see that type's doc comment).
+        private func trimOversizedRuntimeLogs() {
+            guard let runtimeDirectory = try? SpacesProfile.current().runtimeDirectory else { return }
+            let runtimeDirectoryURL = URL(fileURLWithPath: runtimeDirectory, isDirectory: true)
+            for name in ["spacesd.launchd.out.log", "spacesd.launchd.err.log"] {
+                RuntimeLogTrimming.trimIfOversized(path: runtimeDirectoryURL.appendingPathComponent(name, isDirectory: false).path)
+            }
+        }
+    #endif
+
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()
         remoteAgentWatchService?.reconcile()
@@ -624,6 +669,13 @@ enum SpacesDaemonErrorClassification {
         }
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
             TerminalEngineActor.runSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
+        }
+        // The conditional ad-hoc stop (`stopWorkspaceTerminalIfBareShell`) reads a session's foreground
+        // through this rather than from persisted runtime state, whose foreground sample can be a second
+        // old, long enough for a command the user launched right before closing the pane to be invisible
+        // to a decision that would then kill it.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalForegroundProcessSampler { [weak self] sessionID in
+            TerminalEngineActor.runSynchronously { self?.currentForegroundReading(sessionID: sessionID) }
         }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
         // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
@@ -1953,6 +2005,18 @@ enum SpacesDaemonErrorClassification {
             daemonHandoffInProgress: { [weak self] in self?.handoffInProgress ?? false })
         _ = try orchestrator.syncConfig()
         return orchestrator
+    }
+
+    /// The live foreground process of a session this daemon hosts, paired with whether the session's own
+    /// shell is holding any child process. A session it does not host answers nil, which the conditional
+    /// stop reads as nothing left to protect. A hosted session whose foreground pid cannot be inspected (a
+    /// zombie process-group leader in the instant before the shell reaps it) still answers with a reading
+    /// whose `process` is nil, so the child check below keeps standing on its own instead of being skipped
+    /// along with the unreadable foreground.
+    @TerminalEngineActor private func currentForegroundReading(sessionID: String) -> BuiltInTerminalForegroundReading? {
+        guard let core = sessionCores[sessionID] else { return nil }
+        let shellHasChildProcesses = core.childPID().map { TerminalForegroundProcessInspector.hasChildProcesses(pid: $0) } ?? false
+        return BuiltInTerminalForegroundReading(process: core.currentForegroundProcess(), shellHasChildProcesses: shellHasChildProcesses)
     }
 
     @TerminalEngineActor private func terminateBuiltInTerminalSession(id sessionID: String) {

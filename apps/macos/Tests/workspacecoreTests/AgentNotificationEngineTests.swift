@@ -60,7 +60,8 @@ final class AgentNotificationEngineTests: XCTestCase {
     }
 
     /// When the kind resolver yields nothing (no session files to classify), the `(<kind>)` parenthetical
-    /// falls back to `coding agent`, and the label falls back to that same value when the agent has none.
+    /// falls back to `coding agent`; the label is the row's stored name, which registration materializes
+    /// as "Coding Agent" for an agent that reports none.
     func testImmediateInjectionFallsBackToCodingAgentKindWhenUnresolved() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -78,7 +79,7 @@ final class AgentNotificationEngineTests: XCTestCase {
             recorder.delivered.map(\.line),
             [
                 """
-                [spaces] coding agent (coding agent) is blocked
+                [spaces] Coding Agent (coding agent) is blocked
                   project: Project
                   workspace: \(workspace.dir)
                   session: child-session

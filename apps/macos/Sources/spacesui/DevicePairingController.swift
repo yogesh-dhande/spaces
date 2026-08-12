@@ -366,7 +366,7 @@ import workspacecore
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
-                "Enter the SSH details for a Mac or Linux device. Install Spaces on the device first: the Spaces app on a Mac, or the Spaces installer on Ubuntu 24.04."
+                "Enter the SSH details for a Mac or Linux device. A Mac needs the Spaces app installed and opened once; an Ubuntu 24.04 device without Spaces is installed over SSH as part of connecting."
             ))
 
         let sshHostField = NSTextField()
@@ -438,8 +438,9 @@ import workspacecore
         return mobilePanelSection(icon: "link.badge.plus", title: "Add Remote Device", rows: rows)
     }
 
-    /// The recovery block shown after a pairing attempt reports Spaces is missing on a Linux device: the
-    /// pinned install one-liner (copyable) plus a button to run it over SSH and pair. Visibility and content
+    /// The recovery block shown once a pairing attempt reports Spaces is missing on a Linux device: the
+    /// pinned install one-liner (copyable) plus a button that retries the SSH install the attempt already
+    /// started automatically, so a failed install leaves both a manual and a one-click path. Visibility and content
     /// derive from `remoteDeviceLinuxInstallCommand`/`isInstallingRemoteSpaces` so a panel rebuild restores
     /// the block exactly; the flows also toggle the retained views directly to avoid a status-wiping re-render.
     private func remoteDeviceInstallSection() -> NSView {
@@ -648,40 +649,31 @@ import workspacecore
         // so it only reappears if this attempt again finds Spaces missing.
         remoteDeviceLinuxInstallCommand = nil
         remoteDeviceInstallBlock?.isHidden = true
-        let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let nameText = remoteDeviceNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
-        let deviceName = Host.current().localizedName ?? "Mac"
-        let appVersion = AppVersion.short
+        let request: SpacesRemoteDevicePairingRequest
+        do { request = try remoteDevicePairingRequestFromPanelFields() } catch {
+            setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
+            return
+        }
         setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
-                let sshPort = try Self.parsedSSHPort(sshPortText)
-                let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
-                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.pairRemoteDevice(
-                        SpacesRemoteDevicePairingRequest(
-                            sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
-                            clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, customName: Self.normalizedPanelField(nameText), profile: profile))
-                }.value
+                let result = try await Task.detached(priority: .userInitiated) { try SpacesDevicePairingClient.pairRemoteDevice(request) }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
             } catch {
                 guard let self else { return }
-                // A Linux device without Spaces installed carries the pinned install one-liner: surface the
-                // recovery block so the user can install over SSH (or copy the command) instead of only an error.
-                if case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(let message, let linuxInstallCommand) = error,
-                    let command = linuxInstallCommand
+                // A Linux device without Spaces installed carries the pinned install one-liner, so connecting
+                // continues straight into installing it over SSH and pairing. The recovery block is surfaced
+                // first so a failed install still leaves the command copyable and the button there to retry.
+                if case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error, let command = linuxInstallCommand
                 {
                     self.remoteDeviceLinuxInstallCommand = command
                     self.remoteDeviceInstallCommandField?.stringValue = command
                     self.remoteDeviceInstallBlock?.isHidden = false
-                    self.setRemoteDevicePairingStatus(message, isError: true)
+                    self.runRemoteInstallAndPair(
+                        request: request,
+                        statusMessage: "Spaces isn't installed on \(request.sshHost). Installing it over SSH... This can take a few minutes.")
                 } else {
                     self.remoteDeviceLinuxInstallCommand = nil
                     self.remoteDeviceInstallBlock?.isHidden = true
@@ -691,37 +683,38 @@ import workspacecore
         }
     }
 
-    /// Runs the pinned Linux installer on the remote host over SSH (up to ten minutes) and then pairs, the
-    /// recovery for a pairing attempt that reported Spaces missing. Reads and validates the SSH fields exactly
-    /// like `connectRemoteDeviceFromPairingPanel`. While it runs, the install and Connect buttons are disabled
-    /// and the spinner spins; on success the block is cleared and the Devices pane refreshes like the connect
-    /// success path, and on failure the block stays so the command remains copyable.
+    /// Retries the SSH install after the automatic run that connecting starts failed, so the user is never
+    /// left with only a copyable command. Reads the SSH fields again, since they stay editable while the
+    /// install block is showing.
     func installSpacesOnRemoteDevice() {
+        let request: SpacesRemoteDevicePairingRequest
+        do { request = try remoteDevicePairingRequestFromPanelFields() } catch {
+            setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
+            return
+        }
+        runRemoteInstallAndPair(request: request, statusMessage: "Installing Spaces on \(request.sshHost)... This can take a few minutes.")
+    }
+
+    /// Runs the pinned Linux installer on the remote host over SSH (up to ten minutes) and then pairs. Shared
+    /// by the automatic run that a pairing attempt starts when it finds Spaces missing on a Linux device and
+    /// by the "Install Spaces over SSH" button that retries it. While it runs, the install and Connect buttons
+    /// are disabled and the spinner spins; on success the block is cleared and the Devices pane refreshes like
+    /// the connect success path, and on failure the block stays so the command remains copyable and retryable.
+    ///
+    /// The in-progress guard lives here rather than on the callers: it is the single entry point for both, and
+    /// the Connect button it disables is what would otherwise start a second overlapping run.
+    private func runRemoteInstallAndPair(request: SpacesRemoteDevicePairingRequest, statusMessage: String) {
         guard !isInstallingRemoteSpaces else { return }
-        let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let nameText = remoteDeviceNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
-        let deviceName = Host.current().localizedName ?? "Mac"
-        let appVersion = AppVersion.short
         isInstallingRemoteSpaces = true
         remoteDeviceInstallButton?.isEnabled = false
         remoteDeviceConnectButton?.isEnabled = false
         remoteDeviceInstallSpinner?.isHidden = false
         remoteDeviceInstallSpinner?.startAnimation(nil)
-        setRemoteDevicePairingStatus("Installing Spaces on \(sshHostText)... This can take a few minutes.", isError: false)
+        setRemoteDevicePairingStatus(statusMessage, isError: false)
         Task { [weak self] in
             do {
-                let sshPort = try Self.parsedSSHPort(sshPortText)
-                let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
-                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(
-                        SpacesRemoteDevicePairingRequest(
-                            sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
-                            clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, customName: Self.normalizedPanelField(nameText), profile: profile))
+                    try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request)
                 }.value
                 guard let self else { return }
                 self.isInstallingRemoteSpaces = false
@@ -741,6 +734,22 @@ import workspacecore
                 self.setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
             }
         }
+    }
+
+    /// Builds a pairing request from the panel's SSH fields, shared by the connect and install flows so both
+    /// read and validate the form identically. Throws when the optional port field holds an invalid port,
+    /// which the callers report in the same red status style as any other pairing failure.
+    private func remoteDevicePairingRequestFromPanelFields() throws -> SpacesRemoteDevicePairingRequest {
+        let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nameText = remoteDeviceNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
+        return SpacesRemoteDevicePairingRequest(
+            sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: try Self.parsedSSHPort(sshPortText),
+            clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(profile: profile),
+            clientBundleID: Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces", clientDeviceName: Host.current().localizedName ?? "Mac",
+            clientAppVersion: AppVersion.short, customName: Self.normalizedPanelField(nameText), profile: profile)
     }
 
     /// Copies the pinned install one-liner to the pasteboard. Inlined because `AppKitController.copyToPasteboard`
@@ -823,6 +832,7 @@ import workspacecore
             let database = try host.clientDatabase()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
+            host.forgetDaemonUpdateProgress(deviceID: deviceID)
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
@@ -876,8 +886,8 @@ import workspacecore
         let remote = host.macPairedDevices().map {
             let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
-                id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
-                isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
+                id: $0.id, name: $0.name, host: $0.dialHost, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort,
+                isLocal: false, isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
         }
         return [local] + remote
     }
@@ -886,7 +896,11 @@ import workspacecore
         var parts: [String] = []
         if device.requiresReconnect { parts.append("Reconnect required") }
         if let host = device.host, let port = device.port {
-            parts.append("\(host):\(port)")
+            // A remote device is reachable at several addresses; the one shown is the address it is
+            // currently dialed at (proven, or the preferred candidate until one is proven), labeled by
+            // network path the way the iOS device list and the pairing sheet label theirs. The local
+            // device is reached over loopback and has no such choice, so it stays a bare address.
+            parts.append(device.isLocal ? "\(host):\(port)" : "\(SpacesDeviceHostAddressKind(host: host).label) · \(host):\(port)")
         } else if device.isLocal {
             parts.append(device.isAvailable ? "Local daemon" : "Local daemon unavailable")
         }

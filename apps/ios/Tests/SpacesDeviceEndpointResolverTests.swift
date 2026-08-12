@@ -38,9 +38,7 @@
                 XCTFail("expected invalidEndpoint")
             } catch SpacesDeviceAPIClientError.invalidEndpoint {
                 // expected
-            } catch {
-                XCTFail("unexpected error: \(error)")
-            }
+            } catch { XCTFail("unexpected error: \(error)") }
         }
 
         /// Every candidate that never answers (and never even resets the connection, so there is no pin
@@ -60,9 +58,7 @@
             do {
                 _ = try await resolver.connect(timeout: .milliseconds(300), queue: .main)
                 XCTFail("expected allCandidatesUnreachable")
-            } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) {
-                XCTAssertEqual(hosts, ["192.0.2.1", "198.51.100.1"])
-            } catch {
+            } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) { XCTAssertEqual(hosts, ["192.0.2.1", "198.51.100.1"]) } catch {
                 XCTFail("unexpected error: \(error)")
             }
         }
@@ -84,47 +80,60 @@
         /// must not force the resolver to wait out that candidate's full timeout before the reachable
         /// loopback candidate downstream even gets a turn.
         ///
-        /// A bare TCP listener cannot complete a pinned-TLS handshake — there is no certificate to
-        /// present — so the loopback candidate cannot actually *win* here; the resolver correctly reports
-        /// it as a pin mismatch (a real peer answered at the transport level, but the pinned handshake
-        /// never completed), exactly the signal a genuinely re-paired daemon would produce. That is the
-        /// one true thing this test can assert without standing up a real pinned-TLS daemon:
-        /// `transportAuthenticationFailed` — not `allCandidatesUnreachable`, which would mean the
-        /// loopback listener was never reached at all — and that the whole race finishes near the
-        /// concurrent budget instead of the sequential one (proving the unreachable first candidate did
-        /// not starve the second of a turn).
+        /// The second candidate is a genuine pinned-TLS listener carrying the fingerprint this device
+        /// pinned, so a race that gives it a turn resolves to it winning outright rather than to any
+        /// failure verdict, which is what proves the unreachable first candidate did not starve it.
         func testReachableCandidateGetsATurnDespiteAnUnreachablePreferredCandidate() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["192.0.2.1", "127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = server.certificateFingerprint
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let start = ContinuousClock.now
+            let resolved = try await resolver.connect(timeout: .seconds(3), queue: .main)
+            resolved.connection.cancel()
+
+            XCTAssertEqual(resolved.host, "127.0.0.1")
+            let elapsed = start.duration(to: .now)
+            // Walking the list in order would spend the first candidate's whole budget (capped at
+            // `perCandidateTimeoutCap`) before starting the second; racing costs only the 250ms stagger
+            // plus a loopback handshake.
+            XCTAssertLessThan(elapsed, .seconds(2))
+        }
+
+        /// A candidate that accepts TCP and then never completes the pinned handshake is unreachable, not
+        /// a pin mismatch. Nothing there ever presented a certificate, so nothing about the daemon's
+        /// identity was established. That is the same shape a captive portal, or a stored LAN address
+        /// that now belongs to some other box, produces on a foreground resume. Reporting it as a mismatch is what
+        /// sent the app to the re-pair screen for a network that had simply not settled yet;
+        /// `allCandidatesUnreachable` is treated as transient and retried upstream, which is correct here.
+        func testOpenPortThatNeverCompletesTheHandshakeIsNotAPinMismatch() async throws {
             let listener = try LoopbackConnectionSink()
             let port = try await listener.start()
             defer { listener.stop() }
 
             var settings = SpacesMobileConnectionSettings()
-            settings.hosts = ["192.0.2.1", "127.0.0.1"]
+            settings.hosts = ["127.0.0.1"]
             settings.port = Int(port)
-            settings.certificateFingerprint = "SHA256:unreachable"
+            settings.certificateFingerprint = "SHA256:" + String(repeating: "0", count: 64)
             let resolver = SpacesDeviceEndpointResolver(settings: settings)
 
-            let start = ContinuousClock.now
             do {
                 _ = try await resolver.connect(timeout: .milliseconds(500), queue: .main)
-                XCTFail("expected transportAuthenticationFailed")
-            } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
-                // Expected: the loopback candidate answered at the TCP level but never completed the
-                // pinned handshake, which is exactly what a real pin mismatch looks like.
-            } catch {
+                XCTFail("expected allCandidatesUnreachable")
+            } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) { XCTAssertEqual(hosts, ["127.0.0.1"]) } catch {
                 XCTFail("unexpected error: \(error)")
             }
-            let elapsed = start.duration(to: .now)
-            // Sequential worst case would be roughly two full per-candidate passes (each a ~500ms TLS
-            // wait plus a 750ms plain-TCP mismatch probe) — near 2.5s. The 250ms stagger keeps the raced
-            // version well under that even though both candidates still have to be probed.
-            XCTAssertLessThan(elapsed, .seconds(2))
         }
 
-        /// The common shape of a real pin mismatch: the verify block rejects the certificate outright and
-        /// the `NWConnection` fails immediately (an `NWError.tls`-shaped failure), not a timeout. Uses a
+        /// A real pin mismatch: the peer presents a certificate and the verify block rejects it. Uses a
         /// genuine pinned-TLS listener (`PinnedTLSLoopbackServer`) with a deliberately wrong
-        /// `certificateFingerprint`, so the mismatch is real rather than simulated. Must classify as a pin
+        /// `certificateFingerprint`, so the rejection is real rather than simulated. Must classify as a pin
         /// mismatch and make the race throw `transportAuthenticationFailed` — not `allCandidatesUnreachable`,
         /// which is treated as a transient, silently-retried error upstream and would never surface the
         /// re-pair prompt this failure needs to reach.
@@ -146,14 +155,11 @@
                 XCTFail("expected transportAuthenticationFailed")
             } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
                 // Expected.
-            } catch {
-                XCTFail("unexpected error: \(error)")
-            }
+            } catch { XCTFail("unexpected error: \(error)") }
             let elapsed = start.duration(to: .now)
-            // An immediate certificate rejection must be classified without waiting out the per-candidate
-            // timeout budget — that is the whole point of checking
-            // `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure` before falling through to
-            // the timeout-plus-plain-TCP-probe path.
+            // A certificate rejection must surface without waiting out the per-candidate timeout budget:
+            // Network.framework parks a rejected pin in `.waiting` and keeps redialing, so `waitUntilReady`
+            // has to end the wait on the verify block's recorded verdict rather than idle out the budget.
             XCTAssertLessThan(elapsed, .seconds(2))
         }
 

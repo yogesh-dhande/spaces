@@ -110,15 +110,17 @@ echo "Building SwiftPM tests with coverage..."
 "$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage --scratch-path "$coverage_scratch_path"
 
 echo "Running SwiftPM coverage tests..."
-# The mirror-surface suites (GhosttyMirrorGraphemeClusterTests, GhosttyMirrorSurfaceMRUTests) drive
-# a REAL mirror-owned ghostty app, and only one embedded ghostty app may be live per process
+# The mirror-surface suites (GhosttyMirrorGraphemeClusterTests, GhosttyMirrorLinkActivationTests,
+# GhosttyMirrorSurfaceMRUTests, GhosttyMirrorSurfacePresentationTests) drive a REAL mirror-owned
+# ghostty app, and only one embedded ghostty app may be live per process
 # (GhosttyProcessAppRuntime.initializeOnce). Every test class in the package shares one
 # spacesPackageTests bundle, so a parallel worker process that ran any daemon-core suite first
 # cannot host the mirror app afterwards — worker assignment is arbitrary, which makes these suites
 # crash their worker only in full runs and take innocent tests down with the redistribution. They
 # are skipped here and run together in their own process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
-    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorSurfaceMRUTests
+    --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests --skip GhosttyMirrorSurfaceMRUTests \
+    --skip GhosttyMirrorSurfacePresentationTests
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
@@ -183,21 +185,22 @@ if [ "$swiftpm_status" -ne 0 ]; then
     fi
 fi
 
-# The mirror-surface suite skipped above, in a process of its own so the mirror service is the
-# process's one embedded ghostty app. Serial and filtered: one suite, fresh process, same coverage
-# scratch so its raw profiles merge into the artifacts generated below.
+# The mirror-surface suites skipped above, in a process of their own so the mirror service is the
+# process's one embedded ghostty app. Serial and filtered: fresh process, same coverage scratch so
+# their raw profiles merge into the artifacts generated below.
 #
-# Not on CI runners: the suite needs a real rendering ghostty surface to export a frame, and the
-# GitHub macOS runner never produces one — both tests time out at SurfaceSnapshotTimeout even in
-# this dedicated serial process, with the runner consuming artifacts byte-identical (object md5 and
+# Not on CI runners: these suites need a real rendering ghostty surface to export a frame, and the
+# GitHub macOS runner never produces one — they time out at SurfaceSnapshotTimeout even in this
+# dedicated serial process, with the runner consuming artifacts byte-identical (object md5 and
 # resources) to ones that pass on developer machines, so the difference is the runner environment,
-# not the build. Local verify remains this suite's gate, like the desktop e2e lanes.
+# not the build. Local verify remains their gate, like the desktop e2e lanes.
 if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "SKIPPING mirror-surface coverage tests: CI runners cannot host a rendering ghostty surface (gated by local verify)."
 else
     echo "Running mirror-surface coverage tests in their own process..."
     run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" test --skip-build --enable-code-coverage \
-        --disable-sandbox --scratch-path "$coverage_scratch_path" --filter "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorSurfaceMRUTests"
+        --disable-sandbox --scratch-path "$coverage_scratch_path" \
+        --filter "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests"
 fi
 
 generate_codecov_artifacts

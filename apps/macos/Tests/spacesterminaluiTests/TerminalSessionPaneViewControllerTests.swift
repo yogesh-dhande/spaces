@@ -199,6 +199,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         /// fires only after the async detach has landed.
         var detachedClientIDWhenCloseHookRan: String?
         var closeHookRan = false
+        /// Whether the close hook reported the pane as the session's owner, or its session as ended.
+        var closeHookOwnedOrEnded: Bool?
     }
 
     /// Records the pane's attach/detach sends in the order they reach the daemon, and can hold the
@@ -581,7 +583,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
             attachClientAction: { client, _ in capture.attachedClientID = client.id },
             detachClientAction: { clientID in capture.detachedClientID = clientID },
-            onCloseClientDetached: {
+            onCloseClientDetached: { _ in
                 capture.detachedClientIDWhenCloseHookRan = capture.detachedClientID
                 hookRan.fulfill()
             })
@@ -802,6 +804,117 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.isClientAttached)
     }
 
+    /// The close hook reports ownership so the host asks the daemon to stop an ad hoc terminal only for an
+    /// owner close. An owner pane reports true.
+    @MainActor func testCloseHookReportsOwnershipForOwnerPane() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let hookRan = expectation(description: "close hook runs")
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-owner-close", paths: .init(rootDirectory: root.path),
+            stateProvider: Self.ownedSessionStateProvider(sessionID: "session-owner-close", ownerClientID: "pane-owner"),
+            reusableOwnerClientID: "pane-owner", attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
+                hookRan.fulfill()
+            })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        controller.closeEmbedded()
+
+        await fulfillment(of: [hookRan], timeout: 1)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, true)
+    }
+
+    /// A viewer close must never stop the session, so the hook reports no ownership even though the pane
+    /// is closing the same way an owner would.
+    @MainActor func testCloseHookReportsNoOwnershipForViewerPane() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let hookRan = expectation(description: "close hook runs")
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-viewer-close", paths: .init(rootDirectory: root.path),
+            stateProvider: Self.ownedSessionStateProvider(sessionID: "session-viewer-close", ownerClientID: "another-device"),
+            preferredAttachmentMode: .viewer, attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
+                hookRan.fulfill()
+            })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        controller.closeEmbedded()
+
+        await fulfillment(of: [hookRan], timeout: 1)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, false)
+    }
+
+    /// An ended session's pane holds no attachment to have owned, so ownership alone would silence the
+    /// close hook and leave the dead terminal's row behind. Closing it is the user dismissing it, and the
+    /// hook has to report that.
+    @MainActor func testCloseHookReportsRequestForEndedSessionPane() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let hookRan = expectation(description: "close hook runs")
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-ended-close", paths: .init(rootDirectory: root.path),
+            stateProvider: Self.endedSessionStateProvider(sessionID: "session-ended-close"),
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID },
+            onCloseClientDetached: { ownedOrEnded in
+                capture.closeHookOwnedOrEnded = ownedOrEnded
+                hookRan.fulfill()
+            })
+
+        controller.showEmbedded(focus: true)
+        await controller.debugAwaitPendingClientControl()
+
+        controller.closeEmbedded()
+
+        await fulfillment(of: [hookRan], timeout: 1)
+        XCTAssertEqual(capture.closeHookOwnedOrEnded, true)
+    }
+
+    /// A session that has exited, with no attachments left on it.
+    @MainActor private static func endedSessionStateProvider(sessionID: String) -> FakeTerminalSessionStateProvider {
+        FakeTerminalSessionStateProvider(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-08-01T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .exited, updatedAt: "2026-08-01T00:00:02Z",
+                title: "shell", workingDirectory: "/tmp", columns: 80, rows: 24), attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+    }
+
+    /// A live session whose owner attachment belongs to `ownerClientID`.
+    @MainActor private static func ownedSessionStateProvider(sessionID: String, ownerClientID: String) -> FakeTerminalSessionStateProvider {
+        FakeTerminalSessionStateProvider(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-08-01T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-08-01T00:00:01Z",
+                title: "shell", workingDirectory: "/tmp", columns: 80, rows: 24),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(
+                clients: [
+                    TerminalClient(id: ownerClientID, kind: .localWindow, identity: TerminalClientIdentity(label: "owner"), connectedAt: "now")
+                ], attachments: [TerminalAttachment(sessionID: sessionID, clientID: ownerClientID, mode: .owner, attachedAt: "now")]))
+    }
+
     /// A session-terminating close is the daemon already stopping the session, so it must not fire the
     /// close hook — running the ad hoc cleanup then would be redundant work against a dying session.
     @MainActor func testCloseForSessionTerminationSkipsCloseHook() async throws {
@@ -814,7 +927,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             sessionID: "session-terminate-no-hook", paths: .init(rootDirectory: root.path),
             stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
             attachClientAction: { client, _ in capture.attachedClientID = client.id },
-            detachClientAction: { clientID in capture.detachedClientID = clientID }, onCloseClientDetached: { capture.closeHookRan = true })
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, onCloseClientDetached: { _ in capture.closeHookRan = true })
 
         controller.showEmbedded(focus: true)
         await controller.debugAwaitPendingClientControl()
@@ -3393,6 +3506,51 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         controller.debugSimulateRuntimeStateDidChange()
 
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
+    }
+
+    /// A `session_metadata` state-stream payload must cause at most one `refreshNow()`, not two. Before
+    /// the fix, `TerminalRemoteSessionStateNotificationRouting` fanned this reason out to both
+    /// `.spacesTerminalSessionMetadataDidChange` and `.spacesTerminalRuntimeStateDidChange`, and this
+    /// pane observes both with the identical unconditional refresh — so one title rewrite from a coding
+    /// agent (which can happen many times a second) ran the full refresh twice. Posts through the real
+    /// routing table (`postStateStreamNotifications`), not the individual `debugSimulate*` hooks, so the
+    /// assertion exercises the fan-out itself rather than one notification in isolation.
+    @MainActor func testSessionMetadataStateStreamPayloadCausesExactlyOneRefresh() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-metadata-refresh-count"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot()
+        fakeHost.effectiveTitle = "backend"
+        fakeHost.effectiveWorkingDirectory = "/tmp/work"
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: fakeHost)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+
+        controller.debugForceRefresh()
+        let refreshCountBeforeMetadataChange = controller.debugRefreshNowCallCountForTesting
+
+        fakeHost.effectiveTitle = "streaming agent output"
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.sessionMetadata, sessionID: sessionID)
+
+        XCTAssertEqual(controller.displayTitle, "streaming agent output", "the single refresh must still have picked up the new title")
+        XCTAssertEqual(
+            controller.debugRefreshNowCallCountForTesting, refreshCountBeforeMetadataChange + 1,
+            "one session_metadata payload must cause exactly one refreshNow(), not one per routed notification")
     }
 
     /// Posts the local notifications a state-stream payload with `reason` fans out to.

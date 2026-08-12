@@ -82,14 +82,14 @@ extension WorkspaceOrchestrator {
     /// unclassified but still-running program (`python3 agent.py`) — neither of those is the detected
     /// agent process exiting, and demoting on either would drop a still-active coding-agent row. Only a
     /// foreground executable name that matches the session's own launch-configured shell basename is
-    /// unambiguous evidence the terminal is back at a bare prompt.
+    /// unambiguous evidence the terminal is back at a bare prompt, which `TerminalBareShellForeground`
+    /// decides: the same rule the conditional stop of a user-closed ad hoc terminal applies, so a shell
+    /// interpreting a script (`zsh build.sh`) counts as a running program for both.
     func foregroundHasRevertedToPlainShell(_ session: TerminalSessionCatalogEntry) -> Bool {
-        guard session.runtimeState.foregroundDetectedAgentKind == nil,
-            let executableName = session.runtimeState.foregroundExecutableName?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !executableName.isEmpty
-        else { return false }
-        let shellBasename = URL(fileURLWithPath: session.launchConfiguration.shell).lastPathComponent
-        return executableName == shellBasename
+        guard session.runtimeState.foregroundDetectedAgentKind == nil else { return false }
+        return TerminalBareShellForeground.isBareShell(
+            executableName: session.runtimeState.foregroundExecutableName, argv: session.runtimeState.foregroundArgv,
+            launchShell: session.launchConfiguration.shell)
     }
 
     func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (kind: String, label: String, displayCommand: String?)? {
@@ -119,7 +119,7 @@ extension WorkspaceOrchestrator {
         // ProcessExitMonitorService) can both observe no existing row and both reach this call for the same
         // deterministic id, and a hook signal can commit newer status/session-key state between this pass's
         // reads and its upsert. So the record carries only fresh initial lifecycle values, and preserving
-        // any already-committed status, session key, claimed launcher fields, and lifecycle timestamps is enforced
+        // any already-committed status, session key, and lifecycle timestamps is enforced
         // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
         // the snapshot forward here — closing the read-modify-upsert race. On first insert (no conflict)
         // these initial values are the ones written.
@@ -131,8 +131,7 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
             userLabel: workspaceAgentWindows.first { $0.id == agentID }?.userLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
-            detectedAgentKind: detectedAgent.kind, createdAt: now, updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: nil, status: .idle, detectedAgentKind: detectedAgent.kind, createdAt: now, updatedAt: now)
         let nextAgentWindows = workspaceAgentWindows.filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
@@ -145,8 +144,8 @@ extension WorkspaceOrchestrator {
     func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
 
     /// True when `record` is an ad-hoc coding-agent row that foreground detection promoted from a plain
-    /// terminal (id == `adHocDetectedAgentID(sessionID)`), as opposed to an explicitly spawned or
-    /// configured-launcher agent. This is pure id-provenance: it stays true even after hook signals land
+    /// terminal (id == `adHocDetectedAgentID(sessionID)`), as opposed to an explicitly spawned agent.
+    /// This is pure id-provenance: it stays true even after hook signals land
     /// on the row, because a signal updates the detection row in place and preserves its id. Provenance
     /// alone is NOT sufficient to demote — that additionally requires no hook evidence
     /// (`agentRowHasRecordedHookSignal`), since a signaled detection row must exit through the
@@ -172,13 +171,12 @@ extension WorkspaceOrchestrator {
     /// Whether this agent row is already finalized — its exit has been delivered — so a termination path
     /// must neither re-notify its subscribers nor re-run its exit disposition. Finalized means either the
     /// `.exited` status (a kept live-terminal exit) OR a recorded `exit` event
-    /// (`agentSessionHasRecordedExitEvent`). The recorded-event half is load-bearing: a configured
-    /// launcher's exit is finalized to `.done` (`handleAgentExit`), and `.done` is ALSO the resting state
-    /// a live launcher returns to after every completed turn, so status alone cannot tell an
-    /// already-notified launcher exit from a live agent between turns. Keying on the persisted exit event
+    /// (`agentSessionHasRecordedExitEvent`). The recorded-event half is load-bearing: `.done` is the
+    /// resting state a live agent returns to after every completed turn, so status alone cannot tell an
+    /// already-notified exit from a live agent between turns. Keying on the persisted exit event
     /// instead means the most common kill scenario — an orchestrator killing a child that is sitting
     /// `.done` after finishing — is correctly seen as NOT finalized and still delivers exactly one exited
-    /// notice, while a launcher whose exit was already delivered is never re-notified. Both halves are
+    /// notice, while an agent whose exit was already delivered is never re-notified. Both halves are
     /// scoped to the row's CURRENT life across the restart-reuse reset (a fresh agent's `init` on the same
     /// terminal reuses the row id): the status half because that reset moves `.exited` back to `.idle`, and
     /// the event half because `agentSessionHasRecordedExitEvent` discounts an `exit` event once a later
@@ -205,7 +203,7 @@ extension WorkspaceOrchestrator {
     /// Finalizes coding-agent rows whose backing built-in terminal session has ended without any exit
     /// signal — the state codex and opencode (which provide no session-end hook) and a SIGKILL'd claude
     /// leave behind. It covers both session provenances that back a Spaces agent row:
-    ///  - explicitly spawned/configured `.agent`-launch-kind sessions (`agent spawn`, a launcher), and
+    ///  - explicitly spawned `.agent`-launch-kind sessions (`agent spawn`), and
     ///  - ad-hoc foreground-detected agents running in a `.shell`-launch-kind terminal the user closed.
     ///
     /// Such a row would otherwise stay `spinning`/`waiting` forever and its subscribers would never learn
@@ -221,15 +219,14 @@ extension WorkspaceOrchestrator {
     /// path predating the `.exited` status): that raised a spurious "finished" alert for an agent that was
     /// actually terminated with its shell, delivered no exited notice, and leaked the closed terminal's
     /// watch edges. Unifying it here makes a dead ad-hoc `.shell` row take the identical exit flow — a
-    /// dead non-launcher session is deleted by `handleAgentExit`, so it disappears from listings and a
-    /// remote overview diffs the row's disappearance as `exited`, matching the local `.exited` notice.
+    /// dead session is deleted by `handleAgentExit`, so it disappears from listings and a remote overview
+    /// diffs the row's disappearance as `exited`, matching the local `.exited` notice.
     ///
-    /// Only rows not yet finalized are swept (`agentRowIsFinalized`): a row already deleted (spawned/ad-hoc)
-    /// or held `.exited`, and a configured launcher held `.done` that already recorded its `exit` event, is
-    /// never re-processed and its subscribers never get a duplicate exited notice. A live launcher sitting
-    /// `.done` between turns has no exit event yet, so it is not treated as finalized — but the liveness
-    /// check below leaves it untouched while its session is alive; only once its terminal has ended does
-    /// this sweep finalize it and deliver the notice.
+    /// Only rows not yet finalized are swept (`agentRowIsFinalized`): a row already deleted or held
+    /// `.exited` is never re-processed and its subscribers never get a duplicate exited notice. A live
+    /// agent sitting `.done` between turns has no exit event yet, so it is not treated as finalized — but
+    /// the liveness check below leaves it untouched while its session is alive; only once its terminal has
+    /// ended does this sweep finalize it and deliver the notice.
     @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
         for project in try store.projects() {
@@ -244,8 +241,8 @@ extension WorkspaceOrchestrator {
                     if try agentRowIsFinalized(agent) { continue }
                     guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
                     // A `.shell`-launch-kind row is only ever an ad-hoc foreground-detected agent, which
-                    // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned/launcher
-                    // session. Any other launch kind is not a coding agent and is left alone.
+                    // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned session.
+                    // Any other launch kind is not a coding agent and is left alone.
                     guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID),
                         launchConfiguration.kind == .agent || launchConfiguration.kind == .shell
                     else { continue }
@@ -296,21 +293,16 @@ extension WorkspaceOrchestrator {
         return ((try? store.agentWindows(workspaceID: window.workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
     }
 
-    func fallbackAgentFocusName(_ record: AgentWindowRecord) throws -> String? {
-        let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
-        if let title = sanitizedFocusName(trackedWindow?.name) { return sanitizedFocusName("Coding Agent \(title)") ?? title }
-        if let detail = sanitizedFocusName(trackedWindow?.detail) { return sanitizedFocusName("Coding Agent \(detail)") ?? detail }
-        return sanitizedFocusName("Coding Agent")
-    }
+    /// The name a coding-agent row carries when nothing reported one. A hook `init` signal carries no
+    /// label and foreground detection cannot classify every command, so nameless registrations are
+    /// routine; registration stores this as the row's real label rather than leaving the row nameless, so
+    /// the row, its pane, its focus name, and `spaces open` routing all read one stored string.
+    public static let defaultAgentLabel = "Coding Agent"
 
-    func uniqueAgentFocusLabel(
-        workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil, claimedLauncherName: String? = nil
-    ) throws -> String? {
+    func uniqueAgentFocusLabel(workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil) throws -> String? {
         guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
-        // Configured coding-agent slots reserve their exact names even before a live agent
-        // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
-        // and harness focus keep a stable one-name-to-one-row mapping.
+        // Two agents that report the same label get the later one suffixed, so the Run tab and harness
+        // focus keep a stable one-name-to-one-row mapping.
         let usedNames = Set(
             try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
                 guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
@@ -319,69 +311,12 @@ extension WorkspaceOrchestrator {
         let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(
             \.effectiveLabel
         ).compactMap(sanitizedFocusName).map(normalizedFocusName)
-        let reservedLauncherNames = Set(
-            try store.workspaceAgentLaunchers(workspaceID: workspaceID).map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.filter
-            { launcherName in
-                guard let claimedLauncherName else { return true }
-                return normalizedFocusName(launcherName) != normalizedFocusName(claimedLauncherName)
-            }.map(normalizedFocusName))
         var blockedNames = usedNames
         blockedNames.formUnion(existingAgentNames)
-        blockedNames.formUnion(reservedLauncherNames)
         if !blockedNames.contains(normalizedFocusName(baseLabel)) { return baseLabel }
         var suffix = 2
         while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) { suffix += 1 }
         return "\(baseLabel)-\(suffix)"
-    }
-
-    func trackedTerminalWindowsForAgents(workspaceID: String, agentWindows: [AgentWindowRecord]) throws -> [WindowRecord] {
-        guard !agentWindows.isEmpty else { return [] }
-        let trackedAgentTerminalKeys = Set(agentWindows.compactMap(\.terminalTrackingKey))
-        guard !trackedAgentTerminalKeys.isEmpty else { return [] }
-        // Auto-launched coding agents register their own tracked terminal rows before the
-        // workspace launch finishes. Preserve those rows when replacing the workspace
-        // window snapshot so stop/restart can still close the actual agent terminals.
-        return try store.windows(workspaceID: workspaceID).filter { window in
-            guard window.roleValue == .terminal else { return false }
-            if let trackingKey = window.terminalTrackingKey, trackedAgentTerminalKeys.contains(trackingKey) { return true }
-            return false
-        }
-    }
-
-    func normalizeAgentLauncherIDs(previous: [AgentLauncher], updated: [AgentLauncher]) -> [AgentLauncher] {
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-        let previousNames = previous.map { normalizedFocusName($0.name) }
-        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
-        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
-        var usedIDs = Set<String>()
-
-        return updated.map { launcher in
-            if previousByID[launcher.id] != nil {
-                usedIDs.insert(launcher.id)
-                return launcher
-            }
-
-            let normalizedName = normalizedFocusName(launcher.name)
-            if nameCounts[normalizedName] == 1,
-                let match = previous.first(where: { normalizedFocusName($0.name) == normalizedName && !usedIDs.contains($0.id) })
-            {
-                usedIDs.insert(match.id)
-                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
-            }
-
-            let trimmedCommand = launcher.command.trimmingCharacters(in: .whitespacesAndNewlines)
-            if commandCounts[trimmedCommand] == 1,
-                let match = previous.first(where: {
-                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
-                })
-            {
-                usedIDs.insert(match.id)
-                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
-            }
-
-            return launcher
-        }
     }
 
     @discardableResult func pruneOrphanedAgentWindows(workspaceID: String, agents: [AgentWindowRecord], prunedTerminalTrackingKeys: Set<String>)
@@ -397,7 +332,6 @@ extension WorkspaceOrchestrator {
             // workspace process still owns the same terminal identity.
             guard prunedTerminalTrackingKeys.contains(trackingKey) else { continue }
             if runningProcessTrackingKeys.contains(trackingKey) { continue }
-            if try spacesAgentRecordIsConfiguredLauncher(workspaceID: workspaceID, record: agent) { continue }
             // The backing terminal is already gone (its tracking key was pruned), so destroy the row
             // through the chokepoint without terminating anything: it still owes the child's subscribers an
             // exited notice and must tear down the orphaned terminal's own watch state.
@@ -585,14 +519,6 @@ extension WorkspaceOrchestrator {
         return updated
     }
 
-    /// Evicts a stale agent slot whose backing session is gone, when a relaunch reuses its launcher
-    /// identity. Destroys the row through the chokepoint (terminating any lingering terminal), so the stale
-    /// child's subscribers are told it exited and the terminal's own watch state is torn down before the
-    /// fresh session takes over.
-    func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
-        try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
-    }
-
     func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?) throws {
         guard
             let trackedWindow = try matchedTrackedWindowForAgent(workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID)
@@ -625,22 +551,9 @@ extension WorkspaceOrchestrator {
             agentSessionID: agentSessionID, eventType: eventType, source: source, message: message, createdAt: createdAt)
     }
 
-    func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord) throws -> Bool {
-        guard record.provider == .spaces else { return false }
-        let launchers = try store.workspaceAgentLaunchers(workspaceID: workspaceID)
-        if let claimedLauncherID = sanitizedFocusName(record.claimedLauncherID) {
-            if launchers.contains(where: { $0.id == claimedLauncherID }) { return true }
-        }
-        if let claimedLauncherName = sanitizedFocusName(record.claimedLauncherName) {
-            return launchers.contains { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }
-        }
-        return false
-    }
-
     @discardableResult public func registerAgentWindow(
         workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, sessionKey: String? = nil,
-        status: AgentWindowStatus = .idle, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil, eventType: String = "register",
-        eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        status: AgentWindowStatus = .idle, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
@@ -653,17 +566,16 @@ extension WorkspaceOrchestrator {
         // the daemon and remote signal init paths (both pass the preserved `existing.status`).
         let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
-            let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
+            // The default heals a row stored without a label before materialization existed, so every
+            // signal leaves the row addressable by the one name its surfaces display.
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
-                claimedLauncherName: resolvedClaimedLauncherName)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label ?? Self.defaultAgentLabel, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: resolvedStatus, note: existing.note,
+                sessionKey: sessionKey ?? existing.sessionKey, status: resolvedStatus, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -671,22 +583,21 @@ extension WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: existingAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
-            // This registration may be what binds the row to a launcher, and a launcher-named row carries
-            // no rename of its own.
-            let clearedRename = try clearRenameIfLauncherClaimed(updated)
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType, source: eventSource,
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return clearedRename ? updated.withUserLabel(nil) : updated
+            return updated
         }
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
+        // A registration that reports no label materializes `Coding Agent` as the row's stored label,
+        // through the same uniquifier a reported label runs through, so a second nameless agent in the
+        // workspace stores "Coding Agent-2" and the two rows stay one-name-to-one-row for focus.
+        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: sanitizedFocusName(label) ?? Self.defaultAgentLabel)
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
             terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
-            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: resolvedStatus,
-            detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID), createdAt: now, updatedAt: now)
+            status: resolvedStatus, detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID), createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -701,8 +612,7 @@ extension WorkspaceOrchestrator {
 
     @discardableResult public func updateAgentWindowStatus(
         workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, sessionKey: String? = nil, label: String? = nil,
-        status: AgentWindowStatus, claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator",
-        environmentKeys: [String]? = nil
+        status: AgentWindowStatus, eventType: String? = nil, eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
         // Per-tool hooks make an active agent signal `working` on every tool call. A signal that would
@@ -715,17 +625,16 @@ extension WorkspaceOrchestrator {
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
         if let existing {
-            let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
+            // Same healing default as `registerAgentWindow`'s existing-row branch: a pre-materialization
+            // row gains its stored name on the next signal.
             let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
-                claimedLauncherName: resolvedClaimedLauncherName)
+                workspaceID: workspaceID, preferredLabel: label ?? existing.label ?? Self.defaultAgentLabel, excludingAgentWindowID: existing.id)
             let updated = AgentWindowRecord(
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel, userLabel: existing.userLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note,
+                sessionKey: sessionKey ?? existing.sessionKey, status: status, note: existing.note,
                 detectedAgentKind: liveDetectedAgentKind(terminalSessionID: terminalTrackingID ?? existing.terminalTrackingID)
                     ?? existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
@@ -733,31 +642,24 @@ extension WorkspaceOrchestrator {
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
                 agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
             try store.upsertAgentWindow(updated)
-            // A signal can carry the launcher name that first binds this row to a launcher, and a
-            // launcher-named row carries no rename of its own.
-            let clearedRename = try clearRenameIfLauncherClaimed(updated)
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
                 message: agentSessionEventMessage(
                     provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
                     environmentKeys: environmentKeys), createdAt: now)
-            return clearedRename ? updated.withUserLabel(nil) : updated
+            return updated
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey,
-            status: status, claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
-            environmentKeys: environmentKeys)
+            status: status, eventType: eventType ?? status.rawValue, eventSource: eventSource, environmentKeys: environmentKeys)
     }
 
-    /// Applies an exit's disposition to the row — keep it `.done` (configured launcher), demote it (a
-    /// never-signaled ad-hoc detection row on a live terminal), keep it `.exited` (any other row on a live
-    /// terminal), or delete it (its terminal has ended). The exit's lifecycle event is NOT recorded here:
+    /// Applies an exit's disposition to the row — demote it (a never-signaled ad-hoc detection row on a
+    /// live terminal), keep it `.exited` (any other row on a live terminal), or delete it (its terminal has
+    /// ended). The exit's lifecycle event is NOT recorded here:
     /// `finalizeAgentRow` records it as the atomic claim that admits exactly one caller to this
     /// disposition, so recording it again would duplicate the very event that claim exists to make unique.
     @discardableResult public func handleAgentExit(_ existing: AgentWindowRecord) throws -> AgentWindowRecord? {
-        if try spacesAgentRecordIsConfiguredLauncher(workspaceID: existing.workspaceID, record: existing) {
-            return try recordAgentExitStatus(existing, status: .done)
-        }
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
@@ -774,7 +676,7 @@ extension WorkspaceOrchestrator {
             // The agent process ended but its terminal session is still open, so keep the row and mark it
             // `exited` (not `idle`): the terminal stays addressable and a restart reuses it, while remote
             // watchers see a real exit transition instead of a status change they treat as "not started".
-            return try recordAgentExitStatus(existing, status: .exited)
+            return try recordAgentExitStatus(existing)
         }
         terminateBuiltInTerminalSession(existing.terminalTrackingID)
         // Drop the row's inbound watch edges explicitly before the delete: the FK is `ON DELETE RESTRICT`,
@@ -786,22 +688,21 @@ extension WorkspaceOrchestrator {
         return nil
     }
 
-    /// Writes the finalized exit status onto the row, or reports nothing to record when the row changed
-    /// under the caller — a stop or restart deleted it, or a fresh agent rebound it to another session —
+    /// Writes the finalized `.exited` status onto the row, or reports nothing to record when the row
+    /// changed under the caller — a stop deleted it, or a fresh agent rebound it to another session —
     /// which `markAgentWindowExitStatus` decides against the stored row rather than re-inserting the
     /// caller's snapshot. The exit's lifecycle event was already recorded by the chokepoint's claim.
-    func recordAgentExitStatus(_ existing: AgentWindowRecord, status: AgentWindowStatus) throws -> AgentWindowRecord? {
+    func recordAgentExitStatus(_ existing: AgentWindowRecord) throws -> AgentWindowRecord? {
         let now = nowISO8601()
-        guard try store.markAgentWindowExitStatus(existing, status: status, updatedAt: now) else { return nil }
+        guard try store.markAgentWindowExitStatus(existing, updatedAt: now) else { return nil }
         let terminalTarget: TerminalTargetRecord? =
             if existing.terminalTarget != nil || existing.terminalTrackingID != nil {
                 TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, trackingID: existing.terminalTrackingID)
             } else { nil }
         return AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label, userLabel: existing.userLabel,
-            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
-            claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
-            detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
+            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey, status: .exited,
+            note: existing.note, detectedAgentKind: existing.detectedAgentKind, createdAt: existing.createdAt, updatedAt: now)
     }
 
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {
@@ -835,18 +736,6 @@ extension WorkspaceOrchestrator {
         return try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID)
     }
 
-    @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else {
-                throw WorkspaceError.invalidArgument(message: "Coding agent is not running.")
-            }
-            let launcher = try restartableCodingAgentLauncher(record)
-            try stopCodingAgentRecord(record)
-            return try launchAgentLauncherUnlocked(workspaceID: workspaceID, launcherID: launcher.id, background: false)
-        }
-    }
-
     /// How an agent-row termination should be finalized, chosen by the caller and interpreted by
     /// `finalizeAgentRow`.
     public enum AgentTerminationReason: Sendable {
@@ -855,15 +744,15 @@ extension WorkspaceOrchestrator {
         /// the backing built-in terminal when the caller has not already done so.
         case destroyed(terminateTerminalSession: Bool)
         /// A lifecycle exit reported by a hook signal, a remote signal, or a device-runtime reconciler. The
-        /// delete-vs-keep decision is delegated to `handleAgentExit` (configured launcher → `.done`; a
-        /// never-signaled ad-hoc detection row on a live terminal → silent demote/delete; any other row on
-        /// a live terminal → `.exited`; a row whose terminal has ended → delete).
+        /// delete-vs-keep decision is delegated to `handleAgentExit` (a never-signaled ad-hoc detection row
+        /// on a live terminal → silent demote/delete; any other row on a live terminal → `.exited`; a row
+        /// whose terminal has ended → delete).
         case exited(eventType: String, eventSource: String, environmentKeys: [String]?)
     }
 
     /// The single finalization chokepoint every agent-row termination routes through — sidebar / Device
-    /// API stop, restart, `agent kill`, workspace stop, terminal teardown, stale-slot relaunch, orphan
-    /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
+    /// API stop, `agent kill`, workspace stop, terminal teardown, orphan prune, and
+    /// every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
     /// a watched child's subscribers are always told it exited before the row goes away and that the
     /// terminated terminal's own watch state is always torn down. In order it:
     ///  1. claims the agent life's single exit through ONE atomic conditional INSERT (`claimAgentExit` →
@@ -881,7 +770,7 @@ extension WorkspaceOrchestrator {
     ///     leaving a busy subscriber's row for its next idle flush — a no-op when the row has no
     ///     subscribers. Delivery deliberately comes AFTER the queueing rather than instead of it: see
     ///     `claimAgentExit` for why the obligation must be durable before the finalized fact is visible;
-    ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
+    ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.exited`, demote,
     ///     or delete — the delete branch drops the inbound edges explicitly), while `.destroyed`
     ///     unconditionally drops the inbound edges and deletes the row (terminating the terminal first when
     ///     asked);
@@ -903,8 +792,8 @@ extension WorkspaceOrchestrator {
             // Destroys delete the row and (usually) terminate the backing terminal. During a daemon
             // handoff the terminal side becomes a silent no-op (`terminateBuiltInTerminalSession` defers to
             // the successor daemon), so proceeding would delete rows for a terminal that survives the
-            // handoff. Veto at the chokepoint so every destroy path — workspace stop, agent kill, stale-slot
-            // eviction — either does both or neither. `.exited` stays admitted: it records an observed exit
+            // handoff. Veto at the chokepoint so every destroy path — workspace stop, agent kill —
+            // either does both or neither. `.exited` stays admitted: it records an observed exit
             // and performs no terminal-side work that a handoff could split. The veto runs BEFORE the claim
             // so a vetoed destroy consumes nothing.
             guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
@@ -927,7 +816,7 @@ extension WorkspaceOrchestrator {
         case .exited(let eventType, let eventSource, let environmentKeys):
             // Every step below — delivering the claimed notice, the disposition, the terminal's own
             // subscriber teardown — belongs to the caller that won the claim, so a second observer of the
-            // same transition does nothing at all. The losing claim also covers a row a stop/restart
+            // same transition does nothing at all. The losing claim also covers a row a stop
             // already deleted (its destroy announced the exit before deleting) and a row already finalized
             // on an earlier pass. Returning the row as it now stands — nil once it is gone — reports that
             // settled state to the caller.
@@ -985,147 +874,10 @@ extension WorkspaceOrchestrator {
     }
 
     /// Terminates a coding-agent record through the finalization chokepoint. A stop is a hard destroy: it
-    /// terminates the backing terminal and deletes the row (even a configured launcher's) unconditionally.
-    /// Shared by the macOS sidebar / Device API stop (`stopCodingAgent`), restart (`restartCodingAgent`,
-    /// which stops the old child here before relaunching a fresh session/row), and `agent kill`'s
-    /// hook-signaled branch (`killAgentSession`).
+    /// terminates the backing terminal and deletes the row unconditionally. Shared by the macOS sidebar /
+    /// Device API stop (`stopCodingAgent`) and `agent kill`'s hook-signaled branch (`killAgentSession`).
     func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
         try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
-    }
-
-    func restartableCodingAgentLauncher(_ record: AgentWindowRecord) throws -> AgentLauncher {
-        let launchers = try store.workspaceAgentLaunchers(workspaceID: record.workspaceID)
-        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
-            guard let launcher = launchers.first(where: { $0.id == claimedLauncherID }) else {
-                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-            }
-            return launcher
-        }
-        if let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherName.isEmpty {
-            guard let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }) else {
-                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-            }
-            return launcher
-        }
-        if let label = record.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty,
-            let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(label) })
-        {
-            return launcher
-        }
-        throw WorkspaceError.invalidArgument(message: "Unconfigured live coding agents cannot be restarted from Spaces.")
-    }
-
-    /// Starts a configured coding agent in a workspace. Under the lifecycle gate: an agent started while a
-    /// teardown was mid-flight would be left running against a removed worktree with no row to stop it by.
-    ///
-    /// The `Unlocked` variants exist for the two callers that already hold the workspace's gate —
-    /// `launchWorkspaceUnlocked` (workspace launch starts every configured agent) and `restartCodingAgent`
-    /// — since the gate rejects re-entry rather than allowing it.
-    @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try launchAgentLauncherUnlocked(workspaceID: workspaceID, name: name, background: background)
-        }
-    }
-
-    @discardableResult func launchAgentLauncherUnlocked(workspaceID: String, name: String, background: Bool) throws -> AgentWindowRecord {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent name is required.") }
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        guard let launcher = settings?.agentLaunchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(trimmedName) }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-        }
-        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
-    }
-
-    @discardableResult public func launchAgentLauncher(workspaceID: String, launcherID: String, background: Bool = false) throws -> AgentWindowRecord
-    {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try launchAgentLauncherUnlocked(workspaceID: workspaceID, launcherID: launcherID, background: background)
-        }
-    }
-
-    @discardableResult func launchAgentLauncherUnlocked(workspaceID: String, launcherID: String, background: Bool) throws -> AgentWindowRecord {
-        let trimmedID = launcherID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent ID is required.") }
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        guard let launcher = settings?.agentLaunchers.first(where: { $0.id == trimmedID }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-        }
-        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
-    }
-
-    @discardableResult func launchAgentLauncher(_ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool)
-        throws -> AgentWindowRecord
-    {
-        let workspaceID = workspace.id
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
-            if $0.claimedLauncherID == launcher.id { return true }
-            guard $0.claimedLauncherID == nil else { return false }
-            return normalizedFocusName($0.label ?? $0.claimedLauncherName ?? "") == normalizedFocusName(launcher.name)
-        }) {
-            if existing.provider == .spaces, !builtInAgentSessionIsStillLive(existing) {
-                try removeStaleAgentWindow(existing)
-            } else {
-                if try focusAgentWindowRecord(existing, requestID: nil) {
-                    try markWorkspaceRunningIfNeeded(workspace)
-                    return existing
-                }
-                // A failed focus attempt is not enough evidence to destroy the reserved row.
-                // Only evict the existing record when its terminal session is actually gone;
-                // otherwise keep the current slot and treat launch as an idempotent no-op.
-                if existing.provider == .spaces, builtInAgentSessionIsStillLive(existing) {
-                    try markWorkspaceRunningIfNeeded(workspace)
-                    return existing
-                }
-                try removeStaleAgentWindow(existing)
-            }
-        }
-
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
-        )
-        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
-        _ = background
-        let agentSessionID = UUID().uuidString
-        launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
-        let shellPath = terminalShellPathOverride()
-        let sessionCommand = commandPrefixedWithShellEnvironment(
-            wrappedAgentLauncherCommand(
-                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: nil), env: launchEnv)
-        let session = try launchSpacesTerminalSession(
-            title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
-        let record = try registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: launcher.name, terminalTrackingID: session.sessionID, status: .idle,
-            claimedLauncherID: launcher.id, claimedLauncherName: launcher.name)
-        try markWorkspaceRunningIfNeeded(workspace)
-        return record
-    }
-
-    func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?, commandPrelude: String? = nil) -> String {
-        let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "'\\''")
-        let wrappedCommand = commandWithPrelude("printf '\\033]0;\(escapedName)\\007'; \(command)", prelude: commandPrelude)
-        let resolvedShell: String
-        if let trimmedShell = shellPath?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedShell.isEmpty {
-            resolvedShell = trimmedShell
-        } else {
-            resolvedShell = defaultInteractiveShellPath()
-        }
-        return "exec \(shellQuoted(resolvedShell)) -ilc \(shellQuoted(wrappedCommand))"
-    }
-
-    func focusAgentWindowRecord(_ record: AgentWindowRecord, requestID: String?) throws -> Bool {
-        let terminalApp = record.provider == .spaces ? TerminalHost.spaces.appName : nil
-        let focusResult = focusManagedTerminal(terminalApp: terminalApp, providerIdentity: record.terminalFocusIdentity, requestID: requestID)
-        switch focusResult {
-        case .sessionRequest: return true
-        case .unavailable: return false
-        }
     }
 
     // MARK: - Orchestration rows (shared by the profile command surface and the Device API)
@@ -1215,18 +967,11 @@ extension WorkspaceOrchestrator {
     /// Sets (or clears, with an empty title) the name a user gave a coding-agent row, addressed by the
     /// agent session id the overview row carries. The name is stored on the session rather than in the
     /// workspace config because most live agents have no config entry to rename: they are registered by an
-    /// agent's own hooks, detected in a terminal's foreground, or spawned through `spaces agent spawn`. A
-    /// launcher-backed row keeps renaming its launcher entry, so this never competes with that name.
+    /// agent's own hooks, detected in a terminal's foreground, or spawned through `spaces agent spawn`.
     ///
     /// An empty (or whitespace-only) title clears the rename instead of being rejected, putting back the
     /// runtime label underneath it — the only way back from a rename, matching `renameTerminalSession`.
     /// An id that names no agent session in the workspace is a loud error, not a silent no-op.
-    ///
-    /// So is an agent a configured launcher has claimed: that agent's row is named by the launcher entry
-    /// and never reads the stored rename, so accepting one would report success and change nothing the
-    /// user can see. A client can arrive here holding an overview from before someone added or recreated
-    /// the matching launcher, and the error tells it to refresh and rename that entry instead. Clearing a
-    /// rename is refused for the same reason, hence the guard sits above the empty-title path.
     ///
     /// A name the user sets has to stay unique among the workspace's visible rows, the same rule a config
     /// edit answers to, so the candidate name runs through `validateWorkspaceFocusNames` before it is
@@ -1244,18 +989,13 @@ extension WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(message: "No coding-agent session '\(agentID)' in workspace \(workspaceID).")
             }
             let agents = try store.agentWindows(workspaceID: workspaceID)
-            let claims = AgentLauncherClaim.resolve(agents: agents, launchers: try store.workspaceAgentLaunchers(workspaceID: workspaceID))
-            guard !claims.claimedAgentIDs.contains(existing.id) else {
-                throw WorkspaceError.invalidArgument(
-                    message: "This coding agent is named by its configured launcher entry. Rename the launcher in workspace settings instead.")
-            }
             let userLabel: String?
             if title.isEmpty {
                 userLabel = try clearedAgentSessionUserLabel(existing)
             } else {
                 // Validated as the workspace would look with the rename applied: the candidate replaces
-                // this row's own name, so it is checked against the processes, browser sessions, launchers,
-                // and other agents, and never against the name it is replacing.
+                // this row's own name, so it is checked against the processes, browser sessions, and other
+                // agents, and never against the name it is replacing.
                 try validateWorkspaceFocusNames(
                     workspaceID: workspaceID, agentWindows: agents.map { $0.id == existing.id ? $0.withUserLabel(title) : $0 })
                 userLabel = title
@@ -1269,41 +1009,6 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    /// Writes a workspace's configured agent launchers, and clears the session rename off any agent the
-    /// new launcher set now claims. Every launcher write goes through here: a claim can form at any of
-    /// them (a settings edit, a project's config propagating, the seed on first load, a rollback restore),
-    /// and a claimed agent must carry no rename, the same invariant `renameAgentSession` enforces from the
-    /// other side by refusing to rename a claimed agent.
-    ///
-    /// Left alone, that rename is invisible on the row the launcher now names, yet still feeds every other
-    /// name consumer (session summary titles, notification lines, focus names), and it would resurface as
-    /// the row's name the moment the launcher was removed again.
-    func setWorkspaceAgentLaunchers(workspaceID: String, launchers: [AgentLauncher]) throws {
-        try store.setWorkspaceAgentLaunchers(workspaceID: workspaceID, launchers: launchers)
-        let agents = try store.agentWindows(workspaceID: workspaceID)
-        let claims = AgentLauncherClaim.resolve(agents: agents, launchers: launchers)
-        for agent in agents where agent.userLabel != nil && claims.claimedAgentIDs.contains(agent.id) {
-            try store.setAgentSessionUserLabel(id: agent.id, userLabel: nil)
-        }
-    }
-
-    /// Clears a stored rename off `record` when a configured launcher claims it, for the other direction:
-    /// the row was renamed while unclaimed and a registration has just bound it to a launcher. Reports
-    /// whether it cleared, so the caller's in-memory record can drop the rename too.
-    ///
-    /// Keyed on the claim actually resolving rather than on the record carrying a `claimedLauncher*`
-    /// field: a claim id or name naming no configured launcher leaves the row unclaimed and still named by
-    /// its rename.
-    private func clearRenameIfLauncherClaimed(_ record: AgentWindowRecord) throws -> Bool {
-        guard record.userLabel != nil else { return false }
-        let claims = AgentLauncherClaim.resolve(
-            agents: try store.agentWindows(workspaceID: record.workspaceID),
-            launchers: try store.workspaceAgentLaunchers(workspaceID: record.workspaceID))
-        guard claims.claimedAgentIDs.contains(record.id) else { return false }
-        try store.setAgentSessionUserLabel(id: record.id, userLabel: nil)
-        return true
-    }
-
     /// What a cleared rename leaves in `user_label`: nil when the agent's reported label is free, so the
     /// row simply falls back to it, and a uniquified variant of that label when it is not.
     ///
@@ -1313,18 +1018,12 @@ extension WorkspaceOrchestrator {
     /// `uniqueAgentFocusLabel` means the recovered name is chosen by the same numeric-suffix rule
     /// registration applies ("Codex" taken yields "Codex-2"), and the user is free to rename again.
     private func clearedAgentSessionUserLabel(_ existing: AgentWindowRecord) throws -> String? {
-        // A row with no reported label has no name to recover, and none to collide with either: the
-        // "Coding Agent" placeholder surfaces render for it is presentation, not a name, so such rows
-        // contribute no focus-name entry and take no part in uniqueness (two label-less registrations
-        // already share the placeholder without any rename involved). Suffixing here would invent and
-        // persist a name for a row that has none.
+        // Registration materializes a label for every row, including one nothing reported, so the recovered
+        // name is the stored label. The guard covers only a row stored before labels were materialized: it
+        // has no name to recover and none to collide with, and suffixing would invent one for it.
         guard let reportedLabel = sanitizedFocusName(existing.label) else { return nil }
-        // No claimed-name exemption here: an agent that reaches a clear is unclaimed by definition (a
-        // claimed agent's rename is refused above), so a `claimedLauncherName` it still carries is stale
-        // data from a deleted launcher. Exempting it would free the name of a launcher recreated under
-        // the same name, and the clear would put the recovered label right next to that launcher's row.
         let uniqueLabel = try uniqueAgentFocusLabel(
-            workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id, claimedLauncherName: nil)
+            workspaceID: existing.workspaceID, preferredLabel: reportedLabel, excludingAgentWindowID: existing.id)
         guard let uniqueLabel, normalizedFocusName(uniqueLabel) != normalizedFocusName(reportedLabel) else { return nil }
         return uniqueLabel
     }

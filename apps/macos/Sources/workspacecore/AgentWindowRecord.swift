@@ -7,9 +7,8 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let label: String?
     /// The name the user typed for this agent's row, or nil when it was never renamed. Kept apart from
     /// `label`, which the hook and foreground-detection writers rewrite from what the agent reports, so a
-    /// rename survives every later signal. Two paths write it (both through
-    /// `SQLiteStore.setAgentSessionUserLabel`): the rename command, and claim formation, which clears it
-    /// when a configured launcher takes over naming the row. It is read-only on every other path.
+    /// rename survives every later signal. Only the rename command writes it (through
+    /// `SQLiteStore.setAgentSessionUserLabel`); it is read-only on every other path.
     ///
     /// Read-only does not mean droppable. A lifecycle path that rebuilds a record from an existing one
     /// must copy this field across: the upsert leaves the stored column alone either way, but the record it
@@ -19,8 +18,6 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let runtimeTargetID: String?
     public let terminalTarget: TerminalTargetRecord?
     public let sessionKey: String?
-    public let claimedLauncherID: String?
-    public let claimedLauncherName: String?
     public let status: AgentWindowStatus
     /// Explicit, user-authored annotation for orchestration (`spaces agent annotate`). It is never
     /// derived from prompts or terminal output, and survives status signals — only the annotate path
@@ -37,8 +34,8 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
-        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
-        status: AgentWindowStatus, note: String? = nil, detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
+        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, status: AgentWindowStatus, note: String? = nil,
+        detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -48,8 +45,6 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.runtimeTargetID = runtimeTargetID
         self.terminalTarget = terminalTarget
         self.sessionKey = sessionKey
-        self.claimedLauncherID = claimedLauncherID
-        self.claimedLauncherName = claimedLauncherName
         self.status = status
         self.note = note
         self.detectedAgentKind = detectedAgentKind
@@ -83,9 +78,6 @@ public struct AgentWindowRecord: Codable, Sendable {
     /// reports for itself, and nil when it has neither. This is the name every surface shows and the only
     /// name a name-based lookup or a uniqueness check may read. Reading `label` directly for either
     /// purpose leaves a renamed agent answering to a name nothing displays.
-    ///
-    /// Claim matching (`AgentLauncherClaim`) is the exception and stays on `label`: it asks which launcher
-    /// the agent reported itself as, which a rename does not change.
     public var effectiveLabel: String? {
         if let userLabel = userLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !userLabel.isEmpty { return userLabel }
         guard let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
@@ -97,7 +89,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public func withUserLabel(_ userLabel: String?) -> AgentWindowRecord {
         AgentWindowRecord(
             id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
-            terminalTarget: terminalTarget, sessionKey: sessionKey, claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName,
-            status: status, note: note, detectedAgentKind: detectedAgentKind, createdAt: createdAt, updatedAt: updatedAt)
+            terminalTarget: terminalTarget, sessionKey: sessionKey, status: status, note: note, detectedAgentKind: detectedAgentKind,
+            createdAt: createdAt, updatedAt: updatedAt)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 
 /// Resolves a user-entered device selector (`--device <name-or-id>` on the CLI, `device` on MCP
 /// tools) against the profile's paired-device records. An exact ID match wins; otherwise the name
@@ -23,7 +24,15 @@ public enum SpacesPairedDeviceSelection {
         throw SpacesClientError.invalidArgument("No device matches '\(selector)'. Paired devices:\n\(deviceRows(devices))")
     }
 
+    /// One tab-separated line per device: id, name, platform, the address it is currently dialed at
+    /// labeled by network path, and every candidate address it may fail over to. The candidates are
+    /// listed because a device that answers on one address and not another is otherwise invisible from
+    /// the CLI, and diagnosing that is exactly what someone reaching for `spaces device list` is doing.
     public static func deviceRows(_ devices: [SpacesPairedDeviceRecord]) -> String {
-        devices.map { "\($0.id)\t\($0.name)\t\($0.platform)\t\($0.host):\($0.port)" }.joined(separator: "\n")
+        devices.map { device in
+            let address = device.dialHost.map { "\(SpacesDeviceHostAddressKind(host: $0).label) · \($0):\(device.port)" } ?? "-"
+            let candidates = device.hosts.isEmpty ? "-" : device.hosts.joined(separator: ",")
+            return "\(device.id)\t\(device.name)\t\(device.platform)\t\(address)\t\(candidates)"
+        }.joined(separator: "\n")
     }
 }

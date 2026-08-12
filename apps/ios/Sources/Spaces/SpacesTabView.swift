@@ -12,6 +12,7 @@ struct SpacesTabView: View {
     @State private var isShowingFilters = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var pendingDeleteWorkspace: SpacesDeviceWorkspaceSummary?
+    @State private var pendingStop: PendingStop?
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
@@ -51,6 +52,12 @@ struct SpacesTabView: View {
                 workspace.isRunning
                     ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
                     : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
+        }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
+            stop in
+            Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { stop in
+            Text(stop.message)
         }.sheet(item: $pendingDeleteWorkspace) { workspace in
             WorkspaceDeleteSheet(workspace: workspace) { deleteLocalBranch, deleteRemoteBranch in
                 Task { await model.deleteWorkspace(workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch) }
@@ -60,6 +67,15 @@ struct SpacesTabView: View {
 
     private var hideWorkspaceDialogBinding: Binding<Bool> {
         Binding(get: { pendingHideWorkspace != nil }, set: { if !$0 { pendingHideWorkspace = nil } })
+    }
+
+    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } }) }
+
+    private func performPendingStop(_ stop: PendingStop) async {
+        switch stop {
+        case .row(let row): await model.stop(row: row)
+        case .workspace(let workspace): await model.stopWorkspace(workspace)
+        }
     }
 
     /// Any detail route — a terminal, a pending terminal launch, or a browser session — that should
@@ -117,9 +133,17 @@ struct SpacesTabView: View {
                         homeControls.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12).bandListRow().id(SpacesListRowID.controls)
                     }
                     if model.isActiveDeviceBlocked {
-                        // Fully blocked, scoped to this device: the banner in homeControls is the only
-                        // surface. Switch to another paired device or restart this device's daemon.
-                        EmptyView()
+                        // Fully blocked, scoped to this device: nothing here can be used, so the version
+                        // hero takes the whole list when there is something for the user to do or know,
+                        // and the screen stays bare while Spaces is applying a staged build by itself.
+                        // Switch to another paired device from the selector above either way.
+                        if case .hero(let hero) = model.daemonCompatibilityPresentation {
+                            Section {
+                                DaemonVersionHeroView(content: hero, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
+                                    Task { await model.retryStagedApply() }
+                                }.frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.compatibilityHero)
+                            }
+                        }
                     } else if model.isLoading && model.overview == nil {
                         Section {
                             ProgressView("Loading workspaces...").frame(maxWidth: .infinity, minHeight: 360).bandListRow().id(SpacesListRowID.loading)
@@ -154,7 +178,9 @@ struct SpacesTabView: View {
         private var listIdentitySections: [[String]] {
             var sections: [[String]] = [["controls@\(SpacesListRowID.controls)"]]
             if model.isActiveDeviceBlocked {
-                // No rows: the compatibility banner in homeControls is the whole surface.
+                // The version hero is the whole surface, and there is none while a staged build is being
+                // applied on its own.
+                if case .hero = model.daemonCompatibilityPresentation { sections.append(["compatibilityHero@\(SpacesListRowID.compatibilityHero)"]) }
             } else if model.isLoading && model.overview == nil {
                 sections.append(["loading@\(SpacesListRowID.loading)"])
             } else if projectGroups.isEmpty && model.terminalGroups.isEmpty && !isHiddenSectionVisible {
@@ -190,17 +216,20 @@ struct SpacesTabView: View {
     private var homeControls: some View {
         VStack(spacing: 8) {
             deviceSelectorRow
-            compatibilityBanner
+            pendingUpdateCard
             if !model.isActiveDeviceBlocked { searchFilterRow }
         }
     }
 
-    @ViewBuilder private var compatibilityBanner: some View {
-        if let status = model.daemonStatus, let remedy = model.daemonUpdateRemedy, remedy != .none {
+    /// The quiet card for a device that works fine and has an update waiting. A blocked device's state
+    /// is not shown here at all: it takes the whole list as the version hero, or nothing while Spaces is
+    /// applying the staged build on its own.
+    @ViewBuilder private var pendingUpdateCard: some View {
+        if case .pendingUpdate(let content) = model.daemonCompatibilityPresentation {
             // The update action fires directly: `requestDaemonUpdate()` re-execs the daemon onto
             // whatever build is staged and preserves running terminals, processes, and coding agents,
             // so there is nothing to confirm or defer.
-            CompatibilityBannerView(remedy: remedy, status: status, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
+            PendingDaemonUpdateCardView(content: content, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
                 Task { await model.requestDaemonUpdate() }
             }
         }
@@ -352,10 +381,14 @@ struct SpacesTabView: View {
             // the structural change this deliberately avoids) but nothing under a workspace on its way out
             // is worth acting on.
             WorkspaceControlBar(
-                workspace: group.workspace, isMutating: model.isMutating || isDeleting,
+                // Every action here rides the shared `commandChannel`, whose gate drops a second mutation
+                // without sending it, so the bar must read busy while any shared-channel mutation is in
+                // flight or its taps would silently do nothing. A delete never sets `isMutating` (it runs
+                // on its own private channel), so another workspace's delete never dims this bar (#450);
+                // this workspace's own delete dims it via `isDeleting`.
+                workspace: group.workspace, isBusy: model.isMutating || isDeleting,
                 onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                onStop: { Task { await model.stopWorkspace(group.workspace) } },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } }, onStop: { pendingStop = .workspace(group.workspace) },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
                 onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
             ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
@@ -429,12 +462,24 @@ struct SpacesTabView: View {
         Task { await model.rename(row: row, to: title) }
     }
 
-    /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy
-    /// and never touches the bridge client, so unlike every other row it is gated neither on
-    /// `isMutating` nor on having a session or a run action.
+    /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy and
+    /// never touches the bridge client, so unlike every other row it is gated neither on having a session
+    /// nor a run action, and never on `model.isMutating` (#450). A row with an existing session is the
+    /// same: its tap navigates to that session locally (`activateRuntimeRow`) without touching the bridge
+    /// client either, so it too stays ungated regardless of `model.isMutating`. This row's own deleting
+    /// state is covered separately by the `disabled` the caller wraps it in (`workspaceSection`).
+    ///
+    /// A session-less row with nothing to run offers nothing either way, gated or not. The one case left
+    /// is a session-less row whose tap starts a run: `activateRuntimeRow` pushes
+    /// `TerminalLaunchPendingView`, which calls `model.performPrimaryAction`/`run`, and that path shares
+    /// `commandChannel` and is refused by `performMutationReturningSession`'s own `isMutating` guard. Left
+    /// ungated, a tap during a shared-channel mutation would push that pending view only for it to resolve
+    /// to `nil` and pop itself a moment later — so this one case stays gated on `model.isMutating`
+    /// (review round 2, finding 3).
     private func isRuntimeRowDisabled(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        guard !row.isBrowserSession else { return false }
-        return model.isMutating || (row.sessionID == nil && !row.canRun)
+        guard !row.isBrowserSession, row.sessionID == nil else { return false }
+        guard row.canRun else { return true }
+        return model.isMutating
     }
 
     @ViewBuilder private func runtimeTrailingIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
@@ -458,7 +503,7 @@ struct SpacesTabView: View {
         }
         if row.canStop {
             Button {
-                Task { await model.stop(row: row) }
+                pendingStop = .row(row)
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }.tint(Theme.red).disabled(model.isMutating)
@@ -482,7 +527,7 @@ struct SpacesTabView: View {
         }
         if row.canStop {
             Button {
-                Task { await model.stop(row: row) }
+                pendingStop = .row(row)
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }.disabled(model.isMutating)
@@ -609,9 +654,32 @@ struct SpacesTabView: View {
             BandRow(
                 dotKind: StatusDot.Kind(session.state), tile: .tile(for: .workspaceTerminals), title: session.title, detail: session.liveTitle ?? ""
             ) { RowChevron() }
-        }.buttonStyle(.plain).disabled(isDeleting || model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).opacity(
-            isDeleting ? 0.5 : 1
-        ).accessibilityIdentifier("terminal.row.\(session.id)")
+            // Gated on this row's own deleting state, not `model.isMutating`: that flag also covers
+            // mutations against other workspaces, which have nothing to do with this loose session (#450).
+        }.buttonStyle(.plain).disabled(isDeleting || (!session.isControlAvailable && !session.hasFinalRender)).opacity(isDeleting ? 0.5 : 1)
+            .accessibilityIdentifier("terminal.row.\(session.id)")
+    }
+}
+
+/// A stop the user has asked for but not yet confirmed: either one runtime row's session or a whole
+/// workspace. Both live in this tab (the row swipe tray/context menu and the workspace control bar), so
+/// they share this one pending-state/dialog pair rather than each entry point carrying its own.
+private enum PendingStop {
+    case row(SpacesMobileWorkspaceRuntimeRow)
+    case workspace(SpacesDeviceWorkspaceSummary)
+
+    var title: String {
+        switch self {
+        case .row(let row): StopConfirmationCopy.rowTitle(row.title)
+        case .workspace(let workspace): StopConfirmationCopy.workspaceTitle(workspace.displayName)
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .row: StopConfirmationCopy.rowMessage
+        case .workspace: StopConfirmationCopy.workspaceMessage
+        }
     }
 }
 
@@ -630,6 +698,7 @@ struct SpacesTabView: View {
 /// (a workspace id naming both a band and a loose band, say) still yields two distinct rows.
 private enum SpacesListRowID {
     static let controls = "controls"
+    static let compatibilityHero = "compatibility.hero"
     static let loading = "loading"
     static let empty = "empty"
     static let hiddenHeader = "hidden.header"
@@ -662,8 +731,10 @@ private struct WorkspaceBandActions: ViewModifier {
         // Suppressed, not disabled, for both cases — the Demo Mode backend cannot serve these, and a
         // workspace already marked for deletion is inert by contract. Disabling would still open the swipe
         // tray and the context menu on a band whose workspace is on its way out; leaving the surfaces off
-        // entirely is what makes the row genuinely offer nothing. The mark outlives `isMutating` when a
-        // delete's outcome could not be confirmed, which is exactly when this matters.
+        // entirely is what makes the row genuinely offer nothing. This is the only in-flight gate Delete
+        // and Hide need here: a delete whose outcome could not be confirmed keeps this mark on well after
+        // the mutation itself has finished, so this is checked on its own rather than folded into a busy
+        // flag that has already cleared.
         if model.isDemoModeEnabled || model.isWorkspacePendingDeletion(workspace.id) {
             content
         } else {
@@ -687,13 +758,16 @@ private struct WorkspaceBandActions: ViewModifier {
         }.disabled(model.isMutating).accessibilityIdentifier("workspace.hide.\(workspace.id)")
     }
 
-    /// Delete in the long-press menu, where `.destructive` is only what colours it red.
+    /// Delete in the long-press menu, where `.destructive` is only what colours it red. Not gated on
+    /// `model.isMutating`: a delete against another workspace has no bearing on this one (#450), and a
+    /// delete of this workspace already in flight is caught by the outer `isWorkspacePendingDeletion`
+    /// check, which removes the whole tray rather than leaving a disabled button behind.
     private var menuDeleteButton: some View {
         Button(role: .destructive) {
             onDelete()
         } label: {
             deleteLabel
-        }.disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+        }.accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
 
     /// Delete in the swipe tray — deliberately roleless, tinted red by hand instead of carrying
@@ -712,12 +786,15 @@ private struct WorkspaceBandActions: ViewModifier {
     /// The rule: `.destructive` in `swipeActions` is only correct when the action removes the row from the
     /// data synchronously with the tap (the Alerts tab's dismiss does, and keeps its role). Any swipe
     /// action that leaves its row in place must not carry it. `.tint(Theme.red)` keeps the tray identical.
+    ///
+    /// Not gated on `model.isMutating` — see `menuDeleteButton`: a delete against another workspace runs on
+    /// its own private channel and has no bearing on whether this one can be tapped (#450).
     private var swipeDeleteButton: some View {
         Button {
             onDelete()
         } label: {
             deleteLabel
-        }.tint(Theme.red).disabled(model.isMutating).accessibilityIdentifier("workspace.delete.\(workspace.id)")
+        }.tint(Theme.red).accessibilityIdentifier("workspace.delete.\(workspace.id)")
     }
 
     private var deleteLabel: some View { Label("Delete", systemImage: "trash") }

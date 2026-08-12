@@ -248,8 +248,7 @@ import workspacecore
                     config: SpacesDeviceProjectConfig(
                         setupScript: "make setup", stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
-                        browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
-                        agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
+                        browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")]))
             ],
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
@@ -262,8 +261,7 @@ import workspacecore
                         stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
-                        resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],
-                        agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]),
+                        resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")]),
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
@@ -271,9 +269,8 @@ import workspacecore
                     ],
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
-                            id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
-                            agentID: "running-agent", sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting,
-                            canRun: false, canStop: true, canRestart: true)
+                            id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -310,8 +307,7 @@ import workspacecore
                     config: SpacesDeviceWorkspaceConfig(
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
-                        resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],
-                        agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]),
+                        resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")]),
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
                             id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
@@ -319,9 +315,8 @@ import workspacecore
                     ],
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
-                            id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
-                            agentID: "running-agent", sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting,
-                            canRun: false, canStop: true, canRestart: true)
+                            id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, canStop: true)
                     ],
                     terminalRows: [
                         SpacesDeviceWorkspaceTerminalRow(
@@ -374,7 +369,7 @@ import workspacecore
         let windows = AppKitController.deviceTerminalWindows(from: terminalRows)
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(configuredProcesses: [], windows: windows, processes: [], agentWindows: [])
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
-            browserSessions: [], processEntries: entries, processesByID: [:], configuredAgentLaunchers: [], agentWindows: [])
+            browserSessions: [], processEntries: entries, processesByID: [:], agentWindows: [])
 
         #expect(windows.map(\.terminalTrackingKey) == ["terminal:session-shell"])
         #expect(entries.count == 1)
@@ -537,9 +532,8 @@ import workspacecore
         #expect(remote.displayName == "Build Host")
     }
 
-    @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
-        // Regression: an attention alert for a waiting/done agent must focus that agent's existing
-        // session, not resolve to `.runCodingAgent` (which would start a second agent). Build the
+    @Test func waitingAgentAlertResolvesToFocusingItsSession() {
+        // An attention alert for a waiting/done agent focuses that agent's existing session. Build the
         // alert through the real overview path, then resolve its focus request end to end.
         let overview = SpacesDeviceOverviewPayload(
             projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
@@ -547,14 +541,10 @@ import workspacecore
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
-                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [
-                        SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
-                    ]),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
-                            id: "row-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                            agentID: "agent-1", sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting,
-                            updatedAt: "2026-06-28T09:00:00Z", canRun: false, canStop: true, canRestart: true)
+                            id: "agent:agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-1",
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z", canStop: true)
                     ])
             ], sessions: [])
 
@@ -570,7 +560,7 @@ import workspacecore
         #expect(record.id == "agent-1")
         #expect(record.workspaceID == "workspace-1")
 
-        // Resolving it opens the agent's terminal session instead of launching another agent.
+        // Resolving it opens the agent's terminal session.
         #expect(
             AppKitController.windowFocusResolution(for: focusRequest, overview: overview)
                 == .openTerminal(
@@ -806,9 +796,8 @@ import workspacecore
                     dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1,
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
-                            id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
-                            agentID: "running-agent", sessionID: "session-starting-agent", isConfigured: true, runState: .running,
-                            activityState: .waiting, canRun: false, canStop: true, canRestart: true)
+                            id: "agent:running-agent", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "running-agent",
+                            sessionID: "session-starting-agent", runState: .running, activityState: .waiting, canStop: true)
                     ])
             ], sessions: [session])
 
@@ -988,7 +977,7 @@ import workspacecore
 
     @Test func remoteBrowserSSHArgumentsUsePairedDeviceSSHMetadata() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            id: "remote", name: "Build Host", platform: "linux", hosts: ["10.0.0.4"], port: 7443, certificateFingerprint: "fingerprint",
             sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
         let args = try BrowserSSHForwardManager.sshArguments(device: device, localPort: 41001, remotePort: 32001)
@@ -1002,7 +991,7 @@ import workspacecore
 
     @Test func remoteBrowserSSHArgumentsUseOneProcessForMultipleForwardBindings() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            id: "remote", name: "Build Host", platform: "linux", hosts: ["10.0.0.4"], port: 7443, certificateFingerprint: "fingerprint",
             sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
         let args = try BrowserSSHForwardManager.sshArguments(
@@ -1082,7 +1071,7 @@ import workspacecore
             projects: [project], workspaces: [descriptor], workspaceRows: rows, liveSessions: [],
             daemonStatus: TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0))
         let device = SpacesPairedDeviceRecord(
-            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            id: "local", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: 19000, certificateFingerprint: "fingerprint",
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
         let clientApp = SpacesDeviceClientApp(
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
@@ -1109,7 +1098,7 @@ import workspacecore
     @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
         let recorder = ThreadRecorder()
         let device = SpacesPairedDeviceRecord(
-            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            id: "local", name: "Mac", platform: "macos", hosts: ["127.0.0.1"], port: 19000, certificateFingerprint: "fingerprint",
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
         let clientApp = SpacesDeviceClientApp(
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")

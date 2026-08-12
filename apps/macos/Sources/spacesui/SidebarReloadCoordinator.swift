@@ -25,16 +25,26 @@ import Foundation
     private var nextRunID = 0
     private var activeRunID: Int?
     private var pendingRequest: ReloadRequest?
+    /// Minimum spacing between reload *starts*. Requests are driven by database writes, so a streaming
+    /// terminal raises them far faster than a snapshot load can run; coalescing alone only keeps one
+    /// load in flight, which under a storm means reloads run back to back forever. Spacing the starts
+    /// rather than debouncing to the trailing edge keeps the latency-sensitive case free: a request
+    /// after a quiet period runs at once, and only requests inside the interval wait.
+    private let minimumStartInterval: Duration
+    private let clock = ContinuousClock()
+    private var lastStartInstant: ContinuousClock.Instant?
+    private var scheduledStartTask: Task<Void, Never>?
     private(set) var state: State = .idle
 
     init(
         loadSnapshot: @escaping @MainActor () async -> Result<Snapshot, any Error>,
         applySnapshot: @escaping @MainActor (Snapshot, _ forceRemoteRefresh: Bool, _ bypassesBackoff: Bool) -> Void,
-        handleFailure: @escaping @MainActor (any Error, String?) -> Void
+        handleFailure: @escaping @MainActor (any Error, String?) -> Void, minimumStartInterval: Duration = .milliseconds(250)
     ) {
         self.loadSnapshot = loadSnapshot
         self.applySnapshot = applySnapshot
         self.handleFailure = handleFailure
+        self.minimumStartInterval = minimumStartInterval
     }
 
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh") so a
@@ -49,27 +59,74 @@ import Foundation
             state = .queued
             return
         }
-        start(request)
+        startOrSchedule(request)
     }
 
+    /// Cancels the in-flight load only. A start already scheduled behind the spacing interval keeps its
+    /// schedule, matching the one call site (`applicationWillTerminate`), which drops the load it no
+    /// longer needs rather than shutting the coordinator down; `stop()` is the full teardown.
     func cancelCurrentTask() { reloadTask?.cancel() }
 
-    /// Awaits the currently running (or about to run) reload, so a test can observe what a request
-    /// applied deterministically instead of polling. A no-op once the coordinator is idle.
-    func drainCurrentReloadForTesting() async { await reloadTask?.value }
+    /// Awaits the currently running reload plus any start still waiting on the spacing interval, so a
+    /// test can observe what a request applied deterministically instead of polling. A no-op once the
+    /// coordinator is idle.
+    func drainCurrentReloadForTesting() async {
+        while scheduledStartTask != nil || reloadTask != nil {
+            if let scheduledStartTask { await scheduledStartTask.value }
+            if let reloadTask { await reloadTask.value }
+        }
+    }
 
     func stop() {
         reloadTask?.cancel()
         reloadTask = nil
+        scheduledStartTask?.cancel()
+        scheduledStartTask = nil
         activeRunID = nil
         pendingRequest = nil
         state = .idle
+    }
+
+    /// Starts immediately when the spacing interval has already elapsed, otherwise holds the request as
+    /// pending and schedules the one start that will run it. At most one start is ever scheduled; every
+    /// further request merges into the pending one that start will carry.
+    private func startOrSchedule(_ request: ReloadRequest) {
+        guard scheduledStartTask == nil else {
+            pendingRequest = mergedPendingRequest(existing: pendingRequest, next: request)
+            state = .queued
+            return
+        }
+        guard let earliestStart = lastStartInstant?.advanced(by: minimumStartInterval), earliestStart > clock.now else {
+            start(request)
+            return
+        }
+        pendingRequest = mergedPendingRequest(existing: pendingRequest, next: request)
+        state = .queued
+        scheduleStart(at: earliestStart)
+    }
+
+    private func scheduleStart(at deadline: ContinuousClock.Instant) {
+        let clock = clock
+        scheduledStartTask = Task { @MainActor [weak self] in
+            try? await clock.sleep(until: deadline, tolerance: nil)
+            guard !Task.isCancelled, let self else { return }
+            self.scheduledStartTask = nil
+            // The trailing request carries state the sidebar has not shown yet, so spacing may delay it
+            // but must never drop it.
+            guard let next = self.pendingRequest else {
+                self.state = .idle
+                return
+            }
+            self.pendingRequest = nil
+            self.start(next)
+        }
     }
 
     private func start(_ request: ReloadRequest) {
         nextRunID += 1
         let runID = nextRunID
         activeRunID = runID
+        lastStartInstant = clock.now
         state = .loading
         reloadTask = Task { @MainActor [weak self] in await self?.run(request, runID: runID) }
     }
@@ -96,7 +153,7 @@ import Foundation
             return
         }
         pendingRequest = nil
-        start(next)
+        startOrSchedule(next)
     }
 
     private func mergedPendingRequest(existing: ReloadRequest?, next: ReloadRequest) -> ReloadRequest {

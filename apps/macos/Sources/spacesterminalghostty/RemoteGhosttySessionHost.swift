@@ -9,12 +9,30 @@
     /// — failed to reach the device. Raised from the serial input queue (off the main actor, awaited
     /// through its `async` `onError`) with the error the send threw, and deliberately not classified
     /// here: the host knows only that its request failed, while the owner of the session's link state
-    /// (`DeviceTerminalSessionStateModel.isTransportFailureEvidenceOfLostLink`) knows whether a given
-    /// failure is evidence about the link.
+    /// (`DeviceTerminalSessionStateModel.reportFailedInputSend`) knows whether a given failure is
+    /// evidence about the link, and whether that evidence is conclusive.
     ///
-    /// Returns whether the failure itself proves the link is gone. When `true`, the host discards this
-    /// pane's queued input (`TerminalInputSerialQueue.cancelAll()`) instead of letting a backlog typed
-    /// during the outage drain and deliver late — including any Enter — once the link recovers.
+    /// Returns whether the failure is CONCLUSIVE proof the link is gone, not merely that this one send
+    /// failed. When `true`, the host discards this pane's queued input (`TerminalInputSerialQueue.cancelAll()`)
+    /// instead of letting a backlog typed during the outage drain and deliver late — including any Enter —
+    /// once the link recovers. A bare request timeout answers `false`: the failed send is still reported
+    /// (whatever failure surfacing the model does for it — the disconnect notice, the paced reconnect —
+    /// runs the same as for any other transport failure), but the timeout alone does not prove the queued
+    /// backlog would go nowhere. The interactive control deadline is tight enough
+    /// (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`, 5s) that a live but
+    /// congested link can miss it on its own: the send path never touches the main actor
+    /// (`TerminalInputSerialQueue.enqueue` hands off to a detached task that talks to the pinned-TLS
+    /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
+    /// request client, which acquires its request lock before starting the per-operation deadline, so a
+    /// keystroke queued behind a grid-sized resync fetch is not charged for that wait — it gets a fresh
+    /// 5s window once its turn comes. What actually burns that window is the daemon's own answer running
+    /// late: under heavy streaming the daemon's serial terminal-engine queue is saturated, so a
+    /// keystroke's response can genuinely time out with nothing wrong with the link. Discarding a live
+    /// pane's backlog on that false alarm is the bug this distinction exists to avoid — and a silently
+    /// dead link (nothing ever answers) produces the identical timeout, so the timeout by itself is not
+    /// conclusive either way. Only a connection-level failure (refused, closed, every candidate address
+    /// unreachable) — or a repeat failure during an outage a prior conclusive failure already confirmed —
+    /// answers `true`.
     public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (
@@ -51,19 +69,61 @@
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
         /// Notified when an interactive control request — typed input, paste, key, scroll, resize, or
         /// clear-screen — throws. Input rides a different connection than the state subscription, so a
-        /// send that cannot reach the device is the earliest proof the link is gone — a silently dead
-        /// network path leaves the subscription's socket looking healthy until TCP keepalive gives up a
-        /// minute or more later. See `reportInputFailure`, the shared call point every one of those
-        /// requests funnels its failure through.
+        /// send that cannot reach the device is the earliest evidence the link may be gone — a silently
+        /// dead network path leaves the subscription's socket looking healthy until TCP keepalive gives up
+        /// a minute or more later. "May be" because a bare request timeout is not conclusive by itself (see
+        /// the handler's own doc): the same 5s deadline that catches a dead link also catches an app-side
+        /// stall that never touched the network. See `reportInputFailure`, the shared call point every one
+        /// of those requests funnels its failure through.
         private let inputFailureHandler: RemoteGhosttyInputFailureHandler?
         private let terminalView: GhosttyMirrorTerminalView
+        /// The main actor's mirror of the payload the pipeline stored, updated as each reduction result
+        /// is applied. Every main-actor reader below (title, working directory, owner, owner epoch,
+        /// runtime grid, ended-run identity, render-state key) reads it rather than the pipeline's copy,
+        /// so none of them has to await anything. It therefore lags the pipeline by whatever is in
+        /// flight: at most the one payload being reduced, because the consumer awaits each
+        /// application before taking the next. Every reader tolerates that: they describe the session as
+        /// last rendered, which is exactly what a lagging mirror holds.
         private var latestState: GhosttyRemoteSessionStatePayload?
-        private var stateReducer = TerminalRemoteStateReducer()
+        /// Reduces incoming payloads off the main actor, in arrival order across every entry point. It
+        /// owns the reducer (and so the render-update baseline and the previous stored payload the next
+        /// reduce chains from); this host only applies what it hands back.
+        private lazy var statePipeline = TerminalRemoteStateReductionPipeline(
+            shouldUseFrame: { frame, payload in
+                Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
+            }, apply: { [weak self] output in self?.applyReducedState(output) })
+        /// Whether a payload carrying a full frame is in the pipeline and has not been applied yet.
+        ///
+        /// The pipeline reduces off the main actor, so a host that is built and attached within one
+        /// main-actor turn — the lazy pane open, whose registration with the session's state model replays
+        /// that model's cached frame synchronously — holds no frame at attach time even though one is
+        /// already on its way. Without this, every such open would ask the device for a frame it is about
+        /// to receive and pay for a grid-sized export.
+        ///
+        /// Cleared by ANY apply the pipeline delivers rather than by matching the payload that set it: the
+        /// apply mailbox collapses runs of outputs, so the apply that lands can describe a later payload
+        /// than the one marked here. Since every submitted payload still produces an apply — its own, or
+        /// the one it was collapsed into — clearing on any apply cannot leave this stuck set, and clearing
+        /// it early (on an apply for an older payload) costs at most the one resync it exists to avoid.
+        private let pendingFullFrameSubmission = PendingFullFrameSubmission()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
         private var lastRenderUpdateResyncAt: Date?
+        /// The one delayed `.state` request owed to a resync the throttle turned away; see
+        /// `scheduleTrailingRenderUpdateResync`.
+        private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+        /// What a landing frame must cover for that delayed request to count as answered. Non-nil exactly
+        /// while `pendingRenderUpdateResyncTask` is armed; see `TerminalResyncOwedOrdering` for why a
+        /// frame alone is not proof.
+        private var owedRenderUpdateResyncOrdering: TerminalResyncOwedOrdering?
+        /// How long one resync request paces the next. Only a test overrides it
+        /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its
+        /// boundary instead of waiting out a real second.
+        private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
+        var renderUpdateResyncIntervalForTesting: TimeInterval?
+        private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
         /// Unit tests inject a uniquely-named pasteboard here so an owner-targeted OSC 52 write never
@@ -150,6 +210,7 @@
                 directStateStreamClient?.stop()
                 pendingViewportSettleTask?.cancel()
                 pendingViewportResizeTask?.cancel()
+                pendingRenderUpdateResyncTask?.cancel()
                 scrollCoalescer.cancel()
                 inputQueue.cancelAll()
             }
@@ -197,12 +258,25 @@
                 container.needsLayout = true
                 container.layoutSubtreeIfNeeded()
             }
-            // Same rule as applyRemoteState: while the ended-session replay is showing a scrolled
+            // Same rule as applyReducedState: while the ended-session replay is showing a scrolled
             // viewport, a re-attach must not clobber it with the daemon's final frame. But if the
             // surface was released and recreated between detach and this attach, repaint the replay
             // viewport so the recreated surface is not left blank.
             if !isEndedScrollbackReplayActive {
-                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+                let frame = currentRenderFrameForRenderUpdate()
+                terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+                // Attaching with no frame, and none on the way, leaves nothing to paint and no baseline for
+                // the deltas the stream carries — they describe only the cells that changed. That happens
+                // when the subscriber's own full frame has not landed yet (this host is built lazily, after
+                // its pane's state model has been streaming) and when an owner change scrubbed the render
+                // update out of the stored payload. Nothing else on this path would ask: the owner attach's
+                // viewport resize below announces nothing when the grid has not moved, and a delta failing
+                // to apply is the only other trigger. So ask here instead of waiting for that failure —
+                // unless a full frame is already queued for this host, which is the ordinary lazy pane open
+                // (see `pendingFullFrameSubmission`). Throttled with every other resync request and
+                // satisfied by the `.state` response, so a re-attach while one is in flight adds nothing.
+                // Owed by no particular update: this attach found no frame at all, so any frame closes it.
+                if frame == nil, !pendingFullFrameSubmission.isPending { requestRenderUpdateStateResync(owedBy: .anyFrame) }
             } else {
                 repaintEndedReplayViewportIfSurfaceEmpty()
             }
@@ -257,7 +331,7 @@
 
         public func requestSurfaceRefresh() {
             requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange)
-            // Same rule as applyRemoteState: a refresh must not clobber a scrolled ended viewport, but
+            // Same rule as applyReducedState: a refresh must not clobber a scrolled ended viewport, but
             // it must repaint the replay when the surface was released and recreated underneath it.
             if !isEndedScrollbackReplayActive {
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
@@ -379,7 +453,7 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             let client = GhosttyRemoteSessionStateStreamClient(
-                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.applyRemoteState(payload) },
+                socketPath: paths.subscriptionSocketPath, onEvent: { [weak self] payload in self?.submitToStatePipeline(payload) },
                 onDisconnect: { [weak self] in self?.handleStreamDisconnect() })
             do {
                 try client.start()
@@ -395,8 +469,18 @@
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             do {
+                // The event callback fires off the main actor and submits from there: reduction is the
+                // expensive part and it does not need the main actor, so a payload reaches the pipeline
+                // without a main-actor hop at all. The capture is weak so a client that outlives this
+                // host cannot keep the pipeline reducing frames for an owner that is gone.
                 let client = try stateStreamSubscriber(
-                    launchConfiguration.sessionID, { [weak self] payload in Task { @MainActor [weak self] in self?.applyRemoteState(payload) } },
+                    launchConfiguration.sessionID,
+                    { [weak statePipeline = statePipeline, pendingFullFrameSubmission] payload in
+                        // `submitToStatePipeline`'s body, inlined because this callback deliberately does
+                        // not touch `self` (see the capture note above); the marking rule is the same.
+                        if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+                        statePipeline?.submit(payload)
+                    },
                     { [weak self] _ in
                         Task { @MainActor [weak self] in
                             self?.directStateStreamClient = nil
@@ -412,16 +496,94 @@
             requestDirectStateFetch()
         }
 
-        /// A resync means a frame-bearing payload failed to apply (missing baseline, revision or
-        /// owner-epoch mismatch). Each direct `.state` fetch opens a transient connection on the
+        /// A resync means this host has no full frame to draw from: a frame-bearing payload failed to
+        /// apply (missing baseline, revision or owner-epoch mismatch), its frame was refused as stale, or
+        /// an attach found no frame at all. Each direct `.state` fetch opens a transient connection on the
         /// daemon's subscription socket, so an unthrottled retry loop floods the daemon with
         /// unicast initial exports without converging; space the retries so the stream's own
         /// recovery (the forced full-frame broadcast) can land in between.
-        private func requestRenderUpdateStateResync() {
+        ///
+        /// The throttle paces requests; it never discards one. A `.state` read can answer with no render
+        /// update at all — the session exports none while its capture holds nothing visible — and it stamps
+        /// the throttle just the same, so the next reducer-required resync can land inside a window that
+        /// repaired nothing. Dropping it there would leave a session that emits one delta and goes quiet
+        /// with a blank pane until some unrelated later event, so a suppressed request arms exactly one
+        /// delayed retry at the window boundary instead.
+        private func requestRenderUpdateStateResync(owedBy ordering: TerminalResyncOwedOrdering) {
             let now = Date()
-            if let lastRenderUpdateResyncAt, now.timeIntervalSince(lastRenderUpdateResyncAt) < 1 { return }
+            if let lastRenderUpdateResyncAt {
+                let elapsed = now.timeIntervalSince(lastRenderUpdateResyncAt)
+                if elapsed < renderUpdateResyncInterval {
+                    scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed, owedBy: ordering)
+                    return
+                }
+            }
+            // The open-throttle path owes the same guarantee as the throttled one: a fetch already in
+            // flight was issued before this resync was owed, so stamping the throttle and letting
+            // `requestDirectStateFetch` refuse on `directStateFetchInFlight` would consume the request
+            // unsent. Arm the trailing retry instead, exactly as a throttled request does.
+            guard !directStateFetchInFlight else {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval, owedBy: ordering)
+                return
+            }
             lastRenderUpdateResyncAt = now
             requestDirectStateFetch()
+        }
+
+        /// Arms the one delayed request a throttled resync is owed, and records the ordering that request
+        /// has to be answered at. Coalesced: a second suppressed request while this is pending is already
+        /// covered by the same timer, so it must not stack a competing one — it only raises the debt to
+        /// whichever failure is later (`TerminalResyncOwedOrdering.merged`).
+        ///
+        /// Cleared when it sends, when a frame covering the recorded ordering lands (`applyReducedState`),
+        /// and when the host is torn down (`deinit`), alongside the pane's other pending tasks — so a dead
+        /// host can never dial the device.
+        ///
+        /// The mirror case needs no machinery: an in-flight fetch that completes frameless while nothing is
+        /// armed owes nothing, because nothing has failed to reduce since it was issued. Whatever payload
+        /// next fails asks again through `requestRenderUpdateStateResync`, and a session that goes quiet
+        /// with no payload at all is covered on the far side — the daemon holds its subscriber-baseline arm
+        /// until a broadcast actually carries a full frame.
+        private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval, owedBy ordering: TerminalResyncOwedOrdering) {
+            owedRenderUpdateResyncOrdering = owedRenderUpdateResyncOrdering?.merged(with: ordering) ?? ordering
+            armTrailingRenderUpdateResync(after: delay)
+        }
+
+        /// The timer behind a request already recorded as owed.
+        ///
+        /// The request stays owed until a fetch genuinely starts. A `.state` read already in flight refuses
+        /// this one (`directStateFetchInFlight`), and that read was issued before this resync was owed, so
+        /// it can answer with no render update and repair nothing; treating the refusal as delivery is how
+        /// the owed request would go missing. So a retry that lands on one waits out another full window
+        /// instead — no spin, the pacing is unchanged since nothing was sent, and the recorded ordering
+        /// rides along untouched because the same debt is still outstanding.
+        private func armTrailingRenderUpdateResync(after delay: TimeInterval) {
+            guard pendingRenderUpdateResyncTask == nil else { return }
+            pendingRenderUpdateResyncTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                self.pendingRenderUpdateResyncTask = nil
+                // An ended pane showing its own scrollback replay renders from the transcript, not from
+                // session state, so a fetch here would repair nothing it displays: the request is abandoned
+                // rather than re-armed, and the debt goes with it.
+                guard !self.isEndedScrollbackReplayActive else {
+                    self.owedRenderUpdateResyncOrdering = nil
+                    return
+                }
+                guard !self.directStateFetchInFlight else {
+                    self.armTrailingRenderUpdateResync(after: self.renderUpdateResyncInterval)
+                    return
+                }
+                self.owedRenderUpdateResyncOrdering = nil
+                self.lastRenderUpdateResyncAt = Date()
+                self.requestDirectStateFetch()
+            }
+        }
+
+        private func cancelTrailingRenderUpdateResync() {
+            pendingRenderUpdateResyncTask?.cancel()
+            pendingRenderUpdateResyncTask = nil
+            owedRenderUpdateResyncOrdering = nil
         }
 
         private func requestDirectStateFetch() {
@@ -437,8 +599,15 @@
                 self.directStateFetchInFlight = false
                 switch result {
                 case .success(let fetchResult):
-                    self.applyRemoteState(fetchResult.payload)
+                    // The agent signals are independent of the session's screen state, so they are applied
+                    // and acknowledged whatever happens to the render payload below — dropping them would
+                    // lose events no later broadcast repeats.
                     self.applyAndAcknowledgeAgentSignals(fetchResult.agentSignals)
+                    // Through the same pipeline as the subscription's payloads: a fetched full frame is
+                    // the head of a new render-update chain, so it must not overtake a delta already
+                    // queued behind it. Marked out-of-band so the reducer can refuse it if the stream has
+                    // already carried the session past what this read captured.
+                    self.submitToStatePipeline(fetchResult.payload, isOutOfBand: true)
                 case .failure(let error):
                     TerminalPerformance.logMetric(
                         "terminal_remote_state_fetch", target: "session=\(sessionID)", elapsedMS: 0, success: false,
@@ -485,6 +654,18 @@
             lastSubscriptionAttemptAt = Date()
         }
 
+        /// Hands a payload to the reduction pipeline, noting first whether it carries a full frame this
+        /// host has yet to apply (see `pendingFullFrameSubmission`). The note is taken *before* the submit
+        /// because the apply that retires it can land as soon as the payload is in.
+        ///
+        /// `isOutOfBand` marks the response to a direct `.state` read, which the reducer orders against its
+        /// own baseline when the payload reaches the head of the queue — the only place that can see a
+        /// newer stream payload submitted ahead of it and still reducing.
+        private func submitToStatePipeline(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool = false) {
+            if payload.renderUpdateKind == .full { pendingFullFrameSubmission.mark() }
+            statePipeline.submit(payload, isOutOfBand: isOutOfBand)
+        }
+
         private func isInteractiveRuntimeStateForControl() -> Bool {
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
@@ -497,31 +678,51 @@
             }
         }
 
-        private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
+        /// Applies one payload the pipeline reduced. Everything here needs the main actor: the terminal
+        /// view, the state the clipboard one-shot reads, the resync request, the metrics, and the
+        /// notifications.
+        private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+            // Any apply at all retires the pending-full-frame note, whichever payload it describes; see
+            // `pendingFullFrameSubmission` for why matching them would be the wrong rule.
+            pendingFullFrameSubmission.clear()
+            let incomingPayload = output.incomingPayload
             // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and
             // whichever route delivered it may have done so out of order with respect to the state
-            // payloads around it (see `DeviceTerminalSessionStateModel.apply`).
+            // payloads around it (see `DeviceTerminalSessionStateModel.apply`). Running it ahead of the
+            // `latestState` move below is what keeps its ownership check reading the same state it read
+            // when the reduction was inline.
             applyClipboardWrite(from: incomingPayload)
             // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen
             // state, and its runtime/attachment snapshot is a repeat of the output turn that carried the
-            // escape sequence — so reducing it is skipped rather than risking an out-of-order payload
-            // regressing the cached title, runtime state, or ownership.
-            guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
-            let decodeStartedAt = Date()
-            let reduction = stateReducer.reduce(
-                incomingPayload: incomingPayload, previousPayload: latestState,
-                shouldUseFrame: { frame, payload in
-                    Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: payload.runtimeState, reason: payload.reason)
-                }, requestResyncOnApplyFailure: true)
+            // escape sequence, so the pipeline reduces nothing for it.
+            guard let reduction = output.reduction else { return }
             let payload = reduction.payload
             let decodedFrame = reduction.frameToApply
             let decodedUpdate = reduction.decodedUpdate
-            let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
+            let decodeMS = output.reduceMS
             let dropReason = reduction.dropReason
             latestState = reduction.storedPayload
-            if reduction.didRequestResync { requestRenderUpdateStateResync() }
+            // Covers a resync the pipeline's apply mailbox inherited from an output it coalesced away:
+            // the superseded frame is not worth drawing, but the full frame it could not build is.
+            //
+            // The ordering the resync is owed at comes from this output's own decoded update even when the
+            // request was inherited: the surviving output is never older than the one it replaced, so its
+            // target is at or past the failure's, and an output with no decodable target records `unknown`,
+            // which no frame retires.
+            if output.requestsResync { requestRenderUpdateStateResync(owedBy: .forFailedUpdate(decodedUpdate)) }
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
+            // A frame that covers the failure the pending resync was armed for repaired the chain, so that
+            // resync is no longer owed. Covering it is what makes the retirement sound — a fetch answered
+            // before the failure was owed lands a frame that applies and yet leaves this host behind the
+            // session (see `TerminalResyncOwedOrdering`). Ordered after the request above so an output that
+            // both carries a frame and inherits a coalesced-away resync retires that request rather than
+            // leaving it armed.
+            if let frameForUpdate, let owed = owedRenderUpdateResyncOrdering,
+                owed.isSatisfied(byFrameOwnerEpoch: frameForUpdate.ownerEpoch, sessionRevision: frameForUpdate.sessionRevision)
+            {
+                cancelTrailingRenderUpdateResync()
+            }
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
@@ -546,36 +747,45 @@
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
-            let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-            var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
-                outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-                dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
-                frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
-                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
-                appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
-                operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
-                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
-                resyncCount: reduction.didRequestResync ? 1 : nil)
-            renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-            renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
-            renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
-            SpacesDeviceTerminalPerformanceLogger.emit(
-                .init(
-                    sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
-                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,
-                    attributes: renderUpdateAttributes))
-            TerminalPerformance.logMetric(
-                "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-                success: true,
-                detail:
-                    "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
-            )
-            TerminalPerformance.logMetric(
-                "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
-                detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
-            if postNotifications { postLocalNotifications(for: payload) }
+            // The attribute dictionary below is ~20 string conversions per payload on a path that runs
+            // at the session's flush rate, so it is built only when something is listening. `emittedAt`
+            // is parsed inside the same gate for the same reason: it feeds nothing but these metrics.
+            let deviceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            if deviceLoggingEnabled || TerminalPerformance.isEnabled {
+                let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+                var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
+                    reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
+                    outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+                    dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
+                    frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
+                    targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                    appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
+                    operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+                    scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
+                    resyncCount: output.requestsResync ? 1 : nil)
+                renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+                renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
+                // The payloads this apply superseded report nothing of their own; this is their trace.
+                renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
+                if deviceLoggingEnabled {
+                    SpacesDeviceTerminalPerformanceLogger.emit(
+                        .init(
+                            sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
+                            elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,
+                            attributes: renderUpdateAttributes))
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_remote_state_receive", target: "session=\(payload.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: true,
+                    detail:
+                        "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
+                )
+                TerminalPerformance.logMetric(
+                    "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), success: dropReason == nil,
+                    detail: GhosttyRenderFrameMetrics.detailString(renderUpdateAttributes))
+            }
+            postLocalNotifications(for: payload)
         }
 
         /// Applies a program's OSC 52 copy to this machine's pasteboard when this client owns the
@@ -786,7 +996,7 @@
                 guard deltaRows != 0 else { return true }
                 // Arm the replay against the current ended run. Every non-idle state descends from this
                 // single idle->loading transition, so recording identity once here covers the `.loading`,
-                // `.ready`, and `.unavailable` outcomes; `applyRemoteState` compares it to later payloads
+                // `.ready`, and `.unavailable` outcomes; `applyReducedState` compares it to later payloads
                 // to discard a stale replay when a different ended run is observed.
                 endedScrollbackRunIdentity = currentEndedRunIdentity()
                 endedScrollbackState = .loading(pendingDeltaRows: deltaRows)
@@ -1079,9 +1289,13 @@
         }
 
         /// Reports one interactive control send's failure to `inputFailureHandler` and, only when the
-        /// failure is itself proof the link is gone, discards this pane's queued input backlog rather than
-        /// letting it drain and deliver late — including any Enter — once the link recovers. Shared by
-        /// every interactive control path: the four still chained on `inputQueue`'s `onError` (input, key,
+        /// failure is CONCLUSIVE proof the link is gone (not merely a timed-out round trip — see the
+        /// handler's own doc), discards this pane's queued input backlog rather than letting it drain and
+        /// deliver late — including any Enter — once the link recovers. A bare timeout still reaches the
+        /// handler and still gets whatever failure surfacing it does, but leaves the backlog queued: the
+        /// serial chain already tolerates a thrown predecessor (each enqueued task awaits its predecessor's
+        /// `.result`, not its success), so the next queued send simply attempts on its own. Shared by every
+        /// interactive control path: the four still chained on `inputQueue`'s `onError` (input, key,
         /// clear-screen, scroll), and the resize path, which sends off that queue in its own detached task
         /// and so calls this directly instead of through `onError`. `self`-free so every call site can
         /// capture it by value into a closure or task body built off the main actor.
@@ -1118,5 +1332,19 @@
             if hasMatchingLastRequestedSize, runtimeSize == nil, !force { return false }
             return true
         }
+    }
+
+    /// One host's note that a full frame is in its reduction pipeline, unapplied. Lock-guarded because the
+    /// state stream submits payloads from its own thread while the main actor reads and clears it. See
+    /// `RemoteGhosttySessionHost.pendingFullFrameSubmission` for the rule it encodes.
+    private final class PendingFullFrameSubmission: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending = false
+
+        var isPending: Bool { lock.withLock { pending } }
+
+        func mark() { lock.withLock { pending = true } }
+
+        func clear() { lock.withLock { pending = false } }
     }
 #endif

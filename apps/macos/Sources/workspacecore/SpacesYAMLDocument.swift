@@ -11,11 +11,10 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
     public var services: [String]
     public var processes: [Process]
     public var browserSessions: [BrowserSessionConfig]
-    public var agentLaunchers: [AgentLauncherConfig]
 
     public init(
         version: Int = Self.currentVersion, setupScript: String? = nil, stopScript: String? = nil, services: [String] = [], processes: [Process] = [],
-        browserSessions: [BrowserSessionConfig] = [], agentLaunchers: [AgentLauncherConfig] = []
+        browserSessions: [BrowserSessionConfig] = []
     ) {
         self.version = version
         self.setupScript = Self.normalizedOptionalString(setupScript)
@@ -23,20 +22,17 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         self.services = services
         self.processes = processes
         self.browserSessions = browserSessions
-        self.agentLaunchers = agentLaunchers
     }
 
     public init(project: ProjectRecord) {
         self.init(
             setupScript: project.setupScript, stopScript: project.stopScript, services: project.ports.map(\.name),
-            processes: project.processes.map(Process.init), browserSessions: project.browserSessions.map(BrowserSessionConfig.init),
-            agentLaunchers: project.agentLaunchers.map(AgentLauncherConfig.init))
+            processes: project.processes.map(Process.init), browserSessions: project.browserSessions.map(BrowserSessionConfig.init))
     }
 
     public var serviceDefinitions: [ServiceDefinition] { services.map { ServiceDefinition(name: $0) } }
     public var processTemplates: [ProcessTemplate] { processes.map(\.processTemplate) }
     public var configuredBrowserSessions: [BrowserSession] { browserSessions.map(\.browserSession) }
-    public var configuredAgentLaunchers: [AgentLauncher] { agentLaunchers.map(\.agentLauncher) }
 
     public func applying(to project: inout ProjectRecord) {
         project.setupScript = setupScript
@@ -44,7 +40,6 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         project.ports = serviceDefinitions
         project.processes = processTemplates
         project.browserSessions = configuredBrowserSessions
-        project.agentLaunchers = configuredAgentLaunchers
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -54,7 +49,6 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         case services
         case processes
         case browserSessions = "browser_sessions"
-        case agentLaunchers = "agent_launchers"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -71,7 +65,6 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
         processes = try container.decodeIfPresent([Process].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([BrowserSessionConfig].self, forKey: .browserSessions) ?? []
-        agentLaunchers = try container.decodeIfPresent([AgentLauncherConfig].self, forKey: .agentLaunchers) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -82,7 +75,6 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         try container.encode(services, forKey: .services)
         try container.encode(processes, forKey: .processes)
         try container.encode(browserSessions, forKey: .browserSessions)
-        try container.encode(agentLaunchers, forKey: .agentLaunchers)
     }
 
     fileprivate static func normalizedOptionalString(_ value: String?) -> String? {
@@ -141,20 +133,6 @@ extension SpacesYAMLDocument {
 
         public var browserSession: BrowserSession { BrowserSession(name: name, url: url) }
     }
-
-    public struct AgentLauncherConfig: Codable, Equatable, Sendable {
-        public var name: String
-        public var command: String
-
-        public init(name: String, command: String) {
-            self.name = name
-            self.command = command
-        }
-
-        public init(_ launcher: AgentLauncher) { self.init(name: launcher.name, command: launcher.command) }
-
-        public var agentLauncher: AgentLauncher { AgentLauncher(name: name, command: command) }
-    }
 }
 
 public enum SpacesYAMLService {
@@ -168,6 +146,18 @@ public enum SpacesYAMLService {
         // Service names become DNS hostnames, so validate them at the import boundary. Done here
         // rather than inside `init(from:)` so the precise message is not wrapped by the YAML decoder.
         for service in document.services { try ServiceName.validated(service) }
+        // Configured processes and browser sessions must always have explicit names (spec.md): Spaces
+        // rejects an unnamed entry rather than falling back to its command or URL as an identity. The
+        // settings editor already enforces this at save time (`requiredConfiguredFocusName`); a
+        // spaces.yaml is the other place these get their name, so it is validated here, at the same import
+        // boundary as service names, naming the offending entry by its command/URL since that is the one
+        // thing an unnamed entry is guaranteed to have.
+        for process in document.processes where process.name == nil {
+            throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: process '\(process.command)' is missing a name.")
+        }
+        for session in document.browserSessions where session.name == nil {
+            throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: browser session '\(session.url ?? "")' is missing a name.")
+        }
         return document
     }
 

@@ -39,6 +39,16 @@
         }
     }
 
+    /// The status a fake device reports about itself, changeable mid-test from the `@Sendable` request
+    /// closure's side, so a device can be made to finally come back on its staged build.
+    private actor SpacesMobileDaemonStatusBox {
+        private var status: TerminalServiceDaemonStatus
+
+        init(_ status: TerminalServiceDaemonStatus) { self.status = status }
+        func set(_ status: TerminalServiceDaemonStatus) { self.status = status }
+        func current() -> TerminalServiceDaemonStatus { status }
+    }
+
     /// A backend whose `currentResolvedHost()` returns a fixed value instead of the default `nil`, so a
     /// test can prove `SpacesMobileAppModel.updateBrowserRoutes` prefers the client's live-resolved host
     /// over a stale paired-device record without needing a real `SpacesDeviceEndpointResolver` handshake.
@@ -110,12 +120,19 @@
             let rows = model.workspaceGroups.flatMap(\.rows)
             let process = rows.first { $0.title == "api" }
             let terminal = rows.first { $0.title == "shell" }
+            let agent = rows.first { $0.title == "Codex" }
 
             XCTAssertEqual(process?.canStop, true)
             XCTAssertEqual(process?.canRestart, true)
             XCTAssertEqual(process?.sessionID, "session-api")
             XCTAssertEqual(terminal?.canRun, false)
             XCTAssertEqual(terminal?.runState, .exited)
+            // Stop is an agent's only lifecycle control: it exists only as a session someone started by
+            // running its command in a terminal, so there is nothing to start or restart.
+            XCTAssertEqual(agent?.canRun, false)
+            XCTAssertEqual(agent?.canRestart, false)
+            XCTAssertEqual(agent?.canRestartFromTerminalDetail, false)
+            XCTAssertEqual(agent?.canStop, true)
         }
 
         func testBrowserSessionRowsBuiltFromResolvedRoutes() {
@@ -374,15 +391,252 @@
             let workspace = makeOverview().workspaces[0]
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
 
-            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isMutating, "a delete never holds the app-wide mutation gate (#450)")
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
 
             await gate.open()
             await delete.value
 
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+        }
+
+        /// Before #450 was fixed, `deleteWorkspace` held the app-wide `isMutating` flag for its whole
+        /// duration, so a second workspace's delete — sent on its own private channel and with no bearing
+        /// on the first — was rejected by the same guard, silently. Neither call is rejected now: both
+        /// mark their own workspace immediately, and workspace-docs's delete is not dropped just because
+        /// workspace-feature's is still unresolved — it queues behind it (`pendingDeleteChains`, review
+        /// round 2 finding 1) and completes on its own once the queue reaches it. See
+        /// `testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests` for the queue's ordering
+        /// guarantee itself; this test's focus is that queuing is not rejection.
+        func testDeleteOfOneWorkspaceDoesNotRejectADeleteOfAnother() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+
+            // Deletes are chained now, so a call that would otherwise block until its predecessor resolves
+            // has to run on its own task rather than be awaited directly here.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // Neither call was refused: both rows read as deleting even though workspace-docs's request has
+            // not been sent yet (it is queued behind workspace-feature's, still held open by the gate).
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-docs"))
+
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            // workspace-docs's delete reached the daemon and completed on its own once the queue got to
+            // it, proving it was queued rather than dropped.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// The daemon runs every `archiveWorkspace`/`deleteProject` request off one serial per-daemon
+        /// queue and only marks a workspace as tearing down once that request is dequeued. Two requests
+        /// issued back to back from this client could therefore both sit on that queue at once; if the
+        /// first is still occupying it past this client's 30s request timeout, the second — still queued,
+        /// still unregistered — would time out too and reconcile to a false failure, even though the
+        /// daemon goes on to delete it anyway (review round 2, finding 1). `pendingDeleteChains` closes the
+        /// window by construction: this proves this client never has two `archiveWorkspace` requests on
+        /// the same daemon's wire at once, regardless of which workspaces they target. Both deletes here
+        /// target the same device (no identity change), so they share one chain key; see
+        /// `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete` for proof that a
+        /// *different* device's delete gets its own key and is not serialized against this one.
+        func testConcurrentDeletesMarkBothWorkspacesButSerializeTheirRequests() async {
+            let gate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                // Blocks every archiveWorkspace request, regardless of which workspace it targets, so the
+                // recorder can prove the second is never even sent while the first is unresolved.
+                await gate.wait()
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // The mark is set synchronously, before the chained task that actually sends the request even
+            // starts running, so waiting for it is not enough to prove the request reached the daemon.
+            // Wait for the recorder to see it directly.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request cannot appear here no matter how long this waits: `pendingDeleteChains`
+            // makes it wait on workspace-feature's whole call (same device, same chain key), which is
+            // parked on the still-closed gate.
+            var requests = await recorder.snapshot()
+            XCTAssertEqual(
+                requests.map(\.commandName), ["archiveWorkspace"], "the second delete's request must not be sent while the first is still unresolved")
+
+            await gate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            guard case .archiveWorkspace(let firstPayload)? = requests.first?.command,
+                case .archiveWorkspace(let secondPayload)? = requests.last?.command
+            else {
+                XCTFail("Expected two archiveWorkspace requests.")
+                return
+            }
+            XCTAssertEqual(firstPayload.workspaceID, "workspace-feature", "the first request sent must be whichever delete was issued first")
+            XCTAssertEqual(secondPayload.workspaceID, "workspace-docs")
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"))
+        }
+
+        /// `pendingDeleteChains` keys its tail by `overviewIdentity`, not one shared tail, because two
+        /// different devices have two independent daemon teardown queues: a delete against device B has
+        /// no business waiting out a delete against device A (review round 3, finding 1). There is no
+        /// second real paired device/backend in this harness, so this reuses the same seam the earlier
+        /// device-switch delete tests already rely on (`handleAuthenticationFailure`, which bumps
+        /// `overviewIdentity` exactly as a real device switch does) rather than standing up a second
+        /// `SpacesDeviceAPIClient`; that is enough to exercise the keying itself, since the chain keys on
+        /// the identity value alone.
+        func testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // Confirms workspace-feature's request is actually parked on the gate (its chain entry is a
+            // still-unresolved task) before switching, so the test proves independence rather than luck.
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Stands in for switching to a different paired device: bumps `overviewIdentity`, the value
+            // `pendingDeleteChains` keys on, the same way `SpacesMobileAppModel.selectDevice` does.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+
+            // workspace-docs's request reaches the daemon without waiting for workspace-feature's gate to
+            // open: different `overviewIdentity` at call time means a different chain entry.
+            while await recorder.snapshot().count < 2 { await Task.yield() }
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace", "archiveWorkspace"])
+            XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "still unresolved, untouched by the device switch")
+
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+        }
+
+        /// A delete still waiting in the per-daemon queue when the active device switches is cancelled,
+        /// not carried out in the background against the device the app no longer shows (#450 review
+        /// round 4, finding 1): `performDeleteWorkspace`'s identity guard clears the pending mark and now
+        /// also surfaces `errorMessage` naming the workspace, since a confirmed destructive action the
+        /// user asked for must not go silently unperformed. Driven with the same
+        /// `handleAuthenticationFailure` identity-bump seam as the other device-switch tests: the switch
+        /// has to land while workspace-docs's delete is still queued behind workspace-feature's (both
+        /// issued against the same, still-current device), not after, or `pendingDeleteChains` would key
+        /// workspace-docs's delete under the new identity instead and it would never reach this guard at
+        /// all — see `testDeleteAgainstADifferentDeviceDoesNotWaitBehindAPriorDevicesDelete`.
+        func testQueuedDeleteCancelledByADeviceSwitchSurfacesAnErrorAndClearsItsMark() async {
+            let featureGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                guard case .archiveWorkspace(let payload) = request.command else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(refreshedOverview))
+                }
+                if payload.workspaceID == "workspace-feature" { await featureGate.wait() }
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "Deleted workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: payload.workspaceID)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let overview = makeOverview()
+            let featureWorkspace = overview.workspaces.first { $0.id == "workspace-feature" }!
+            let docsWorkspace = overview.workspaces.first { $0.id == "workspace-docs" }!
+            model.overview = overview
+
+            let featureDelete = Task { await model.deleteWorkspace(featureWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            while await recorder.snapshot().isEmpty { await Task.yield() }
+
+            // Queued behind workspace-feature's still-unresolved delete, on the same (still-current)
+            // device, so it shares its chain key and has to wait its turn.
+            let docsDelete = Task { await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
+            while !model.isWorkspacePendingDeletion("workspace-docs") { await Task.yield() }
+            XCTAssertNil(model.errorMessage, "not surfaced yet: workspace-docs's delete has not reached its guard")
+
+            // The active device changes while workspace-docs's delete is still parked in the queue.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+
+            // Releases workspace-feature's delete; workspace-docs's turn comes right after and finds the
+            // identity it queued under no longer current.
+            await featureGate.open()
+            await featureDelete.value
+            await docsDelete.value
+
+            XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-docs"), "cancelled, not left marked forever")
+            XCTAssertEqual(
+                model.errorMessage,
+                "\"docs\" wasn't deleted: the active device changed before its delete could be sent. Delete it again from that device.")
+            // Only one archiveWorkspace request was ever sent: workspace-docs's delete was cancelled
+            // before it reached the network, not executed against the device it queued against.
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["archiveWorkspace"])
         }
 
         /// A delete the daemon refused leaves the workspace where it was, so the mark is lifted and its
@@ -432,6 +686,60 @@
             XCTAssertEqual(model.overview, overviewWithoutFeature)
             XCTAssertFalse(model.isWorkspacePendingDeletion("workspace-feature"))
             XCTAssertNil(model.deletedWorkspaceNotice, "no branch deletion was requested, so a reconciled delete stays silent")
+        }
+
+        /// Before #450 review round 5, `reconcileWorkspaceDeletionOutcome` captured its staleness snapshot
+        /// after `fetchOverview` returned rather than before it was even sent, so a concurrent mutation
+        /// that landed and published while this fetch was still in flight bumped `mutationGeneration`
+        /// before the capture ever ran; the capture then trivially matched the already-bumped value and
+        /// this now-stale fetch overwrote the fresher published overview. Gating reconciliation's own
+        /// overview fetch and letting an unrelated mutation land and publish while it is still gated
+        /// reproduces that ordering directly.
+        func testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let baseOverview = makeOverview()
+            let overviewWithoutFeature = SpacesDeviceOverviewPayload(
+                projects: baseOverview.projects, workspaces: baseOverview.workspaces.filter { $0.id != "workspace-feature" },
+                sessions: baseOverview.sessions, daemonStatus: baseOverview.daemonStatus)
+            // Distinct from both `baseOverview` (feature running) and `overviewWithoutFeature` (feature
+            // absent), so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "archiveWorkspace": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overviewWithoutFeature))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
+
+            let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
+            // Waits for reconciliation's own overview fetch to actually be sent and gated, not merely for
+            // the archiveWorkspace timeout: the mark alone does not prove the request reached the daemon.
+            while (await recorder.snapshot()).map(\.commandName) != ["archiveWorkspace", "overview"] { await Task.yield() }
+
+            // An unrelated mutation against a different workspace lands and publishes while reconciliation's
+            // own fetch is still gated.
+            await model.stopWorkspace(docsWorkspace)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            await delete.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
         }
 
         /// The branch-deletion report exists only in the archive response, so when that response is lost
@@ -540,7 +848,7 @@
             model.overview = baseOverview
 
             let delete = Task { await model.deleteWorkspace(baseOverview.workspaces[0], deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
             // The archive has already failed with a timeout and the reconciliation refetch is parked here.
             XCTAssertTrue(model.isWorkspacePendingDeletion("workspace-feature"), "the timed-out delete keeps its mark while it reconciles")
 
@@ -942,9 +1250,9 @@
             model.overview = makeOverview()
 
             let delete = Task { await model.deleteWorkspace(workspace, deleteLocalBranch: false, deleteRemoteBranch: false) }
-            while !model.isMutating { await Task.yield() }
-            // A real connection change while the delete is still parked in its request: this rebuilds the
-            // client and channel and bumps the overview identity, exactly as a device switch does.
+            while !model.isWorkspacePendingDeletion("workspace-feature") { await Task.yield() }
+            // A real connection change while the delete is still parked in its request: this resets the
+            // connection and bumps the overview identity, exactly as a device switch does.
             model.handleAuthenticationFailure(message: "Pair this device again.")
 
             await gate.open()
@@ -1175,34 +1483,60 @@
             XCTAssertFalse(model.isMutating)
         }
 
-        func testRunAgentTimeoutRequiresFreshSessionWhenRowRetainsExitedSession() async {
-            let oldRow = SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "agent-old", sessionID: "session-codex-old", isConfigured: true, runState: .exited, activityState: .idle, canRun: true,
-                canStop: false, canRestart: false)
-            let newRow = SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "agent-new", sessionID: "session-codex-new", isConfigured: true, runState: .running, activityState: .spinning, canRun: false,
-                canStop: true, canRestart: true)
-            let refreshedOverview = makeOverview(
-                sessions: [makeSession(id: "session-codex-new")], featureProcessRows: [], featureCodingAgentRows: [newRow])
+        /// Before #450 review round 5, `reconciledSessionAfterMutationTimeout` published its refetched
+        /// overview unconditionally — no generation check at all, only the identity guard. A concurrent
+        /// mutation that landed and published a fresher overview while this recovery fetch was still in
+        /// flight was silently overwritten by this now-stale one once it resumed. Gating the recovery
+        /// fetch and letting an unrelated mutation land and publish while it is still gated reproduces
+        /// that ordering directly, the same technique as
+        /// `testReconciliationDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch`.
+        func testMutationTimeoutRecoveryDoesNotOverwriteAFresherConcurrentMutationLandedDuringItsFetch() async {
+            let overviewGate = SpacesMobileAsyncGate()
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-old", sessionID: "session-api-old", runState: .exited, canRun: true, canStop: false, canRestart: false)
+            let staleOverview = makeOverview(sessions: [makeSession(id: "session-api-stale")], featureProcessRows: [oldRow])
+            // Distinct from `staleOverview`, so the assertions below can tell which one ended up published.
+            let concurrentMutationOverview = makeOverview(featureIsRunning: false)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.commandName == "runCodingAgent" { throw SpacesDeviceAPIClientError.requestTimedOut }
-                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
+                switch request.commandName {
+                case "runWorkspaceProcess": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "overview":
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(staleOverview))
+                default:
+                    return SpacesDeviceAPIResponse(
+                        ok: true, message: "ok",
+                        result: .mutation(SpacesDeviceMutationResult(overview: concurrentMutationOverview, workspaceID: "workspace-docs")))
+                }
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            model.overview = makeOverview(sessions: [makeSession(id: "session-codex-old")], featureProcessRows: [], featureCodingAgentRows: [oldRow])
+            let baseOverview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
+            model.overview = baseOverview
+            let docsWorkspace = baseOverview.workspaces.first { $0.id == "workspace-docs" }!
 
-            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .codingAgent(oldRow)))
-            let requests = await recorder.snapshot()
+            let run = Task { await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(oldRow))) }
+            // Waits for the recovery's own overview fetch to actually be sent and gated, not merely for
+            // the runWorkspaceProcess timeout.
+            while (await recorder.snapshot()).map(\.commandName) != ["runWorkspaceProcess", "overview"] { await Task.yield() }
 
-            XCTAssertEqual(session?.id, "session-codex-new")
-            XCTAssertEqual(requests.map(\.commandName), ["runCodingAgent", "overview"])
-            XCTAssertNil(model.errorMessage)
-            XCTAssertFalse(model.isMutating)
+            // An unrelated mutation against a different workspace lands and publishes while the recovery
+            // fetch is still gated. Deletes, not a shared-channel action like Stop: `run` above is still
+            // holding `isMutating` for its whole reconciliation, and a shared-channel mutation would be
+            // silently refused by that same gate rather than actually racing this fetch.
+            await model.deleteWorkspace(docsWorkspace, deleteLocalBranch: false, deleteRemoteBranch: false)
+            XCTAssertEqual(
+                model.overview, concurrentMutationOverview, "the concurrent mutation's fresher overview must be showing before the gate opens")
+
+            await overviewGate.open()
+            _ = await run.value
+
+            // The gated fetch resumes carrying pre-mutation data; it must not overwrite the fresher
+            // overview the concurrent mutation already published.
+            XCTAssertEqual(model.overview, concurrentMutationOverview)
         }
 
         func testRefreshedSessionLookupIgnoresVisibleFilters() {
@@ -1212,6 +1546,48 @@
 
             XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).isEmpty)
             XCTAssertEqual(model.refreshedSession(forRowID: "process:process-api")?.id, "session-api")
+        }
+
+        /// `terminalSession(for:in:)` and `refreshedSession(forRowID:in:)` are what
+        /// `performMutationReturningSession` and `reconciledSessionAfterMutationTimeout` read from to
+        /// answer whether their own action produced a session (#450 review round 7): both take the
+        /// overview to search explicitly, defaulting to the model's published one for every other,
+        /// UI-facing caller, so a caller instead holding a specific mutation response or reconciliation
+        /// fetch reads that data's own verdict regardless of whether the same overview also won its
+        /// publish race against a fresher, unrelated one.
+        ///
+        /// The genuine race this protects against has no test-reachable suspension point in this harness
+        /// to reproduce deterministically: it requires another overview-derived operation to bump
+        /// `mutationGeneration` between a response's own bump and its own publish check, and
+        /// `updateBrowserRoutes` — the only await in between — returns before reaching any await of its
+        /// own once `activeDeviceID` is nil (the same seam gap already reported for its internal
+        /// generation guard in review round 5). This tests the mechanism the fix relies on directly
+        /// instead: that the explicit overview wins over the published one, not that a race can be staged.
+        func testTerminalSessionForRowReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            // The model's published overview knows nothing about the new session yet — as it would not,
+            // had this mutation's publish lost its ordering race against a fresher, unrelated one.
+            model.overview = makeOverview()
+            let row = SpacesMobileWorkspaceRuntimeRow(source: .process(newRow))
+
+            XCTAssertNil(model.terminalSession(for: row), "the published overview has no matching session")
+            XCTAssertEqual(model.terminalSession(for: row, in: responseOverview)?.id, "session-api-new")
+        }
+
+        func testRefreshedSessionForRowIDReadsTheExplicitOverviewNotThePublishedOne() {
+            let model = makeModel()
+            let newRow = SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api-new", sessionID: "session-api-new", runState: .running, canRun: false, canStop: true, canRestart: true)
+            let responseOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
+            model.overview = makeOverview()
+
+            XCTAssertNil(model.refreshedSession(forRowID: "process:template-api"), "the published overview has no matching row")
+            XCTAssertEqual(model.refreshedSession(forRowID: "process:template-api", in: responseOverview)?.id, "session-api-new")
         }
 
         func testRuntimeRowLookupBySessionIgnoresVisibleFilters() {
@@ -1836,9 +2212,9 @@
         /// Failures gathered against one connection say nothing about the next one, so a connection change
         /// mid-run starts the clock over rather than letting the new connection inherit it.
         func testFailureRunDoesNotCarryAcrossAConnectionChange() async {
-            // Resetting authentication rebuilds the client from `settings`, so the refresh after it runs
-            // against the real network transport rather than the fake. An empty candidate list makes that
-            // refresh fail on the spot (`invalidEndpoint`) instead of dialing anything.
+            // The failure run is keyed by connection identity, and raising the recovery surface bumps it,
+            // so the refresh after it starts a fresh run rather than inheriting the one already past the
+            // alert delay. An empty candidate list keeps the fake's own transport out of the picture.
             var settings = SpacesMobileConnectionSettings()
             settings.hosts = []
             let client = SpacesDeviceAPIClient(settings: settings) { _ in throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
@@ -1868,6 +2244,66 @@
             XCTAssertNotNil(model.connectionNotice)
             XCTAssertTrue(model.isShowingConnectionSettings)
             XCTAssertNil(model.errorMessage)
+        }
+
+        /// Raising the re-pair surface must not unpair the app. The token in `settings` is a copy of one
+        /// the Keychain still holds, and the overview poll only runs while `settings.isPaired`, so
+        /// clearing it in memory ended every retry that could have proven the failure transient: the app
+        /// stayed on the pairing screen for the rest of the process even once the network recovered.
+        func testAuthenticationFailureKeepsThePairingSoAPollCanStillRun() {
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(), bridgeClient: pairedClient { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") })
+
+            model.handleAuthenticationFailure(message: "Pair this device again.")
+
+            XCTAssertEqual(model.settings.trimmedAuthToken, "paired-token", "the credential is still on disk; the in-memory copy must survive")
+            XCTAssertTrue(model.settings.isPaired, "the poll is gated on isPaired, so unpairing here stops every retry")
+            XCTAssertEqual(model.connectionNotice, "Pair this device again.", "the recovery notice is still the user-facing consequence")
+            XCTAssertTrue(model.isShowingConnectionSettings)
+        }
+
+        /// What keeping the credential buys: a device that rejects one request and answers the next comes
+        /// back on its own, with no re-pair and nothing for the user to tap.
+        func testRefreshAfterATransientAuthenticationFailureRecoversOnItsOwn() async {
+            let overview = makeOverview()
+            let counter = SpacesMobilePollCounter()
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(),
+                bridgeClient: pairedClient { _ in
+                    if await counter.increment() == 1 {
+                        return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                })
+
+            await model.refresh()
+            XCTAssertNotNil(model.connectionNotice, "the rejected request raises the recovery notice")
+            XCTAssertTrue(model.settings.isPaired)
+
+            await model.refresh()
+
+            XCTAssertNil(model.connectionNotice, "the device answered: the recovery episode is over")
+            XCTAssertEqual(model.overview?.workspaces.map(\.id), overview.workspaces.map(\.id))
+        }
+
+        /// A genuinely revoked device rejects every poll, two seconds apart. The recovery surface is
+        /// raised once for that episode, not re-raised on every rejection: a user who has navigated away
+        /// from Paired Devices must not be pulled back to it every two seconds.
+        func testRepeatedAuthenticationFailuresRaiseTheRecoverySurfaceOnlyOnce() async {
+            let model = SpacesMobileAppModel(
+                settings: pairedSettings(),
+                bridgeClient: pairedClient { _ in SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                })
+
+            await model.refresh()
+            XCTAssertTrue(model.isShowingConnectionSettings)
+            // The user read the notice and navigated away, which is what clears the request flag.
+            model.isShowingConnectionSettings = false
+
+            await model.refresh()
+
+            XCTAssertFalse(model.isShowingConnectionSettings, "the same failing credential must not keep pulling the user back")
+            XCTAssertNotNil(model.connectionNotice, "the notice stays: the device is still rejecting this device")
         }
 
         /// A mutation is something the user just asked for, so its failure is reported immediately rather
@@ -2007,17 +2443,20 @@
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
-        /// A device that never comes back leaves the warning in place: the update gives up, re-enables the
-        /// action, and reports nothing. Reconciling with a refresh here would do the opposite — against a
-        /// device that is still down it clears the status the banner renders from and raises a connection
-        /// error, and it cannot run under the expected-outage suppression because that keys off the flag
-        /// this path has to release to re-enable the button.
-        func testATimedOutUpdateLeavesTheWarningInPlaceWithoutAnError() async {
+        /// A blocked device that never answers again leaves the block in place and reports nothing: an
+        /// unreachable device is the overview poll's story, not evidence about an update, and the verdict
+        /// may only rest on what the device says about itself. Reconciling with a refresh here would do
+        /// the opposite — against a device that is still down it clears the status the screen renders
+        /// from and raises a connection error, and it cannot run under the expected-outage suppression
+        /// because that keys off the flag this path has to release.
+        func testAnAutomaticApplyReportsNothingWhenTheDeviceNeverAnswersAgain() async {
             let settings = SpacesMobileConnectionSettings()
+            let recorder = SpacesMobileRequestRecorder()
             let overviewCounter = SpacesMobilePollCounter()
             let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
             let overview = makeOverview(daemonStatus: blockingStaged)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
                 switch request.commandName {
                 case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 case "overview":
@@ -2032,16 +2471,211 @@
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(10), daemonUpdateTimeout: .milliseconds(50))
 
+            // Establishing the state is all it takes: a blocked device with a build staged has its apply
+            // requested without the user asking.
             await model.refresh()
             XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+            // The request proves the apply started (the flag is claimed before it is sent), so waiting for
+            // the flag to be clear afterwards is waiting for that run to be over, not for it to begin.
+            await waitUntil("the automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
 
-            await model.requestDaemonUpdate()
-
-            XCTAssertNotNil(model.daemonStatus, "the banner must survive a daemon that never came back")
+            XCTAssertNotNil(model.daemonStatus, "the block must survive a daemon that never came back")
             XCTAssertTrue(model.isActiveDeviceBlocked, "an unreturned daemon leaves the device blocked, not silently usable")
             XCTAssertNil(model.errorMessage, "a slow restart and a refused one look the same here; neither is a reported failure")
             XCTAssertNil(model.connectionNotice)
-            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again so the user can retry")
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a silent device is not the device reporting the apply did not land")
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "with nothing reported there is nothing for the user to do yet")
+        }
+
+        /// An apply that ended with no verdict must not spend the once-per-build rule. The device went
+        /// quiet for the whole poll — a daemon mid-handoff, a switched-away connection, and an
+        /// unreachable device all look like this — so nothing was decided and no report was raised. If
+        /// the attempt stayed consumed, the device coming back still blocked on that same staged build
+        /// would find the automatic apply deduped away with nothing on screen, and the user would be
+        /// stuck there until the app was relaunched.
+        func testAnUndecidedAutomaticApplyIsRequestedAgainWhenTheDeviceComesBack() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // The daemon says nothing for the whole poll, so the run ends with no evidence either way.
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                // The overview keeps answering: this is the device reporting itself still blocked and
+                // still waiting on the same staged build, which is what the app polls for anyway.
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+            await waitUntil("the first automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a device that said nothing about itself reported no failed apply")
+
+            // The overview poll goes on reporting the device blocked with that build staged, exactly as it
+            // does in the app; that report has to be able to re-arm the apply.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the device is still blocked on the build it has staged")
+        }
+
+        /// A verdict may only rest on evidence that is still current. A device that answers early in the
+        /// poll and then goes quiet — what a daemon mid-handoff replaying its sessions looks like — must
+        /// not be judged from that first report once the budget runs out: the apply may well have landed
+        /// while it was silent. The run ends undecided, so nothing is reported and the attempt re-arms.
+        func testAStaleStatusFromEarlyInThePollDoesNotReportThatTheApplyDidNotLand() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let statusPolls = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    // One answer at the start of the poll — the build still staged, the handoff not yet
+                    // done — and silence from then on.
+                    guard await statusPolls.increment() == 1 else { return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.") }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(80))
+
+            await model.refresh()
+            await waitUntil("the automatic apply to finish") {
+                await recorder.snapshot().contains { $0.commandName == "requestDaemonRestart" } && !model.isApplyingDaemonUpdate
+            }
+
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "a report the device stopped answering for cannot be a verdict about it")
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "nothing was decided, so the block carries no failure and no Try Again yet")
+            XCTAssertNil(model.errorMessage)
+            // Undecided, so the once-per-build rule is handed back: the device's next report re-arms it.
+            await waitUntil("the automatic apply to be requested again") {
+                await model.refresh()
+                return await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count >= 2
+            }
+        }
+
+        /// The whole automatic flow on a blocked device: Spaces asks it to apply the build already
+        /// installed on it, without being told to and without asking; a device that keeps reporting that
+        /// same build staged gets one report and the retry, and the request is never re-sent for a build
+        /// already asked about, however many times the device repeats itself.
+        func testABlockedDeviceAppliesItsStagedBuildOnItsOwnAndReportsOnlyWhenItDoesNotLand() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // The device answers throughout and never applies the build: the apply did not land.
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            let alert = model.stagedApplyDidNotLandAlert
+            XCTAssertEqual(alert?.title, "Update didn't land")
+            XCTAssertEqual(
+                alert?.message,
+                "Spaces 2.0.0 is installed on \(model.connectionSummary), but its daemon is still running 1.0.0. "
+                    + "Nothing running on it was interrupted.")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "an apply that did not land leaves the device blocked")
+            XCTAssertNil(model.errorMessage, "the report is the whole surface; nothing goes through the connection error")
+            guard case .hero(let hero) = model.daemonCompatibilityPresentation else {
+                return XCTFail("A blocked device whose apply did not land shows the hero.")
+            }
+            XCTAssertEqual(hero.actionTitle, "Update Daemon", "the blocked screen carries the retry once the report is dismissed")
+
+            // The device goes on reporting the same staged build on every poll; none of that re-asks.
+            await model.refresh()
+            await model.refresh()
+            let restarts = await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count
+            XCTAssertEqual(restarts, 1, "a repeated status report is not new information and must not re-request the apply")
+        }
+
+        /// Try Again is the user asking again, which is new information: it re-sends the request the
+        /// once-per-build rule would otherwise suppress, and takes the report and the hero down while the
+        /// device is applying an update again.
+        func testTryAgainReAsksForAnApplyTheOnceOnlyRuleWouldSuppress() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(blockingStaged))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            await model.retryStagedApply()
+
+            let restarts = await recorder.snapshot().filter { $0.commandName == "requestDaemonRestart" }.count
+            XCTAssertEqual(restarts, 2, "the user asking again re-sends the request")
+            XCTAssertEqual(model.stagedApplyDidNotLandAlert?.stagedVersion, "2.0.0", "a retry that also went unanswered reports itself again")
+        }
+
+        /// Everything this flow left behind is retired by the device's own facts: once it comes back on
+        /// the staged build there is nothing staged, so the report and the hero go with it — no dismissal
+        /// and no separate cleanup path.
+        func testTheStagedApplyReportRetiresWhenTheDeviceComesBackOnTheStagedBuild() async {
+            let settings = SpacesMobileConnectionSettings()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let applied = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let statusBox = SpacesMobileDaemonStatusBox(blockingStaged)
+            let blockedOverview = makeOverview(daemonStatus: blockingStaged)
+            let appliedOverview = makeOverview(daemonStatus: applied)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(await statusBox.current()))
+                default:
+                    let isApplied = await statusBox.current().version == applied.version
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(isApplied ? appliedOverview : blockedOverview))
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(5), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            await waitUntil("the report the apply did not land") { model.stagedApplyDidNotLandAlert != nil }
+
+            // The device finally comes back on the staged build.
+            await statusBox.set(applied)
+            await model.refresh()
+
+            XCTAssertNil(model.stagedApplyDidNotLandAlert, "the state the report described is over")
+            XCTAssertFalse(model.isActiveDeviceBlocked)
+            XCTAssertEqual(model.daemonCompatibilityPresentation, .none, "an up-to-date device says nothing about its version")
+            XCTAssertEqual(model.overview, appliedOverview, "the device is usable again")
         }
 
         /// The handshake fallback clears the daemon status when it cannot reach the device, which leaves
@@ -2072,20 +2706,22 @@
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
 
+            // The first read establishes the state and, because the device is blocked with a build
+            // staged, starts the automatic apply — the update this test runs its refresh underneath.
             await model.refresh()
             XCTAssertNotNil(model.daemonStatus, "precondition: the first read establishes the device's status")
             XCTAssertTrue(model.isActiveDeviceBlocked)
-
-            let update = Task { await model.requestDaemonUpdate() }
-            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+            await waitUntil("the automatic apply to claim the update") { model.isApplyingDaemonUpdate }
 
             await model.refresh()
 
-            XCTAssertNotNil(model.daemonStatus, "the banner renders off the status; the expected outage must not erase it")
+            XCTAssertNotNil(model.daemonStatus, "the screen renders off the status; the expected outage must not erase it")
             XCTAssertTrue(model.isActiveDeviceBlocked, "the device must stay blocked while its daemon is mid-update")
 
-            update.cancel()
-            await update.value
+            // Ends the in-flight apply deterministically instead of waiting out its budget: the poll
+            // abandons a run whose connection identity moved, which is what a device switch does.
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await waitUntil("the abandoned apply to release the update") { !model.isApplyingDaemonUpdate }
         }
 
         /// The deadline is re-checked after each wait, not only before it. A probe launched once the
@@ -2245,42 +2881,104 @@
             XCTAssertNil(model.overview)
         }
 
-        /// The banner renders straight off `DaemonUpdateRemedy` plus the status it came from: the action
-        /// button only ever appears for `.applyStagedUpdate`, and that one remedy still reads differently
-        /// depending on whether the daemon is also wire-incompatible (`isBlocking`).
-        func testCompatibilityBannerViewRendersExpectedTitleAndSeverityPerRemedy() {
-            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
-            let blockingStagedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
-            let installOnDeviceStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
-            let updateClientStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
+        // MARK: - What the device screen says about a daemon's version
 
-            let pendingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {}
-            )
-            XCTAssertFalse(pendingBanner.isBlocking)
-            XCTAssertEqual(pendingBanner.title, "Daemon update pending")
+        /// A device that still works keeps its explicit action: a quiet card stating the gap, and rows
+        /// that stay usable underneath it. This phone may be the only client running, so this is the one
+        /// staged-update state it does not apply on its own.
+        func testACompatibleDeviceWithAStagedBuildGetsTheQuietPendingCard() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
 
-            let blockingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, isApplyingUpdate: false,
-                onUpdate: {})
-            XCTAssertTrue(blockingBanner.isBlocking)
-            XCTAssertEqual(blockingBanner.title, "This device needs a daemon update")
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: false, stagedApplyDidNotLand: false, deviceName: "Studio",
+                clientVersion: "1.5.0")
 
-            let installBanner = CompatibilityBannerView(
-                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
-            XCTAssertTrue(installBanner.isBlocking)
-            XCTAssertEqual(installBanner.title, "Install the update on this device")
-            XCTAssertFalse(DaemonUpdateRemedy.installUpdateOnDevice.offersDaemonUpdateAction)
+            guard case .pendingUpdate(let card) = presentation else { return XCTFail("A compatible device with a build staged gets the card.") }
+            XCTAssertEqual(card.title, "Update pending")
+            XCTAssertEqual(card.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
+            XCTAssertEqual(card.body, "Spaces 2.0.0 is on Studio, ready to apply. Nothing it's running stops.")
+            XCTAssertEqual(card.actionTitle, "Update Daemon")
+        }
 
-            let updateClientBanner = CompatibilityBannerView(
-                remedy: .updateClient, status: updateClientStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
-            XCTAssertTrue(updateClientBanner.isBlocking)
-            XCTAssertEqual(updateClientBanner.title, "Update Spaces to use this device")
-            XCTAssertFalse(DaemonUpdateRemedy.updateClient.offersDaemonUpdateAction)
+        /// The blocked device Spaces is already applying a staged build to shows nothing at all: the work
+        /// is under way, and the device comes back on its own. Only once the apply has demonstrably not
+        /// landed does that state own a surface, and then it carries the retry.
+        func testABlockedStagedUpdateShowsNothingUntilTheApplyHasNotLanded() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let remedy = DaemonUpdateRemedy.remedy(for: status)
 
-            XCTAssertTrue(
-                DaemonUpdateRemedy.applyStagedUpdate(installedVersion: "2.0.0").offersDaemonUpdateAction,
-                "the only remedy that offers the Update Daemon action")
+            XCTAssertEqual(
+                DaemonCompatibilityPresentation.presentation(
+                    remedy: remedy, status: status, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio", clientVersion: "1.5.0"),
+                .none, "work already in flight is not something to look at")
+
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: remedy, status: status, isBlocked: true, stagedApplyDidNotLand: true, deviceName: "Studio", clientVersion: "1.5.0")
+
+            guard case .hero(let hero) = presentation else { return XCTFail("An apply that did not land owns the screen.") }
+            XCTAssertEqual(hero.eyebrow, "CAN'T CONNECT — UPDATE READY TO APPLY")
+            XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.0.0", to: "2.0.0"))
+            XCTAssertEqual(hero.whoLine, "Spaces 2.0.0 is already on Studio")
+            XCTAssertEqual(hero.body, "Its daemon didn't pick the update up, and nothing running on Studio was interrupted.")
+            XCTAssertEqual(hero.actionTitle, "Update Daemon")
+        }
+
+        /// A blocked device with nothing staged cannot be fixed from here, so it gets no action — only
+        /// the one instruction that fixes it, which differs by what kind of device it is. Neither states
+        /// a target version: what lands is whatever gets installed there.
+        func testABlockedDeviceWithNothingStagedPointsAtTheDeviceAndOffersNoAction() {
+            let linux = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, operatingSystem: "Linux")
+            let mac = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
+
+            guard
+                case .hero(let linuxHero) = DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: linux), status: linux, isBlocked: true, stagedApplyDidNotLand: false,
+                    deviceName: "builder", clientVersion: "1.5.0")
+            else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(linuxHero.eyebrow, "CAN'T CONNECT — UPDATE NEEDED")
+            XCTAssertEqual(linuxHero.versionPair, DaemonVersionPair(from: "1.0.0", to: "?"), "no build is staged, so there is no target to name")
+            XCTAssertEqual(linuxHero.whoLine, "nothing newer is installed on builder")
+            XCTAssertEqual(
+                linuxHero.body,
+                "Update it from Spaces on your Mac — it installs over SSH, and everything on builder keeps running. This phone can't update a "
+                    + "Linux daemon.")
+            XCTAssertNil(linuxHero.actionTitle, "nothing this app does can update a Linux daemon")
+
+            guard
+                case .hero(let macHero) = DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: mac), status: mac, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio",
+                    clientVersion: "1.5.0")
+            else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(macHero.body, "Open Spaces on Studio and install the update; its daemon applies it on its own, and nothing running stops.")
+            XCTAssertNil(macHero.actionTitle, "the update has to be installed on that Mac")
+        }
+
+        /// When this app is the side that is behind, the pair names this app's build against the
+        /// device's. That is a statement of the two builds in play, not a comparison: which one is behind
+        /// came from the wire verdict, never from this app measuring itself against a daemon.
+        func testAnAppTooOldForItsDeviceNamesItsOwnBuildAsTheSideThatMoves() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1, version: "3.0.0")
+
+            let presentation = DaemonCompatibilityPresentation.presentation(
+                remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: true, stagedApplyDidNotLand: false, deviceName: "Studio",
+                clientVersion: "1.5.0")
+
+            guard case .hero(let hero) = presentation else { return XCTFail("A blocked device owns the screen.") }
+            XCTAssertEqual(hero.eyebrow, "CAN'T CONNECT — THIS APP NEEDS AN UPDATE")
+            XCTAssertEqual(hero.versionPair, DaemonVersionPair(from: "1.5.0", to: "3.0.0"))
+            XCTAssertEqual(hero.whoLine, "this app · Studio")
+            XCTAssertEqual(hero.body, "Studio speaks a newer connection protocol than this app. Update Spaces from the App Store to reconnect.")
+            XCTAssertNil(hero.actionTitle, "only the App Store can update this app")
+        }
+
+        /// A compatible, up-to-date device says nothing about versions at all.
+        func testAnUpToDateDeviceShowsNothing() {
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version)
+
+            XCTAssertEqual(
+                DaemonCompatibilityPresentation.presentation(
+                    remedy: DaemonUpdateRemedy.remedy(for: status), status: status, isBlocked: false, stagedApplyDidNotLand: false,
+                    deviceName: "Studio", clientVersion: "1.5.0"), .none)
         }
 
         // MARK: - Renaming runtime rows
@@ -2345,23 +3043,27 @@
             XCTAssertEqual(request.config.processes.map(\.command), ["npm run dev"])
             XCTAssertEqual(request.config.stopScript, "npm stop")
             XCTAssertEqual(request.config.ports.map(\.name), ["web"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Codex"])
             XCTAssertEqual(request.config.browserSessions.map(\.name), ["Dashboard"])
         }
 
-        func testRenameConfiguredCodingAgentRowEditsItsLauncherEntry() async throws {
-            let (model, recorder) = makeRenamingModel(
-                overview: makeOverview(featureCodingAgentRows: [configuredCodingAgentRow()], featureConfig: config()))
+        /// Nothing in the workspace config names a coding agent, so every agent row renames its own
+        /// session; an empty submission clears that rename back to the label the agent reports.
+        func testRenameCodingAgentRowRenamesItsSession() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureConfig: config()))
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Codex" })
 
+            XCTAssertEqual(model.canRename(row: row), true)
             await model.rename(row: row, to: "Reviewer")
+            await model.rename(row: row, to: "  ")
 
-            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
-                return XCTFail("Expected an updateWorkspaceConfig command.")
-            }
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Reviewer"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.command), ["codex"])
-            XCTAssertEqual(request.config.processes.map(\.name), ["api"])
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["renameAgentSession", "renameAgentSession"])
+            guard case .renameAgentSession(let request)? = requests.first?.command else { return XCTFail("Expected a renameAgentSession command.") }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.agentID, "runtime-codex")
+            XCTAssertEqual(request.title, "Reviewer")
+            guard case .renameAgentSession(let clearing)? = requests.last?.command else { return XCTFail("Expected a renameAgentSession command.") }
+            XCTAssertEqual(clearing.title, "")
         }
 
         /// The configured browser session is matched by name and its raw URL is preserved: resolution expands
@@ -2391,8 +3093,7 @@
                 processes: [
                     SpacesDeviceProcessTemplate(id: "template-worker", name: "worker", command: "npm run worker"),
                     SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev"),
-                ], browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-review", name: "Review", command: "review")])
+                ], browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")])
             let latestOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: latestConfig)
             let (model, recorder) = makeRenamingModel(overview: cachedOverview, fetchedOverview: latestOverview)
             let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
@@ -2406,7 +3107,6 @@
             XCTAssertEqual(request.config.ports.map(\.name), ["api", "web"])
             XCTAssertEqual(request.config.processes.map(\.name), ["worker", "backend"])
             XCTAssertEqual(request.config.browserSessions.map(\.name), ["Docs"])
-            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Review"])
         }
 
         /// A process running without a configured entry takes its name from the running process, so there is
@@ -2452,28 +3152,20 @@
             return (model, recorder)
         }
 
-        /// The feature workspace's configuration, matching the configured process, launcher, and browser
-        /// session the rename tests target.
+        /// The feature workspace's configuration, matching the configured process and browser session the
+        /// rename tests target.
         private func config() -> SpacesDeviceWorkspaceConfig {
             SpacesDeviceWorkspaceConfig(
                 stopScript: "npm stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "web")],
                 processes: [SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev")],
                 browserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:${PORT_web}/dashboard")],
-                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")])
         }
 
         private func configuredProcessRow() -> SpacesDeviceWorkspaceProcessRow {
             SpacesDeviceWorkspaceProcessRow(
                 id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
                 processID: "runtime-api", sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
-        }
-
-        private func configuredCodingAgentRow() -> SpacesDeviceWorkspaceCodingAgentRow {
-            SpacesDeviceWorkspaceCodingAgentRow(
-                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
-                agentID: "runtime-codex", sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning, canRun: false,
-                canStop: true, canRestart: true)
         }
 
         private func makeOverview(
@@ -2495,9 +3187,8 @@
             let codingAgentRows =
                 featureCodingAgentRows ?? [
                     SpacesDeviceWorkspaceCodingAgentRow(
-                        id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
-                        sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true,
-                        canRestart: true)
+                        id: "agent:runtime-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
+                        sessionID: "session-codex", runState: .running, activityState: .spinning, canStop: true)
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature", baseBranch: "main",
@@ -2515,10 +3206,26 @@
             return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions, daemonStatus: daemonStatus)
         }
 
-        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
+        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil, operatingSystem: String = "macOS")
+            -> TerminalServiceDaemonStatus
+        {
             TerminalServiceDaemonStatus(
                 version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0,
-                protocolVersion: protocolVersion)
+                protocolVersion: protocolVersion, operatingSystem: operatingSystem)
+        }
+
+        /// Waits for work the app model runs on its own — an automatic staged apply and the report it may
+        /// raise are not awaitable from a caller — instead of sleeping a fixed amount and hoping. Fails
+        /// the test rather than hanging if the condition never holds.
+        private func waitUntil(
+            _ description: String, timeout: Duration = .seconds(10), file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool
+        ) async {
+            let deadline = ContinuousClock().now + timeout
+            while ContinuousClock().now < deadline {
+                if await condition() { return }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            XCTFail("Timed out waiting for \(description).", file: file, line: line)
         }
 
         private func makeSession(
@@ -2537,6 +3244,20 @@
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
         }
+
+        /// Settings that actually read as paired (`isPaired`), which the default `SpacesMobileConnectionSettings()`
+        /// does not: the authentication-recovery tests turn on whether the pairing survives a failure.
+        private func pairedSettings() -> SpacesMobileConnectionSettings {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.authToken = "paired-token"
+            settings.certificateFingerprint = "SHA256:" + String(repeating: "a", count: 64)
+            return settings
+        }
+
+        private func pairedClient(_ handler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)
+            -> SpacesDeviceAPIClient
+        { SpacesDeviceAPIClient(settings: pairedSettings(), requestHandler: handler) }
 
         /// A model whose device is unreachable: every request — the overview fetch and the frozen-core
         /// handshake it falls back to — throws.

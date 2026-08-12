@@ -68,6 +68,46 @@ enum PanelLayoutEngine {
         return normalized(layout)
     }
 
+    /// Appends a tab holding a single pane without selecting or focusing it, so the panel keeps showing
+    /// whatever the user was looking at. A panel that had no tabs still ends up selecting this one:
+    /// `normalized` gives an empty selection the first tab, because a panel with tabs must show one.
+    static func appendUnselectedTab(tabID: String, pane: Pane, to layout: PanelLayout) -> PanelLayout {
+        var layout = layout
+        layout.tabs.append(PanelTab(id: tabID, title: nil, lastFocusedPaneID: nil, root: .leaf(pane)))
+        return normalized(layout)
+    }
+
+    /// Points an existing pane at different content without moving it: same pane id, same tab, same
+    /// position in its split, same window. Used when a restart's replacement session takes over the pane
+    /// its predecessor occupied.
+    ///
+    /// Nothing else in the layout needs touching, and that is the point: `selectedTabID`,
+    /// `focusedPaneID`, and each tab's `lastFocusedPaneID` all reference pane ids, not sessions, so a
+    /// retarget cannot disturb what is selected or focused. It deliberately skips `normalized` for the
+    /// same reason: no node was added or removed, so there is nothing to re-point, and running the
+    /// normalizer would only risk moving a selection this operation exists to preserve.
+    static func retargetPane(paneID: String, to content: PaneContentDescriptor, in layout: PanelLayout) -> PanelLayout {
+        var layout = layout
+        layout.tabs = layout.tabs.map { tab in
+            var tab = tab
+            tab.root = retargeting(paneID: paneID, to: content, in: tab.root)
+            return tab
+        }
+        return layout
+    }
+
+    private static func retargeting(paneID: String, to content: PaneContentDescriptor, in node: PaneNode) -> PaneNode {
+        switch node {
+        case .leaf(var pane):
+            guard pane.id == paneID else { return node }
+            pane.content = content
+            return .leaf(pane)
+        case .split(var split):
+            split.children = split.children.map { retargeting(paneID: paneID, to: content, in: $0) }
+            return .split(split)
+        }
+    }
+
     /// Sets a tab's user-chosen name; nil (or an empty trim) returns the tab to its
     /// derived title.
     static func renameTab(tabID: String, title: String?, in layout: PanelLayout) -> PanelLayout {

@@ -95,6 +95,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Remote devices with an overview pull in flight, so nothing starts a second connection to a
     /// device that is still answering (or still timing out).
     private var remoteOverviewPullsInFlight: Set<String> = []
+    /// Per-device counter stamped onto each pull, bumped whenever something invalidates what an
+    /// in-flight pull can still tell us about the device; see `invalidateInFlightRemoteOverviewPulls`.
+    private var remoteOverviewPullGenerations: [String: Int] = [:]
     /// Pacing for pulls that fail. The in-flight guard above bounds how many connections a failing
     /// device carries at once but not how often it is dialed, and only a successful pull stamps the
     /// freshness window; this is what keeps a device that fails fast from being re-dialed by every
@@ -106,6 +109,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Detection for the one device that cannot report its own death: this Mac's daemon. Ticked by the
     /// watchdog while the local section claims to be loaded; see `LocalDaemonReachabilityProbe`.
     private let localDaemonReachabilityProbe = LocalDaemonReachabilityProbe()
+    /// Immediate recovery when this Mac's own network path changes, rather than waiting out the
+    /// watchdog tick and each device's backoff; see `handleNetworkPathChange`.
+    private let deviceNetworkPathWatcher = DeviceNetworkPathWatcher()
     /// State of the live device-overview subscriptions, one per paired remote device. The remote
     /// daemon pushes a fresh overview on every database change, so remote sidebar state stays
     /// current without polling (remote state has no local event). This controller performs the
@@ -257,6 +263,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .success(let snapshot):
             host.logStartupProfile("sidebar_snapshot_received")
             applySidebarDataSnapshot(snapshot)
+            // Alerts is where the app opens when the snapshot resolved no pane of its own — the launch
+            // placeholder's spinner is what would otherwise be left on screen. This landing (here, or
+            // deferred through `launchLandingOwed` when the initial load failed) is the only path that
+            // navigates to Alerts without the user acting: the reconcile paths never do. A background
+            // presentation on purpose: nothing has rendered an alerts pane yet, so the render cannot be
+            // skipped as an unchanged repaint, and a landing that raced a New Project / New Workspace
+            // form opened during loading must not dismiss it the way `.userNavigation` would.
+            if host.detailPane == .none { host.showAlertsDetail() }
             host.logStartupProfile("sidebar_snapshot_applied")
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
@@ -267,8 +281,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             host.showError(error)
             host.showPlaceholder(message: "Spaces couldn't load workspace data.")
+            // The error placeholder is launch content, not a pane the user chose, and the reconcile
+            // paths deliberately never replace an unresolved `.none` pane — so the landing this launch
+            // never performed is owed to the first successful reload, or the error text would outlive
+            // the outage it reported.
+            launchLandingOwed = true
             host.startBackgroundServicesIfNeeded()
         }
+    }
+
+    /// Whether the app still owes the user its launch landing because the initial snapshot failed and
+    /// rendered the load-error placeholder instead. Consumed by the first successful snapshot apply.
+    private var launchLandingOwed = false
+
+    /// Performs the launch landing deferred by a failed initial load, once data has arrived. The pane
+    /// check keeps the rule that reconciliation never navigates: if the user reached any pane in the
+    /// meantime, the owed landing lapses rather than replacing what they chose.
+    func performOwedLaunchLandingIfNeeded() {
+        guard launchLandingOwed else { return }
+        launchLandingOwed = false
+        if host.detailPane == .none { host.showAlertsDetail() }
     }
 
     /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh"), so an
@@ -395,6 +427,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // The preserve verdict was computed against the pre-reload data; this reload removed what the
             // detail pane was preserving — e.g. the local daemon went offline and its selected workspace
             // vanished. Reconcile the pane instead of leaving stale workspace detail/actions visible.
+            // Whether the pane actually comes down is `refreshSelection`'s call: a daemon that went
+            // offline takes its rows with it for the outage, which is not the same as the workspace
+            // being gone, and the pane stays for the terminal in it.
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_reconciled_ready")
         } else if AppKitController.shouldRefreshVisibleWorkspaceDetail(
@@ -420,6 +455,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
+        performOwedLaunchLandingIfNeeded()
         host.reopenPersistedPanelWindowsIfPossible()
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
@@ -555,6 +591,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // burst of sidebar reloads — or a watchdog tick landing while a previous connect is still timing
         // out — from stacking connections on it.
         guard remoteOverviewPullsInFlight.insert(record.id).inserted else { return }
+        let generation = remoteOverviewPullGenerations[record.id] ?? 0
         Task { @MainActor [weak self] in
             let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
                 do {
@@ -577,11 +614,46 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             switch result {
             case .success: self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
             case .failure:
+                guard
+                    Self.pullFailureStillDescribesDevice(
+                        pullGeneration: generation, currentGeneration: self.remoteOverviewPullGenerations[record.id] ?? 0)
+                else {
+                    DeviceLinkTrace.log(deviceID: record.id, event: "pull_failure_superseded")
+                    return
+                }
                 let delay = self.remoteOverviewPullBackoff.recordFailure(deviceID: record.id)
                 DeviceLinkTrace.log(deviceID: record.id, event: "pull_backoff_armed", detail: "delay_ms=\(Self.milliseconds(delay))")
             }
             self.applyRemoteDeviceSection(deviceID: record.id, result: result)
         }
+    }
+
+    /// Retires whatever pull is currently in flight for `deviceID`, so its answer can no longer report
+    /// the device as offline. Called wherever the ground the in-flight attempt was dialing on has moved:
+    /// this Mac's network path changed, or the user asked for the device again.
+    ///
+    /// The in-flight attempt is deliberately not cancelled or replaced. Its connect is a blocking dial
+    /// inside a detached task, and letting a second one start alongside it is exactly the connection
+    /// stacking `remoteOverviewPullsInFlight` exists to prevent; what replaces it is the subscription
+    /// reopened in the same pass, with the watchdog's next tick behind that.
+    private func invalidateInFlightRemoteOverviewPulls(deviceID: String) {
+        remoteOverviewPullGenerations[deviceID] = (remoteOverviewPullGenerations[deviceID] ?? 0) + 1
+    }
+
+    /// Whether a completed pull's *failure* still describes the device, or belongs to a network this Mac
+    /// has already left.
+    ///
+    /// A pull that started before the path changed is dialing an address that was reachable on the old
+    /// network, and its failure arrives seconds later, by which time the reopened subscription may
+    /// already have published a healthy overview over the new one. Letting that failure through flips a
+    /// working device to offline and parks it there until the watchdog's next tick.
+    ///
+    /// Only failures are held to this. A success is evidence the device answered, which no change of
+    /// network can make untrue, and dropping it would strand a section at "loading…" after a user retry
+    /// whose own pull never started (the in-flight guard refused it). Pure so the rule is directly
+    /// testable.
+    nonisolated static func pullFailureStillDescribesDevice(pullGeneration: Int, currentGeneration: Int) -> Bool {
+        pullGeneration >= currentGeneration
     }
 
     /// Enables and opens live overview subscriptions for paired remote devices, and arms the
@@ -591,11 +663,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         remoteOverviewSubscriptions.enable()
         refreshRemoteOverviewSubscriptions()
         startDeviceReachabilityWatchdog()
+        deviceNetworkPathWatcher.start { [weak self] in self?.handleNetworkPathChange() }
     }
 
     func stopRemoteOverviewSubscriptions() {
         deviceReachabilityWatchdogTimer?.invalidate()
         deviceReachabilityWatchdogTimer = nil
+        deviceNetworkPathWatcher.stop()
         for client in remoteOverviewSubscriptions.disable() { client.stop() }
     }
 
@@ -670,6 +744,60 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             return
         }
         probeLocalDaemonReachability(deviceID: localSection.deviceID)
+    }
+
+    /// This Mac's network path changed: it left a network, joined one, woke, or Tailscale came up or
+    /// went down. Everything any resolver learned about where its device is — the address it proved, and
+    /// the ones its stream found dead — was learned on the path that just went away, so all of it is
+    /// dropped and every paired remote is attempted again right now.
+    ///
+    /// Without this the recovery is real but slow: an offline device waits out the backoff its failures
+    /// grew (up to a minute), and a device still reading as loaded sits on a stream whose path is dead
+    /// until TCP keepalive kills it about ninety seconds later. Joining the office Wi-Fi should bring
+    /// the Mac's devices back in the time one connect takes, not in the time a schedule tuned for a
+    /// device that is genuinely down takes.
+    ///
+    /// Every attempt here is made out of the parts that already exist: the Reconnect button's flow for an
+    /// offline device, and the watchdog's pull plus the same coordinator subscription reset for one that
+    /// still looks healthy. This contributes the trigger, not a second reconnect mechanism.
+    private func handleNetworkPathChange() {
+        SpacesDeviceEndpointRegistry.resetAllForNetworkChange()
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        for record in host.macPairedDevices() where AppKitController.pairedDeviceHasRequiredCredentials(device: record) {
+            guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }) else { continue }
+            DeviceLinkTrace.log(deviceID: record.id, event: "network_path_changed")
+            // Anything already dialing was dialing the old network, so its answer is retired before this
+            // pass starts attempts of its own.
+            invalidateInFlightRemoteOverviewPulls(deviceID: record.id)
+            if section.loadState.isOffline {
+                retryDeviceConnection(deviceID: record.id)
+            } else {
+                // A loaded device is not told it is retrying: its rows are still the device's last word
+                // and the pull may well confirm them, so flipping the section to "loading…" on every
+                // network change would flicker the sidebar for nothing. The pull bypasses the backoff
+                // because the schedule was grown by failures on a network this Mac has now left.
+                //
+                // Its subscription is dropped and reopened all the same. A loaded device's stream is a
+                // long-lived socket on the path that just went away: it carries no application heartbeat,
+                // so nothing on it fails until TCP keepalive gives up about ninety seconds later, and
+                // until then the device looks healthy while every pushed change is stranded. Reopening
+                // goes through the same coordinator entry point the Reconnect button uses, so the
+                // reconcile below dials it through the resolver whose cached winner was just cleared.
+                remoteOverviewSubscriptions.resetForUserRetry(deviceID: record.id)?.stop()
+                startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: true)
+            }
+        }
+        // Terminal-state streams are deliberately left to their own recovery. Their reconnect is armed by
+        // an observed disconnect, and a socket stranded on a dead path has not produced one yet; there is
+        // no entry point that re-dials a live stream without first tearing it down, and tearing one down
+        // raises the pane's dropped-connection banner on a terminal the user may be reading. Their backoff
+        // floors at 500 ms, so once keepalive does fail the socket they recover on their own in well under
+        // a second, over the addresses this pass has already re-proven for the device.
+        //
+        // Reopens every subscription reset above, plus any the new path makes possible: a device whose
+        // subscribe is waiting out a retry, or one the pull above is about to bring back.
+        // `retryDeviceConnection` already reconciles for the offline devices it handled.
+        refreshRemoteOverviewSubscriptions()
     }
 
     /// Checks that a local section claiming to be loaded is still backed by a live daemon, and reloads
@@ -916,6 +1044,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.stopRemoteBrowserForwards(deviceID: deviceID)
                 return
             }
+            // Adopted ahead of the unchanged-check below, because the record and the overview change
+            // independently: a delivery that teaches this client a new address for the device carries an
+            // overview identical to the one already shown, and this is the record every later action and
+            // resolver lookup for this device is taken from. Dropping it there would hand the endpoint
+            // resolver a narrower candidate list than the one just learned.
+            host.deviceSections[index].device = overview.device
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
@@ -928,7 +1062,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
                 from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
             host.deviceSections[index].overview = overview.overview
-            host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
             // Authoritative overview for this remote device: close any open pane whose session it no
@@ -997,6 +1130,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceSections[index].loadState)
         {
+            host.refreshSelection()
+        } else if host.visibleWorkspaceDetailDeviceID() == deviceID, let visibleWorkspaceID = host.detailPane.workspaceID,
+            findWorkspace(id: visibleWorkspaceID) == nil
+        {
+            // A loaded overview is authoritative about removals, and a loaded-to-loaded update crosses no
+            // load-state transition for the branch above to notice. When this device's fresh overview no
+            // longer lists the workspace on screen — deleted from another client — reconcile now, so the
+            // stale pane resolves to the placeholder instead of waiting out the next local reload. Fires
+            // only on an actual removal: the offline branch retains the device's rows, and the
+            // wire-incompatible branch returns above after presenting its block.
             host.refreshSelection()
         }
     }
@@ -1817,7 +1960,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         switch kind {
         case .browser: return "globe"
         case .process, .window, .missingConfiguredProcess: return "terminal"
-        case .agent, .agentLauncher: return "sparkles"
+        case .agent: return "sparkles"
         }
     }
 
@@ -1891,6 +2034,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 editor.window?.makeFirstResponder(editor)
                 editor.selectText(nil)
             }
+            // The editor is the row's last arranged view (no trailing filler): an editable
+            // NSTextField has no intrinsic width, so with a filler present the layout is
+            // ambiguous and the editor collapses to a sliver. Alone, it stretches to the
+            // row's trailing edge.
             row.addArrangedSubview(editor)
         } else {
             let titleLabel = PressableLabel(labelWithString: item.title)
@@ -1916,8 +2063,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(titleLabel)
 
-            // Ad hoc shells trail the title their program reported as dimmed secondary text. It
-            // compresses before the name does, so a long title never squeezes out what the row is.
+            // A row whose terminal reported a title trails it as dimmed secondary text. It compresses
+            // before the name does, so a long title never squeezes out what the row is.
             if let detail = item.detail {
                 let detailLabel = NSTextField(labelWithString: detail)
                 detailLabel.font = Typography.metadata
@@ -1927,9 +2074,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 detailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
                 row.addArrangedSubview(detailLabel)
             }
-        }
 
-        row.addArrangedSubview(NSView())
+            row.addArrangedSubview(NSView())
+        }
 
         cell.addSubview(row)
         NSLayoutConstraint.activate([
@@ -1998,16 +2145,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             item.isEnabled = isEnabled
             menu.addItem(item)
         }
+        // `isRunning` alone hides Start exactly when ad hoc or agent runtime made it true but a configured
+        // process is still missing (see `workspaceLifecycleControlsOfferStart`); Start is offered
+        // alongside Restart/Stop in that state instead of being replaced by them.
+        let missingConfiguredProcessCount = host.workspaceRuntimeStatusByID[workspace.id]?.missingConfiguredProcessCount ?? 0
+        if AppKitController.workspaceLifecycleControlsOfferStart(
+            isRunning: workspace.isRunning, missingConfiguredProcessCount: missingConfiguredProcessCount)
+        {
+            addItem(
+                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
+        }
         if workspace.isRunning {
             addItem(
                 "Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id,
                 isEnabled: daemonActionsEnabled)
             addItem(
                 "Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id,
-                isEnabled: daemonActionsEnabled)
-        } else {
-            addItem(
-                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
                 isEnabled: daemonActionsEnabled)
         }
         menu.addItem(.separator())
@@ -2304,6 +2458,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
         markDeviceSectionRetrying(deviceID: deviceID, index: index)
+        // The section has just been put back to "loading…" on the user's behalf. A pull that was already
+        // failing when they clicked must not be the thing that answers that click.
+        invalidateInFlightRemoteOverviewPulls(deviceID: deviceID)
         remoteOverviewSubscriptions.resetForUserRetry(deviceID: deviceID)?.stop()
         // Both attempts bypass their throttle deliberately: the pull skips the freshness gate and its
         // backoff, and the subscribe skips the backoff, because the user asked for this device
@@ -2714,9 +2871,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             children.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2),
             children.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             children.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            children.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
-            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+            children.bottomAnchor.constraint(equalTo: container.bottomAnchor), rail.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            rail.widthAnchor.constraint(equalToConstant: 2), rail.topAnchor.constraint(equalTo: header.topAnchor),
+            rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
         ])
         automationsRowContainer = container
 

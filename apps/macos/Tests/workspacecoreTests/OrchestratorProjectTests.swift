@@ -133,7 +133,7 @@ extension OrchestratorTests {
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
         let orchestrator = makeTestOrchestrator(
-            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in },
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionTerminator: { _ in })
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
@@ -216,16 +216,12 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
 
-        let project = try orchestrator.addProject(dir: projectDir.path) { config in
-            config.stopScript = "echo ignored"
-            config.agentLaunchers = [AgentLauncher(name: "Ignored", command: "ignored")]
-        }
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in config.stopScript = "echo ignored" }
 
         XCTAssertEqual(project.stopScript, "echo yaml-stop")
         XCTAssertEqual(project.ports.map(\.name), ["api"])
         XCTAssertEqual(project.processes.first?.name, "api")
         XCTAssertEqual(project.browserSessions.first?.url, "http://localhost:3000")
-        XCTAssertEqual(project.agentLaunchers.first?.command, "codex")
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo yaml-stop")
@@ -255,7 +251,6 @@ extension OrchestratorTests {
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo git-yaml-stop")
-        XCTAssertEqual(settings?.agentLaunchers.first?.name, "Codex")
     }
 
     func testGitProjectPreviewAndCreateUseRepositoryDefaultBranch() throws {
@@ -388,7 +383,6 @@ extension OrchestratorTests {
             config.ports = preview.ports
             config.processes = preview.processes
             config.browserSessions = preview.browserSessions
-            config.agentLaunchers = preview.agentLaunchers
         }
 
         XCTAssertEqual(project.stopScript, "echo preview-stop")
@@ -424,6 +418,38 @@ extension OrchestratorTests {
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-yaml-git-import")
         XCTAssertTrue(try store.projects().isEmpty)
         XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().subtracting(reservedBefore).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: workspacesRoot.appendingPathComponent(managedDirname, isDirectory: true).appendingPathComponent("main", isDirectory: true)
+                    .path))
+    }
+
+    /// Configured processes must always have an explicit name (spec.md). A repository's spaces.yaml
+    /// carrying an unnamed process must fail project creation the same way an unsupported version does,
+    /// rolling back the managed clone rather than leaving a project no one can Start (an unnamed process is
+    /// also rejected at launch by `validateWorkspaceFocusNames`, so this keeps a bad config from being
+    /// imported at all instead of surfacing later as a launch failure).
+    func testAddProjectByGitURLRollsBackManagedCloneWhenSpacesYAMLHasAnUnnamedProcess() throws {
+        let fixture = try makeTempGitRepo(name: "unnamed-process-yaml-git-import")
+        try "processes:\n  - command: npm run api\n".write(to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add unnamed process spaces yaml"], cwd: fixture.path
+        )
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("npm run api"))
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("missing a name"))
+        }
+
+        let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "unnamed-process-yaml-git-import")
+        XCTAssertTrue(try store.projects().isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: reposRoot.appendingPathComponent(managedDirname, isDirectory: true).path))
         XCTAssertFalse(
             FileManager.default.fileExists(

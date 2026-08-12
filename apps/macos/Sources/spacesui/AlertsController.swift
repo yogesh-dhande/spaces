@@ -34,8 +34,21 @@ import workspacecore
     var alertsShortcutSpec: HotkeySpec?
     /// Maps sequential window shortcut numbers (1-10, shown as 1-0) to focus targets for the current Alerts view.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
+    /// The alerts pane as it stands on screen: the signature it was rendered from and its row views keyed
+    /// by attention id. Non-nil exactly while those views are the detail pane's content, so a refresh can
+    /// be answered without rebuilding them (see `showAlertsDetail`).
+    private var renderedAlerts: RenderedAlertsDetail?
 
     func alertsFocusRequest(for index: Int) -> WindowFocusRequest? { alertsFocusRequestMap[index] }
+
+    private struct RenderedAlertsDetail {
+        let signature: AlertsRenderSignature
+        let rowsByAttentionID: [String: ClickableRowView]
+    }
+
+    /// Forgets what the pane was rendered from, so the next `showAlertsDetail` builds it again. Called
+    /// from `presentDetailPane` whenever other content takes over the detail container.
+    func invalidateRenderedAlertsDetail() { renderedAlerts = nil }
 
     // MARK: - Alerts content
 
@@ -56,6 +69,127 @@ import workspacecore
     }
 
     func alertsAttentionCount() -> Int { buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count } }
+
+    // MARK: - Render plan and signature
+
+    /// The alerts pane's content resolved for drawing: the visible groups, the owning device's offline
+    /// state, and the sequential window shortcut each row carries. Built once per refresh so the pane's
+    /// signature and the pane itself are derived from the same resolution and cannot drift apart.
+    private struct AlertsRenderPlan {
+        struct Row {
+            let entry: AlertsAttentionEntry
+            let shortcut: String
+            /// The row's window shortcut number, or nil past the tenth row: those get no badge and no
+            /// entry in the focus-request map.
+            let shortcutIndex: Int?
+        }
+
+        struct Group {
+            let projectName: String
+            let workspaceName: String
+            let offlineDeviceName: String?
+            let rows: [Row]
+        }
+
+        let groups: [Group]
+    }
+
+    /// Everything `showAlertsDetail` renders, split by how a change to it has to be answered.
+    ///
+    /// `groups` is what decides which views the pane builds: the group headers, the entry identities and
+    /// their order, and each row's icon, tint, status indicator, shortcut badge, focus target, offline
+    /// dimming, and whether it carries a detail line at all (that one decides the label's font and the
+    /// detail field's visibility, so gaining or losing a detail line is a change of shape, not of text).
+    /// `text` is the two strings each row displays.
+    ///
+    /// They are compared separately because a bell alert renders its session's live title as its detail
+    /// text, which moves as often as the terminal's title does.
+    struct AlertsRenderSignature: Equatable {
+        struct Row: Equatable {
+            let attentionID: String
+            let icon: String
+            let iconTint: AppKitController.AlertsIconTint
+            let shortcut: String
+            let processStatus: RunningProcessState?
+            let agentStatus: AgentWindowStatus?
+            let focusRequestKey: String?
+            let hasDetail: Bool
+        }
+
+        struct Group: Equatable {
+            let projectName: String
+            let workspaceName: String
+            let offlineDeviceName: String?
+            let rows: [Row]
+        }
+
+        struct RowText: Equatable {
+            let attentionID: String
+            let label: String
+            let detail: String
+        }
+
+        let groups: [Group]
+        /// Flattened in render order, so an equal `groups` guarantees this lines up index for index with
+        /// the previously rendered text.
+        let text: [RowText]
+    }
+
+    /// How a refresh compares against the alerts pane already on screen.
+    enum AlertsRenderVerdict: Equatable {
+        /// Nothing the pane renders moved, so the views on screen are already correct.
+        case unchanged
+        /// Only row strings moved, which is written into the fields already built.
+        case textOnly
+        /// The pane's shape changed, so it is built again.
+        case structural
+    }
+
+    nonisolated static func alertsRenderVerdict(rendered: AlertsRenderSignature?, refreshed: AlertsRenderSignature) -> AlertsRenderVerdict {
+        guard let rendered else { return .structural }
+        guard rendered.groups == refreshed.groups else { return .structural }
+        return rendered.text == refreshed.text ? .unchanged : .textOnly
+    }
+
+    private func buildAlertsRenderPlan() -> AlertsRenderPlan {
+        // Sequential window shortcut counter across all groups and items.
+        var shortcutCounter = 1
+        let groups = buildAlertsGroups().map { group -> AlertsRenderPlan.Group in
+            // An unreachable device keeps its alerts listed and attributed to the workspace that raised
+            // them, marked stale by the same dimming its sidebar rows carry: they report what the device
+            // last said, and nothing can be done about them until it answers again.
+            let offlineDeviceName = unreachableDeviceName(workspaceID: group.workspaceID)
+            let rows = group.items.map { entry -> AlertsRenderPlan.Row in
+                let shortcutIndex = shortcutCounter <= 10 ? shortcutCounter : nil
+                shortcutCounter += 1
+                return AlertsRenderPlan.Row(
+                    entry: entry, shortcut: shortcutIndex.map { host.windowShortcutBadgeText(index: $0) } ?? "", shortcutIndex: shortcutIndex)
+            }
+            return AlertsRenderPlan.Group(
+                projectName: group.projectName, workspaceName: group.workspaceName, offlineDeviceName: offlineDeviceName, rows: rows)
+        }
+        return AlertsRenderPlan(groups: groups)
+    }
+
+    private static func alertsRenderSignature(plan: AlertsRenderPlan) -> AlertsRenderSignature {
+        var text: [AlertsRenderSignature.RowText] = []
+        var groups: [AlertsRenderSignature.Group] = []
+        for group in plan.groups {
+            var rows: [AlertsRenderSignature.Row] = []
+            for row in group.rows {
+                text.append(AlertsRenderSignature.RowText(attentionID: row.entry.attentionID, label: row.entry.label, detail: row.entry.detail ?? ""))
+                rows.append(
+                    AlertsRenderSignature.Row(
+                        attentionID: row.entry.attentionID, icon: row.entry.icon, iconTint: row.entry.iconTint, shortcut: row.shortcut,
+                        processStatus: row.entry.processStatus, agentStatus: row.entry.agentStatus,
+                        focusRequestKey: row.entry.focusRequest?.signatureKey, hasDetail: row.entry.detail != nil))
+            }
+            groups.append(
+                AlertsRenderSignature.Group(
+                    projectName: group.projectName, workspaceName: group.workspaceName, offlineDeviceName: group.offlineDeviceName, rows: rows))
+        }
+        return AlertsRenderSignature(groups: groups, text: text)
+    }
 
     func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs() }
 
@@ -159,6 +293,16 @@ import workspacecore
     /// calls this again while alerts is already the visible pane, so nothing here may discard state the
     /// user is in the middle of. `presentation` is what tells the two apart — it defaults to the
     /// refresh, and only the entry points the user actually reached for pass `.userNavigation`.
+    ///
+    /// The render itself replaces every view in the detail container, so a refresh that would draw the
+    /// same pane must not run one: while a terminal streams, refreshes arrive many times a second and
+    /// each rebuild destroys the card or dismiss button under the pointer between mouse-down and
+    /// mouse-up, which is what makes clicks in this pane die. The pane's signature decides that, and a
+    /// refresh that moved only row text is written into the fields already built.
+    ///
+    /// Appearance is deliberately not part of the signature: text is drawn in dynamic `NSColor`s and the
+    /// layer colors are re-resolved by `bindAppearanceReactiveLayer`, so a light/dark switch recolors the
+    /// views that are already on screen without any render.
     func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) {
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.presentDetailPane(.alerts, presentation: presentation)
@@ -167,7 +311,6 @@ import workspacecore
         let previousWorkspaceID = host.selectedWorkspaceID
         host.selectedProjectID = nil
         host.selectedWorkspaceID = nil
-        alertsFocusRequestMap = [:]
         host.outlineView.deselectAll(nil)
         // Reload only the previously-selected workspace row to clear its selection styling;
         // avoid full reloadData() which would reset expand/collapse state.
@@ -175,6 +318,28 @@ import workspacecore
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         host.updateAlertsRowAppearance()
 
+        let plan = buildAlertsRenderPlan()
+        let signature = Self.alertsRenderSignature(plan: plan)
+        // `.userNavigation` always renders: the user reaching for this pane is how it gets built when
+        // something else was showing.
+        if presentation == .backgroundRefresh, let rendered = renderedAlerts {
+            switch Self.alertsRenderVerdict(rendered: rendered.signature, refreshed: signature) {
+            case .unchanged: return
+            case .textOnly:
+                // Only the rows whose strings moved are touched; an equal `groups` means the two text
+                // lists line up index for index. `alertsFocusRequestMap` is rebuilt by the render below,
+                // so skipping the render keeps the map the previous one left, which is still correct: an
+                // equal `groups` means the same entries in the same order with the same focus targets.
+                for (previous, current) in zip(rendered.signature.text, signature.text) where previous != current {
+                    rendered.rowsByAttentionID[current.attentionID]?.updateText(label: current.label, detail: current.detail)
+                }
+                renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: rendered.rowsByAttentionID)
+                return
+            case .structural: break
+            }
+        }
+
+        alertsFocusRequestMap = [:]
         host.clearWorkspaceDetailFooter()
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
@@ -182,7 +347,7 @@ import workspacecore
             view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
         }
 
-        let groups = buildAlertsGroups()
+        var rowsByAttentionID: [String: ClickableRowView] = [:]
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -204,7 +369,7 @@ import workspacecore
         stack.addArrangedSubview(headerRow)
         host.constrainFormFieldToFillWidth(headerRow, in: stack)
 
-        if groups.isEmpty {
+        if plan.groups.isEmpty {
             let sep = NSView()
             sep.translatesAutoresizingMaskIntoConstraints = false
             sep.wantsLayer = true
@@ -237,14 +402,8 @@ import workspacecore
             stack.addArrangedSubview(emptyStack)
             host.constrainFormFieldToFillWidth(emptyStack, in: stack)
         } else {
-            // Sequential window shortcut counter across all groups and items.
-            var shortcutCounter = 1
-
-            for group in groups {
-                // An unreachable device keeps its alerts listed and attributed to the workspace that
-                // raised them, marked stale by the same dimming its sidebar rows carry: they report what
-                // the device last said, and nothing can be done about them until it answers again.
-                let offlineDeviceName = unreachableDeviceName(workspaceID: group.workspaceID)
+            for group in plan.groups {
+                let offlineDeviceName = group.offlineDeviceName
 
                 // Workspace group header
                 let groupHeaderStack = NSStackView()
@@ -284,10 +443,11 @@ import workspacecore
                 itemsStack.spacing = 4
                 itemsStack.translatesAutoresizingMaskIntoConstraints = false
 
-                for entry in group.items {
-                    let shortcut = shortcutCounter <= 10 ? host.windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 10, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
-                    shortcutCounter += 1
+                for planRow in group.rows {
+                    let entry = planRow.entry
+                    if let shortcutIndex = planRow.shortcutIndex, let focusRequest = entry.focusRequest {
+                        alertsFocusRequestMap[shortcutIndex] = focusRequest
+                    }
                     let cardAction: (() async -> Void)?
                     if let focusRequest = entry.focusRequest {
                         cardAction = { [weak self] in
@@ -301,13 +461,14 @@ import workspacecore
                     } else {
                         cardAction = nil
                     }
-                    let card = alertsWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
+                    let card = alertsWindowCard(entry: entry, shortcut: planRow.shortcut, action: cardAction)
                     if let offlineDeviceName {
-                        card.alphaValue = AppKitController.unreachableDeviceAlpha
-                        card.toolTip = "\(offlineDeviceName) is offline"
+                        card.container.alphaValue = AppKitController.unreachableDeviceAlpha
+                        card.container.toolTip = "\(offlineDeviceName) is offline"
                     }
-                    itemsStack.addArrangedSubview(card)
-                    host.constrainFormFieldToFillWidth(card, in: itemsStack)
+                    rowsByAttentionID[entry.attentionID] = card.row
+                    itemsStack.addArrangedSubview(card.container)
+                    host.constrainFormFieldToFillWidth(card.container, in: itemsStack)
                 }
 
                 stack.addArrangedSubview(itemsStack)
@@ -316,6 +477,7 @@ import workspacecore
         }
 
         host.showScrollableDetailStack(stack)
+        renderedAlerts = RenderedAlertsDetail(signature: signature, rowsByAttentionID: rowsByAttentionID)
     }
 
     /// The display name of the device that raised this workspace's alerts when that device is
@@ -327,8 +489,12 @@ import workspacecore
         return section.displayName
     }
 
-    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab rows.
-    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
+    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab
+    /// rows. The card's row is returned alongside its container so a later text-only refresh can write
+    /// into it (see `showAlertsDetail`).
+    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> (
+        container: NSView, row: ClickableRowView
+    ) {
         let dismissButton = NSButton()
         dismissButton.title = ""
         dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
@@ -356,7 +522,7 @@ import workspacecore
         container.addArrangedSubview(mainRow)
         host.constrainFormFieldToFillWidth(mainRow, in: container)
 
-        return container
+        return (container: container, row: mainRow)
     }
 
     @objc private func dismissAlertsAttentionItemAction(_ sender: NSButton) {

@@ -105,18 +105,8 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
                     matchesProcess($0, processID: request.processID, processKey: request.processKey, processTemplateID: request.processTemplateID)
                 })
 
-        case .runCodingAgent(let request):
-            return serveAgentMutation(
-                workspaceID: request.workspaceID, running: true, message: "Started agent.",
-                matches: { matchesAgent($0, agentID: nil, agentName: request.agentName, launcherID: request.agentLauncherID) })
         case .stopCodingAgent(let request):
-            return serveAgentMutation(
-                workspaceID: request.workspaceID, running: false, message: "Stopped agent.",
-                matches: { matchesAgent($0, agentID: request.agentID, agentName: request.agentName, launcherID: request.agentLauncherID) })
-        case .restartCodingAgent(let request):
-            return serveAgentMutation(
-                workspaceID: request.workspaceID, running: true, message: "Restarted agent.",
-                matches: { matchesAgent($0, agentID: request.agentID, agentName: request.agentName, launcherID: request.agentLauncherID) })
+            return serveStopAgent(workspaceID: request.workspaceID, matches: { matchesAgent($0, agentID: request.agentID) })
 
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk:
@@ -177,14 +167,10 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             if let synthesis = started.synthesis { syntheses.append(synthesis) }
             return started.row
         }
+        // Stopping a workspace stops its live agents; starting one leaves agent rows untouched, because
+        // agents only come into existence from a command run in a terminal, never from workspace launch.
         let agentRows = workspace.codingAgentRows.map { row -> SpacesDeviceWorkspaceCodingAgentRow in
-            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
-            guard let started = startedAgentRow(row) else {
-                declined = true
-                return row
-            }
-            if let synthesis = started.synthesis { syntheses.append(synthesis) }
-            return started.row
+            running ? row : row.demoStopped(at: Self.nowTimestamp())
         }
         guard !declined else { return reject(Self.unsupportedInDemo) }
         commitMutation(workspaceID: workspaceID, processRows: processRows, codingAgentRows: agentRows, syntheses: syntheses)
@@ -215,28 +201,19 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         return mutationResponse(message: message, workspaceID: workspaceID)
     }
 
-    private func serveAgentMutation(workspaceID: String, running: Bool, message: String, matches: (SpacesDeviceWorkspaceCodingAgentRow) -> Bool)
-        -> SpacesDeviceAPIResponse
-    {
+    /// Stop is the only lifecycle control a coding agent has: an agent exists only as a live session
+    /// someone started by running its command in a terminal, so there is nothing to start or restart.
+    private func serveStopAgent(workspaceID: String, matches: (SpacesDeviceWorkspaceCodingAgentRow) -> Bool) -> SpacesDeviceAPIResponse {
         guard let workspace = overview.workspaces.first(where: { $0.id == workspaceID }) else { return notFound("workspace") }
         var didMatch = false
-        var declined = false
-        var syntheses: [SynthesizedSession] = []
         let agentRows = workspace.codingAgentRows.map { row -> SpacesDeviceWorkspaceCodingAgentRow in
             guard matches(row) else { return row }
             didMatch = true
-            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
-            guard let started = startedAgentRow(row) else {
-                declined = true
-                return row
-            }
-            if let synthesis = started.synthesis { syntheses.append(synthesis) }
-            return started.row
+            return row.demoStopped(at: Self.nowTimestamp())
         }
         guard didMatch else { return notFound("agent") }
-        guard !declined else { return reject(Self.unsupportedInDemo) }
-        commitMutation(workspaceID: workspaceID, processRows: workspace.processRows, codingAgentRows: agentRows, syntheses: syntheses)
-        return mutationResponse(message: message, workspaceID: workspaceID)
+        commitMutation(workspaceID: workspaceID, processRows: workspace.processRows, codingAgentRows: agentRows, syntheses: [])
+        return mutationResponse(message: "Stopped agent.", workspaceID: workspaceID)
     }
 
     // MARK: - Session synthesis
@@ -259,18 +236,6 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, templateID: row.templateID,
             processID: synthesis.runtimeID, sessionID: synthesis.session.sessionID, runState: .running, exitedAt: nil, canRun: false, canStop: true,
             canRestart: true)
-        return (running, synthesis.session)
-    }
-
-    private func startedAgentRow(_ row: SpacesDeviceWorkspaceCodingAgentRow) -> (
-        row: SpacesDeviceWorkspaceCodingAgentRow, synthesis: SynthesizedSession?
-    )? {
-        guard row.sessionID == nil else { return (row.demoRunning(), nil) }
-        guard let synthesis = synthesizeSession(kind: "agent", workspaceID: row.workspaceID, rowID: row.id, title: row.name) else { return nil }
-        let running = SpacesDeviceWorkspaceCodingAgentRow(
-            id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, launcherID: row.launcherID, agentID: synthesis.runtimeID,
-            sessionID: synthesis.session.sessionID, isConfigured: row.isConfigured, runState: .running, activityState: .spinning,
-            updatedAt: Self.nowTimestamp(), canRun: false, canStop: true, canRestart: true)
         return (running, synthesis.session)
     }
 
@@ -360,12 +325,9 @@ private func matchesProcess(_ row: SpacesDeviceWorkspaceProcessRow, processID: S
     return false
 }
 
-/// Matches an agent row against whatever identifier the request carried (id, launcher, or name).
-private func matchesAgent(_ row: SpacesDeviceWorkspaceCodingAgentRow, agentID: String?, agentName: String?, launcherID: String?) -> Bool {
-    if let agentID, agentID == row.agentID || agentID == row.id { return true }
-    if let launcherID, launcherID == row.launcherID { return true }
-    if let agentName, agentName == row.name { return true }
-    return false
+private func matchesAgent(_ row: SpacesDeviceWorkspaceCodingAgentRow, agentID: String?) -> Bool {
+    guard let agentID else { return false }
+    return agentID == row.agentID || agentID == row.id
 }
 
 /// Forwards a demo request into the backing actor. `close` is a no-op — there is no connection to tear
@@ -443,18 +405,10 @@ extension SpacesDeviceWorkspaceProcessRow {
 }
 
 extension SpacesDeviceWorkspaceCodingAgentRow {
-    fileprivate func demoRunning() -> SpacesDeviceWorkspaceCodingAgentRow {
-        SpacesDeviceWorkspaceCodingAgentRow(
-            id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agentID, sessionID: sessionID,
-            isConfigured: isConfigured, runState: .running, activityState: .spinning, updatedAt: TerminalSessionTimestamp.string(from: Date()),
-            canRun: false, canStop: true, canRestart: true)
-    }
-
     fileprivate func demoStopped(at updatedAt: String) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
-            id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agentID, sessionID: sessionID,
-            isConfigured: isConfigured, runState: .exited, activityState: .exited, updatedAt: updatedAt, canRun: true, canStop: false,
-            canRestart: true)
+            id: id, workspaceID: workspaceID, name: name, command: command, agentID: agentID, sessionID: sessionID, runState: .exited,
+            activityState: .exited, updatedAt: updatedAt, canStop: false)
     }
 }
 

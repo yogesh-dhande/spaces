@@ -68,7 +68,6 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup"
             config.processes = [ProcessTemplate(name: "web", command: "echo web")]
-            config.agentLaunchers = [AgentLauncher(name: "Codex", command: "echo codex")]
             config.browserSessions = [BrowserSession(name: "App", url: "http://localhost:3000")]
         }
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
@@ -81,7 +80,6 @@ extension OrchestratorTests {
         }
 
         assertSetupBlocked { try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web") }
-        assertSetupBlocked { _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex") }
 
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         XCTAssertFalse(reservation.sessionID.isEmpty)
@@ -113,7 +111,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionLauncher: { _ in throw WorkspaceError.invalidArgument(message: "launcher failed") })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
@@ -139,7 +137,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let launchCapture = TerminalLaunchAttemptCapture()
         let orchestrator = makeTestOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, builtInTerminalWindowCloser: { _, _ in },
             builtInTerminalSessionLauncher: { _ in
                 launchCapture.count += 1
                 throw WorkspaceError.invalidArgument(message: "launcher should not run")
@@ -195,7 +193,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
@@ -384,7 +382,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()

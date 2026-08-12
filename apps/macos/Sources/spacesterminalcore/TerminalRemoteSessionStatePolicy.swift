@@ -77,10 +77,23 @@ public struct TerminalRemoteStateReductionResult: Sendable {
     public let frameToApply: GhosttyRenderFrame?
     public let dropReason: String?
     public let didRequestResync: Bool
+    /// True when the reduction moved nothing at all: an out-of-band payload the reducer refused whole
+    /// (`staleOutOfBandReduction`), whose `storedPayload` is therefore the previous payload untouched.
+    ///
+    /// `payload` still carries the refused input — its attachment snapshot, its render snapshot, its
+    /// metadata — because the metrics and traces describe the payload that arrived. A consumer must
+    /// derive no client state from it while this is set: the payload was captured before whatever
+    /// superseded it, so its attachment snapshot names the ownership of a session generation that has
+    /// been handed off, and its render snapshot describes a screen the client is already past.
+    ///
+    /// A partial refusal (`supersededScreen`, where only the render update is refused and the payload's
+    /// metadata is ordered on its own terms and genuinely merges) is NOT this: the flag stays false
+    /// there, and the payload's remaining state applies as it always did.
+    public let isRefusedOutOfBandPayload: Bool
 
     public init(
         payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?,
-        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool
+        frameToApply: GhosttyRenderFrame?, dropReason: String?, didRequestResync: Bool, isRefusedOutOfBandPayload: Bool = false
     ) {
         self.payload = payload
         self.storedPayload = storedPayload
@@ -88,47 +101,205 @@ public struct TerminalRemoteStateReductionResult: Sendable {
         self.frameToApply = frameToApply
         self.dropReason = dropReason
         self.didRequestResync = didRequestResync
+        self.isRefusedOutOfBandPayload = isRefusedOutOfBandPayload
     }
 }
 
 public struct TerminalRemoteStateReducer: Sendable {
     private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
+    /// Where the last frame this reducer actually handed back sits in the session's order.
+    ///
+    /// Deliberately not the same thing as `renderUpdateBaseline`. The baseline advances for every frame
+    /// that decodes and applies, including one the caller then vetoes (`shouldUseFrame`) — it has to, since
+    /// it is what the session's next delta is computed against. The caller never received that frame, so
+    /// ordering an out-of-band response against the baseline would refuse the resync the veto itself asked
+    /// for, which is the only thing that can repair the pane. This moves only when a frame is genuinely
+    /// handed over, so it answers the question the staleness check actually asks: is this response older
+    /// than what the client is holding?
+    private var retainedFrameOrdering: (sessionRevision: UInt64?, ownerEpoch: UInt64)?
 
     public init(renderUpdateBaseline: GhosttyRenderUpdateBaseline? = nil) { self.renderUpdateBaseline = renderUpdateBaseline }
 
-    public mutating func resetRenderUpdateBaseline() { renderUpdateBaseline = nil }
-
+    /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
+    ///   response to a direct `.state` read. Such a payload was captured at request time and can reach
+    ///   this reducer after the stream has already carried the session past it, so it must prove it is not
+    ///   stale before it is allowed to move the chain (see `staleOutOfBandReduction`). Nothing on the wire
+    ///   marks one: a fetch response is stamped `initial`, the same reason a fresh subscriber's unicast
+    ///   initial carries, so provenance is passed in by the caller that made the request.
     public mutating func reduce(
         incomingPayload: GhosttyRemoteSessionStatePayload, previousPayload: GhosttyRemoteSessionStatePayload?,
-        shouldUseFrame: (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool = { _, _ in true }, requestResyncOnApplyFailure: Bool = false
+        shouldUseFrame: (GhosttyRenderFrame, GhosttyRemoteSessionStatePayload) -> Bool = { _, _ in true }, requestResyncOnApplyFailure: Bool = false,
+        isOutOfBand: Bool = false
     ) -> TerminalRemoteStateReductionResult {
+        var incomingPayload = incomingPayload
+        var supersededFrameDropReason: String?
+        // An out-of-band payload is ordered against what this reducer has actually reduced, in two steps:
+        // its frame first, then — for a payload left with none, whether it never carried one or its frame
+        // was just refused — its metadata. Splitting it that way is what keeps a response's title, working
+        // directory, ownership and runtime state from being thrown away with a screen the client is
+        // already showing: screen revisions only advance with screen content, and a quiet terminal changes
+        // metadata without painting anything.
+        if isOutOfBand, let previousPayload, Self.isOutOfBandPayloadOrderable(incomingPayload, against: previousPayload) {
+            switch outOfBandFrameDisposition(of: incomingPayload) {
+            case .supersededSession:
+                // An older owner epoch invalidates the whole payload, not just its screen: the attachment
+                // snapshot it carries names the owner from before a handoff, and merging that would revert
+                // ownership on top of refusing the frame.
+                return staleOutOfBandReduction(
+                    payload: incomingPayload, storedPayload: previousPayload, dropReason: Self.staleOutOfBandStateDropReason)
+            case .supersededScreen:
+                incomingPayload = incomingPayload.replacingRenderUpdate(nil)
+                supersededFrameDropReason = Self.staleOutOfBandFrameDropReason
+            case .usable: break
+            }
+            if !incomingPayload.hasRenderUpdate, Self.isStaleMetadata(incomingPayload, against: previousPayload) {
+                return staleOutOfBandReduction(
+                    payload: incomingPayload, storedPayload: previousPayload, dropReason: Self.staleOutOfBandStateDropReason)
+            }
+        }
         let resolved = payloadByResolvingRenderUpdate(incomingPayload)
         var payload = resolved.payload
-        var dropReason = resolved.dropReason
+        var dropReason = resolved.dropReason ?? supersededFrameDropReason
         var frameToApply: GhosttyRenderFrame?
-        // `resolved.frame` is the materialized full frame — the same value a
-        // `payload.decodedRenderUpdate?.fullFrame` read on the resolved payload would return,
-        // handed back directly so the reducer does not re-decode the blob it just encoded.
+        // `resolved.frame` is the materialized full frame, the same value a
+        // `payload.decodedRenderUpdate?.fullFrame` read on the resolved payload returns, handed back
+        // directly so callers do not have to go through the payload for it.
         if let frame = resolved.frame {
             if shouldUseFrame(frame, payload) {
                 frameToApply = frame
+                retainedFrameOrdering = (frame.sessionRevision, frame.ownerEpoch)
             } else {
                 payload = payload.replacingRenderUpdate(nil)
                 dropReason = dropReason ?? "stale_resize_grid"
             }
-        } else if incomingPayload.renderUpdate != nil {
+        } else if incomingPayload.hasRenderUpdate {
             dropReason = dropReason ?? "decode_failed"
         }
         let storedPayload = previousPayload?.merged(with: payload) ?? payload
+        // Every drop reaching here asks for a resync, the caller's veto above included: whichever way the
+        // frame was lost, the client is left with a picture the session has already moved past and nothing
+        // on the client ever rebuilds it on its own. The request is the only thing that makes the session
+        // re-send a full frame; the caller paces it (see `RemoteGhosttySessionHost`'s once-per-second
+        // throttle), so a run of vetoed frames costs one round trip, not one each. The exception is the
+        // superseded out-of-band frame handled above: it refuses a screen the client is already past
+        // rather than losing one it needed, so the retained frame is still current and nothing is owed.
         return TerminalRemoteStateReductionResult(
             payload: payload, storedPayload: storedPayload, decodedUpdate: resolved.decodedUpdate, frameToApply: frameToApply, dropReason: dropReason,
-            didRequestResync: requestResyncOnApplyFailure && resolved.dropReason != nil)
+            didRequestResync: requestResyncOnApplyFailure && dropReason != nil && dropReason != Self.staleOutOfBandFrameDropReason)
+    }
+
+    /// Whether an out-of-band payload is subject to the ordering below at all.
+    ///
+    /// A response reporting the session is no longer interactive is normally exempt: it is the session's
+    /// final word rather than one screen update among many, and ordering it away would leave the pane
+    /// believing a dead session is live. But a `.state` read capturing one run's exit can be delayed
+    /// across a relaunch and arrive after the stream has already reported the NEW run live, and applying
+    /// that would mark a running session dead and disable its input until some later event. So the
+    /// exemption is withheld from a response that is provably answering for a superseded run.
+    ///
+    /// "Provably" needs both a run discriminator and a direction. The discriminator is the child PID,
+    /// which is the part of `TerminalSessionRuntimeState.runIdentity` that distinguishes one launch from
+    /// another — the rest of that identity is the exit timestamp, which necessarily differs between a run's
+    /// live and ended payloads and so cannot separate runs from exits. The direction is `emittedAt`: a
+    /// different child PID alone says the payloads describe different runs, not which is older, and a
+    /// response for a genuinely NEWER run must still land. What this cannot catch: a payload carrying no
+    /// runtime state, or two runs the daemon reports under the same child PID (a PID reused after wrap),
+    /// where the exemption stands as before.
+    private static func isOutOfBandPayloadOrderable(
+        _ payload: GhosttyRemoteSessionStatePayload, against previousPayload: GhosttyRemoteSessionStatePayload
+    ) -> Bool {
+        guard payload.runtimeState?.state.isInteractive == false else { return true }
+        guard let childPID = payload.runtimeState?.childPID, let previousChildPID = previousPayload.runtimeState?.childPID,
+            childPID != previousChildPID
+        else { return false }
+        return isStaleMetadata(payload, against: previousPayload)
+    }
+
+    /// Where an out-of-band payload's own full frame sits relative to what the client is holding.
+    ///
+    /// A direct `.state` read answers with the screen and metadata as they were when the session was
+    /// asked, and it re-enters beside a stream that never stopped. Ordering it by arrival cannot work — a
+    /// newer stream payload may already be queued ahead of it — so it is ordered here, at the head of the
+    /// queue, against the state this reducer has actually reduced.
+    ///
+    /// The frame is superseded when it belongs to an older owner epoch (epochs only advance, so a lower
+    /// one describes a session generation that has been handed off) or when it sits at or below the
+    /// revision of the last frame the client RETAINED in the same epoch (the daemon advances revisions
+    /// monotonically per session and never lets two different screens share one, so equal means identical
+    /// content). The comparison is against `retainedFrameOrdering` rather than the delta baseline for the
+    /// reason recorded there: a vetoed frame advances the baseline without ever reaching the client, and
+    /// the resync that veto asks for carries exactly that frame and revision back. Anything else is
+    /// usable — a strictly newer revision matters because a `.state` export flushes pending output into
+    /// the session's surface without broadcasting, making that response the only carrier of the screen it
+    /// describes.
+    private enum OutOfBandFrameDisposition {
+        /// Nothing to refuse: no orderable frame, no chain to protect, or a frame that is genuinely newer.
+        case usable
+        /// The client already holds this screen. Only the render update is refused; the payload's metadata
+        /// is ordered separately (see `isStaleMetadata`).
+        case supersededScreen
+        /// The payload describes a session generation that has been handed off, so none of it applies.
+        case supersededSession
+    }
+
+    private func outOfBandFrameDisposition(of payload: GhosttyRemoteSessionStatePayload) -> OutOfBandFrameDisposition {
+        guard payload.hasRenderUpdate else { return .usable }
+        guard let retained = retainedFrameOrdering, let frame = payload.decodedRenderUpdate?.fullFrame else { return .usable }
+        if frame.ownerEpoch != retained.ownerEpoch { return frame.ownerEpoch < retained.ownerEpoch ? .supersededSession : .usable }
+        // An unrevisioned frame on either side cannot be ordered, so it is left to apply as it did before
+        // this guard existed.
+        guard let frameRevision = frame.sessionRevision, let retainedRevision = retained.sessionRevision else { return .usable }
+        if frameRevision > retainedRevision { return .usable }
+        // A broken chain (a delta that could not apply nils the baseline) makes the EQUAL-revision response
+        // useful again: its content is byte-identical to what the pane already shows, so nothing repaints
+        // backwards, and it re-heads the chain the deltas that follow need. That is the only concession —
+        // a strictly older frame is refused whether or not the chain is broken, since applying one would
+        // both regress the pane and, because the caller retires an armed resync on any applied frame,
+        // silently cancel the resync the breakage asked for.
+        if frameRevision == retainedRevision, renderUpdateBaseline == nil { return .usable }
+        return .supersededScreen
+    }
+
+    /// The reduction an out-of-band payload gets when nothing about it may move the client's state.
+    ///
+    /// Deliberately does NOT request a resync, unlike every other drop in `reduce` (see the note there):
+    /// those lose state the client needed, while this refuses state the client is already past.
+    private func staleOutOfBandReduction(
+        payload: GhosttyRemoteSessionStatePayload, storedPayload: GhosttyRemoteSessionStatePayload, dropReason: String
+    ) -> TerminalRemoteStateReductionResult {
+        TerminalRemoteStateReductionResult(
+            payload: payload, storedPayload: storedPayload, decodedUpdate: nil, frameToApply: nil, dropReason: dropReason, didRequestResync: false,
+            isRefusedOutOfBandPayload: true)
+    }
+
+    /// The whole payload was refused: its screen belonged to a superseded session generation, or it
+    /// carries no usable screen and its metadata is older than what has already been reduced.
+    private static let staleOutOfBandStateDropReason = "stale_out_of_band_state"
+    /// Only the render update was refused; the payload's metadata was still considered on its own terms.
+    private static let staleOutOfBandFrameDropReason = "stale_out_of_band_frame"
+
+    /// Orders a payload carrying no usable screen by `emittedAt`, because nothing else it carries is
+    /// reliably ordered: attachment-only updates and Linux payloads reuse the prior revisions
+    /// (`DeviceTerminalSessionStateModel.apply` documents the same finding and orders on the same field).
+    /// One daemon stamps every payload for a session, so the comparison is against a single clock; a
+    /// backwards step of that wall clock is the known caveat, and its cost is one dropped metadata refresh
+    /// that the next payload supersedes.
+    private static func isStaleMetadata(_ payload: GhosttyRemoteSessionStatePayload, against previousPayload: GhosttyRemoteSessionStatePayload)
+        -> Bool
+    {
+        guard let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt),
+            let previousEmittedAt = GhosttyRemoteSessionStateTimestamp.date(from: previousPayload.emittedAt)
+        else { return false }
+        // Strictly older only. `emittedAt` has millisecond resolution, so a tie is as likely to mean "the
+        // session answered in the same instant it broadcast" as "this is a repeat" — and the model's own
+        // ordering guard (`DeviceTerminalSessionStateModel.apply`) keeps ties for the same reason.
+        return emittedAt < previousEmittedAt
     }
 
     private mutating func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
         payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, frame: GhosttyRenderFrame?, dropReason: String?
     ) {
-        guard payload.renderUpdate != nil else { return (payload, nil, nil, nil) }
+        guard payload.hasRenderUpdate else { return (payload, nil, nil, nil) }
         guard let decodedUpdate = payload.decodedRenderUpdate else {
             return (payload.replacingRenderUpdate(nil), nil, nil, "render_update_decode_failed")
         }
@@ -136,15 +307,16 @@ public struct TerminalRemoteStateReducer: Sendable {
             let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
             renderUpdateBaseline = baseline
             let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-            // Encoding can fail only for a malformed frame; when it does, drop the render update and
-            // let `reduce` report `decode_failed`, matching a nil materialized-frame read.
-            guard let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)) else {
-                return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, nil)
-            }
-            // Seed the cache with the frame we just encoded so later reads on the stored payload
-            // (renderSnapshot, renderOwnerEpoch, currentRenderStateKey) hit without decoding.
-            GhosttyRenderUpdateDecodeCache.seed(.full(frame), for: materializedUpdate)
-            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, frame, nil)
+            // The stored payload carries the materialized full frame as a value, not as a re-encoded
+            // blob: the reads the client makes of it next (renderSnapshot, renderOwnerEpoch, the render
+            // state key) all want the frame, and nothing on this path wants bytes. The payload still
+            // yields the identical blob if it is ever serialized (see `GhosttyRenderUpdateBody`).
+            //
+            // Storing the *materialized* frame rather than the incoming delta is what lets the next
+            // payload's merge carry a complete screen forward, and what makes a resync request recover:
+            // the chain's state lives in this reducer's baseline and in the stored payload's full frame,
+            // both advanced exactly once per payload, in arrival order.
+            return (payload.replacingRenderUpdate(materialized: .full(frame)), decodedUpdate, frame, nil)
         } catch {
             renderUpdateBaseline = nil
             return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, Self.renderUpdateDropReason(for: error))

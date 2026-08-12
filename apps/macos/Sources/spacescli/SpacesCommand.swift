@@ -18,7 +18,7 @@ public struct SpacesCommand: ParsableCommand {
               - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
               - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
               - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
-              - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
+              - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It is convergent: it launches whichever configured processes are not already running (a never-started one launches fresh, an exited one restarts) and leaves already-running processes, ad hoc terminals, and coding-agent sessions untouched; a workspace whose configured processes are all already running succeeds as a no-op. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
@@ -935,12 +935,20 @@ struct DevicePairCommand: ParsableCommand {
         let result: SpacesRemoteDevicePairingResult
         if let ssh {
             let (sshUser, sshHost) = Self.parsedSSHDestination(ssh)
-            result = try SpacesDevicePairingClient.pairRemoteDevice(
-                SpacesRemoteDevicePairingRequest(
-                    sshHost: sshHost, sshUser: sshUser, sshPort: sshPort,
-                    clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
-                    clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
-            )
+            let request = SpacesRemoteDevicePairingRequest(
+                sshHost: sshHost, sshUser: sshUser, sshPort: sshPort, clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
+                clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
+            do { result = try SpacesDevicePairingClient.pairRemoteDevice(request) } catch {
+                // A Linux device without Spaces installed carries the pinned install one-liner: run the
+                // installer over SSH and pair in one go rather than printing a command to run by hand.
+                guard let installCommand = Self.automaticInstallCommand(forPairingFailure: error) else { throw error }
+                let destination = sshUser.map { "\($0)@\(sshHost)" } ?? sshHost
+                print("Spaces is not installed on \(destination). Installing it over SSH (up to 10 minutes)...")
+                do { result = try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request) } catch {
+                    guard Self.isRemoteInstallRunFailure(error) else { throw error }
+                    throw RemoteDeviceInstallFailure(underlyingMessage: error.localizedDescription, installCommand: installCommand)
+                }
+            }
         } else {
             let parsedLink = try SpacesDevicePairingLink.parse(link ?? "")
             result = try SpacesDevicePairingClient.pairDevice(
@@ -955,6 +963,41 @@ struct DevicePairCommand: ParsableCommand {
         guard let atIndex = trimmed.firstIndex(of: "@"), atIndex != trimmed.startIndex else { return (nil, trimmed) }
         return (String(trimmed[trimmed.startIndex..<atIndex]), String(trimmed[trimmed.index(after: atIndex)...]))
     }
+
+    /// The install command to run over SSH for a failed pairing attempt, or nil when the failure is not an
+    /// installable device. Only a Linux device carries a command; a remote Mac reports Spaces missing with no
+    /// command (its app cannot be installed over SSH), so that failure and every other one is rethrown.
+    static func automaticInstallCommand(forPairingFailure error: any Error) -> String? {
+        guard case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error else { return nil }
+        return linuxInstallCommand
+    }
+
+    /// Whether a failure from the combined install-and-pair path came from the installer run itself —
+    /// the only failure that re-running the installer by hand can fix.
+    /// `installSpacesOnRemoteDeviceAndPair` runs the installer and then pairs, so every other failure it
+    /// can raise (an unreachable Device API on the freshly installed daemon, a rejected pairing) happened
+    /// after Spaces was installed. Telling the user to run the installer again for those both misdirects
+    /// them and hides that the install completed, so they are reported exactly as they were thrown.
+    static func isRemoteInstallRunFailure(_ error: any Error) -> Bool {
+        guard let pairingError = error as? SpacesRemoteDevicePairingError else { return false }
+        switch pairingError {
+        case .remoteInstallFailed, .remoteInstallTimedOut: return true
+        default: return false
+        }
+    }
+}
+
+/// Raised when the SSH install that pairing started for a bare Linux device fails. It reports the underlying
+/// failure and then the exact command to run on the device by hand, so the manual path stays spelled out.
+struct RemoteDeviceInstallFailure: LocalizedError {
+    let underlyingMessage: String
+    let installCommand: String
+
+    static func message(underlyingMessage: String, installCommand: String) -> String {
+        "\(underlyingMessage)\nRun the installer on the device, then pair again:\n  \(installCommand)"
+    }
+
+    var errorDescription: String? { Self.message(underlyingMessage: underlyingMessage, installCommand: installCommand) }
 }
 
 struct DeviceRemoveCommand: ParsableCommand {
@@ -1186,6 +1229,7 @@ struct TerminalShowCommand: ParsableCommand {
                 userInfo: [
                     IPCNotification.terminalSessionIDUserInfoKey: sessionID,
                     IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                    IPCNotification.terminalOpenFocusIntentUserInfoKey: TerminalOpenFocusIntent.focus.rawValue,
                     IPCNotification.focusRequestIDUserInfoKey: requestID,
                 ])
             print("Requested owner terminal window for session \(sessionID)")

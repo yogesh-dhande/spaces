@@ -62,27 +62,50 @@ final class InstalledSpacesVersionTests: XCTestCase {
             return bundle
         }
     #else
-        /// The Linux installer repoints `~/.spaces/daemon/current` at the new release while the old
-        /// daemon keeps running from its own release directory, so `current`'s manifest names what is
-        /// installed.
-        func testReadsVersionFromTheCurrentReleaseManifest() throws {
-            try makeRelease(version: "0.2.0", current: true)
+        /// The installer repoints the release tree's `current` at the new release while the old daemon
+        /// keeps running from its own release directory, so the manifest behind `current` — found from
+        /// the running executable's own release tree, never a fixed home path — names what is
+        /// installed. A daemon serving a development profile reads that profile's tree, so another
+        /// profile's installed build can never appear as this daemon's staged update.
+        func testReadsInstalledVersionFromItsOwnReleaseTreeCurrentManifest() throws {
+            let runningDaemon = try makeRelease(version: "0.1.0")
+            _ = try makeRelease(version: "0.2.0", current: true)
 
-            XCTAssertEqual(InstalledSpacesVersion.installedReleaseVersion(homeDirectoryURL: root), "0.2.0")
+            XCTAssertEqual(InstalledSpacesVersion.installedReleaseVersion(executableURL: runningDaemon), "0.2.0")
         }
 
-        func testReportsNoInstalledVersionWhenNoReleaseIsInstalled() {
-            XCTAssertNil(InstalledSpacesVersion.installedReleaseVersion(homeDirectoryURL: root))
+        /// systemd execs the daemon through the `current` symlink; the version must resolve through it
+        /// back into the release tree.
+        func testResolvesSymlinkedDaemonPathBackIntoItsReleaseTree() throws {
+            _ = try makeRelease(version: "0.2.0", current: true)
+            let linked = root.appendingPathComponent("daemon/current/bin/spacesd-bin", isDirectory: false)
+
+            XCTAssertEqual(InstalledSpacesVersion.installedReleaseVersion(executableURL: linked), "0.2.0")
         }
 
-        private func makeRelease(version: String, current: Bool) throws {
-            let release = root.appendingPathComponent(".spaces/daemon/releases/\(version)", isDirectory: true)
-            try FileManager.default.createDirectory(at: release, withIntermediateDirectories: true)
+        /// A development daemon launched from `.build/debug` sits in no release tree, so there is no
+        /// installed build to restart onto.
+        func testReportsNoInstalledVersionForADaemonOutsideAReleaseTree() throws {
+            let daemon = root.appendingPathComponent(".build/debug/spacesd-bin", isDirectory: false)
+            try FileManager.default.createDirectory(at: daemon.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: daemon)
+
+            XCTAssertNil(InstalledSpacesVersion.installedReleaseVersion(executableURL: daemon))
+        }
+
+        /// Creates `daemon/releases/<version>/` with its manifest and `bin/spacesd-bin`, returning the
+        /// executable inside it; `current: true` also points `daemon/current` at the release.
+        private func makeRelease(version: String, current: Bool = false) throws -> URL {
+            let release = root.appendingPathComponent("daemon/releases/\(version)", isDirectory: true)
+            try FileManager.default.createDirectory(at: release.appendingPathComponent("bin", isDirectory: true), withIntermediateDirectories: true)
             let manifest = try JSONSerialization.data(withJSONObject: ["app_version": version])
             try manifest.write(to: release.appendingPathComponent("manifest.json", isDirectory: false))
-            guard current else { return }
+            let daemon = release.appendingPathComponent("bin/spacesd-bin", isDirectory: false)
+            try Data().write(to: daemon)
+            guard current else { return daemon }
             try FileManager.default.createSymbolicLink(
-                at: root.appendingPathComponent(".spaces/daemon/current", isDirectory: false), withDestinationURL: release)
+                at: root.appendingPathComponent("daemon/current", isDirectory: false), withDestinationURL: release)
+            return daemon
         }
     #endif
 }

@@ -1256,13 +1256,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
+        case .stopWorkspaceTerminalIfBareShell(let payload): return try handleStopWorkspaceTerminalIfBareShellRequest(payload, context: context)
         case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
         case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload, context: context)
         case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload, context: context)
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
-        case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload, context: context)
         case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
-        case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload, context: context)
         case .renameAgentSession(let payload): return try handleRenameAgentSessionRequest(payload, context: context)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
@@ -1966,9 +1965,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             // A terminal window's own row. Only sessions the live catalog does not already carry: a live
-            // one is published as an ad hoc summary, which is the only summary that carries a `liveTitle`,
-            // so claiming it here would drop what the program prints. What is left is the ended-but-held
-            // session — the case the process and agent loops above already cover through the same lookup.
+            // one is published as an ad hoc summary, which is where a shell's `liveTitle` reaches clients
+            // (a window row's summary carries none), so claiming it here would drop what the program
+            // prints. What is left is the ended-but-held session, the case the process and agent loops
+            // above already cover through the same lookup.
             for window in descriptor.windows where window.roleValue == .terminal {
                 guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID), sessionsByID[sessionID] == nil else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
@@ -2032,13 +2032,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private static func agentSlotKey(_ record: AgentWindowRecord) -> String {
-        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
-            return "agent-id:\(claimedLauncherID)"
-        }
         // The slot name has to be the name the row displays: a rename frees the raw label for a new agent
         // to register under, and keying on it would collapse two live agents into one slot.
-        let slotName = record.claimedLauncherName ?? record.effectiveLabel ?? record.id
-        return "agent:\(normalizedSlotName(slotName))"
+        "agent:\(normalizedSlotName(record.effectiveLabel ?? record.id))"
     }
 
     private static func normalizedSlotName(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -2061,10 +2057,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return value
     }
 
+    /// The window opener is a no-op for every Device API request: the caller may be an iPhone, another
+    /// Mac, or the local app itself, and a request arriving over the wire is never authority to open a
+    /// pane on this machine's desktop. Clients that want a pane ask for one themselves once the
+    /// mutation's refreshed overview comes back.
+    ///
+    /// `deliversTerminalWindowOpens: false` follows from that and has to be stated, because the closer is
+    /// wired independently and does post real IPC. Without it a restart served here would close a pane as
+    /// held for a replacement whose open this orchestrator can never send, and the client would keep
+    /// showing the terminated session forever.
     private func deviceOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
         WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+            store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+            builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
     }
 
     private func finishReservedWorkspaceTerminalLaunchInBackground(_ reservation: WorkspaceOrchestrator.WorkspaceTerminalLaunchReservation) {
@@ -2075,8 +2080,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             do {
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 let orchestrator = WorkspaceOrchestrator(
-                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
-                    builtInTerminalSessionLauncher: launcher)
+                    store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+                    builtInTerminalSessionTerminator: terminator, builtInTerminalSessionLauncher: launcher)
                 try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
             } catch {
                 guard traceEnabled else { return }
@@ -2284,8 +2289,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             do {
                 let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
                 let orchestrator = WorkspaceOrchestrator(
-                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
-                    builtInTerminalSessionLauncher: launcher)
+                    store: store, builtInTerminalWindowOpener: { _, _, _ in }, deliversTerminalWindowOpens: false,
+                    builtInTerminalSessionTerminator: terminator, builtInTerminalSessionLauncher: launcher)
                 try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
             } catch {
                 guard traceEnabled else { return }
@@ -2349,7 +2354,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.ports = request.config.ports.map(workspacePort)
             config.processes = request.config.processes.map(workspaceProcess)
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
-            config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
         return try refreshedMutationResponse(context: context, message: "Updated project settings.", projectID: request.projectID)
     }
@@ -2362,7 +2366,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.ports = request.config.ports.map(workspacePort)
             config.processes = request.config.processes.map(workspaceProcess)
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
-            config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
         return try refreshedMutationResponse(context: context, message: "Updated workspace settings.", workspaceID: request.workspaceID)
     }
@@ -2416,6 +2419,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
     }
 
+    /// Serves the close of the pane that owned an ad hoc terminal: the daemon decides whether the
+    /// terminal is idle at a bare prompt and only then stops it (see
+    /// `stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell`). Both outcomes are a success (keeping a
+    /// busy terminal is the point of the request, not a failure of it), so the response reports which one
+    /// happened rather than an error code.
+    private func handleStopWorkspaceTerminalIfBareShellRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        let terminated = try context.orchestrator().stopAdHocBuiltInTerminalSessionIfForegroundIsBareShell(
+            workspaceID: workspaceID, sessionID: request.sessionID)
+        return try refreshedMutationResponse(
+            context: context, message: terminated ? "Stopped workspace terminal." : "Kept workspace terminal.", workspaceID: workspaceID,
+            terminatedTerminalSession: terminated)
+    }
+
     private func handleRenameTerminalSessionRequest(_ request: SpacesDeviceTerminalSessionRenameRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -2466,47 +2485,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(context: context, message: "Restarted process.", workspaceID: workspaceID)
     }
 
-    private func handleRunCodingAgentRequest(_ request: SpacesDeviceRunCodingAgentRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse
-    {
-        let workspaceID = request.workspaceID
-        let agentName = request.agentName
-        let orchestrator = try context.orchestrator()
-        let record =
-            if let agentLauncherID = normalizedString(request.agentLauncherID) {
-                try orchestrator.launchAgentLauncher(workspaceID: workspaceID, launcherID: agentLauncherID)
-            } else { try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
-        return try refreshedMutationResponse(
-            context: context, message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalTrackingID))
-    }
-
     private func handleStopCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
         let workspaceID = request.workspaceID
-        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
+        guard let agentID = normalizedString(request.agentID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
         }
         try context.orchestrator().stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(context: context, message: "Stopped coding agent.", workspaceID: workspaceID)
     }
 
-    private func handleRestartCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
-        -> SpacesDeviceAPIResponse
-    {
-        let workspaceID = request.workspaceID
-        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.", errorCode: .invalidArgument)
-        }
-        let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
-        return try refreshedMutationResponse(
-            context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
-    }
-
-    /// Renames a coding-agent row whose name is stored on its session (one with no configured launcher
-    /// behind it). An empty title clears the rename, restoring the name the agent reports for itself (see
-    /// `SpacesDeviceAgentSessionRenameRequest.title`); an id that names no agent session in the workspace
-    /// throws from the orchestrator and is reported as a failure.
+    /// Renames a coding-agent row, whose name is stored on its session. An empty title clears the rename,
+    /// restoring the name the agent reports for itself (see `SpacesDeviceAgentSessionRenameRequest.title`);
+    /// an id that names no agent session in the workspace throws from the orchestrator and is reported as a
+    /// failure.
     private func handleRenameAgentSessionRequest(_ request: SpacesDeviceAgentSessionRenameRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -2727,14 +2720,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func refreshedMutationResponse(
         context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil,
-        notice: String? = nil
+        notice: String? = nil, terminatedTerminalSession: Bool? = nil
     ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
                 SpacesDeviceMutationResult(
                     overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID,
-                    notice: notice)))
+                    notice: notice, terminatedTerminalSession: terminatedTerminalSession)))
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {
@@ -2755,21 +2748,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             })
         else { throw NSError(domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Running process not found."]) }
         return process.id
-    }
-
-    private func resolvedAgentID(request: SpacesDeviceCodingAgentMutationRequest, store: SQLiteStore) throws -> String? {
-        let workspaceID = request.workspaceID
-        if let agentID = normalizedString(request.agentID) { return agentID }
-        if let agentLauncherID = normalizedString(request.agentLauncherID),
-            let agentID = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.claimedLauncherID == agentLauncherID })?.id
-        {
-            return agentID
-        }
-        guard let agentName = normalizedString(request.agentName) else { return nil }
-        let normalizedAgentName = normalizedRowKey(agentName)
-        return try store.agentWindows(workspaceID: workspaceID).first {
-            normalizedRowKey($0.effectiveLabel ?? $0.claimedLauncherName) == normalizedAgentName
-        }?.id
     }
 
     private func normalizedString(_ value: String?) -> String? {
@@ -2796,17 +2774,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         BrowserSession(name: session.name, url: session.url)
     }
 
-    private func workspaceAgentLauncher(_ launcher: SpacesDeviceAgentLauncher) -> AgentLauncher {
-        AgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
-    }
-
     private func applyProjectConfig(_ source: SpacesDeviceProjectConfig, to project: inout ProjectRecord) {
         project.setupScript = normalizedOptionalString(source.setupScript)
         project.stopScript = normalizedOptionalString(source.stopScript)
         project.ports = source.ports.map(workspacePort)
         project.processes = source.processes.map(workspaceProcess)
         project.browserSessions = source.browserSessions.map(workspaceBrowserSession)
-        project.agentLaunchers = source.agentLaunchers.map(workspaceAgentLauncher)
     }
 
     private func handleStateRequest(_ request: SpacesDeviceTerminalSessionRequest) throws -> SpacesDeviceAPIResponse {

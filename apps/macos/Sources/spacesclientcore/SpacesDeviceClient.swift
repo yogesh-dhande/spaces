@@ -119,7 +119,7 @@ public enum SpacesDeviceClient {
             let timestamp = ISO8601DateFormatter().string(from: now)
             let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
             let record = SpacesPairedDeviceRecord(
-                id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, host: bootstrap.host, port: bootstrap.port,
+                id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, hosts: [bootstrap.host], port: bootstrap.port,
                 certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp,
                 lastSelectedAt: timestamp)
             try database.upsert(device: record)
@@ -226,11 +226,62 @@ public enum SpacesDeviceClient {
         onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
     ) throws -> SpacesDeviceAPIOverviewStreamClient {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        // The record this subscription publishes with, carried across deliveries. A stream outlives many
+        // overviews, and only the delivery that actually widens the candidates gets a merged record back;
+        // without carrying it, every later delivery would republish the record captured at subscribe time
+        // and walk the learned address back out of the caller's state.
+        let publishedRecord = PairedDeviceRecordBox(device)
         let client = try SpacesDeviceAPIOverviewStreamClient(
-            authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
-            onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
+            authToken: authToken, clientApp: clientApp,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
+            onOverview: { payload in
+                // Every delivery is the daemon's own current view of where it is reachable, so this is
+                // where a pushed overview widens the device's candidate addresses. Once per delivery, not
+                // per render: the sidebar repaints from the published section, not from here.
+                let current = publishedRecord.value
+                if let merged = mergeAdvertisedHosts(device: current, status: payload.daemonStatus) { publishedRecord.value = merged }
+                onOverview(SpacesDeviceOverview(device: publishedRecord.value, overview: payload))
+            }, onDisconnect: onDisconnect)
         try client.start()
         return client
+    }
+
+    /// Folds the addresses a daemon reports for itself (`TerminalServiceDaemonStatus.deviceAPIAddresses`)
+    /// into the device's stored candidates and the live resolver, so an address this client has never
+    /// seen — the tailnet address of a Mac that gained Tailscale after pairing — becomes dialable without
+    /// re-pairing. An empty list means the daemon reported nothing, so it changes nothing, and an
+    /// unchanged union writes nothing.
+    ///
+    /// Skipped for the local device: this Mac's own daemon is reached over loopback and re-resolves
+    /// itself through the control socket (`recoveredLocalResolution`), so folding in its outward-facing
+    /// LAN and tailnet addresses would make every local connect race addresses that are never the right
+    /// way to reach it.
+    ///
+    /// Returns the record as stored after the merge, or nil when nothing was written. Callers publish
+    /// that record rather than the one they passed in: the caller's copy was read before this widened
+    /// the candidates, and a client that keeps holding it hands the narrower list back to
+    /// `SpacesDeviceEndpointRegistry.resolver(for:certificateFingerprint:)`, whose reconcile would then
+    /// strip the address this merge just learned right back out of the live resolver.
+    @discardableResult static func mergeAdvertisedHosts(
+        device: SpacesPairedDeviceRecord, status: TerminalServiceDaemonStatus?, database providedDatabase: SpacesClientDatabase? = nil
+    ) -> SpacesPairedDeviceRecord? {
+        guard device.id != SpacesPairedDeviceRecord.localDeviceID, let advertised = status?.deviceAPIAddresses, !advertised.isEmpty else {
+            return nil
+        }
+        let resolver = SpacesDeviceEndpointRegistry.resolver(
+            for: device, certificateFingerprint: device.certificateFingerprint, database: providedDatabase)
+        // The steady state — the daemon reporting the addresses this client already knows — is decided
+        // in memory against the live resolver's list, which the stored record's list is kept equal to.
+        // A subscription delivers an overview on every daemon database change, and opening a write
+        // transaction on the client database that often, only to persist nothing, would put this on a
+        // path it has no business being on.
+        let candidates = resolver.candidateHosts
+        guard SpacesClientDatabase.mergedHostCandidates(stored: candidates, advertised: advertised) != candidates else { return nil }
+        guard let database = try? providedDatabase ?? SpacesClientDatabase.defaultDatabase(),
+            let merged = try? database.mergeAdvertisedHosts(deviceID: device.id, advertised: advertised)
+        else { return nil }
+        SpacesDeviceEndpointRegistry.refresh(record: merged)
+        return merged
     }
 
     /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
@@ -303,13 +354,17 @@ public enum SpacesDeviceClient {
         database providedDatabase: SpacesClientDatabase? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalRecoveryBootstrapProvider
     ) throws -> SpacesDeviceOverviewResolution {
-        do { return try resolutionFromInlineStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
+        do {
+            return try resolutionFromInlineStatus(
+                device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, database: providedDatabase)
+        } catch {
             // The local daemon's Device API endpoint is not durable: it can idle-shut-down, be restarted,
             // or be relaunched on a freshly assigned port, so the port in the caller's `paired_devices`
             // record goes stale without anything invalidating it. A transport failure against the local
             // device is therefore first read as "this Mac's endpoint needs re-resolving", not "the device
-            // is gone". Only the local device — a remote device's endpoint is configured, so a transport
-            // failure there is a genuinely unreachable device with nothing to re-resolve.
+            // is gone". Only the local device needs that step: a remote device's candidate addresses are
+            // already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`), so a transport
+            // failure there means every address it knows was tried and none answered.
             guard device.id == SpacesPairedDeviceRecord.localDeviceID, isDeviceAPITransportFailure(error) else {
                 return try resolutionFromHandshake(
                     device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider, overviewError: error)
@@ -368,12 +423,17 @@ public enum SpacesDeviceClient {
     /// One overview round-trip, resolved through the compatibility verdict the overview carries inline —
     /// so the compatible steady state needs no second round-trip.
     private static func resolutionFromInlineStatus(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider,
+        database providedDatabase: SpacesClientDatabase? = nil
     ) throws -> SpacesDeviceOverviewResolution {
         let payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview
         let status = payload.daemonStatus
+        // The pull path's once-per-refresh point, matching the subscription's once-per-delivery point.
+        // The resolution carries the merged record, so the caller adopts the widened candidates instead
+        // of holding the copy it read before this call.
+        let resolved = mergeAdvertisedHosts(device: device, status: status, database: providedDatabase) ?? device
         let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
-        let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
+        let overview = verdict.isCompatible ? SpacesDeviceOverview(device: resolved, overview: payload) : nil
         return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
     }
 
@@ -563,6 +623,18 @@ public enum SpacesDeviceClient {
             profile: profile)
     }
 
+    /// Asks the owning daemon to stop an ad hoc terminal the user closed, which it does only when the
+    /// terminal is idle at a bare shell prompt with no surviving owner attachment. The response's
+    /// `terminatedTerminalSession` reports whether it did.
+    public static func stopWorkspaceTerminalIfBareShell(
+        workspaceID: String, sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .stopWorkspaceTerminalIfBareShell(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func renameTerminalSession(
         workspaceID: String, sessionID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -572,8 +644,8 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
-    /// Renames a coding-agent row that has no configured launcher behind it. An empty title clears the
-    /// rename, restoring the name the agent reports for itself.
+    /// Renames a coding-agent row. An empty title clears the rename, restoring the name the agent reports
+    /// for itself.
     public static func renameAgentSession(
         workspaceID: String, agentID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -614,34 +686,13 @@ public enum SpacesDeviceClient {
             device: device, clientApp: clientApp, profile: profile)
     }
 
-    public static func runCodingAgent(
-        workspaceID: String, agentName: String, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .runCodingAgent(.init(workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID))), device: device,
-            clientApp: clientApp, profile: profile)
-    }
-
     public static func stopCodingAgent(
-        workspaceID: String, agentID: String?, agentName: String?, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, agentID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(
-                command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: agentLauncherID))),
-            device: device, clientApp: clientApp, profile: profile)
-    }
-
-    public static func restartCodingAgent(
-        workspaceID: String, agentID: String?, agentName: String?, agentLauncherID: String?, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(
-                command: .restartCodingAgent(
-                    .init(workspaceID: workspaceID, agentID: agentID, agentName: agentName, agentLauncherID: agentLauncherID))), device: device,
-            clientApp: clientApp, profile: profile)
+            .init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), device: device, clientApp: clientApp,
+            profile: profile)
     }
 
     /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send text/bytes --device`).
@@ -836,7 +887,7 @@ public enum SpacesDeviceClient {
     ) throws -> SpacesDeviceAPIResponse {
         let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
         let client = try SpacesDeviceAPIRequestClient(
-            host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
+            resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint),
             timeoutSeconds: requestTimeoutSeconds(for: request.command))
         let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
@@ -883,6 +934,11 @@ public enum SpacesDeviceClient {
             case .requestRejected: return false
             }
         }
+        // Every candidate address the device knows was raced and none answered, so the device is
+        // unreachable from here right now — retryable, exactly like the single-address timeout it
+        // replaces. A pinned-identity failure on one of those candidates is reported as an
+        // authentication error instead and never reaches this case.
+        if case SpacesDeviceEndpointResolverError.allCandidatesUnreachable = error { return true }
         // The pinned-TLS transport's reachability failures (timeout/refused/closed). A certificate
         // pin mismatch is deliberately not retryable: the daemon is reachable but presents the wrong
         // identity, which must surface as a real error.
@@ -914,13 +970,54 @@ public enum SpacesDeviceClient {
         }
     }
 
+    /// True when a Device API transport failure (`isDeviceAPITransportFailure(error)` must already be
+    /// true) is a bare REQUEST TIMEOUT — the deadline elapsed with no answer — rather than a
+    /// connection-level failure (refused, closed, or every candidate address unreachable).
+    ///
+    /// The two look identical to most callers ("the request did not get an answer"), but they are not
+    /// the same evidence about the link. A connection-level failure means the transport itself gave up:
+    /// the daemon refused the connection, an open one was closed under it, or every known address was
+    /// raced and none answered — conclusive that the link is down right now. A timeout only means this
+    /// one round trip did not complete inside its deadline, and on the hot per-keystroke path that
+    /// deadline is tight enough (`DeviceTerminalSessionStateModel.interactiveControlRequestTimeoutSeconds`,
+    /// 5s) that a live, merely congested link can miss it too: the send itself never touches the main
+    /// actor (`TerminalInputSerialQueue.enqueue` hands off to a detached task that calls the pinned-TLS
+    /// connection directly). Interactive sends and the `.state` resync fetch share one per-session
+    /// request client (`SpacesDeviceAPIRequestSessionClient`), and `send` acquires that client's request
+    /// lock before starting the per-operation deadline inside `sendOnceLocked` — so a keystroke queued
+    /// behind a grid-sized resync fetch is not charged for the wait, it gets a fresh 5s window the moment
+    /// its turn comes. What actually costs it that window: `SpacesPinnedTLSConnection.readLine(timeout:)`
+    /// throws `.timeout` whenever the ANSWER itself is late, and under heavy streaming the daemon's own
+    /// serial terminal-engine queue — effectively one core wide — is saturated, so a keystroke's response
+    /// can genuinely run behind schedule with the link itself never having done anything wrong. A silent
+    /// link death (a connect that never reaches ready, or a request nothing answers) produces the
+    /// identical timeout, so a timeout alone does not prove the link is fine either — it is inconclusive
+    /// in both directions. A caller that needs to tell those two apart (see
+    /// `DeviceTerminalSessionStateModel.reportFailedInputSend`, which uses this to decide whether a failed
+    /// keystroke send also proves every other queued keystroke should be discarded) calls this in addition
+    /// to `isDeviceAPITransportFailure`, and gets its conclusive answer from the already-confirmed-outage
+    /// branch (a connection-level failure, or a stream disconnect whose next failure cancels the backlog),
+    /// not from the timeout itself.
+    ///
+    /// Only the two shapes a timeout actually arrives as qualify: `SpacesDeviceAPIRequestClientError.timeout`
+    /// and `SpacesPinnedTLSConnectionError.timeout` — the latter is what `sendLine`/`readLine` throw
+    /// directly on the production request path, since neither `SpacesDeviceAPIRequestClient` nor
+    /// `SpacesDeviceAPIRequestSessionClient` wraps it into the former. Every other transport failure
+    /// (`.emptyResponse`, `.connectionFailed`, `.connectionClosed`, `allCandidatesUnreachable`, the raw
+    /// POSIX/`NWError` codes) is connection-level and answers `false` here.
+    public static func isDeviceAPIRequestTimeout(_ error: any Error) -> Bool {
+        if case SpacesDeviceAPIRequestClientError.timeout = error { return true }
+        if case SpacesPinnedTLSConnectionError.timeout = error { return true }
+        return false
+    }
+
     public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
-            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
-            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
-            .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation, .cancelAutomationRun,
-            .endAutomationAgents:
+            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
+            .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
+            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation,
+            .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
@@ -929,6 +1026,30 @@ public enum SpacesDeviceClient {
             .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
             .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
+        }
+    }
+}
+
+/// The paired-device record a long-lived overview subscription publishes with, held across the
+/// stream's deliveries. Needed because the subscription's callback is `@Sendable` and outlives the
+/// call that built it, while the record it publishes has to move forward as the daemon teaches this
+/// client new addresses.
+private final class PairedDeviceRecordBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: SpacesPairedDeviceRecord
+
+    init(_ value: SpacesPairedDeviceRecord) { storage = value }
+
+    var value: SpacesPairedDeviceRecord {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
         }
     }
 }

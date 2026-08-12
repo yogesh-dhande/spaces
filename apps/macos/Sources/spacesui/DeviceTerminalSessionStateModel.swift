@@ -125,7 +125,7 @@
             certificateFingerprint = preparedCredentials.certificateFingerprint
             requestClientBox = DeviceAPIRequestClientBox(
                 try SpacesDeviceAPIRequestSessionClient(
-                    host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint),
+                    resolver: SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: preparedCredentials.certificateFingerprint)),
                 authToken: preparedCredentials.authToken)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
@@ -330,9 +330,36 @@
             let id = UUID()
             listeners.append(Listener(id: id, onUpdate: onUpdate, onDisconnect: onDisconnect))
             // Replay the last known payload so a late subscriber renders immediately.
-            if let latestRemoteStatePayload { onUpdate(latestRemoteStatePayload) }
+            if let replayPayload = replayPayloadForNewListener() { onUpdate(replayPayload) }
             ensureSubscriptionStarted()
             return ListenerHandle(detach: { [weak self] in Task { @MainActor [weak self] in self?.removeListener(id: id) } })
+        }
+
+        /// The cached payload as a listener joining mid-stream may consume it.
+        ///
+        /// The cache is the wire payload, and in steady state the render update on the wire is a delta:
+        /// absolute values for the cells that changed and nothing for the rest. A listener registering now
+        /// holds no baseline to apply that to, so the delta cannot paint anything — the applier refuses it
+        /// outright — and handing it over only starts the listener's render chain with a failure and the
+        /// resync round trip that failure costs. So the render update is handed over exactly when it is a
+        /// full frame; otherwise the payload is replayed without it, and the render host asks the device
+        /// for a full frame when it attaches without one (see `RemoteGhosttySessionHost.attach`).
+        ///
+        /// Everything else in the payload is still replayed: runtime state, ownership, title, and working
+        /// directory are what tell a fresh listener what session it is looking at, and none of them
+        /// depends on holding a render baseline. The cache itself is left alone — the delta is still the
+        /// state the next payload merges onto for the listeners that do have the baseline for it.
+        ///
+        /// The classification reads the update's header (`renderUpdateKind`) and never decodes its cells:
+        /// this runs on the main actor during listener registration, and a grid decode here is precisely
+        /// the work the off-main reduction pipeline exists to keep off it. A blob whose header cannot be
+        /// classified is treated as not-a-full-frame and stripped, which is the safe direction — the
+        /// listener resyncs rather than being handed something it cannot use.
+        private func replayPayloadForNewListener() -> GhosttyRemoteSessionStatePayload? {
+            guard let latestRemoteStatePayload else { return nil }
+            guard latestRemoteStatePayload.hasRenderUpdate else { return latestRemoteStatePayload }
+            guard latestRemoteStatePayload.renderUpdateKind != .full else { return latestRemoteStatePayload }
+            return latestRemoteStatePayload.replacingRenderUpdate(nil)
         }
 
         fileprivate func removeListener(id: UUID) {
@@ -384,7 +411,7 @@
         /// whether to retry or schedule a reconnect from its boolean result.
         private func establishStateStreamConnection() async {
             if streamClient != nil { return }
-            if await openStateStream(port: Int(device.port)) { return }
+            if await openStateStream() { return }
             // The first connect failed. For the local device this may be a stale port or an idle-shut-down
             // daemon; ensure it is running and re-resolve its current port, then retry. The (possibly
             // rebuilt) request client now targets a running daemon, so re-run the catch-up: an ended
@@ -394,7 +421,7 @@
                 return
             }
             await reloadCatchUpState()
-            if await openStateStream(port: Int(device.port)) { return }
+            if await openStateStream() { return }
             // A transient subscribe failure on a live session would otherwise strand existing listeners
             // with only the one-shot catch-up and no live updates, because the render host has already
             // taken its `ListenerHandle` and will not ask to subscribe again. Schedule the same
@@ -414,18 +441,17 @@
         /// would block every future reconnect. A `true` result therefore does not guarantee the installed
         /// client is still current — a racing disconnect may already have cleared and rescheduled it — only
         /// that the disconnect path has taken over its lifecycle.
-        @discardableResult private func openStateStream(port: Int) async -> Bool {
+        @discardableResult private func openStateStream() async -> Bool {
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)),
                 authToken: requestClientBox.current.authToken, clientApp: clientApp)
-            let host = device.host
-            let fingerprint = certificateFingerprint
+            let resolver = SpacesDeviceEndpointRegistry.resolver(for: device, certificateFingerprint: certificateFingerprint)
             streamClientGeneration &+= 1
             let generation = streamClientGeneration
             let client: SpacesDeviceAPIStateStreamClient
             do {
                 client = try SpacesDeviceAPIStateStreamClient(
-                    request: request, host: host, port: port, certificateFingerprint: fingerprint,
+                    request: request, resolver: resolver,
                     onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.applyStreamEvent(payload, generation: generation) } },
                     onDisconnect: { [weak self] error in
                         Task { @MainActor [weak self] in self?.handleStreamDisconnect(error, generation: generation) }
@@ -493,8 +519,9 @@
         /// together), so senders already vended to the render host follow the new client and token. Returns
         /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded, so
         /// the daemon is now reachable whether or not it rebound the same port, rotated its certificate, or
-        /// rotated its token. Returns false for remote devices (stable endpoint, nothing to re-resolve) and
-        /// when the local bootstrap itself failed (the daemon could not be reached or started).
+        /// rotated its token. Returns false for remote devices — their pinned identity is stable and their
+        /// candidate addresses are already re-walked inside the connect itself (`SpacesDeviceEndpointResolver`)
+        /// — and when the local bootstrap itself failed (the daemon could not be reached or started).
         ///
         /// Invoked from the connect-time subscribe recovery, the transcript path's local pin-mismatch/
         /// unreachable recovery, and the stream-disconnect path when the local daemon rejected a subscribe as
@@ -503,7 +530,7 @@
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
-            let previousHost = device.host
+            let previousHosts = device.hosts
             let previousPort = device.port
             let previousFingerprint = certificateFingerprint
             let previousToken = requestClientBox.current.authToken
@@ -513,12 +540,12 @@
             // read of nil is a legitimate "no token".
             let refreshedToken = outcome.persistedToken ?? previousToken
             let endpointOrIdentityChanged =
-                refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint
+                refreshed.port != previousPort || refreshed.hosts != previousHosts || refreshed.certificateFingerprint != previousFingerprint
             // Rebuild on an endpoint/identity move or a token rotation through one branch — a token-only
             // change rebuilds the client too rather than carrying a special-cased in-place token swap.
             if endpointOrIdentityChanged || refreshedToken != previousToken,
                 let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
-                    host: refreshed.host, port: refreshed.port, certificateFingerprint: refreshed.certificateFingerprint)
+                    resolver: SpacesDeviceEndpointRegistry.resolver(for: refreshed, certificateFingerprint: refreshed.certificateFingerprint))
             {
                 let previousClient = requestClientBox.replace(with: rebuiltClient, authToken: refreshedToken)
                 // `cancel()` contends with `send()`'s request lock, which an in-flight request against the
@@ -591,17 +618,41 @@
         /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
         /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
         ///
-        /// Returns whether this failure proves the link is gone — `isTransportFailureEvidenceOfLostLink`'s
-        /// verdict on `error`, unconditionally — which is also this method's own `RemoteGhosttyInputFailureHandler`
-        /// wiring contract: the render host discards its queued input backlog exactly when this is `true`.
-        /// The two early-return guards below must not change that answer:
-        ///  - a non-transport error (the daemon answered) returns `false` — the link is fine and its input must
-        ///    still be delivered;
+        /// Returns whether this failure is CONCLUSIVE proof the link is gone — which is also this method's
+        /// own `RemoteGhosttyInputFailureHandler` wiring contract: the render host discards its queued
+        /// input backlog exactly when this is `true`, and leaves it queued (to keep draining once the link
+        /// proves itself live again) when it is `false`.
+        ///
+        /// The failure-surfacing side effects below (tear down the subscription, arm the paced reconnect,
+        /// flip the disconnected notice) fire for ANY transport failure, timeout included — a 5s stall is
+        /// worth telling the user about and worth retrying regardless of which kind it turns out to be.
+        /// Only the return value, and so only whether the queued backlog survives, depends on the finer
+        /// classification:
+        ///  - a non-transport error (the daemon answered) returns `false` and does nothing else — the link
+        ///    is fine and its input must still be delivered;
+        ///  - a bare request timeout (`SpacesDeviceClient.isDeviceAPIRequestTimeout`) returns `false` after
+        ///    doing the side effects above — the deadline elapsed, but on the hot per-keystroke path
+        ///    (`interactiveControlRequestTimeoutSeconds`, 5s) a live link can miss it too: interactive
+        ///    sends and the `.state` resync fetch share one per-session request client, which acquires its
+        ///    request lock before starting the per-operation deadline, so a keystroke queued behind a
+        ///    grid-sized resync fetch is not charged for that wait — it gets a fresh 5s window once its
+        ///    turn comes. What actually burns that window is the daemon's own answer running late: under
+        ///    heavy streaming the daemon's serial terminal-engine queue is saturated, so a keystroke's
+        ///    response can genuinely miss the deadline with nothing wrong with the link. A silently dead
+        ///    link (nothing ever answers) produces the identical timeout, so a timeout alone is not proof
+        ///    either way — conclusive discard comes only from the branches below, never from a bare
+        ///    timeout; discarding on the timeout alone would drop keystrokes the link stalled but never
+        ///    lost;
+        ///  - a connection-level failure (refused, closed, every candidate unreachable) returns `true` —
+        ///    conclusive that the transport itself gave up, not merely that one round trip missed its clock;
         ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)
-        ///    still returns `true` — the link is still gone, so every keystroke of an ongoing outage, not
-        ///    only the first, must keep dropping its queued input rather than buffering.
+        ///    still returns `true` regardless of which shape this repeat failure is — the outage was
+        ///    already confirmed by an earlier conclusive failure or by the stream's own disconnect, so
+        ///    every keystroke of an ongoing outage, not only the first, must keep dropping its queued input
+        ///    rather than buffering behind a link that is not coming back on its own.
         @discardableResult func reportFailedInputSend(_ error: any Error) -> Bool {
             guard Self.isTransportFailureEvidenceOfLostLink(error) else { return false }
+            let isConclusiveLinkDown = !SpacesDeviceClient.isDeviceAPIRequestTimeout(error)
             // Typing produces one of these per keystroke for as long as the outage lasts. A link already
             // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
             guard !isStateStreamDisconnected else { return true }
@@ -613,11 +664,15 @@
             streamClient = nil
             deadClient?.stop()
             scheduleReconnect()
-            return true
+            return isConclusiveLinkDown
         }
 
-        /// Whether a failed request proves this session's link is gone. True only for a transport failure:
-        /// the request never reached the daemon.
+        /// Whether a failed request is evidence about this session's link at all — true for any transport
+        /// failure, timeout included: the request never demonstrably reached and was answered by the
+        /// daemon. This is the broad classification that gates `reportFailedInputSend`'s failure-surfacing
+        /// side effects (disconnect notice, paced reconnect); it does NOT by itself say the link is
+        /// conclusively down — see `reportFailedInputSend`'s own doc for the finer distinction its return
+        /// value makes between a bare timeout and a connection-level failure.
         ///
         /// A reachable daemon that answers with a coded rejection — the session is not running, another
         /// client owns it, the token was revoked — says nothing about the link, and reporting one as a
@@ -810,12 +865,16 @@
         /// sends over the tailnet relay run 0.7-1.5s, so 5s keeps well over 3x headroom while halving the
         /// worst-case stall a keystroke would otherwise wait out on a dead link.
         ///
-        /// This deadline also gates how fast `reportFailedInputSend` learns the link is gone and drops the
-        /// pane's queued input (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed into
-        /// a dead pane sits behind this timeout before that verdict lands and the backlog is discarded. Do
-        /// not tighten it toward the healthy-latency range without re-measuring actual send latency first:
-        /// too tight and a merely slow (not dead) link starts misreporting itself as gone and dropping
-        /// input a user is still waiting to land.
+        /// This deadline also gates how fast `reportFailedInputSend` reports a send as failed and surfaces
+        /// the disconnect notice (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed
+        /// into a dead pane sits behind this timeout before that surfacing lands. It does NOT by itself gate
+        /// dropping the pane's queued input backlog: `reportFailedInputSend` only discards the backlog for a
+        /// connection-level failure, never for a bare timeout, precisely because tightening this deadline
+        /// toward the healthy-latency range would otherwise make a merely slow (not dead) link misreport
+        /// itself as gone and drop input a user is still waiting to land. Still worth re-measuring actual
+        /// send latency before tightening further: a timeout this frequent would surface the disconnect
+        /// notice — and retry the subscription — on ordinary jitter, even though it can no longer discard a
+        /// keystroke over it.
         nonisolated static let interactiveControlRequestTimeoutSeconds: TimeInterval = 5
 
         /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke

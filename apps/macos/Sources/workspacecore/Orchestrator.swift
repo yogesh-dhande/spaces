@@ -15,11 +15,18 @@ import systembridge
 #endif
 
 public final class WorkspaceOrchestrator {
-    public typealias BuiltInTerminalWindowOpener = @Sendable (String, TerminalAttachmentMode) -> Void
+    public typealias BuiltInTerminalWindowOpener = @Sendable (String, TerminalAttachmentMode, TerminalPaneOpenIntent) -> Void
     public typealias BuiltInTerminalWindowFocuser = @Sendable (String, String?) -> Void
-    public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
+    public typealias BuiltInTerminalWindowCloser = @Sendable (String, TerminalPaneCloseDisposition) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
+    /// Reads a live session's foreground process, and whether its shell is holding any child process, from
+    /// the OS at call time, by session id. Distinct from the foreground fields on persisted runtime state,
+    /// which are a periodic sample up to a second old: the conditional stop of a user-closed ad hoc
+    /// terminal decides whether to kill a shell, so it must see a command the user started an instant
+    /// before closing. Returns nil when the session is not live in this process or its foreground cannot
+    /// be resolved.
+    public typealias BuiltInTerminalForegroundProcessSampler = @Sendable (String) -> BuiltInTerminalForegroundReading?
     /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.
@@ -51,6 +58,7 @@ public final class WorkspaceOrchestrator {
     #endif
     private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
+    private static let builtInTerminalForegroundProcessSamplerOverrideStore = LockedBox<BuiltInTerminalForegroundProcessSampler?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
     static let builtInTerminalSessionInputWriterOverrideStore = LockedBox<BuiltInTerminalSessionInputWriter?>(nil)
@@ -121,6 +129,14 @@ public final class WorkspaceOrchestrator {
 
     public static func setProcessWideBuiltInTerminalSessionTerminator(_ terminator: BuiltInTerminalSessionTerminator?) {
         builtInTerminalSessionTerminatorOverrideStore.set(terminator)
+    }
+
+    /// Installs the process-wide fresh-foreground sampler. Only the daemon owns live sessions, and it
+    /// serves the conditional stop from transient per-request orchestrators, so the sampler is installed
+    /// once for the process rather than threaded through every construction site. Orchestrators built
+    /// without one resolve no foreground at all, which the conditional stop reads as a bare shell.
+    public static func setProcessWideBuiltInTerminalForegroundProcessSampler(_ sampler: BuiltInTerminalForegroundProcessSampler?) {
+        builtInTerminalForegroundProcessSamplerOverrideStore.set(sampler)
     }
 
     /// Installs a process-wide notification deliverer used when an orchestrator is
@@ -244,10 +260,21 @@ public final class WorkspaceOrchestrator {
     let currentDate: () -> Date
     let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
+    /// Whether this orchestrator's window opener actually reaches a client.
+    ///
+    /// This gates every pane hold, because a hold is a promise that a replacement open is coming: the
+    /// client keeps the pane in the layout and overview pruning skips it, so a hold nobody can claim
+    /// leaves the terminated session's pane on screen for good. The two halves are wired independently
+    /// (the Device API injects a no-op opener but leaves the closer at its real IPC-posting default),
+    /// which is exactly how a hold could be sent by an orchestrator that will never post the open that
+    /// releases it. Reading both the hold and the replacement's open off this one flag is what keeps them
+    /// from diverging again.
+    let deliversTerminalWindowOpens: Bool
     let builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
+    let builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler
     /// Reports whether the owning daemon is mid exec-in-place handoff. During a handoff the daemon's
     /// terminal terminator no-ops (live sessions are quiesced and carried across the exec, not killed),
     /// so a destructive workspace operation that deleted its process/window/agent rows would leave the
@@ -281,11 +308,14 @@ public final class WorkspaceOrchestrator {
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
-        builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
-        builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
-        currentDate: @escaping () -> Date = Date.init
+        deliversTerminalWindowOpens: Bool = true, builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil,
+        builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil, builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
+        builtInTerminalForegroundProcessSampler: BuiltInTerminalForegroundProcessSampler? = nil,
+        daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
+        self.builtInTerminalForegroundProcessSampler =
+            builtInTerminalForegroundProcessSampler ?? Self.builtInTerminalForegroundProcessSamplerOverrideStore.get() ?? { _ in nil }
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
@@ -293,29 +323,40 @@ public final class WorkspaceOrchestrator {
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         #if canImport(Darwin)
+            self.deliversTerminalWindowOpens = deliversTerminalWindowOpens
+        #else
+            // A headless daemon has no client to open a pane in, so it can never promise a replacement.
+            self.deliversTerminalWindowOpens = false
+        #endif
+        #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
-                builtInTerminalWindowOpener ?? { sessionID, mode in
-                    try? IPCNotification.post(
-                        IPCNotification.openTerminalSessionWindow,
-                        userInfo: [
-                            IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
-                        ])
+                builtInTerminalWindowOpener ?? { sessionID, mode, openIntent in
+                    var userInfo: [String: String] = [
+                        IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
+                        IPCNotification.terminalOpenFocusIntentUserInfoKey: openIntent.focus.rawValue,
+                    ]
+                    if let replaced = openIntent.replacesSessionID, !replaced.isEmpty {
+                        userInfo[IPCNotification.terminalOpenReplacesSessionIDUserInfoKey] = replaced
+                    }
+                    try? IPCNotification.post(IPCNotification.openTerminalSessionWindow, userInfo: userInfo)
                 }
             self.builtInTerminalWindowFocuser =
                 builtInTerminalWindowFocuser ?? { sessionID, requestID in
                     var userInfo: [String: String] = [
                         IPCNotification.terminalSessionIDUserInfoKey: sessionID,
                         IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                        IPCNotification.terminalOpenFocusIntentUserInfoKey: TerminalOpenFocusIntent.focus.rawValue,
                     ]
                     if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
                     try? IPCNotification.post(IPCNotification.openTerminalSessionWindow, userInfo: userInfo)
                 }
             self.builtInTerminalWindowCloser =
-                builtInTerminalWindowCloser ?? { sessionID in
+                builtInTerminalWindowCloser ?? { sessionID, disposition in
                     try? IPCNotification.post(
                         IPCNotification.closeTerminalSessionWindow,
                         userInfo: [
                             IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalSessionIsTerminatingUserInfoKey: "true",
+                            IPCNotification.terminalCloseDispositionUserInfoKey: disposition.rawValue,
                         ])
                 }
             self.builtInTerminalSessionTerminator =
@@ -327,9 +368,9 @@ public final class WorkspaceOrchestrator {
                     try TerminalService.createSession(launchConfiguration)
                 }
         #else
-            self.builtInTerminalWindowOpener = builtInTerminalWindowOpener ?? { _, _ in }
+            self.builtInTerminalWindowOpener = builtInTerminalWindowOpener ?? { _, _, _ in }
             self.builtInTerminalWindowFocuser = builtInTerminalWindowFocuser ?? { _, _ in }
-            self.builtInTerminalWindowCloser = builtInTerminalWindowCloser ?? { _ in }
+            self.builtInTerminalWindowCloser = builtInTerminalWindowCloser ?? { _, _ in }
             self.builtInTerminalSessionTerminator =
                 builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { _ in }
             self.builtInTerminalSessionLauncher =
@@ -406,21 +447,18 @@ public final class WorkspaceOrchestrator {
         }
         let previousPorts = existing.ports
         let previousProcesses = existing.processes
-        let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
         existing.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: existing.ports)
         existing.ports = try normalizedServiceDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
-        existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
-            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         let appConfig = try store.appConfig()
         _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
@@ -816,15 +854,31 @@ public final class WorkspaceOrchestrator {
         } catch { return false }
     }
 
-    public func launchWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try launchWorkspaceUnlocked(workspaceID: workspaceID) }
-    }
+    /// Start is convergent: it launches whatever configured runtime (processes) is not already running and
+    /// leaves everything else alone. Ad hoc terminals and coding-agent sessions are not configured runtime,
+    /// so their presence never blocks or restarts Start; a workspace whose configured processes are already
+    /// running succeeds as a no-op. This is `upWorkspace` with `restartIfRunning: false` under its own name
+    /// for callers (the macOS Start action, the iOS control bar, and remote-device `workspace start`) that
+    /// only ever want the launch-or-converge behavior, never a forced restart.
+    public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
 
     public func restartWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
-            try launchWorkspaceUnlocked(workspaceID: workspaceID)
-        }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try restartWorkspaceUnlocked(workspaceID: workspaceID) }
+    }
+
+    /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
+    /// in the layout position the user arranged instead of at the end of the tab strip. Every reservation
+    /// is released before this returns, including when the launch throws part way through.
+    private func restartWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
+        let reservations = try replacedTerminalSessionReservations(workspaceID: workspaceID)
+        // Releases only the holds the stop actually sent. Installed before the stop rather than after it,
+        // because a stop can fail part way through closing sessions (its stop script throws, or the
+        // handoff re-check at the row-mutation boundary rejects) with some holds already out; the
+        // reservations themselves record which ones those were, so a stop rejected at its opening guard
+        // has nothing to release and leaves its still-running panes alone.
+        defer { releaseUnclaimedReplacedTerminalSessions(reservations) }
+        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, reservations: reservations)
+        try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background, reservations: reservations)
     }
 
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
@@ -834,11 +888,28 @@ public final class WorkspaceOrchestrator {
             let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
             if workspace.isRunning || hasTrackedRuntime {
                 if restartIfRunning {
-                    _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
-                    try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+                    try restartWorkspaceUnlocked(workspaceID: workspaceID, background: background)
                 } else {
+                    // The setup recovery screen keeps ad hoc terminal access open while setup is pending,
+                    // running, or failed, so a workspace can reach this branch (tracked runtime present)
+                    // with setup never having succeeded. `launchWorkspaceUnlocked` runs this same sequence
+                    // before touching any configured process; this branch has to run it too, or Start would
+                    // launch configured processes into a worktree setup never finished, or silently report
+                    // success on a workspace whose setup failed. Same call order and same lock as
+                    // `launchWorkspaceUnlocked`: `withWorkspaceSetupLock` inside these calls is a separate
+                    // gate keyed by workspace id, so running them under the already-held lifecycle lock does
+                    // not deadlock (`launchWorkspaceUnlocked` already does exactly this from inside the same
+                    // lifecycle lock in the other two branches below).
+                    try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
+                    try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+                    try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
                     try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
                     try restartExitedProcesses(workspaceID: workspaceID, background: background)
+                    // Restarting exited rows above only revives processes that were already tracked. A
+                    // workspace whose only runtime is ad hoc (an ad hoc terminal or a coding-agent session,
+                    // issue #438) has no rows at all for its configured processes, so it needs its own step
+                    // to launch those: the ones neither running nor exited.
+                    try launchMissingConfiguredProcesses(workspaceID: workspaceID, background: background)
                     if try hasTrackedRuntimeIndicators(workspaceID: workspaceID) { try markWorkspaceRunningIfNeeded(workspaceID: workspaceID) }
                 }
                 return
@@ -847,13 +918,26 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false) throws {
-        let (_, initialWorkspace) = try resolveWorkspace(id: workspaceID)
+    /// - Parameter reservations: The panes a restart is holding for these launches, so each configured
+    ///   process's replacement claims the pane its predecessor occupied. Nil for a cold launch, which
+    ///   replaces nothing.
+    private func launchWorkspaceUnlocked(workspaceID: String, background: Bool = false, reservations: ReplacedTerminalSessionReservations? = nil)
+        throws
+    {
+        // Fail fast on an unknown workspace id before triggering deferred setup for it.
+        _ = try resolveWorkspace(id: workspaceID)
         try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
         try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
+        // This cold-launch path unconditionally relaunches every configured process, which would kill and
+        // restart already-running ones and would be destructive if reached with runtime present. Every
+        // caller (`restartWorkspace`, and `upWorkspace`'s not-already-running branch) already guarantees no
+        // tracked runtime exists before calling in, so this guard should never fire; it stays as an
+        // invariant check rather than something a user can hit. Start (`launchWorkspace`) routes through
+        // `upWorkspace` instead, which launches only what is missing and leaves already-running processes
+        // and any ad hoc or agent runtime untouched instead of refusing.
         guard !(workspace.isRunning || hasTrackedRuntime) else {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
@@ -885,18 +969,9 @@ public final class WorkspaceOrchestrator {
         var newWindows: [WindowRecord] = []
 
         if let config {
-            newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
-        }
-
-        if let config {
-            for launcher in config.agentLaunchers {
-                let trimmedName = launcher.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedName.isEmpty else { continue }
-                _ = try launchAgentLauncherUnlocked(workspaceID: workspace.id, name: trimmedName, background: background)
-            }
             newWindows.append(
-                contentsOf: try trackedTerminalWindowsForAgents(
-                    workspaceID: workspace.id, agentWindows: try store.agentWindows(workspaceID: workspace.id)))
+                contentsOf: try launchProcesses(
+                    workspace: workspace, templates: config.processes, env: env, background: background, reservations: reservations))
         }
 
         var index = 0
@@ -924,7 +999,13 @@ public final class WorkspaceOrchestrator {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
-    private func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true) throws -> WorkspaceStopOutcome {
+    /// - Parameter reservations: A restart's captured sessions, whose panes are closed as held for their
+    ///   replacements rather than torn down. The stop records each hold through the reservations as it
+    ///   sends it, so the restart releases exactly what went out. Nil for a plain stop, which is every
+    ///   caller but the restart.
+    private func stopWorkspaceUnlocked(
+        workspaceID: String, waitForTerminalExit: Bool = true, reservations: ReplacedTerminalSessionReservations? = nil
+    ) throws -> WorkspaceStopOutcome {
         // Refuse a stop that races a daemon handoff before touching anything: the daemon's terminator
         // no-ops during handoff (sessions are quiesced and carried across the exec), so proceeding would
         // delete the workspace's rows while its terminals stay live. Rejecting here keeps both the
@@ -941,22 +1022,35 @@ public final class WorkspaceOrchestrator {
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         var closedBuiltInTerminalSessionIDs = Set<String>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
+        // One close per session id per stop, whichever loop below reaches it first.
+        //
+        // The loops overlap by design: a configured process whose command runs a coding agent has both a
+        // `running_processes` row and an `agent_sessions` row naming the same terminal, and a tracked
+        // window row can name it too. Closing such a session twice is not harmless once a restart is
+        // holding its pane: the first close carries `awaitReplacement` and the second would carry a plain
+        // teardown, and the client would honor the teardown and drop the pane the replacement is about to
+        // claim. Routing every loop through here makes the invariant structural and order-independent,
+        // rather than a guard each loop has to remember (the agent loop did not).
+        //
+        // The disposition is resolved per session rather than per loop, so it belongs to whichever loop
+        // owns the replacement pairing no matter which one gets there first: only the configured-process
+        // sessions a restart named are in `reservations`, and agent, tracked-window, and ad hoc sessions
+        // are never relaunched by a restart, so they always resolve to a plain teardown.
+        func closeBuiltInTerminalSessionOnce(_ sessionID: String) {
+            guard !closedBuiltInTerminalSessionIDs.contains(sessionID) else { return }
+            terminateBuiltInTerminalSession(sessionID, closeDisposition: reservations?.closeDisposition(for: sessionID) ?? .teardown)
+            closedBuiltInTerminalSessionIDs.insert(sessionID)
+        }
         for process in processes {
             if isManagedTerminalApp(process.terminalApp) {
-                if let sessionID = process.terminalTrackingID, !sessionID.isEmpty {
-                    terminateBuiltInTerminalSession(sessionID)
-                    closedBuiltInTerminalSessionIDs.insert(sessionID)
-                }
+                if let sessionID = process.terminalTrackingID, !sessionID.isEmpty { closeBuiltInTerminalSessionOnce(sessionID) }
             } else if let pid = resolvedRuntimePID(for: process) {
                 terminateProcessGroup(pid: pid)
             }
         }
         let workspaceAgentWindows = try store.agentWindows(workspaceID: workspace.id)
         for agent in workspaceAgentWindows {
-            if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
-                terminateBuiltInTerminalSession(sessionID)
-                closedBuiltInTerminalSessionIDs.insert(sessionID)
-            }
+            if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty { closeBuiltInTerminalSessionOnce(sessionID) }
         }
         if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
             if directoryExists(at: workspace.dir) {
@@ -972,18 +1066,10 @@ public final class WorkspaceOrchestrator {
         // terminated by session id here.
         for window in windows where window.roleValue == .terminal && isManagedTerminalApp(window.app) {
             guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID) else { continue }
-            if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
-                terminateBuiltInTerminalSession(sessionID)
-                closedBuiltInTerminalSessionIDs.insert(sessionID)
-            }
+            closeBuiltInTerminalSessionOnce(sessionID)
         }
         // CLI-created shells are workspace-owned by launch metadata even when no runtime-target row exists.
-        for sessionID in try liveAdHocBuiltInTerminalSessionIDs(workspaceID: workspace.id) {
-            if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
-                terminateBuiltInTerminalSession(sessionID)
-                closedBuiltInTerminalSessionIDs.insert(sessionID)
-            }
-        }
+        for sessionID in try liveAdHocBuiltInTerminalSessionIDs(workspaceID: workspace.id) { closeBuiltInTerminalSessionOnce(sessionID) }
         // Re-check at the row-mutation boundary: a handoff that began after the entry guard (while the
         // terminate loop above was running) would have silently no-op'd the not-yet-terminated sessions.
         // Aborting before the deletes below prevents the dangerous divergence where rows are erased while
@@ -1102,15 +1188,24 @@ public final class WorkspaceOrchestrator {
         let waitingAgentWindowCount = agentWindows.filter { $0.status == .waiting }.count
 
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let expectedProcessKeys = (settings?.processes ?? []).map { configuredProcessMatchKey(name: $0.name) }
-        let trackedProcessKeys = runningProcesses.map { runningProcessMatchKey(name: $0.templateName) }
-        let missingConfiguredProcessCount = missingRuntimeRecordCount(expectedKeys: expectedProcessKeys, actualKeys: trackedProcessKeys)
+        let configuredProcesses = settings?.processes ?? []
+        // A template is missing (needs Start) when no row is both a live, running instance of it and
+        // actually resolves to it: `matchingConfiguredTemplateForMissingCheck` is the same rule
+        // `launchMissingConfiguredProcesses` matches by (templateID first, then processKey only for a row
+        // with no templateID at all), so a stale-templateID row can never satisfy a template it does not
+        // match, and requiring `.running` here (not just "some row exists") is what keeps an exited row
+        // from reading as satisfied when a fresh Start would actually revive it.
+        let missingConfiguredProcessCount = configuredProcesses.filter { template in
+            !runningProcesses.contains { process in
+                process.status == .running && matchingConfiguredTemplateForMissingCheck(for: process, settings: settings)?.id == template.id
+            }
+        }.count
 
         let expectedBrowserTargets = Set(try resolvedWorkspaceBrowserSessions(workspaceID: workspaceID).compactMap(\.url).filter { !$0.isEmpty })
         let trackedBrowserTargets = Set(trackedWindows.filter { $0.roleValue == .browser }.compactMap(\.targetURL).filter { !$0.isEmpty })
         let missingConfiguredBrowserSessionCount = expectedBrowserTargets.subtracting(trackedBrowserTargets).count
 
-        let expectsManagedRuntime = !expectedProcessKeys.isEmpty
+        let expectsManagedRuntime = !configuredProcesses.isEmpty
         let runtimeHealth: WorkspaceRuntimeHealth =
             switch lifecycleState {
             case .stopped: hasTrackedRuntimeIndicators ? .partial : .healthy
@@ -1129,17 +1224,6 @@ public final class WorkspaceOrchestrator {
             hasTrackedRuntimeIndicators: hasTrackedRuntimeIndicators, runningProcessCount: runningProcessCount,
             exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentWindowCount,
             missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
-    }
-
-    private func missingRuntimeRecordCount(expectedKeys: [String], actualKeys: [String]) -> Int {
-        var actualCounts: [String: Int] = [:]
-        for key in actualKeys { actualCounts[key, default: 0] += 1 }
-
-        var missingCount = 0
-        for key in expectedKeys {
-            if let currentCount = actualCounts[key], currentCount > 0 { actualCounts[key] = currentCount - 1 } else { missingCount += 1 }
-        }
-        return missingCount
     }
 
     /// The message a contended workspace lifecycle gate reports. Named rather than written twice: the
@@ -1479,11 +1563,14 @@ public final class WorkspaceOrchestrator {
                     return reservation.sessionID
                 }
             }
+            // An ad hoc terminal (or a coding-agent session) is opened one at a time by someone who wants
+            // to type in it next, so its pane comes forward focused.
             let session = try launchSpacesTerminalSession(
                 title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
-                command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
-                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy,
-                workspaceID: reservation.workspaceID, kind: reservation.launchConfiguration.kind)
+                command: reservation.launchConfiguration.command, showMode: .owner, openIntent: .focused,
+                backend: reservation.launchConfiguration.backend, readinessPolicy: .stableChildPID, sessionID: reservation.sessionID,
+                lifetimePolicy: reservation.launchConfiguration.lifetimePolicy, workspaceID: reservation.workspaceID,
+                kind: reservation.launchConfiguration.kind)
             if reservation.windowRecordInsertedBeforeLaunch {
                 guard try reservedWorkspaceTerminalWindowExists(reservation) else {
                     builtInTerminalSessionTerminator(reservation.sessionID)
@@ -1499,7 +1586,7 @@ public final class WorkspaceOrchestrator {
             return session.sessionID
         } catch {
             markReservedWorkspaceTerminalLaunchFailed(reservation)
-            builtInTerminalWindowCloser(reservation.sessionID)
+            builtInTerminalWindowCloser(reservation.sessionID, .teardown)
             throw error
         }
     }
@@ -1635,7 +1722,7 @@ public final class WorkspaceOrchestrator {
             results.append((name, target))
         }
 
-        for target in runtimeTargets { append(try focusName(for: target, workspaceID: workspaceID), target: focusableTarget(from: target)) }
+        for target in runtimeTargets { append(focusName(for: target), target: focusableTarget(from: target)) }
 
         for session in configuredBrowsers where !runtimeBrowserURLs.contains(normalizedFocusName(session.targetURL)) {
             append(session.name, target: .browserSession(targetURL: session.targetURL))
@@ -1660,11 +1747,12 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
+    /// A target's focus name is the name it displays. An agent row's is its stored name and nothing else:
+    /// registration materializes a label for a row nothing named, so there is no second name derived from
+    /// the terminal's title for a caller to have to guess at.
+    private func focusName(for target: WorkspaceNavigationTarget) -> String? {
         switch target {
-        case .agent(let record):
-            if let label = sanitizedFocusName(record.effectiveLabel) { return label }
-            return try fallbackAgentFocusName(record)
+        case .agent(let record): return sanitizedFocusName(record.effectiveLabel)
         case .browser(let window): return sanitizedFocusName(window.name)
         case .process(let process): return sanitizedFocusName(process.templateName)
         case .window(let window): return sanitizedFocusName(window.name)
@@ -1688,27 +1776,20 @@ public final class WorkspaceOrchestrator {
         return sanitized
     }
 
-    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]) throws {
+    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession]) throws {
         let processEntries = try processes.map { process in (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process") }
         let browserEntries = try browserSessions.map { session in
             (name: try requiredConfiguredFocusName(session.name, kind: "Browser session"), kind: "browser session")
         }
-        let launcherEntries = try agentLaunchers.map { launcher in
-            (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
-        }
-        let entries = processEntries + browserEntries + launcherEntries
-        try validateUniqueFocusNameEntries(entries)
+        try validateUniqueFocusNameEntries(processEntries + browserEntries)
     }
 
     func validateWorkspaceFocusNames(
-        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentLaunchers: [AgentLauncher]? = nil,
-        agentWindows: [AgentWindowRecord]? = nil
+        workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentWindows: [AgentWindowRecord]? = nil
     ) throws {
         let workspaceProcesses = try processes ?? store.workspaceProcesses(workspaceID: workspaceID)
         let workspaceBrowserSessions = try browserSessions ?? store.workspaceBrowserSessions(workspaceID: workspaceID)
-        let workspaceAgentLaunchers = try agentLaunchers ?? store.workspaceAgentLaunchers(workspaceID: workspaceID)
         let workspaceAgentWindows = try agentWindows ?? store.agentWindows(workspaceID: workspaceID)
-        let claims = AgentLauncherClaim.resolve(agents: workspaceAgentWindows, launchers: workspaceAgentLaunchers)
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
@@ -1717,16 +1798,9 @@ public final class WorkspaceOrchestrator {
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {
                 ($0.name, "browser session")
             })
-            + (try workspaceAgentLaunchers.map { launcher in
-                (name: try requiredConfiguredFocusName(launcher.name, kind: "Coding agent"), kind: "coding agent")
-            })
             + workspaceAgentWindows.compactMap { record -> (name: String, kind: String)? in
-                // An agent a launcher claims is shown by that launcher's row, which already contributed
-                // the launcher's name above: one row, counted once. Whether a launcher claims it is the
-                // claim rule's answer, not a name comparison, so an agent that merely ends up named like a
-                // launcher (a rename to that name) still counts as its own row and collides, which is what
-                // makes two rows sharing one visible name impossible.
-                guard !claims.claimedAgentIDs.contains(record.id) else { return nil }
+                // Every agent row contributes the name it displays, so two rows can never share one visible
+                // name.
                 guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
             }
@@ -1852,8 +1926,7 @@ public final class WorkspaceOrchestrator {
                     stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
                     ports: try store.workspaceServiceDefinitions(workspaceID: workspace.id),
                     processes: try store.workspaceProcesses(workspaceID: workspace.id),
-                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
-                    agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
+                    browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id))
             } else {
                 settings = nil
             }
@@ -1878,7 +1951,6 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceServiceDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: snapshot.workspace.id, updatedAt: nowISO8601())
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
@@ -1888,13 +1960,12 @@ public final class WorkspaceOrchestrator {
 
     func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         try validateWorkspaceFocusNames(
-            workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
+            workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
         try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
-        try setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
@@ -1905,9 +1976,7 @@ public final class WorkspaceOrchestrator {
         let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
-        return WorkspaceSettings(
-            stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions, agentLaunchers: agentLaunchers)
+        return WorkspaceSettings(stopScript: stopScript, ports: ports, processes: processes, browserSessions: browserSessions)
     }
 
     private func runScript(_ script: String, cwd: String) throws { _ = try Shell.run(["/bin/bash", "-lc", script], cwd: cwd) }

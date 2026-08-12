@@ -76,10 +76,6 @@ extension AppKitController {
         processesSection.presentValidationError = { [weak self] error in self?.showError(error) }
         processesSection.onCommit = { updated in commit { $0.processes = updated } }
 
-        let agentLaunchersSection = AgentLaunchersSection(
-            launchers: config.agentLaunchers, subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
-        agentLaunchersSection.onCommit = { updated in commit { $0.agentLaunchers = updated } }
-
         // Service rows show `remote:local` while a remote service has a live SSH forward, so the
         // section is tracked as the visible ports section: starting or stopping a forward while
         // this dialog is open refreshes the port texts in place through refreshVisibleServicePortDisplays.
@@ -103,10 +99,7 @@ extension AppKitController {
             value: config.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and delete.")
         stopScriptSection.onCommit = { value in commit { $0.stopScript = value.isEmpty ? nil : value } }
 
-        for section in [
-            browserSessionsSection.view, processesSection.view, agentLaunchersSection.view, portsSection.view, envSection.view,
-            stopScriptSection.view,
-        ] {
+        for section in [browserSessionsSection.view, processesSection.view, portsSection.view, envSection.view, stopScriptSection.view] {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
         }

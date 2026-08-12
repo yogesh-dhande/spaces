@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import Network
     import SwiftUI
     import UIKit
     import UniformTypeIdentifiers
@@ -65,6 +66,22 @@
             func append(_ message: String) { messages.append(message) }
 
             func firstMessage() -> String? { messages.first }
+        }
+
+        /// A bridge whose every request fails with one transport error, counting the attempts so a test
+        /// asserting that nothing was prompted can still prove the request actually ran.
+        private actor FailingTransportRecorder {
+            private let error: any Error
+            private var attemptCount = 0
+
+            init(error: any Error) { self.error = error }
+
+            func handle() throws -> SpacesDeviceAPIResponse {
+                attemptCount += 1
+                throw error
+            }
+
+            func attempts() -> Int { attemptCount }
         }
 
         private func settings() -> SpacesMobileConnectionSettings {
@@ -157,7 +174,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
 
@@ -185,13 +202,50 @@
             try await waitUntilSendCompletes(model)
         }
 
+        /// The session ending is what discards the queued input, not the user leaving: a composed message
+        /// waiting behind a slow send would otherwise drain into a terminal whose process is gone. That
+        /// teardown runs from the state-apply path the reduction pipeline drives, so it has to fire for a
+        /// payload the model never saw arrive itself.
+        func testASessionEndingCancelsInputQueuedBehindASlowSend() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+
+            await model.sendText("blocking", asPaste: true)
+            try await waitUntilRecorderContains("send:blocking", recorder: recorder)
+            model.composerDraftText = "queued"
+            model.attachComposerImage(attachment("Screenshot"))
+            await model.sendComposedMessage()
+            XCTAssertTrue(model.isSendingComposedMessage)
+
+            await model.applyLatestState(terminatedState(), isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertEqual(model.phase, .ended)
+            XCTAssertFalse(model.isSendingComposedMessage)
+            let tokens = await recorder.tokens()
+            XCTAssertFalse(tokens.contains("paste"), "the queued composed send must not reach a session that has ended")
+        }
+
+        private func terminatedState() -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:24:00Z",
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:24:00Z"),
+                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
         func testCancelingQueuedComposedSendClearsSendingState() async throws {
             let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
 
             await model.sendText("blocking", asPaste: true)
             try await waitUntilRecorderContains("send:blocking", recorder: recorder)
@@ -218,7 +272,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -242,7 +296,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "original"
             model.attachComposerImage(attachment("Screenshot"))
             let sentAttachmentID = try XCTUnwrap(model.composerAttachments.first?.id)
@@ -269,7 +323,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -291,7 +345,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 3)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 3)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -314,7 +368,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -335,7 +389,7 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
             model.attachComposerImage(attachment("Clipboard"))
@@ -360,7 +414,7 @@
                 session: session(), settings: settings(),
                 onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
             await model.sendComposedMessage()
@@ -381,7 +435,7 @@
                 session: session(), settings: settings(),
                 onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
                 bridgeClient: bridgeClient)
-            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
 
@@ -395,6 +449,51 @@
             XCTAssertNil(model.composerErrorMessage)
             XCTAssertEqual(model.composerDraftText, "hello")
             XCTAssertEqual(model.composerAttachments.count, 1)
+        }
+
+        /// A TLS-layer transport failure is not a revoked pairing. A connection the OS tore down while the
+        /// app was suspended fails in exactly this shape on the first send after a resume, and routing it
+        /// into re-pair recovery is what sent the app to the pairing screen for something the next
+        /// attempt fixes on its own.
+        func testGenericTLSTransportFailureOnSendDoesNotPromptToRePair() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let transport = FailingTransportRecorder(error: NWError.tls(-9806))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { _ in try await transport.handle() }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let attempts = await transport.attempts()
+            XCTAssertGreaterThan(attempts, 0, "sanity: the send has to have actually reached the transport")
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertNil(authenticationMessage, "a dropped TLS connection is a retry, not proof the Mac stopped recognizing this device")
+        }
+
+        /// The signal that does mean the pairing is gone: the pinned verify block compared the daemon's
+        /// certificate against the pin and rejected it. That still has to reach the re-pair flow.
+        func testCertificatePinRejectionOnSendPromptsToRePair() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let transport = FailingTransportRecorder(
+                error: TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { _ in try await transport.handle() }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
         }
 
         private func withPasteboard(_ body: (UIPasteboard) -> Void) {

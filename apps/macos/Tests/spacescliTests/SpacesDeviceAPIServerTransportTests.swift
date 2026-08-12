@@ -159,7 +159,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 defer { deleteFinished.signal() }
                 do {
                     let client = try SpacesDeviceAPIRequestClient(
-                        host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                        resolver: SpacesDeviceEndpointResolver(
+                            hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
                     deleteResult.setResponseData(try SpacesDeviceAPICodec.encodeResponse(try client.request(deleteRequest)))
                 } catch { deleteResult.setError(error) }
             }
@@ -169,7 +170,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             // The refresh poll a client issues on its own connection while the delete is still running.
             let pollClient = try SpacesDeviceAPIRequestClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, timeoutSeconds: 5)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint), timeoutSeconds: 5)
             let overview = try pollClient.request(SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp))
             XCTAssertTrue(overview.ok, overview.message)
 
@@ -291,7 +293,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 defer { hookFinished.signal() }
                 do {
                     let client = try SpacesDeviceAPIRequestClient(
-                        host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                        resolver: SpacesDeviceEndpointResolver(
+                            hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
                     let response = try client.request(hookRequest)
                     hookResult.setResponseData(try SpacesDeviceAPICodec.encodeResponse(response))
                 } catch { hookResult.setError(error) }
@@ -301,7 +304,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             defer { releaseHook.signal() }
 
             let pingClient = try SpacesDeviceAPIRequestClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, timeoutSeconds: 1)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint), timeoutSeconds: 1)
             let ping = try pingClient.request(SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp))
             XCTAssertTrue(ping.ok, ping.message)
 
@@ -315,7 +319,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testReusableRequestSessionConnectsLazily() throws {
         let client = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: makeAvailableTCPPort(), certificateFingerprint: testTLSIdentity().certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: ["127.0.0.1"], port: makeAvailableTCPPort(), certificateFingerprint: try testTLSIdentity().certificateFingerprint))
 
         XCTAssertEqual(client.openedConnectionCountForTesting, 0)
     }
@@ -335,7 +340,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-SESSION-REUSE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0")
             let client = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
 
             let request = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
             let firstResponse = try client.send(request)
@@ -365,8 +371,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-SESSION-IDLE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0")
             let client = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, idleReconnectInterval: 1,
-                uptime: uptime.value)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint),
+                idleReconnectInterval: 1, uptime: uptime.value)
             defer { client.cancel() }
 
             let pingRequest = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
@@ -638,8 +645,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let config = SpacesDeviceProjectConfig(
                 setupScript: "echo setup", stopScript: "echo stop", ports: [SpacesDeviceServiceDefinition(id: "port-api", name: "api")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-api", name: "api", command: "npm run api")],
-                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$SPACES_API_PORT")],
-                agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")])
+                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$SPACES_API_PORT")])
 
             let createResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
@@ -655,7 +661,6 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(project.config.ports.first?.name, "api")
             XCTAssertEqual(project.config.processes.first?.command, "npm run api")
             XCTAssertEqual(project.config.browserSessions.first?.url, "http://localhost:$SPACES_API_PORT")
-            XCTAssertEqual(project.config.agentLaunchers.first?.name, "Codex")
 
             let hideResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
@@ -1407,15 +1412,19 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         let finished = DispatchSemaphore(value: 0)
         let queue = DispatchQueue(label: "spaces.device.api.transport.outcome.test")
         let resultBox = DeviceAPITransportTestResultBox()
+        // Reported the way the clients report it: the verify block's own rejection, not the raw NWError.
+        // A `.failed` TLS state alone does not distinguish a refused pin from a dropped handshake, so a
+        // caller that wants the re-pair verdict has to carry this box.
+        let pinRejection = SpacesPinnedTLSPinRejection()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint, pinRejection: pinRejection))
 
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready: finished.signal()
             case .failed(let error):
-                resultBox.setError(error)
+                resultBox.setError(pinRejection.error ?? error)
                 finished.signal()
             default: break
             }

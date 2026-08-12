@@ -133,7 +133,10 @@ import Foundation
         public func updateUIView(_ hostView: GhosttyRemoteTerminalHostView, context: Context) {
             hostView.onInputReadinessChanged = { ready in _ = Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { _ = Task { @MainActor in callback() } } }
-            hostView.onViewportSizeChanged = { columns, rows in _ = Task { @MainActor in onViewportSizeChanged(columns, rows) } }
+            // UIKit delivers layout on the main thread. Keeping viewport delivery synchronous preserves
+            // the keyboard transition's measured order: a late smaller grid must not overwrite its final
+            // settled grid after the model has already resized the owner runtime to it.
+            hostView.onViewportSizeChanged = { columns, rows in MainActor.assumeIsolated { onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
@@ -172,6 +175,18 @@ import Foundation
             let width: UInt32
             let height: UInt32
             let scale: Double
+        }
+
+        /// Everything that decides what a mirror render-frame apply would write into the surface.
+        /// `acceptsTerminalInput` belongs here because the applied frame's mouse-capture flags are derived
+        /// from it, so the same snapshot applies differently to an interactive owner and a read-only pane.
+        private struct AppliedRenderFrameIdentity: Equatable {
+            let renderKey: String
+            let version: Int
+            let sessionRevision: UInt64?
+            let ownerEpoch: UInt64
+            let acceptsTerminalInput: Bool
+            let snapshot: GhosttyTerminalSnapshot
         }
 
         private enum AccessoryModifier: String, CaseIterable {
@@ -228,7 +243,20 @@ import Foundation
         private var latestSnapshot: GhosttyTerminalSnapshot?
         private var currentRenderedSnapshot: GhosttyTerminalSnapshot?
         private var lastRenderKey = ""
+        /// What the mirror surface currently holds. SwiftUI re-runs `updateUIView` and UIKit re-runs
+        /// `layoutSubviews` for reasons that have nothing to do with the terminal's content — a title
+        /// change, a keyboard frame, a sibling view's update — and each of those reaches
+        /// `applyLatestRenderFrameIfPossible`. Applying a frame the surface already shows costs a
+        /// full-grid cell copy and a full-grid surface write, so a byte-identical frame is skipped
+        /// instead. Cleared wherever the surface this describes goes away or is rebound, so
+        /// a fresh surface always re-applies, and also in `setTerminalFontSize(_:)`: a font retune changes
+        /// what the surface should show without changing anything this identity tracks (a font decrease
+        /// leaves the cropped frame byte-identical), so it is cleared there too rather than skipped as a
+        /// no-op.
+        private var lastAppliedRenderFrameIdentity: AppliedRenderFrameIdentity?
         private var lastSurfaceGeometry: SurfaceGeometry?
+        private var keyboardViewportRefreshTask: Task<Void, Never>?
+        private var pendingKeyboardViewportSettlementID: UUID?
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
@@ -382,6 +410,9 @@ import Foundation
             let hadRenderedSnapshot = currentRenderedSnapshot != nil
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
+            keyboardViewportRefreshTask?.cancel()
+            keyboardViewportRefreshTask = nil
+            pendingKeyboardViewportSettlementID = nil
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
@@ -405,6 +436,7 @@ import Foundation
         private func releaseSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
+            lastAppliedRenderFrameIdentity = nil
             GhosttySharedTerminalMirror.shared.release(from: self)
         }
 
@@ -423,6 +455,7 @@ import Foundation
         func surrenderSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
+            lastAppliedRenderFrameIdentity = nil
             didSurrenderSharedMirror = true
             setNeedsDisplay()
             reportInputReadinessIfNeeded()
@@ -489,6 +522,12 @@ import Foundation
             fontSize = newFontSize
             guard mirror != nil else { return }
             GhosttySharedTerminalMirror.shared.setFontSize(newFontSize, from: self)
+            // The identity below has no notion of font size, so a retune that leaves the cropped frame
+            // byte-identical (a font decrease is the common case: it never changes what a fixed viewport
+            // can crop from the snapshot) would otherwise be skipped as a no-op re-apply, leaving Ghostty's
+            // own reflow of the old-sized grid on screen until the next real frame lands. Clearing here
+            // forces `applyLatestRenderFrameIfPossible()` to apply regardless of whether the frame changed.
+            lastAppliedRenderFrameIdentity = nil
             renderLatestSnapshot()
             reportViewportSizeIfNeeded()
         }
@@ -521,6 +560,10 @@ import Foundation
 
         public override func layoutSubviews() {
             super.layoutSubviews()
+            // A keyboard layout guide reports intermediate frames during its animation. Resizing the
+            // remote terminal for those frames makes the daemon reflow through transient grids, so the
+            // keyboard transition owns the one final report below. The local surface still follows each
+            // layout: it has no remote round trip and must never leave a newly exposed area unpainted.
             reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
@@ -596,6 +639,15 @@ import Foundation
             ]
         }
 
+        /// How many frames have actually reached the mirror apply. The skip that the applied-frame
+        /// identity performs is invisible from the outside — the surface shows the same
+        /// pixels either way — so this is what lets a test see that a repeat layout or a title-only
+        /// payload costs no apply.
+        public private(set) var renderFrameApplyCountForTesting = 0
+        /// Counts host render passes even when there is no native mirror, which lets keyboard-transition
+        /// tests distinguish local surface updates from remote viewport reports.
+        public private(set) var renderLatestSnapshotCallCountForTesting = 0
+
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
         public var hasMirrorSurfaceForTesting: Bool { mirrorSurface() != nil }
@@ -628,14 +680,20 @@ import Foundation
             _ = handleTapToActivateInput(at: recognizer.location(in: self))
         }
 
+        /// A link under the tap wins over the application tracking the mouse. The probe runs entirely
+        /// against this device's mirror surface and never reaches the session, so the only cost is that
+        /// an application tracking the mouse loses the taps that land on a URL while keeping every
+        /// other one. That is the right trade on a phone: coding agents track the mouse for their whole
+        /// session, and a URL tap there means the user wants to read the link on the device in their
+        /// hand rather than click that cell on the machine running the session.
         @discardableResult private func handleTapToActivateInput(at location: CGPoint) -> TapActivationResult {
+            if openTerminalLink(at: location) { return .openedLink }
             if sendMouseButtonClickIfCaptured(at: location) {
                 // A tap that drives the application still needs the keyboard: without this, tapping
                 // vim's mouse=a on a phone would move the cursor while leaving nothing to type with.
                 if acceptsTerminalInput, !isFirstResponder { becomeFirstResponder() }
                 return .sentClick
             }
-            if openTerminalLink(at: location) { return .openedLink }
             guard acceptsTerminalInput else { return .ignored }
             becomeFirstResponder()
             return .focused
@@ -761,19 +819,30 @@ import Foundation
         }
 
         private func scheduleKeyboardViewportRefresh() {
-            for delayMS in [0, 120, 320] {
-                Task { @MainActor [weak self] in
-                    if delayMS == 0 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(delayMS)) }
-                    guard let self else { return }
-                    self.setNeedsLayout()
-                    self.layoutIfNeeded()
-                    self.reportViewportSizeIfNeeded()
-                    self.renderLatestSnapshot()
-                }
+            keyboardViewportRefreshTask?.cancel()
+            let settlementID = UUID()
+            pendingKeyboardViewportSettlementID = settlementID
+            keyboardViewportRefreshTask = Task { @MainActor [weak self] in
+                // UIKeyboardLayoutGuide exposes the changing geometry but no completion callback for
+                // reloadInputViews(). Keep the established final 320 ms sample as the single settle
+                // point, rather than reporting each intermediate layout-guide frame.
+                try? await Task.sleep(for: .milliseconds(320))
+                guard !Task.isCancelled, let self else { return }
+                self.completeKeyboardViewportSettlement(id: settlementID)
             }
         }
 
+        private func completeKeyboardViewportSettlement(id: UUID) {
+            guard pendingKeyboardViewportSettlementID == id else { return }
+            pendingKeyboardViewportSettlementID = nil
+            keyboardViewportRefreshTask?.cancel()
+            keyboardViewportRefreshTask = nil
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+
         private func reportViewportSizeIfNeeded() {
+            guard pendingKeyboardViewportSettlementID == nil else { return }
             guard scrollInteractionDepth == 0 else {
                 deferredViewportSizeReport = true
                 return
@@ -794,6 +863,7 @@ import Foundation
         }
 
         private func renderLatestSnapshot() {
+            renderLatestSnapshotCallCountForTesting += 1
             guard let latestSnapshot else {
                 currentRenderedSnapshot = nil
                 latestRenderFrame = nil
@@ -861,8 +931,11 @@ import Foundation
                 mirror = acquired
                 // A rebind reuses a surface that is already sized and occluded from its previous
                 // holder, so the cached geometry has to be dropped for `updateSurfaceGeometry()` to
-                // re-apply this view's size, scale, and occlusion rather than skip as unchanged.
+                // re-apply this view's size, scale, and occlusion rather than skip as unchanged. The
+                // applied-frame identity goes with it: the acquired surface holds the previous holder's
+                // cells, so this view's next frame has to be applied even if it matches its own last one.
                 lastSurfaceGeometry = nil
+                lastAppliedRenderFrameIdentity = nil
                 updateSurfaceGeometry()
                 if let surface = mirrorSurface() {
                     GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
@@ -899,7 +972,7 @@ import Foundation
             if let debugTapLinkHandlerForTesting { return debugTapLinkHandlerForTesting(location) }
             guard let surface = mirrorSurface() else { return false }
             let position = Self.ghosttyMousePosition(for: location)
-            let mods = Self.linkActivationMouseModifiers()
+            let mods = linkActivationMouseModifiers()
             tapLinkProbeDepth += 1
             openedLinkDuringTapProbe = false
             defer { tapLinkProbeDepth -= 1 }
@@ -931,7 +1004,24 @@ import Foundation
             return true
         }
 
-        private static func linkActivationMouseModifiers() -> ghostty_input_mods_e { ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
+        /// The modifiers the tap's link probe synthesizes. Super is what Ghostty's URL link requires to
+        /// match. Shift rides along while the mirror carries the session's mouse tracking, because a
+        /// tracking terminal refreshes link hover state only for a shift-held mouse position and then
+        /// drops shift again before matching the link's own modifiers: shift is Ghostty's "this click
+        /// is for the terminal, not the application" release, the same one a cmd+shift+click uses in a
+        /// Mac pane. Without it the probe finds nothing in any pane running a coding agent, which
+        /// tracks the mouse for its whole session.
+        ///
+        /// Accepted limitation: an application that asks to capture shift itself (XTSHIFTESCAPE, a
+        /// state the snapshot transports onto the mirror) takes this shift-click too, so its link taps
+        /// forward as clicks instead of opening. That matches a directly attached Ghostty terminal,
+        /// where cmd+shift+click cannot follow a link under such an application either; working around
+        /// it would mean mutating the mirror's shift-capture state around the probe. If link taps ever
+        /// need to win there too, the client-side linkURLs hit-testing design (#373) is the seam.
+        private func linkActivationMouseModifiers() -> ghostty_input_mods_e {
+            guard mirrorCapturesMouse else { return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue) }
+            return ghostty_input_mods_e(GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
+        }
 
         private func updateSurfaceGeometry() {
             guard let mirror, let surface = mirrorSurface() else { return }
@@ -975,13 +1065,22 @@ import Foundation
 
         private func applyLatestRenderFrameIfPossible() {
             guard let mirror, let frame = mirrorRenderFrame() else {
+                lastAppliedRenderFrameIdentity = nil
                 setNeedsDisplay()
                 return
             }
+            let identity = appliedRenderFrameIdentity(for: frame)
+            guard identity != lastAppliedRenderFrameIdentity else { return }
             let applyStartedAt = Date()
-            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame(mirror, cFrame) }
+            // The draw-free apply: the `ghostty_surface_refresh` below is what wakes the render thread
+            // to build and present this frame, so a synchronous draw here would only block on the swap
+            // chain to re-present the cells built for the previous one.
+            let applied = withCFrame(frame) { cFrame in ghostty_mirror_apply_render_frame_no_draw(mirror, cFrame) }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
-            if let sessionID = activeOwnerEpoch?.sessionID {
+            renderFrameApplyCountForTesting += 1
+            // Built only when something is listening: this runs once per applied frame, and the dictionary
+            // costs more than the apply it describes.
+            if SpacesDeviceTerminalPerformanceLogger.isEnabled(), let sessionID = activeOwnerEpoch?.sessionID {
                 let attributes = GhosttyRenderFrameMetrics.attributes(
                     frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
                     targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
@@ -989,6 +1088,7 @@ import Foundation
                     .init(sessionID: sessionID, source: "ios-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS, attributes: attributes))
             }
             if applied {
+                lastAppliedRenderFrameIdentity = identity
                 if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
                 // The shared surface stays hidden from the moment it is handed over until a frame of
                 // this view's own session has landed on it, so a rebind never shows the previous
@@ -998,6 +1098,12 @@ import Foundation
                 ghosttyRemoteTerminalTrace("mirror_apply_failed")
                 setNeedsDisplay()
             }
+        }
+
+        private func appliedRenderFrameIdentity(for frame: GhosttyRenderFrame) -> AppliedRenderFrameIdentity {
+            AppliedRenderFrameIdentity(
+                renderKey: lastRenderKey, version: frame.version, sessionRevision: frame.sessionRevision, ownerEpoch: frame.ownerEpoch,
+                acceptsTerminalInput: acceptsTerminalInput, snapshot: frame.snapshot)
         }
 
         private func mirrorRenderFrame() -> GhosttyRenderFrame? {
@@ -1251,8 +1357,6 @@ import Foundation
         func setKeyboardOccludedHeightForTesting(_ height: CGFloat?) {
             keyboardOccludedHeightOverrideForTesting = height
             setNeedsLayout()
-            reportViewportSizeIfNeeded()
-            renderLatestSnapshot()
         }
 
         func setSurfaceViewportSizeForTesting(columns: Int, rows: Int) {
@@ -1264,6 +1368,10 @@ import Foundation
         func viewportSizeForTesting() -> (columns: Int, rows: Int) { viewportSize() }
 
         func visibleRenderBoundsForTesting() -> CGRect { visibleRenderBounds() }
+
+        func keyboardViewportSettlementIDForTesting() -> UUID? { pendingKeyboardViewportSettlementID }
+
+        func completeKeyboardViewportSettlementForTesting(id: UUID) { completeKeyboardViewportSettlement(id: id) }
 
         private var terminalUserInterfaceIdiom: UIUserInterfaceIdiom { userInterfaceIdiomOverrideForTesting ?? traitCollection.userInterfaceIdiom }
 

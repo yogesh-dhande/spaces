@@ -437,9 +437,11 @@ public enum GhosttyRenderUpdateBinaryCodec {
     private static let nilRevision = UInt64.max
 
     // The two high bits of a cell's wire flags word are reserved by the codec to mark that the cell is
-    // followed by a text payload in its block's sparse section. Style flags occupy bits 0-10 (see
-    // GhosttyTerminalSnapshotGrid), never these, so the encoder writes them from the block's cluster and
-    // link tables and the decoder strips them back off before rebuilding the cell.
+    // followed by a text payload in its block's sparse section. Style flags and the per-row wrap
+    // metadata occupy bits 0-12 (see GhosttyTerminalSnapshotGrid), never these, so the encoder writes
+    // them from the block's cluster and link tables and the decoder strips them back off before
+    // rebuilding the cell. Row metadata stays on every cell through a delta because the embedded
+    // renderer restores each row from column zero.
     private static let clusterPayloadFlag: UInt16 = 1 << 15
     private static let linkPayloadFlag: UInt16 = 1 << 14
     private static let payloadFlagMask: UInt16 = clusterPayloadFlag | linkPayloadFlag
@@ -503,6 +505,26 @@ public enum GhosttyRenderUpdateBinaryCodec {
                     sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
                     fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
             }
+        }
+    }
+
+    /// The kind of update an encoded blob carries, read from its fixed header alone.
+    ///
+    /// A caller that only needs to classify a render update — is this a full frame, or a delta that is
+    /// useless without one? — would otherwise pay a whole columns×rows cell decode for a question the
+    /// first six bytes answer. That decode is exactly the work the off-main reduction pipeline exists to
+    /// keep off the main actor, so the classification paths (`GhosttyRemoteSessionStatePayload.renderUpdateKind`)
+    /// read the header instead.
+    ///
+    /// Returns nil for anything this build would refuse to decode — wrong magic, wrong version, unknown
+    /// kind byte, or too short to hold the header — so an unclassifiable blob is never mistaken for a full
+    /// frame. Callers treat nil as "not a full frame".
+    public static func encodedKind(of data: Data) -> GhosttyRenderUpdateKind? {
+        guard data.count >= magic.count + 2 else { return nil }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> GhosttyRenderUpdateKind? in
+            guard (0..<magic.count).allSatisfy({ raw[$0] == magic[$0] }) else { return nil }
+            guard Int(raw[magic.count]) == GhosttyRenderUpdate.currentVersion else { return nil }
+            return try? kind(for: raw[magic.count + 1])
         }
     }
 

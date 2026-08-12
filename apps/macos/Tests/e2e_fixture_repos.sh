@@ -67,6 +67,32 @@ spaces_e2e_create_atlas_fixture_repo() {
   spaces_e2e_install_demo_fixture "$template_dir" "atlas" "$repo_dir" "# Atlas Docs"
 }
 
+# Writes the Device API parity lanes' stand-in coding agent into a fixture repo.
+#
+# A coding agent is nothing but a program that reports the Spaces agent hooks from inside a workspace
+# terminal, so the fixture ships one: it signals `init` then `working` and stays alive until its
+# terminal is torn down, at which point it signals `exit`. It lives in the repo (and is committed) so
+# every workspace worktree cut from that repo carries it, which is what lets the parity flow start an
+# agent with nothing but a terminal and a command.
+spaces_e2e_write_parity_agent_script() {
+  local script_path="$1"
+  local spaces_cli="$2"
+
+  cat >"$script_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+spaces_cli="$spaces_cli"
+trap '"\$spaces_cli" agent signal exit >/dev/null 2>&1 || true; exit 0' TERM INT
+# Workspace and session ids come from the Spaces terminal environment.
+"\$spaces_cli" agent signal init >/dev/null
+"\$spaces_cli" agent signal working >/dev/null
+printf 'device-api-agent-ready\n'
+# Background the sleep so TERM/INT interrupt the wait immediately instead of after the running sleep.
+while true; do sleep 5 & wait \$! || true; done
+EOF
+  chmod +x "$script_path"
+}
+
 spaces_e2e_create_standard_fixture_repos() {
   local template_dir="$1"
   local harbor_repo="$2"

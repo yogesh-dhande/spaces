@@ -90,6 +90,31 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 }
 
 @MainActor @Observable final class TerminalViewerModel {
+    /// The one viewer-attach operation allowed for one model lifecycle. Both reconnect and foreground
+    /// resume await this operation, so a late reconnect cannot reattach over a completed takeover.
+    private struct ViewerAttachmentOperation {
+        let lifecycle: UInt64
+        let clientID: String
+        let commandChannel: SpacesDeviceAPICommandChannel
+        let appearance: ThemeAppearance
+        let task: Task<Void, Error>
+    }
+
+    private struct AutomaticTakeoverContext {
+        let generation: UInt64
+        let lifecycle: UInt64
+        let clientID: String
+    }
+
+    /// A direct state read either admits its own payload, is overtaken by an accepted stream payload
+    /// after the read began, or cannot supply a usable state at all. Only foreground ownership needs to
+    /// distinguish the first two; other callers retain their existing optional-result contract.
+    private enum StateRefreshOutcome {
+        case accepted(GhosttyRemoteSessionStatePayload)
+        case superseded(GhosttyRemoteSessionStatePayload)
+        case unavailable
+    }
+
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     /// Demo Mode is view-only: the backend serves a recorded transcript and rejects every write. The
@@ -161,6 +186,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttemptGeneration: UInt64 = 0
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -178,18 +204,72 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var isStopping = false
     private var hasSentStopDetach = false
     private var hasAttachedToSession = false
+    private var viewerAttachmentLifecycle: UInt64 = 0
+    @ObservationIgnored private var viewerAttachmentOperation: ViewerAttachmentOperation?
+    private var automaticTakeoverGeneration: UInt64 = 0
+    @ObservationIgnored private var automaticTakeoverTask: Task<Void, Never>?
     /// The light/dark appearance the session currently carries — set from the value sent on attach and on
     /// each live push. `sendAppearance` dedupes against it so an unchanged app appearance costs no request;
     /// the daemon would no-op a same-value setAppearance anyway, but skipping it avoids the round-trip.
     private var lastAppearanceSentToSession: ThemeAppearance?
     private var hasAttemptedAutomaticTakeover = false
+    /// Foreground ownership is decided by one explicit state read after the scene is active. A payload
+    /// reduced while iOS still runs the app in the background cannot settle that decision, because its
+    /// lease may expire during the rest of the suspension.
+    private var isSceneActive = true
+    private var foregroundResumeCycle: UInt64 = 0
+    private var isForegroundResumeEvaluationPending = false
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
-    private var stateReducer = TerminalRemoteStateReducer()
+    /// Reduces incoming payloads off the main actor, in arrival order across every route into this
+    /// model: the live subscription, the direct `.state` fetch, and the state a takeover returns. It
+    /// owns the reducer, so the render-update baseline and the previous stored payload the next reduce
+    /// chains from live there rather than here, and this model only applies what it hands back.
+    ///
+    /// One instance for the model's whole life, including across `beginStop()`/`start()`: the chain it
+    /// holds describes the same session either way, and a reconnect's `initial`/`.state` full frame
+    /// reseeds the baseline. `applyReducedState` is what makes a stopped model's pending applies inert.
+    @ObservationIgnored private lazy var statePipeline = TerminalRemoteStateReductionPipeline(
+        // Every materialized frame is rendered. The mac mirror gates frames against the surface it is
+        // resizing underneath; this viewer has no such local surface race — it renders whatever grid the
+        // daemon exports and re-measures its own viewport from the frame that arrives.
+        shouldUseFrame: { _, _ in true }, apply: { [weak self] output in self?.applyReducedState(output) })
+    /// Payloads handed to the pipeline, and how many of those the main actor has accounted for. The
+    /// apply mailbox collapses runs of consecutive frames, so one apply stands for itself plus every
+    /// submission it superseded; counting that way is what lets `applyLatestState` wait on a payload
+    /// that may never apply under its own name. Unobserved on purpose: they change on every payload and
+    /// nothing on screen reads them, so observing them would rebuild the terminal's body at the
+    /// session's flush rate.
+    @ObservationIgnored private var submittedStateCount: UInt64 = 0
+    @ObservationIgnored private var appliedStateCount: UInt64 = 0
+    /// Each submission belongs to the viewer lifecycle that admitted it. The reducer keeps its baseline
+    /// across a stop/start, but an old lifecycle's direct read must not publish into its replacement after
+    /// that baseline work completes.
+    @ObservationIgnored private var stateSubmissionLifecycles: [UInt64: UInt64] = [:]
+    @ObservationIgnored private var stateApplyWaiters:
+        [(target: UInt64, continuation: CheckedContinuation<TerminalRemoteStateReductionOutput, Never>)] = []
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
+    /// When the last resync `.state` read was sent, and whether one is still outstanding. Only the resync
+    /// route is tracked here: it is the one a failing session can fire per payload, and the pacing below
+    /// is what keeps that from becoming one read per payload.
+    private var lastRenderUpdateResyncAt: Date?
+    private var isRenderUpdateResyncFetchInFlight = false
+    /// The one delayed `.state` request owed to a resync the throttle turned away; see
+    /// `scheduleTrailingRenderUpdateResync`.
+    private var pendingRenderUpdateResyncTask: Task<Void, Never>?
+    /// What a landing frame must cover for that delayed request to count as answered. Non-nil exactly
+    /// while `pendingRenderUpdateResyncTask` is armed; see `TerminalResyncOwedOrdering` for why a frame
+    /// alone is not proof.
+    private var owedRenderUpdateResyncOrdering: TerminalResyncOwedOrdering?
+    /// How long one resync request paces the next. Only a test overrides it
+    /// (`renderUpdateResyncIntervalForTesting`), so a suite can drive the trailing retry to its boundary
+    /// instead of waiting out a real second.
+    private static let defaultRenderUpdateResyncInterval: TimeInterval = 1
+    var renderUpdateResyncIntervalForTesting: TimeInterval?
+    private var renderUpdateResyncInterval: TimeInterval { renderUpdateResyncIntervalForTesting ?? Self.defaultRenderUpdateResyncInterval }
     @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) {
         [weak self] batch, finish in
         guard let self else {
@@ -351,6 +431,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         if renderModeValue == .ownerBootstrapping { return "Preparing terminal…" }
         if isStartingState { return "Preparing terminal…" }
         if isTakingOver { return "Attempting takeover…" }
+        guard activeOwnerAttachment != nil else { return "This terminal has no active owner.\nTake over to start typing." }
         let ownerLabel = activeOwnerDisplayLabel ?? "another client"
         return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
     }
@@ -417,33 +498,124 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         scheduleReconnect(after: .zero)
     }
 
+    /// Arms the one foreground ownership evaluation for a detail that stays open while iOS suspends the
+    /// app. State that arrives before the next `.active` is not authoritative for that evaluation.
+    func prepareForBackgrounding() {
+        guard !isStopping, !isEndedState else { return }
+        cancelAutomaticTakeover()
+        isSceneActive = false
+        foregroundResumeCycle &+= 1
+        isForegroundResumeEvaluationPending = true
+        trace("background_arm_foreground_state_evaluation cycle=\(foregroundResumeCycle)")
+    }
+
+    /// Evaluates the ownership result associated with the foreground resume. Its stream reconnects without
+    /// a new `start()` call, but the daemon may have expired this device's remote-client lease while it
+    /// was away, so this always reads state after the scene is active instead of trusting background work.
+    func resumeAfterBackgrounding() {
+        guard !isStopping, !isEndedState else { return }
+        let needsForegroundEvaluation = isForegroundResumeEvaluationPending || !isSceneActive
+        isSceneActive = true
+        guard needsForegroundEvaluation else { return }
+        if !isForegroundResumeEvaluationPending {
+            foregroundResumeCycle &+= 1
+            isForegroundResumeEvaluationPending = true
+            trace("foreground_arm_remounted_state_evaluation cycle=\(foregroundResumeCycle)")
+        }
+        let resumeCycle = foregroundResumeCycle
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
+        Task { [weak self] in
+            guard let self else { return }
+            guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+            var hasLiveAttachment = true
+            do {
+                try await self.bridgeClient.heartbeat(sessionID: self.session.id, clientID: self.remoteClient.id, timeout: Self.stateRequestTimeout)
+                self.trace("foreground_resume_heartbeat_success cycle=\(resumeCycle)")
+            } catch {
+                if Self.isAttachmentNotFound(error) {
+                    guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+                    self.hasAttachedToSession = false
+                    do {
+                        try await self.attachViewerForCurrentLifecycle()
+                        self.trace("foreground_resume_attach_success cycle=\(resumeCycle)")
+                    } catch {
+                        self.finishForegroundStateEvaluation(resumeCycle: resumeCycle, acceptedState: nil)
+                        return
+                    }
+                } else if Self.isTerminalNoLongerLiveError(error) {
+                    hasLiveAttachment = false
+                    self.hasAttachedToSession = false
+                    self.trace("foreground_resume_heartbeat_terminal_not_running cycle=\(resumeCycle)")
+                } else {
+                    _ = self.handleAuthenticationFailure(error)
+                    self.finishForegroundStateEvaluation(resumeCycle: resumeCycle, acceptedState: nil)
+                    return
+                }
+            }
+            guard self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) else { return }
+            if hasLiveAttachment { self.hasAttachedToSession = true }
+            let refreshOutcome = await self.refreshLatestStateOutcome(
+                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "foreground_resume", lifecycle: lifecycle,
+                clientID: clientID, isCurrent: { self.isCurrentForegroundResume(lifecycle: lifecycle, clientID: clientID, resumeCycle: resumeCycle) })
+            let acceptedState: GhosttyRemoteSessionStatePayload?
+            switch refreshOutcome {
+            case .accepted(let payload), .superseded(let payload): acceptedState = payload
+            case .unavailable: acceptedState = nil
+            }
+            self.finishForegroundStateEvaluation(resumeCycle: resumeCycle, acceptedState: acceptedState)
+        }
+    }
+
     func stop() {
         guard let stopContext = beginStop() else { return }
         trace("stop")
-        Task { await detachForStop(using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout) }
+        Task {
+            await detachForStop(
+                using: stopContext.channel, clientID: stopContext.clientID, pendingAttachment: stopContext.pendingAttachment,
+                pendingAutomaticTakeover: stopContext.pendingAutomaticTakeover, shouldDetach: stopContext.shouldDetach,
+                timeout: Self.dismissalDetachTimeout)
+        }
     }
 
     func prepareForBackNavigation() async {
         guard let stopContext = beginStop() else { return }
         trace("back_detach_begin")
-        await detachForStop(using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
+        await detachForStop(
+            using: stopContext.channel, clientID: stopContext.clientID, pendingAttachment: stopContext.pendingAttachment,
+            pendingAutomaticTakeover: stopContext.pendingAutomaticTakeover, shouldDetach: stopContext.shouldDetach,
+            timeout: Self.dismissalDetachTimeout)
         trace("back_detach_end")
     }
 
-    private func beginStop() -> (channel: SpacesDeviceAPICommandChannel, shouldDetach: Bool)? {
+    private func beginStop() -> (
+        channel: SpacesDeviceAPICommandChannel, clientID: String, pendingAttachment: ViewerAttachmentOperation?,
+        pendingAutomaticTakeover: Task<Void, Never>?, shouldDetach: Bool
+    )? {
         guard !hasSentStopDetach else { return nil }
         hasSentStopDetach = true
-        let shouldDetach = hasAttachedToSession && !isEndedState
+        let pendingAttachment = viewerAttachmentOperation
+        let pendingAutomaticTakeover = automaticTakeoverTask
+        let shouldDetach = (hasAttachedToSession || pendingAttachment != nil || pendingAutomaticTakeover != nil) && !isEndedState
+        let channel = pendingAttachment?.commandChannel ?? commandChannel
+        let clientID = pendingAttachment?.clientID ?? remoteClient.id
+        viewerAttachmentOperation = nil
+        viewerAttachmentLifecycle &+= 1
+        cancelAutomaticTakeover()
         isStopping = true
+        isBusy = false
         isAwaitingTakeoverConfirmation = false
         hasAttachedToSession = false
         hasAttemptedAutomaticTakeover = false
+        isForegroundResumeEvaluationPending = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
         streamHandle?.cancel()
         streamHandle = nil
+        cancelTrailingRenderUpdateResync()
+        isRenderUpdateResyncFetchInFlight = false
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -456,7 +628,6 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
-        stateReducer.resetRenderUpdateBaseline()
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
@@ -468,31 +639,42 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasRetriedEndedStateAfterStreamClose = false
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
-        return (commandChannel, shouldDetach)
+        return (channel, clientID, pendingAttachment, pendingAutomaticTakeover, shouldDetach)
     }
 
-    private func detachForStop(using currentChannel: SpacesDeviceAPICommandChannel, shouldDetach: Bool, timeout: Duration) async {
+    private func detachForStop(
+        using currentChannel: SpacesDeviceAPICommandChannel, clientID: String, pendingAttachment: ViewerAttachmentOperation?,
+        pendingAutomaticTakeover: Task<Void, Never>?, shouldDetach: Bool, timeout: Duration
+    ) async {
+        if let pendingAttachment { _ = try? await pendingAttachment.task.value }
+        if let pendingAutomaticTakeover { await pendingAutomaticTakeover.value }
         if shouldDetach {
             do {
-                try await detachTerminal(timeout: timeout, commandChannel: currentChannel)
+                try await detachTerminal(clientID: clientID, timeout: timeout, commandChannel: currentChannel)
                 trace("detach_success")
             } catch { trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))") }
         }
         await currentChannel.close()
     }
 
-    private func detachTerminal(timeout: Duration, commandChannel: SpacesDeviceAPICommandChannel) async throws {
-        try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: commandChannel)
+    private func detachTerminal(clientID: String, timeout: Duration, commandChannel: SpacesDeviceAPICommandChannel) async throws {
+        try await bridgeClient.detach(sessionID: session.id, clientID: clientID, timeout: timeout, commandChannel: commandChannel)
     }
 
     private func loadEndedState() async {
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         isConnecting = true
         defer {
-            isConnecting = false
-            reconnectTask = nil
+            if isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) {
+                isConnecting = false
+                reconnectTask = nil
+            }
         }
         trace("ended_state_load")
-        _ = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: false, reason: "ended_initial")
+        _ = await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: false, reason: "ended_initial", lifecycle: lifecycle, clientID: clientID)
     }
 
     private var renderModeValue: TerminalViewerRenderMode {
@@ -501,22 +683,67 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return .status
     }
 
-    func takeOver() async {
+    func takeOver() async { await takeOver(automaticContext: nil) }
+
+    private func takeOver(automaticContext: AutomaticTakeoverContext?) async {
         // Demo Mode is view-only; the backend rejects takeover, so never enter the input path.
         guard !isDemoMode else { return }
         guard !isEndedState else { return }
         guard !isBusy else { return }
+        guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
+        let clientID = automaticContext?.clientID ?? remoteClient.id
+        let lifecycle = automaticContext?.lifecycle ?? viewerAttachmentLifecycle
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         hasAttemptedAutomaticTakeover = true
         isBusy = true
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
         isAwaitingTakeoverConfirmation = true
-        defer { isBusy = false }
+        defer {
+            if isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), automaticContext.map(isCurrentAutomaticTakeover) ?? true {
+                isBusy = false
+            }
+        }
         trace("takeover_begin")
         do {
-            let takeoverState = try await takeOverTerminal(timeout: Self.inputRequestTimeout)
-            if let takeoverState { applyLatestState(takeoverState) }
-            if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
+            let takeoverState = try await takeOverTerminal(clientID: clientID, timeout: Self.inputRequestTimeout)
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
+            replaceCommandChannel()
+            // This await sits behind the reduction pipeline's strict FIFO: whatever the live subscription
+            // already submitted ahead of this response reduces first, and only then does the takeover
+            // response reduce and apply. That is accepted rather than worked around: reduction is off the
+            // main actor and keeps up with a single subscription's flush rate, so the backlog it can be
+            // behind is small and draining, and the alternative — jumping this response to the front of the
+            // queue — would apply it against a reduction chain that has not yet seen everything submitted
+            // before it, corrupting the delta baseline the chain depends on staying in submission order.
+            // `isBusy` and `isAwaitingTakeoverConfirmation` are held across the wait by design, so the UI
+            // stays in its "taking over" state for the whole ride rather than settling early on stale state.
+            // In-band, unlike every other response this model reads state out of: this payload is the
+            // acknowledgment of a mutation this client just made, and it carries the attachment snapshot
+            // naming this device the owner — the state the lines below decide the takeover's outcome
+            // from. The out-of-band ordering exists for a response that describes a session the stream has
+            // moved past, which this one cannot be; applying that rule here would let a stream payload
+            // that raced it refuse the snapshot on `emittedAt` alone and leave a successful takeover
+            // reading as unconfirmed.
+            //
+            // The accepted residual of applying in band: output the session emitted after it captured
+            // this response, but delivered before the response is submitted, is overwritten by this apply,
+            // which walks the delta baseline back to the screen the takeover was answered with. The next
+            // delta then fails its base-revision check and the paced resync repairs it, so what this costs
+            // is a transient stale window, not a stuck pane. It is preferred to the alternative: ordering
+            // the acknowledgment out of band would let those same racing payloads refuse the snapshot the
+            // lines below read the takeover's outcome from.
+            if let takeoverState { await applyLatestState(takeoverState, isOutOfBand: false, lifecycle: lifecycle) }
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
+            if !isOwner {
+                await refreshLatestState(
+                    timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation", lifecycle: lifecycle,
+                    clientID: clientID)
+            }
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
             errorMessage = nil
             if !isOwner {
                 isAwaitingTakeoverConfirmation = false
@@ -526,6 +753,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isAwaitingTakeoverConfirmation = false
             trace("takeover_success state=\(takeoverState == nil ? 0 : 1) owner=\(isOwner ? 1 : 0)")
         } catch {
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            guard automaticContext.map(isCurrentAutomaticTakeover) ?? true else { return }
             isAwaitingTakeoverConfirmation = false
             if Self.isTransientReconnectError(error) {
                 trace("takeover_transient_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
@@ -538,10 +767,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    private func takeOverTerminal(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
-        let takeoverState = try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
-        replaceCommandChannel()
-        return takeoverState
+    private func takeOverTerminal(clientID: String, timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
+        try await bridgeClient.takeOver(sessionID: session.id, clientID: clientID, timeout: timeout)
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
@@ -553,7 +780,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // to the backend and refresh so it serves the recording captured nearest this size. Applies
             // regardless of run state: the read-only recorded surface reports its viewport once mounted.
             viewportSize = resolved
-            Task { [weak self] in await self?.applyDemoViewportResize(columns: resolved.columns, rows: resolved.rows) }
+            let lifecycle = viewerAttachmentLifecycle
+            let clientID = remoteClient.id
+            Task { [weak self] in
+                await self?.applyDemoViewportResize(columns: resolved.columns, rows: resolved.rows, lifecycle: lifecycle, clientID: clientID)
+            }
             return
         }
         guard !isEndedState else { return }
@@ -576,17 +807,28 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// so the available (nil) owner state is fine to pass. A full-frame recording always replaces the
     /// prior frame in the state reducer, so the refreshed grid's frame renders without any revision
     /// bookkeeping.
-    private func applyDemoViewportResize(columns: Int, rows: Int) async {
+    ///
+    /// That last part is why this response alone is applied in-band: each recorded grid is an independent
+    /// capture with its own revisions and owner epoch, not one session's chain, so a viewport that shrinks
+    /// back to a smaller grid asks for a recording the out-of-band ordering would read as a delayed
+    /// response and refuse — leaving the wide recording on a narrow screen. Nothing races this read
+    /// either: the demo stream emits its recording once and never updates.
+    private func applyDemoViewportResize(columns: Int, rows: Int, lifecycle: UInt64, clientID: String) async {
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         do {
             try await bridgeClient.resize(
-                sessionID: session.id, clientID: remoteClient.id, columns: columns, rows: rows, ownerEpoch: currentOwnerEpoch, resizeSerial: nil,
+                sessionID: session.id, clientID: clientID, columns: columns, rows: rows, ownerEpoch: currentOwnerEpoch, resizeSerial: nil,
                 timeout: Self.stateRequestTimeout)
         } catch {
             // A demo resize only records the viewport in memory; a failure leaves the current frame in
             // place, so there is nothing to recover.
             trace("demo_viewport_resize_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
         }
-        await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "demo_viewport_resize")
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, applyToLatestState: false, reason: "demo_viewport_resize",
+            lifecycle: lifecycle, clientID: clientID)
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+        if let refreshedState { await applyLatestState(refreshedState, isOutOfBand: false, lifecycle: lifecycle) }
     }
 
     func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {
@@ -1262,20 +1504,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func scheduleReconnect(after delay: Duration) {
         guard !isStopping else { return }
         guard !isEndedState else { return }
+        reconnectAttemptGeneration &+= 1
+        let reconnectAttempt = reconnectAttemptGeneration
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
         trace("schedule_reconnect delay_ms=\(Self.traceDurationMilliseconds(delay)) silent=\(shouldReconnectSilently ? 1 : 0)")
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled else { return }
-            await self?.connect()
+            await self?.connect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt)
         }
     }
 
-    private func connect() async {
-        guard !isStopping else {
-            reconnectTask = nil
-            return
-        }
+    private func connect(lifecycle: UInt64, clientID: String, reconnectAttempt: UInt64) async {
+        guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
         if isEndedState {
             await loadEndedState()
             return
@@ -1286,28 +1529,54 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         if reconnectSilently { isConnecting = false } else { isConnecting = true }
         do {
             if shouldAttachBeforeSubscribing {
-                let attachAppearance = AppAppearanceStorage.current.resolvedThemeAppearance
-                try await bridgeClient.attach(sessionID: session.id, client: remoteClient, mode: .viewer, appearance: attachAppearance)
-                hasAttachedToSession = true
-                lastAppearanceSentToSession = attachAppearance
+                try await attachViewerForCurrentLifecycle()
+                guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
                 trace("connect_attach_success")
             }
-            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: clientID) { [weak self] payload in
                 guard let self else { return }
-                applyLatestState(payload)
+                guard self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+                // Hand off and return. This is the session's flush rate — up to a few hundred payloads a
+                // second under a streaming agent — and everything expensive about a payload (decoding the
+                // render update, applying it to the baseline, re-encoding the full frame) happens in the
+                // pipeline, off this actor.
+                submitLatestState(payload, isOutOfBand: false)
             } onDisconnect: { [weak self] error in
-                Task { @MainActor [weak self] in await self?.handleDisconnect(error) }
+                Task { @MainActor [weak self] in
+                    guard let self, self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                        return
+                    }
+                    await self.handleDisconnect(error)
+                }
+            }
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else {
+                handle.cancel()
+                return
             }
             streamHandle = handle
             errorMessage = nil
             reconnectTask = nil
             trace("connect_subscribe_success")
-            if !isOwner {
-                let refreshedState = await refreshLatestState(
-                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
-                if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
-            }
+            // Every connect bootstraps from a direct read, an owner's included. `isOwner` can only be true
+            // here on a reconnect — at first connect `latestState` is nil and the fallback snapshot cannot
+            // name this model's freshly minted client ID as the owner — and that is exactly the case that
+            // needs the read: an owner whose stream dropped and reconnected silently would otherwise resume
+            // the new subscription's deltas on the frame it still holds, with nothing confirming that
+            // baseline is still the one the daemon is sending deltas against. The reducer's guards would
+            // catch a divergent delta and drive a resync, but only after a wrong-frame window plus a round
+            // trip this read avoids. The response is ordered out-of-band, so one that lands behind the new
+            // subscription's initial refuses instead of regressing what the stream already delivered.
+            let refreshedState = await refreshLatestState(
+                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap", lifecycle: lifecycle,
+                clientID: clientID, isCurrent: { self.isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) }
+            )
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
+            // Only a non-owner settles `isConnecting` on a bootstrap that answered nothing: an owner
+            // reconnects silently, so it never raised the flag in the first place.
+            if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
         } catch {
+            guard isCurrentConnect(lifecycle: lifecycle, clientID: clientID, reconnectAttempt: reconnectAttempt) else { return }
             reconnectTask = nil
             isConnecting = false
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
@@ -1315,25 +1584,150 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    private func isCurrentConnect(lifecycle: UInt64, clientID: String, reconnectAttempt: UInt64) -> Bool {
+        !isStopping && viewerAttachmentLifecycle == lifecycle && remoteClient.id == clientID && reconnectAttemptGeneration == reconnectAttempt
+    }
+
+    private func isCurrentStateRefresh(lifecycle: UInt64, clientID: String) -> Bool {
+        !isStopping && viewerAttachmentLifecycle == lifecycle && remoteClient.id == clientID
+    }
+
+    private func isCurrentForegroundResume(lifecycle: UInt64, clientID: String, resumeCycle: UInt64) -> Bool {
+        !isStopping && isSceneActive && viewerAttachmentLifecycle == lifecycle && remoteClient.id == clientID && foregroundResumeCycle == resumeCycle
+            && isForegroundResumeEvaluationPending
+    }
+
+    /// Starts or joins this lifecycle's sole viewer attach. The operation captures the client and command
+    /// channel that created it, so stopping or restarting cannot let its late completion mutate a newer
+    /// lifecycle. Stop awaits a captured operation before detaching that same client and channel.
+    private func attachViewerForCurrentLifecycle() async throws {
+        guard !hasAttachedToSession else { return }
+        let operation: ViewerAttachmentOperation
+        if let existing = viewerAttachmentOperation {
+            operation = existing
+        } else {
+            let lifecycle = viewerAttachmentLifecycle
+            let client = remoteClient
+            let channel = commandChannel
+            let appearance = AppAppearanceStorage.current.resolvedThemeAppearance
+            let task = Task { [bridgeClient, sessionID = session.id] in
+                try await bridgeClient.attach(sessionID: sessionID, client: client, mode: .viewer, appearance: appearance, commandChannel: channel)
+            }
+            operation = ViewerAttachmentOperation(
+                lifecycle: lifecycle, clientID: client.id, commandChannel: channel, appearance: appearance, task: task)
+            viewerAttachmentOperation = operation
+        }
+
+        do { try await operation.task.value } catch {
+            if viewerAttachmentOperation?.lifecycle == operation.lifecycle { viewerAttachmentOperation = nil }
+            throw error
+        }
+        guard viewerAttachmentOperation?.lifecycle == operation.lifecycle else { return }
+        viewerAttachmentOperation = nil
+        guard viewerAttachmentLifecycle == operation.lifecycle, !isStopping, remoteClient.id == operation.clientID else { return }
+        hasAttachedToSession = true
+        lastAppearanceSentToSession = operation.appearance
+    }
+
     @discardableResult private func refreshLatestState(
-        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh"
+        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh",
+        lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
     ) async -> GhosttyRemoteSessionStatePayload? {
+        guard
+            case .accepted(let payload) = await refreshLatestStateOutcome(
+                timeout: timeout, ignoreTransientTimeout: ignoreTransientTimeout, applyToLatestState: applyToLatestState, reason: reason,
+                lifecycle: lifecycle, clientID: clientID, isCurrent: isCurrent)
+        else { return nil }
+        return payload
+    }
+
+    private func refreshLatestStateOutcome(
+        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh",
+        lifecycle: UInt64? = nil, clientID: String? = nil, isCurrent: (() -> Bool)? = nil
+    ) async -> StateRefreshOutcome {
+        let refreshLifecycle = lifecycle ?? viewerAttachmentLifecycle
+        let refreshClientID = clientID ?? remoteClient.id
+        let refreshIsCurrent = { self.isCurrentStateRefresh(lifecycle: refreshLifecycle, clientID: refreshClientID) && (isCurrent?() ?? true) }
         trace(
             "fetch_state_begin timeout_ms=\(Self.traceDurationMilliseconds(timeout)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) reason=\(reason)"
         )
         logPerformanceEvent(name: "explicit_state_refresh_begin", attributes: ["reason": reason])
         let startedAt = Date()
+        let appliedGenerationBeforeFetch = appliedStateCount
         do {
             let fetchedState = try await fetchTerminalState(timeout: timeout)
+            guard refreshIsCurrent() else {
+                trace("fetch_state_stale_lifecycle reason=\(reason)")
+                return .unavailable
+            }
             trace(
                 "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderSnapshot?.columns, rows: fetchedState.renderSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
             )
             logPerformanceEvent(
                 name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
                 attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
-            if applyToLatestState { applyLatestState(fetchedState) }
-            return fetchedState
+            // Same trade as the takeover apply: this await rides the reduction pipeline's strict FIFO
+            // behind whatever the live subscription queued ahead of it — for the connect bootstrap fetch,
+            // behind whatever the subscription flushed while the fetch was in flight — rather than jumping
+            // the queue, because reduction is off-main, keeps up with a single subscription's rate, and
+            // depends on seeing every payload in submission order to keep its delta baseline valid. Callers
+            // hold their own transitional flag across the wait by design (`isConnecting` for the connect
+            // bootstrap, `isBusy` for takeover confirmation), so the UI does not settle out of that state
+            // until the fetched payload has actually landed.
+            //
+            // Out-of-band: every fetch that reaches here — the connect bootstrap, a resync, the ownership
+            // handshake's owner-bootstrap read, the ended/stopped-state recovery refreshes — is a response
+            // describing the session as it was when it was asked, re-entering beside a subscription that
+            // never stopped. The reducer orders it against what it has already reduced, so one that was
+            // overtaken by the stream refuses rather than regressing the screen or the metadata.
+            if applyToLatestState {
+                let output = await applyLatestState(fetchedState, isOutOfBand: true, lifecycle: refreshLifecycle)
+                // A response the reducer refused whole judged its raw payload stale against a newer state
+                // the stream has already delivered. Returning the raw payload is what let callers derive
+                // state the apply itself refuses to derive — the ownership handshake seeding the owner
+                // render epoch (and with it the epoch every input and resize request quotes) from a
+                // superseded session generation, and the ended-state recovery reading a delayed exit
+                // report from a run that has already been relaunched as this session being dead. The
+                // ordinary wrapper therefore still answers nil. Foreground ownership is the sole caller
+                // that can use the accepted stored payload, and only when a stream output actually landed
+                // after this read started.
+                if output.reduction?.isRefusedOutOfBandPayload == true {
+                    trace("fetch_state_refused reason=\(reason)")
+                    guard let storedPayload = output.reduction?.storedPayload, appliedStateCount > appliedGenerationBeforeFetch + 1 else {
+                        return .unavailable
+                    }
+                    return .superseded(storedPayload)
+                }
+                // What a caller gets back is the reduction's own payload, not the response as it arrived:
+                // it is the response as the reducer actually admitted it, its render update resolved to
+                // the materialized frame where the frame applied and stripped where it did not. A partial
+                // refusal is what makes that distinction load-bearing. A frame at or below the revision
+                // this client already retains in the same owner epoch is refused on its own while the
+                // payload's metadata is ordered separately and genuinely merges, so
+                // `isRefusedOutOfBandPayload` stays false and the check above lets the response through —
+                // with the refused frame still on it. Read from the raw response, that frame is what the
+                // ownership handshake would seed the owner render epoch's bootstrap snapshot from; read
+                // from the reduced payload there is no screen on it at all, and the handshake falls back
+                // to `latestState`, which holds the newer frame the refusal was measured against.
+                //
+                // A nil reduction is no more readable than a refusal, so it answers the same way. The
+                // pipeline reduces every payload it is handed except a `clipboard_write`, which carries an
+                // event and no state — and no `.state` response is stamped with that reason (see
+                // `applyLatestState`), so this is unreachable rather than a fallback. Returning the
+                // unreduced response here would be the one way back to handing out a frame nothing
+                // admitted.
+                guard let reducedPayload = output.reduction?.payload else {
+                    trace("fetch_state_unreduced reason=\(reason)")
+                    return .unavailable
+                }
+                return .accepted(reducedPayload)
+            }
+            return .accepted(fetchedState)
         } catch {
+            guard refreshIsCurrent() else {
+                trace("fetch_state_stale_lifecycle_failure reason=\(reason)")
+                return .unavailable
+            }
             trace(
                 "fetch_state_failure error=\(sanitizedTraceDetail(error.localizedDescription)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) reason=\(reason)"
             )
@@ -1341,16 +1735,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 name: "explicit_state_refresh_failure", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: ["reason": reason])
             if ignoreTransientTimeout, Self.isTransientReconnectError(error) {
                 errorMessage = nil
-                return nil
+                return .unavailable
             }
-            if handleAuthenticationFailure(error) { return nil }
+            if handleAuthenticationFailure(error) { return .unavailable }
             if let unavailableMessage = unavailableMessage(for: error) {
                 isSessionUnavailable = true
                 errorMessage = unavailableMessage
-                return nil
+                return .unavailable
             }
             errorMessage = error.localizedDescription
-            return nil
+            return .unavailable
         }
     }
 
@@ -1381,7 +1775,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return
         }
         if let error {
-            if handleAuthenticationFailure(error) { return }
+            let isTransient = Self.isTransientReconnectError(error)
+            // Transient first: a stream the OS tore down while the app was suspended comes back dead and
+            // reconnects immediately, so it must never be read as a revoked pairing and sent to the
+            // re-pair screen. Only a failure that is not already known-retryable is offered to the
+            // authentication classification.
+            if !isTransient, handleAuthenticationFailure(error) { return }
             if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") { return }
             if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") { return }
             if let unavailableMessage = unavailableMessage(for: error) {
@@ -1389,14 +1788,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 errorMessage = unavailableMessage
                 return
             }
-            if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
+            if isTransient, latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         }
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
     private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
-        if handleAuthenticationFailure(error) { return }
+        let isTransient = Self.isTransientReconnectError(error)
+        // Transient first, for the same reason as `handleDisconnect`: a connect that failed on a network
+        // still settling after a foreground resume is retried, not read as revocation.
+        if !isTransient, handleAuthenticationFailure(error) { return }
         if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") { return }
         if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") { return }
         if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") { return }
@@ -1405,16 +1807,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             errorMessage = unavailableMessage
             return
         }
-        if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
+        if isTransient, latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
     private func recoverEndedStateIfLiveStreamIsMissing(_ error: Error, reason: String) async -> Bool {
         guard Self.isMissingLiveStateStreamError(error), !isStopping else { return false }
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
         trace("missing_live_stream_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
-        let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason)
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason, lifecycle: lifecycle, clientID: clientID)
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
         isConnecting = false
         guard let refreshedState else { return false }
         if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
@@ -1444,10 +1850,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func recoverEndedStateAfterTerminalStopped(_ error: Error, reason: String) async -> Bool {
         guard Self.isTerminalNoLongerLiveError(error), !isStopping else { return false }
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
         trace("terminal_stopped_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
-        let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason)
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason, lifecycle: lifecycle, clientID: clientID)
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return false }
         isConnecting = false
         guard let refreshedState else { return false }
         if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
@@ -1486,10 +1896,38 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private var activeOwnerDisplayLabel: String? {
-        guard let ownerAttachment = attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
+        guard let ownerAttachment = activeOwnerAttachment else { return nil }
         return attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.deviceName ?? attachmentSnapshot.clients
             .first(where: { $0.id == ownerAttachment.clientID })?.identity.hostName
             ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.label
+    }
+
+    private func finishForegroundStateEvaluation(resumeCycle: UInt64, acceptedState: GhosttyRemoteSessionStatePayload?) {
+        guard foregroundResumeCycle == resumeCycle, isForegroundResumeEvaluationPending, isSceneActive else { return }
+        isForegroundResumeEvaluationPending = false
+        guard let acceptedState else {
+            trace("foreground_resume_state_evaluation_finished_without_accepted_state cycle=\(resumeCycle)")
+            return
+        }
+        let fetchedRuntimeState = acceptedState.runtimeState?.state ?? session.state
+        if fetchedRuntimeState == .starting {
+            hasAttemptedAutomaticTakeover = false
+            trace("foreground_resume_starting_state cycle=\(resumeCycle)")
+            return
+        }
+        guard fetchedRuntimeState == .running else {
+            hasAttemptedAutomaticTakeover = true
+            trace("foreground_resume_nonrunning_state cycle=\(resumeCycle)")
+            return
+        }
+        let fetchedOwnerClientID = acceptedState.attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
+        guard fetchedOwnerClientID != remoteClient.id else {
+            hasAttemptedAutomaticTakeover = true
+            trace("foreground_resume_owner_confirmed cycle=\(resumeCycle)")
+            return
+        }
+        trace("foreground_resume_rearm_auto_takeover cycle=\(resumeCycle) ownerless=\(fetchedOwnerClientID == nil ? 1 : 0)")
+        beginAutomaticTakeover()
     }
 
     private func attemptAutomaticTakeoverIfNeeded() {
@@ -1497,14 +1935,42 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // the attempt anyway.
         guard !isDemoMode else { return }
         guard !isEndedState else { return }
+        guard isSceneActive else { return }
+        guard !isForegroundResumeEvaluationPending else { return }
         guard !hasAttemptedAutomaticTakeover else { return }
         guard !isOwner else { return }
         guard !isSessionUnavailable else { return }
         let state = latestState?.runtimeState?.state ?? session.state
         guard state == .running else { return }
+        beginAutomaticTakeover()
+    }
+
+    private func beginAutomaticTakeover() {
+        guard !isStopping, isSceneActive else { return }
+        cancelAutomaticTakeover()
+        let context = AutomaticTakeoverContext(
+            generation: automaticTakeoverGeneration, lifecycle: viewerAttachmentLifecycle, clientID: remoteClient.id)
         hasAttemptedAutomaticTakeover = true
         trace("auto_takeover_begin")
-        Task { [weak self] in await self?.takeOver() }
+        automaticTakeoverTask = Task { [weak self] in
+            guard let self, self.isCurrentAutomaticTakeover(context) else { return }
+            await self.takeOver(automaticContext: context)
+            if self.automaticTakeoverGeneration == context.generation { self.automaticTakeoverTask = nil }
+        }
+    }
+
+    private func cancelAutomaticTakeover() {
+        automaticTakeoverGeneration &+= 1
+        guard let task = automaticTakeoverTask else { return }
+        automaticTakeoverTask = nil
+        task.cancel()
+        isBusy = false
+        isAwaitingTakeoverConfirmation = false
+    }
+
+    private func isCurrentAutomaticTakeover(_ context: AutomaticTakeoverContext) -> Bool {
+        !Task.isCancelled && !isStopping && isSceneActive && automaticTakeoverGeneration == context.generation
+            && viewerAttachmentLifecycle == context.lifecycle && remoteClient.id == context.clientID
     }
 
     private var isWithinOwnerRecoveryGracePeriod: Bool {
@@ -1599,6 +2065,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func synchronizeOwnershipState(targetViewportSize: (columns: Int, rows: Int)?) async {
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
         let previousEmittedAt = latestState?.emittedAt
         let previousScreenRevision = latestState?.screenStateRevision
         let previousRuntimeSize = latestState.map { ($0.runtimeState?.columns, $0.runtimeState?.rows) }
@@ -1612,7 +2081,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     resizeSerial &+= 1
                     let currentResizeSerial = resizeSerial
                     try await bridgeClient.resize(
-                        sessionID: session.id, clientID: remoteClient.id, columns: targetViewportSize.columns, rows: targetViewportSize.rows,
+                        sessionID: session.id, clientID: clientID, columns: targetViewportSize.columns, rows: targetViewportSize.rows,
                         ownerEpoch: currentOwnerEpoch, resizeSerial: currentResizeSerial, timeout: Self.inputRequestTimeout)
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                 } catch {
@@ -1625,6 +2094,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                         errorMessage = error.localizedDescription
                     }
                 }
+                guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             } else {
                 lastSentResizeSize = targetViewportSize
                 stateWaitTargetViewportSize = nil
@@ -1636,7 +2106,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let streamedState = await awaitOwnerStateFromStream(
             targetViewportSize: stateWaitTargetViewportSize, previousEmittedAt: previousEmittedAt, previousScreenRevision: previousScreenRevision,
             previousRuntimeSize: previousRuntimeSize)
-        guard isOwner else { return }
+        guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID), isOwner else { return }
         if ownerRenderEpochState == nil {
             if streamedState != nil {
                 trace("ownership_sync_using_streamed_state")
@@ -1649,7 +2119,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 return
             }
             let refreshedState = await refreshLatestState(
-                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "owner_bootstrap_refresh")
+                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "owner_bootstrap_refresh", lifecycle: lifecycle,
+                clientID: clientID)
+            guard isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
             trace(
                 "ownership_sync_using_fetched_state render_update=\(refreshedState?.renderUpdate == nil ? 0 : 1) output_bytes=\(refreshedState?.outputByteCount ?? 0)"
             )
@@ -1729,6 +2201,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func handleAuthenticationFailure(_ error: Error) -> Bool {
         guard let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) else { return false }
+        cancelAutomaticTakeover()
         isStopping = true
         isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
@@ -1740,6 +2213,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
+        cancelTrailingRenderUpdateResync()
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false
@@ -1827,6 +2301,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    private static func isAttachmentNotFound(_ error: Error) -> Bool {
+        guard case SpacesDeviceAPIClientError.requestFailed(_, let code) = error else { return false }
+        return code == .notFound
+    }
+
     /// The errno behind a failure, whichever way it is reported. Network.framework raises `NWError.posix`,
     /// which bridges to its own error domain rather than `NSPOSIXErrorDomain` — and the live-state stream
     /// is an `NWConnection`, so every errno it reports arrives that way. Reading only the POSIX domain
@@ -1866,10 +2345,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         pasteboard.string = clipboardWrite.text
     }
 
-    private var activeOwnerClientID: String? {
+    private var activeOwnerAttachment: TerminalAttachment? {
         guard !isEndedState else { return nil }
-        return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
+        return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })
     }
+
+    private var activeOwnerClientID: String? { activeOwnerAttachment?.clientID }
 
     private func activeAttachmentExists(in snapshot: TerminalSessionAttachmentSnapshot?) -> Bool {
         guard let snapshot else { return false }
@@ -1884,28 +2365,127 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             outputByteCount: payload.outputByteCount, outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: nil)
     }
 
-    func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
-        // The one-shot runs first and unconditionally: a clipboard write is an event, not state, and the
-        // direct `.state` refresh runs alongside the live subscription, so a refresh can install newer
-        // state before an older stream event carrying the copy arrives.
+    /// Hands one payload to the reduction pipeline without waiting for it to be applied. The live
+    /// subscription's callback uses this: it runs at the session's flush rate, and nothing it does next
+    /// depends on the payload having landed.
+    ///
+    /// - Parameter isOutOfBand: True for a payload that did not arrive on the session's stream — the
+    ///   response to a direct `.state` read, which the reducer orders against what it has already reduced
+    ///   so a delayed response cannot walk this viewer back to a screen it is already past. Stated by every
+    ///   call site rather than defaulted: nothing on the wire distinguishes a fetch response from a
+    ///   subscriber's initial, and the routes into this model disagree — the takeover response is a read
+    ///   answer that must nonetheless apply in-band (see `takeOver`).
+    func submitLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, lifecycle: UInt64? = nil) {
+        submittedStateCount += 1
+        stateSubmissionLifecycles[submittedStateCount] = lifecycle ?? viewerAttachmentLifecycle
+        statePipeline.submit(payload, isOutOfBand: isOutOfBand)
+    }
+
+    /// Submits `payload` and returns the pipeline output that accounted for it, once that apply has run.
+    /// The routes that read this model's own state immediately afterwards use this rather than
+    /// `submitLatestState`: takeover asks whether it actually became the owner, and the connect
+    /// bootstrap asks whether it is still connecting, and an apply that had not landed yet would answer
+    /// both from the state the payload was meant to replace.
+    ///
+    /// The returned output is what the fetch route reads the reduction's verdict from
+    /// (`refreshLatestState`), so how exactly it corresponds to `payload` matters. In general an apply
+    /// stands for itself plus every submission the mailbox coalesced into it, so a waiter can be released
+    /// by a later output than its own. It cannot happen here: a `.state` response is stamped `initial`
+    /// (a live session's export) or `terminated` (an ended one's), and neither is output-shaped, which
+    /// makes it a coalescing barrier in both directions — `ApplyMailbox.mayCollapse` requires the
+    /// incoming output AND the pending one to be coalescible. So a fetch's output covers exactly its own
+    /// submission, and the verdict read off it is that payload's own.
+    ///
+    /// The waiter is registered before the submit rather than after, so there is no window to guard: this
+    /// body runs synchronously on the main actor (`withCheckedContinuation` inherits the caller's
+    /// isolation and nothing here suspends), and the mailbox drain that resumes waiters always hops
+    /// through a `Task`, so no apply can land between the two lines below.
+    @discardableResult func applyLatestState(_ payload: GhosttyRemoteSessionStatePayload, isOutOfBand: Bool, lifecycle: UInt64? = nil) async
+        -> TerminalRemoteStateReductionOutput
+    {
+        let target = submittedStateCount + 1
+        return await withCheckedContinuation { continuation in
+            stateApplyWaiters.append((target: target, continuation: continuation))
+            submitLatestState(payload, isOutOfBand: isOutOfBand, lifecycle: lifecycle)
+        }
+    }
+
+    /// Accounts one apply against every submission it stands for, and releases whoever was waiting on
+    /// those submissions with the output that covered them. Runs for every output the pipeline hands
+    /// back, including the ones a stopped model drops, so a stop can never strand an `applyLatestState`
+    /// caller.
+    private func noteStateApplied(_ output: TerminalRemoteStateReductionOutput) {
+        appliedStateCount += UInt64(output.coalescedAwayCount) + 1
+        let applied = appliedStateCount
+        stateSubmissionLifecycles = stateSubmissionLifecycles.filter { $0.key > applied }
+        guard !stateApplyWaiters.isEmpty else { return }
+        let released = stateApplyWaiters.filter { $0.target <= applied }
+        stateApplyWaiters.removeAll { $0.target <= applied }
+        for waiter in released { waiter.continuation.resume(returning: output) }
+    }
+
+    /// Applies one payload the pipeline reduced. Everything left here needs the main actor: the model's
+    /// observable state, the clipboard one-shot, the resync request, and the metrics.
+    private func applyReducedState(_ output: TerminalRemoteStateReductionOutput) {
+        defer { noteStateApplied(output) }
+        let incomingPayload = output.incomingPayload
+        // The one-shot runs before lifecycle rejection: a clipboard write is an event, not session state,
+        // and the direct `.state` refresh runs alongside the live subscription, so a refresh can install
+        // newer state before an older stream event carrying the copy arrives. It reads ownership from the
+        // state installed so far, which is why it runs ahead of the `latestState` move further down. A
+        // payload reduced after `beginStop` still carries a copy the user made before navigation, so the
+        // write must land even though its stale session state will not.
         applyClipboardWrite(from: incomingPayload)
+        let applicationSubmission = appliedStateCount + UInt64(output.coalescedAwayCount) + 1
+        let applicationLifecycle = stateSubmissionLifecycles[applicationSubmission]
+        guard applicationLifecycle == nil || applicationLifecycle == viewerAttachmentLifecycle else {
+            trace("drop_state_from_stale_lifecycle submission=\(applicationSubmission)")
+            return
+        }
+        // A stopped model has already released the stream, the queued input, and the ownership state this
+        // would touch; a payload the pipeline was still reducing when `beginStop` ran must land nowhere
+        // rather than resurrect an attachment the stop tore down. Ordering is unaffected: the pipeline
+        // keeps chaining, so a later `start()` resumes from the same reduction chain.
+        guard !isStopping else { return }
         // A `clipboard_write` payload carries nothing else to apply — the reason exports no screen state,
         // and its runtime/attachment snapshot is a repeat of the output turn that carried the escape
-        // sequence — so it is never reduced or installed. Reducing an out-of-order one would rewind
+        // sequence — so the pipeline reduces nothing for it. Reducing an out-of-order one would rewind
         // `latestState` to the event's timestamp and could hand ownership back to whoever held it then.
-        guard incomingPayload.reason != TerminalRemoteSessionStateReason.clipboardWrite else { return }
+        guard let reduction = output.reduction else { return }
         let applyStartedAt = Date()
-        let decodeStartedAt = Date()
-        let reduction = stateReducer.reduce(incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
         let payload = reduction.payload
-        let decodedFrame = reduction.frameToApply
-        let decodedUpdate = reduction.decodedUpdate
-        let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
-        requestRenderUpdateResyncIfNeeded(reduction)
+        // Covers a resync inherited from an output the apply mailbox coalesced away: the superseded frame
+        // is not worth drawing, but the full frame its failed delta could not build is.
+        //
+        // The ordering the resync is owed at comes from this output's own decoded update even when the
+        // request was inherited from an output the mailbox coalesced away: the surviving output is never
+        // older than the one it replaced, so its target is at or past the failure's, and an output with no
+        // decodable target records `unknown`, which no frame retires.
+        if output.requestsResync { requestRenderUpdateResync(owedBy: .forFailedUpdate(reduction.decodedUpdate)) }
+        // A materialized frame that covers the failure the pending resync was armed for repaired the chain,
+        // so that resync is no longer owed. `frameToApply` is the signal rather than the stored payload's
+        // snapshot: the stored payload carries a frame forward through every merge, including the frameless
+        // payloads that follow a break, while this is non-nil only for a payload whose own render update
+        // decoded and applied. Covering the failure is what makes the retirement sound — a fetch answered
+        // before the failure was owed lands a frame that applies and yet leaves the client behind the
+        // session (see `TerminalResyncOwedOrdering`). Ordered after the request above so an output that
+        // both carries a frame and inherits a coalesced-away resync retires that request rather than
+        // leaving it armed.
+        if let frame = reduction.frameToApply, let owed = owedRenderUpdateResyncOrdering,
+            owed.isSatisfied(byFrameOwnerEpoch: frame.ownerEpoch, sessionRevision: frame.sessionRevision)
+        {
+            cancelTrailingRenderUpdateResync()
+        }
         latestState = reduction.storedPayload
-        if payload.attachmentSnapshot != nil {
+        // A payload the reducer refused whole carries the attachment snapshot as it was when the `.state`
+        // read was answered, which is before whatever superseded it — a handoff, or this device's own
+        // attach. Reading it here would rewrite this client's attachment from that pre-handoff snapshot
+        // (leaving the next dismissal with nothing to detach, and the next connect free to skip attaching)
+        // and clear a takeover this payload has no say over. `storedPayload`, which every other line below
+        // reads through `latestState`, is the previous state untouched, so the refusal changes nothing.
+        if !reduction.isRefusedOutOfBandPayload, payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
@@ -1914,6 +2494,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             streamHandle = nil
             reconnectTask?.cancel()
             reconnectTask = nil
+            cancelTrailingRenderUpdateResync()
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()
@@ -1938,7 +2519,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             isSynchronizingOwnership = false
         }
         let isOwnerAfterMerge = isOwner
-        if isOwnerAfterMerge, payload.renderSnapshot != nil {
+        // Same rule for the screen: a refused payload's render snapshot belongs to a session generation
+        // the reducer just refused, so feeding it to the owner render epoch would repaint this viewer with
+        // stale geometry the pane has already moved past.
+        if !reduction.isRefusedOutOfBandPayload, isOwnerAfterMerge, payload.renderSnapshot != nil {
             if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }
         }
         if isOwnerAfterMerge, wasTakingOver {
@@ -1947,8 +2531,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
+            // The frame this model holds was exported for the ownership it just lost, so drop it from the
+            // state the viewer presents. Only this main-actor mirror is cleared; the pipeline's reduction
+            // chain is left alone. That is not because `merged(with:)` scrubs the render update out of the
+            // chain across the handoff — it does not: `ownerChanged` only gates the one merge where the
+            // incoming payload itself carries the new attachment snapshot, so the pipeline's own
+            // `previousPayload` can still be carrying a render update stamped with the old owner epoch, and
+            // the very next frameless payload merges that value straight back in (`ownerChanged` reads
+            // false on every merge afterwards, since the attachment snapshot no longer changes). What
+            // actually keeps a stale frame off the screen is the owner-epoch gate on both ends of the wire:
+            // the daemon's `GhosttyRenderUpdateFactory.canDelta` refuses to build a delta once the export
+            // baseline's `ownerEpoch` no longer matches the frame's, forcing the first export after a
+            // handoff to a full frame (GhosttyRenderUpdate.swift:326-329), and `GhosttyRenderUpdateApplier`
+            // enforces the same equality when applying a delta on this client, so a delta stamped for an
+            // epoch this client's baseline never saw throws `ownerEpochMismatch` and drives a resync
+            // instead of drawing it.
             if wasOwner, !isEndedState, let latestState { self.latestState = payloadByClearingScreenState(latestState) }
-            if wasOwner { stateReducer.resetRenderUpdateBaseline() }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil
@@ -1963,27 +2561,35 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isSessionUnavailable = false
         errorMessage = nil
         isConnecting = false
-        let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
-        var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
-            outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
-            dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
-            dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
-            renderMode: renderMode, frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
-            targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
-            appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
-            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt), operationCount: decodedUpdate?.operationCount,
-            changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
-            fullFrameFallbackReason: decodedUpdate?.fallbackReason, droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
-            resyncCount: reduction.didRequestResync ? 1 : nil)
-        renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
-        renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
-        renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-        renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
-        renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
-        logPerformanceEvent(
-            name: "render_frame_payload_receive", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-            count: incomingPayload.renderUpdate?.count, attributes: renderUpdateAttributes)
+        // ~20 string conversions per payload on a path that runs at the session's flush rate, so the
+        // dictionary is built only when something is listening. `emittedAt` is parsed inside the same
+        // gate for the same reason: it feeds nothing but these metrics.
+        if SpacesDeviceTerminalPerformanceLogger.isEnabled() {
+            let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
+            let decodedFrame = reduction.frameToApply
+            let decodedUpdate = reduction.decodedUpdate
+            var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
+                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: output.reduceMS,
+                outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+                dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
+                dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
+                renderMode: renderMode, frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
+                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
+                applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt), operationCount: decodedUpdate?.operationCount,
+                changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
+                fullFrameFallbackReason: decodedUpdate?.fallbackReason, droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
+                resyncCount: output.requestsResync ? 1 : nil)
+            renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
+            renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
+            renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
+            renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
+            // The payloads this apply superseded report nothing of their own; this is their trace.
+            renderUpdateAttributes["coalesced_applies"] = String(output.coalescedAwayCount)
+            logPerformanceEvent(
+                name: "render_frame_payload_receive", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
+                count: incomingPayload.renderUpdate?.count, attributes: renderUpdateAttributes)
+        }
         trace(
             "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderSnapshot?.columns, rows: latestState?.renderSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))"
         )
@@ -1994,10 +2600,97 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         attemptAutomaticTakeoverIfNeeded()
     }
 
-    private func requestRenderUpdateResyncIfNeeded(_ reduction: TerminalRemoteStateReductionResult) {
-        guard reduction.didRequestResync else { return }
+    /// Asks the daemon for a full frame after a delta failed to apply against the pipeline's baseline.
+    /// The fetched payload re-enters through the same pipeline, so it cannot overtake a delta already
+    /// queued behind it, and it is ordered there as an out-of-band response.
+    ///
+    /// Each read costs the daemon a unicast full-frame export, and a session that keeps producing
+    /// unappliable payloads (a device-side restart window, say) asks for one per payload, so the reads
+    /// are paced: an unthrottled retry loop floods the daemon without converging, and the stream's own
+    /// recovery — the forced full-frame broadcast — needs room to land in between.
+    ///
+    /// The throttle paces requests; it never discards one. A `.state` read can answer with no render
+    /// update at all — the session exports none while its capture holds nothing visible — and it stamps
+    /// the throttle just the same, so the next resync can fall inside a window that repaired nothing.
+    /// Dropping it there would leave a session that emits one delta and goes quiet showing a stale grid
+    /// until some unrelated later event, so a suppressed request arms exactly one delayed retry at the
+    /// window boundary instead.
+    private func requestRenderUpdateResync(owedBy ordering: TerminalResyncOwedOrdering) {
+        if let lastRenderUpdateResyncAt {
+            let elapsed = Date().timeIntervalSince(lastRenderUpdateResyncAt)
+            if elapsed < renderUpdateResyncInterval {
+                scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval - elapsed, owedBy: ordering)
+                return
+            }
+        }
+        // The open-throttle path owes the same guarantee as the throttled one: a resync read already in
+        // flight was issued before this resync was owed, so it can answer with no render update and repair
+        // nothing. Letting it stand in for this request would consume the request unsent, so arm the
+        // trailing retry instead, exactly as a throttled request does.
+        guard !isRenderUpdateResyncFetchInFlight else {
+            scheduleTrailingRenderUpdateResync(after: renderUpdateResyncInterval, owedBy: ordering)
+            return
+        }
+        sendRenderUpdateResyncFetch()
+    }
+
+    /// Arms the one delayed request a throttled resync is owed, and records the ordering that request has
+    /// to be answered at. Coalesced: a second suppressed request while this is pending is already covered
+    /// by the same timer, so it must not stack a competing one — it only raises the debt to whichever
+    /// failure is later (`TerminalResyncOwedOrdering.merged`).
+    ///
+    /// Cancelled when a materialized frame covering the recorded ordering lands (`applyReducedState`),
+    /// when the session ends, on stop, and when a revoked pairing tears the viewer down
+    /// (`handleAuthenticationFailure`) — so a viewer the user has left, one whose pane is already
+    /// repaired, or one the device no longer authenticates, never dials the device.
+    private func scheduleTrailingRenderUpdateResync(after delay: TimeInterval, owedBy ordering: TerminalResyncOwedOrdering) {
+        owedRenderUpdateResyncOrdering = owedRenderUpdateResyncOrdering?.merged(with: ordering) ?? ordering
+        armTrailingRenderUpdateResync(after: delay)
+    }
+
+    /// The timer behind a request already recorded as owed.
+    ///
+    /// The request stays owed until a fetch genuinely starts. A resync read already in flight refuses this
+    /// one, and that read was issued before this resync was owed, so treating the refusal as delivery is
+    /// how the owed request would go missing. A retry that lands on one waits out another full window
+    /// instead — no spin, the pacing is unchanged since nothing was sent, and the recorded ordering rides
+    /// along untouched because the same debt is still outstanding.
+    private func armTrailingRenderUpdateResync(after delay: TimeInterval) {
+        guard pendingRenderUpdateResyncTask == nil else { return }
+        pendingRenderUpdateResyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            pendingRenderUpdateResyncTask = nil
+            guard !isRenderUpdateResyncFetchInFlight else {
+                armTrailingRenderUpdateResync(after: renderUpdateResyncInterval)
+                return
+            }
+            owedRenderUpdateResyncOrdering = nil
+            sendRenderUpdateResyncFetch()
+        }
+    }
+
+    private func cancelTrailingRenderUpdateResync() {
+        pendingRenderUpdateResyncTask?.cancel()
+        pendingRenderUpdateResyncTask = nil
+        owedRenderUpdateResyncOrdering = nil
+    }
+
+    /// Stamps the throttle and sends the resync read. Both the stamp and the in-flight mark are set before
+    /// the request is started, so a burst of failing payloads arriving in the same turn as this one sees
+    /// the window already open rather than each sending a read of its own.
+    private func sendRenderUpdateResyncFetch() {
+        lastRenderUpdateResyncAt = Date()
+        isRenderUpdateResyncFetchInFlight = true
+        let lifecycle = viewerAttachmentLifecycle
+        let clientID = remoteClient.id
         Task { [weak self] in
-            await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
+            guard let self else { return }
+            await self.refreshLatestState(
+                timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync", lifecycle: lifecycle,
+                clientID: clientID)
+            guard self.isCurrentStateRefresh(lifecycle: lifecycle, clientID: clientID) else { return }
+            self.isRenderUpdateResyncFetchInFlight = false
         }
     }
 
@@ -2112,25 +2805,58 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return "ended|\(screenRevision)|\(snapshot.columns)x\(snapshot.rows)|\(latestState?.emittedAt ?? "unknown")"
     }
 
+    /// Applies one reduction output exactly as the pipeline's mailbox would, so the consumption rules —
+    /// which payload's state is installed, whose resync request is honored, what a stopped model drops —
+    /// can be asserted against a constructed output instead of against a reduce task's timing.
+    func applyReducedStateForTesting(_ output: TerminalRemoteStateReductionOutput) {
+        // Keeps `submittedStateCount` in step with the `appliedStateCount` bump `applyReducedState` makes
+        // below, so an `applyLatestState` awaited later in the same test still resolves against a real
+        // submission instead of resolving early because the counters drifted apart.
+        submittedStateCount += UInt64(output.coalescedAwayCount) + 1
+        stateSubmissionLifecycles[submittedStateCount] = viewerAttachmentLifecycle
+        applyReducedState(output)
+    }
+
     /// Injects an owner-interactive state so composer/input send sequencing can be exercised without a
     /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).
     /// Sets the same preconditions the real owner-bootstrap path establishes: this client owns the
     /// session, input readiness is confirmed, and an owner render epoch carries `ownerEpoch`.
-    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) {
+    ///
+    /// Submitted through `applyLatestState` rather than assigned to `latestState` directly, so the
+    /// reduction pipeline's own chain is seeded with this payload. An unseeded chain has no
+    /// `previousPayload` to merge the next real submission against, so that submission would replace
+    /// this owner attachment outright instead of carrying it forward — silently dropping ownership out
+    /// from under whatever the test does next, rather than raising anything a caller would notice.
+    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) async {
         let ownerAttachment = TerminalAttachment(sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
         let runtime = TerminalSessionRuntimeState(
             sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
-        latestState = GhosttyRemoteSessionStatePayload(
+        let payload = GhosttyRemoteSessionStatePayload(
             sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-01-01T00:00:00Z", sessionStateRevision: nil,
             sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
             workingDirectory: session.workingDirectory, outputByteCount: 0)
+        await applyLatestState(payload, isOutOfBand: false)
+        // A real apply that turns this client into the owner (`wasOwner` false going in) schedules the
+        // live ownership-synchronization round trip the owner-bootstrap path always runs after taking
+        // over — see the `scheduleOwnershipSynchronization()` call in `applyReducedState`. That round
+        // trip needs a subscribe stream and daemon responses this helper does not set up, and while it
+        // is pending, `phase` reads `.ownerSynchronizing` rather than `.ownerInteractive`, so
+        // `acceptsInput` is false and every send silently no-ops. This helper's whole point is handing
+        // the caller an owner that is already past that handshake, so the scheduled work is cancelled
+        // immediately behind it rather than left to race whatever the test does next.
+        ownershipSynchronizationTask?.cancel()
+        ownershipSynchronizationTask = nil
+        isOwnershipSynchronizationScheduled = false
+        isSynchronizingOwnership = false
+        needsOwnershipSynchronizationAfterCurrentRun = false
+        // The payload above carries no render update, so the apply above never sets an owner render
+        // epoch on its own; that piece is still injected directly, same as before.
         let bootstrapSnapshot = GhosttyTerminalSnapshot(
             columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0,
             cells: [])
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: session.id, id: "owner|test", ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
-        hasAttachedToSession = true
         hasAttemptedAutomaticTakeover = true
         hasConfirmedOwnerInputReadiness = true
         isInputSurfaceReady = true

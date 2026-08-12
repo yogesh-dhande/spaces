@@ -8,8 +8,8 @@ import spacesdatabase
     import SQLite3
 #endif
 
-/// Behavior coverage for the automations schema upgrade (the v11→v12 step, reached here from a v7
-/// database that first climbs main's v7→v11 steps): the `terminal_sessions` rebuild that makes
+/// Behavior coverage for the automations schema upgrade (the v13→v14 step, reached here from a v7
+/// database that first climbs every intermediate migration): the `terminal_sessions` rebuild that makes
 /// `workspace_id` optional and adds `automation_run_id`, plus the new `automations`/`automation_runs`
 /// tables. Asserts every existing terminal-session row is carried forward untouched (workspace_id
 /// intact, new column NULL), the unique `root_directory` constraint survives the rebuild, and a

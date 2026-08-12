@@ -66,7 +66,6 @@ extension OrchestratorTests {
         [
             ("runConfiguredProcess", { _ = try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processKey: "api") }),
             ("restartWorkspaceProcess", { try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: "process-deleting") }),
-            ("launchAgentLauncher", { _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: "codex") }),
             ("reserveWorkspaceTerminalLaunch", { _ = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID) }),
             (
                 "createWorkspaceTerminalSession",
@@ -958,7 +957,7 @@ extension OrchestratorTests {
         let childPIDWritten = DispatchSemaphore(value: 0)
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
+            builtInTerminalWindowOpener: { sessionID, mode, _ in
                 XCTAssertEqual(mode, .owner)
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
@@ -1099,15 +1098,20 @@ extension OrchestratorTests {
 
     // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
 
-    // Tests launch workspace throws when runtime indicators exist by arranging representative inputs and asserting the expected result.
-    func testLaunchWorkspaceThrowsWhenRuntimeIndicatorsExist() throws {
+    /// Start is convergent (issue #438): tracked runtime that is not part of the workspace's configured
+    /// processes (here, a process row with no matching template) never blocks or is touched by launch.
+    func testLaunchWorkspaceWithUnconfiguredRuntimeIndicatorsIsAConvergentNoOp() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                id: "unconfigured-process", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
                 terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
+        try orchestrator.launchWorkspace(workspaceID: workspace.id)
+
+        let processes = try store.runningProcesses(workspaceID: workspace.id)
+        XCTAssertEqual(processes.map(\.id), ["unconfigured-process"], "an untracked-by-config process is left alone, not restarted")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
     }
 
     // Tests launch workspace waits for pending setup to finish by arranging a deferred setup run and asserting launch completes afterwards.

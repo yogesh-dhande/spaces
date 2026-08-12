@@ -81,6 +81,208 @@
             }
         }
 
+        /// Lets a test install the response its bridge client should serve after the model that owns that
+        /// client exists — the response has to be built from the model's own client identity.
+        private actor TerminalStateResponseHolder {
+            private var response = SpacesDeviceAPIResponse(ok: false, message: "no state installed")
+
+            func set(_ response: SpacesDeviceAPIResponse) { self.response = response }
+
+            func current() -> SpacesDeviceAPIResponse { response }
+        }
+
+        /// A `.state` mock whose first read is held open until the test releases it, so a fetch can still
+        /// be in flight while the payloads that arrive behind it fail to reduce. Every later read answers
+        /// immediately with `later`.
+        private actor HeldTerminalStateResponder {
+            private let first: SpacesDeviceAPIResponse
+            private let later: SpacesDeviceAPIResponse
+            private var answeredCount = 0
+            private var isReleased = false
+            private var waiter: CheckedContinuation<Void, Never>?
+
+            init(first: SpacesDeviceAPIResponse, later: SpacesDeviceAPIResponse) {
+                self.first = first
+                self.later = later
+            }
+
+            func answer() async -> SpacesDeviceAPIResponse {
+                answeredCount += 1
+                guard answeredCount == 1 else { return later }
+                if !isReleased { await withCheckedContinuation { waiter = $0 } }
+                return first
+            }
+
+            func release() {
+                isReleased = true
+                waiter?.resume()
+                waiter = nil
+            }
+        }
+
+        private actor HeldHeartbeatResponder {
+            private var didStart = false
+            private var isReleased = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func markStarted() {
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+
+            func waitForStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func waitForRelease() async {
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
+        private actor HeldTakeoverResponder {
+            private var didStart = false
+            private var isReleased = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func waitForReleaseAfterStarting() async {
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func waitForStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
+        private actor HeldFirstAttachResponder {
+            private var attachCount = 0
+            private var didStart = false
+            private var isReleased = false
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func waitForFirstAttachThenRelease() async {
+                attachCount += 1
+                guard attachCount == 1 else { return }
+                didStart = true
+                let waiters = startWaiters
+                startWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+                guard !isReleased else { return }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+            }
+
+            func waitForFirstAttachStart() async {
+                guard !didStart else { return }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
+            }
+
+            func release() {
+                isReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
+        private actor HeldConnectLifecycleBackend: SpacesDeviceAPIBackend {
+            private let stateResponse: SpacesDeviceAPIResponse
+            private var attachCount = 0
+            private var isFirstAttachReleased = false
+            private var didStartFirstAttach = false
+            private var firstAttachWaiters: [CheckedContinuation<Void, Never>] = []
+            private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+            private var subscribeCount = 0
+            private var subscribeWaiters: [CheckedContinuation<Void, Never>] = []
+
+            init(stateResponse: SpacesDeviceAPIResponse) { self.stateResponse = stateResponse }
+
+            nonisolated func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { HeldConnectLifecycleRequestTransport(backend: self) }
+
+            nonisolated func openSessionStream(
+                request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+                onDisconnect: @escaping @MainActor (Error?) -> Void
+            ) async throws -> SpacesDeviceAPIStreamHandle {
+                await recordSubscribe()
+                return SpacesDeviceAPIStreamHandle {}
+            }
+
+            func send(_ request: SpacesDeviceAPIRequest) async -> SpacesDeviceAPIResponse {
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    attachCount += 1
+                    if attachCount == 1 {
+                        didStartFirstAttach = true
+                        let waiters = firstAttachWaiters
+                        firstAttachWaiters.removeAll()
+                        for waiter in waiters { waiter.resume() }
+                        guard !isFirstAttachReleased else { return SpacesDeviceAPIResponse(ok: true, message: "ok") }
+                        await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
+                    }
+                }
+                if case .state = request.command { return stateResponse }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+
+            func waitForFirstAttachStart() async {
+                guard !didStartFirstAttach else { return }
+                await withCheckedContinuation { continuation in firstAttachWaiters.append(continuation) }
+            }
+
+            func waitForSubscribeCount(_ count: Int) async {
+                guard subscribeCount < count else { return }
+                await withCheckedContinuation { continuation in subscribeWaiters.append(continuation) }
+            }
+
+            func releaseFirstAttach() {
+                isFirstAttachReleased = true
+                let waiters = releaseWaiters
+                releaseWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+
+            func currentSubscribeCount() -> Int { subscribeCount }
+
+            private func recordSubscribe() {
+                subscribeCount += 1
+                let waiters = subscribeWaiters
+                subscribeWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+
+        private struct HeldConnectLifecycleRequestTransport: SpacesDeviceAPIRequestTransport {
+            let backend: HeldConnectLifecycleBackend
+
+            func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { await backend.send(request) }
+
+            func close() async {}
+        }
+
         private actor DeviceAPIRequestRecorder {
             private var requests: [SpacesDeviceAPIRequest] = []
 
@@ -124,6 +326,8 @@
             func append(_ message: String) { messages.append(message) }
 
             func firstMessage() -> String? { messages.first }
+
+            func count() -> Int { messages.count }
         }
 
         private final class HoldOpenTCPServer: @unchecked Sendable {
@@ -258,6 +462,728 @@
             XCTAssertEqual(model.visibleText, "Preparing terminal…")
             XCTAssertFalse(model.showsTakeOverAction)
             XCTAssertFalse(model.acceptsInput)
+        }
+
+        func testEndedTerminalDoesNotPerformForegroundOwnershipEvaluation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .exited), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let requests = await recorder.snapshot()
+            XCTAssertTrue(requests.isEmpty, "ended terminals must not renew attachment, fetch state, or take over on foreground")
+        }
+
+        func testForegroundResumeStartingStateKeepsAutomaticTakeoverEligibleForRunning() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(
+                            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z", state: .starting))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "foreground resume must accept the starting state")
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the later running state must retain normal automatic takeover eligibility")
+        }
+
+        func testForegroundResumeDoesNotAttachAfterBackgroundingAgainDuringHeartbeat() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let heartbeat = HeldHeartbeatResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    await heartbeat.markStarted()
+                    await heartbeat.waitForRelease()
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await heartbeat.waitForStart()
+            model.prepareForBackgrounding()
+            await heartbeat.release()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 0, "a superseded foreground cycle must not reattach after its heartbeat returns")
+        }
+
+        func testBackgroundStartingToRunningWaitsForForegroundOwnershipEvaluation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+            let backgroundTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(backgroundTakeoverCount, 0, "a background state must not preempt another owner before foreground evaluation")
+
+            model.resumeAfterBackgrounding()
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the fresh foreground state must take the single automatic ownership path")
+        }
+
+        /// A detail can mount while its scene is inactive, before SwiftUI emits any phase change. Its
+        /// initial lifecycle synchronization arms the same foreground evaluation as a later background
+        /// transition, so a running stream payload cannot take ownership until the scene is active.
+        func testInitiallyInactiveViewerWaitsForActivationBeforeAutomaticTakeover() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            // This is the detail's initial-task ordering for a scene that mounted inactive.
+            model.prepareForBackgrounding()
+            model.start()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+            let inactiveTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(inactiveTakeoverCount, 0, "an initially inactive detail must not take over from its stream")
+
+            model.resumeAfterBackgrounding()
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "activation must make one fresh ownership read")
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the fresh active result must take over once")
+            try await Task.sleep(for: .milliseconds(100))
+            let activeTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(activeTakeoverCount, 1, "the initial foreground cycle must stay bounded to one takeover")
+        }
+
+        /// A retained detail can stop while backgrounded and remount after the scene is already active,
+        /// so it has no later phase transition to arm its ownership read. Starting that replacement
+        /// lifecycle must still consume one fresh foreground result.
+        func testActiveRemountAfterBackgroundedStopPerformsForegroundOwnershipEvaluation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:27:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.prepareForBackgrounding()
+            model.stop()
+            model.start()
+            model.resumeAfterBackgrounding()
+
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "an active remount must make one fresh ownership read")
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the authoritative remount result must restore automatic takeover")
+        }
+
+        /// A heartbeat can report that the live lease ended because the terminal exited during suspension.
+        /// The authoritative state read still carries the final terminal state, so it must run before the
+        /// foreground cycle is consumed and must not take ownership of an ended session.
+        func testForegroundHeartbeatSessionNotRunningReadsAndAppliesFinalTerminalState() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let finalState = Self.runState(
+                childPID: 200, state: .exited, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:27:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "The terminal session is not running.", errorCode: .sessionNotRunning)
+                }
+                if case .state = request.command { return Self.terminalStateResponse(finalState) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "a non-running heartbeat must still fetch the final terminal state")
+            await waitUntil("the final terminal state to apply") { model.renderMode == "ended" }
+            XCTAssertEqual(model.latestState?.runtimeState?.state, .exited)
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "an ended foreground state must never take over")
+        }
+
+        /// A terminal detail pauses overview polling, and its existing state stream can remain open after
+        /// the daemon revokes this device. The foreground heartbeat is therefore responsible for routing
+        /// that authentication failure into the normal re-pair recovery path.
+        func testForegroundHeartbeatAuthenticationFailureRequestsRePairing() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            let stateRequestCount = await recorder.countStateRequests()
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            let promptCount = await authenticationRecorder.count()
+            XCTAssertEqual(stateRequestCount, 0, "a revoked client must not continue into the foreground state read")
+            XCTAssertEqual(takeoverCount, 0)
+            XCTAssertEqual(promptCount, 1, "one revoked heartbeat must request re-pairing exactly once")
+        }
+
+        func testForegroundStreamStateWaitsForPendingHeartbeatEvaluation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let heartbeat = HeldHeartbeatResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    await heartbeat.markStarted()
+                    await heartbeat.waitForRelease()
+                }
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await heartbeat.waitForStart()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+            let beforeReadTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(
+                beforeReadTakeoverCount, 0, "a stream update must not consume foreground ownership intent before its heartbeat and state read")
+
+            await heartbeat.release()
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the fresh foreground read must decide the one automatic takeover")
+        }
+
+        func testForegroundResumeUsesNewerAcceptedStreamStateWhenItsReadIsRefused() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let staleResponse = Self.terminalStateResponse(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+            let responder = HeldTerminalStateResponder(first: staleResponse, later: staleResponse)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await responder.answer() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let didStartRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didStartRead, "foreground resume must issue its direct state read")
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+            await responder.release()
+
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the state accepted from the newer stream must settle the bounded foreground evaluation")
+            try await Task.sleep(for: .milliseconds(100))
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 1, "the superseding stream state must produce only one foreground takeover")
+        }
+
+        func testStoppedForegroundStateReadCannotApplyIntoReplacementLifecycle() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let responder = HeldTerminalStateResponder(
+                first: Self.terminalStateResponse(
+                    Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z")),
+                later: Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z", state: .starting)))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await responder.answer() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let didStartForegroundRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didStartForegroundRead, "foreground resume must have a state read in flight")
+
+            model.stop()
+            model.start()
+            let didStartReplacementRead = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didStartReplacementRead, "the replacement lifecycle must begin its own bootstrap read")
+            await responder.release()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a stopped lifecycle's state response must not arm takeover for its replacement")
+        }
+
+        func testStoppedRenderResyncReadCannotApplyIntoReplacementLifecycle() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let responder = HeldTerminalStateResponder(
+                first: Self.terminalStateResponse(
+                    Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z")),
+                later: Self.terminalStateResponse(
+                    Self.runningTerminalState(
+                        attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z", state: .starting)))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await responder.answer() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.applyLatestState(
+                try Self.unappliableDeltaState(baseRevision: 40, targetRevision: 41, ownerEpoch: 1, emittedAt: "2026-06-04T14:25:00Z"),
+                isOutOfBand: false)
+            let didStartResyncRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didStartResyncRead, "a failed render update must begin its resync read")
+
+            model.stop()
+            model.start()
+            let didStartReplacementRead = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didStartReplacementRead, "the replacement lifecycle must bootstrap independently")
+            await responder.release()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a stopped resync response must not arm takeover for its replacement")
+        }
+
+        func testStopWaitsForInFlightAutomaticTakeoverBeforeDetaching() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let takeover = HeldTakeoverResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+                }
+                if case .terminalControl(let payload) = request.command, payload.action == .takeover { await takeover.waitForReleaseAfterStarting() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await takeover.waitForStart()
+            model.stop()
+            try await Task.sleep(for: .milliseconds(100))
+            let detachBeforeTakeoverSettles = await recorder.countTerminalControlAction(.detach)
+            XCTAssertEqual(detachBeforeTakeoverSettles, 0, "stop must not detach before an automatic takeover in flight has settled")
+
+            await takeover.release()
+            let didDetach = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetach, "stop must detach after the automatic takeover response settles")
+        }
+
+        func testForegroundResumeSharesAnInFlightReconnectViewerAttach() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let heldAttach = HeldFirstAttachResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    await heldAttach.waitForFirstAttachThenRelease()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                }
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            await heldAttach.waitForFirstAttachStart()
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let startedSecondAttach = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertFalse(startedSecondAttach, "foreground resume must join the reconnect's in-flight viewer attach")
+
+            await heldAttach.release()
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the shared attach must settle before the foreground ownership decision")
+            let requests = await recorder.snapshot()
+            let attachCount = requests.filter { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .attach
+            }.count
+            XCTAssertEqual(attachCount, 1)
+        }
+
+        func testStoppedConnectCannotSubscribeIntoTheRestartedViewerLifecycle() async throws {
+            let stateResponse = Self.terminalStateResponse(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z", state: .starting))
+            let backend = HeldConnectLifecycleBackend(stateResponse: stateResponse)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            await backend.waitForFirstAttachStart()
+            model.stop()
+            model.start()
+            await backend.waitForSubscribeCount(1)
+            await backend.releaseFirstAttach()
+            try await Task.sleep(for: .milliseconds(100))
+
+            let subscribeCount = await backend.currentSubscribeCount()
+            XCTAssertEqual(subscribeCount, 1, "the stopped connect must not subscribe or install callbacks into the restarted lifecycle")
+        }
+
+        func testStopWaitsForInFlightForegroundViewerAttachThenDetachesIt() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let heldAttach = HeldFirstAttachResponder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                }
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    await heldAttach.waitForFirstAttachThenRelease()
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            await heldAttach.waitForFirstAttachStart()
+            model.stop()
+            await heldAttach.release()
+
+            let didDetach = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetach, "stop must detach an attach that completed after stop began")
+            let requests = await recorder.snapshot()
+            let attachIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .attach
+            }
+            let detachIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .detach
+            }
+            XCTAssertNotNil(attachIndex)
+            XCTAssertNotNil(detachIndex)
+            if let attachIndex, let detachIndex { XCTAssertLessThan(attachIndex, detachIndex) }
+        }
+
+        func testForegroundResumeReclaimsALeaseExpiredOwner() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"))
+                }
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: false, message: "client not found", errorCode: .notFound)
+                }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                let client = TerminalClient(
+                    id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:25:30Z")
+                let attachment = TerminalAttachment(
+                    sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:25:30Z")
+                let snapshot = TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment])
+                return Self.terminalStateResponse(
+                    try! Self.framedState(
+                        text: "resumed", sessionRevision: 2, ownerEpoch: 2, emittedAt: "2026-06-04T14:25:30Z", attachmentSnapshot: snapshot))
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "the first post-resume state must reclaim a lease-expired owner")
+            let requests = await recorder.snapshot()
+            let heartbeatIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .heartbeat
+            }
+            let attachIndex = requests.firstIndex { request in
+                guard case .terminalControl(let payload) = request.command else { return false }
+                return payload.action == .attach
+            }
+            let stateIndex = requests.firstIndex { request in
+                if case .state = request.command { return true }
+                return false
+            }
+            XCTAssertNotNil(heartbeatIndex)
+            XCTAssertNotNil(attachIndex)
+            XCTAssertNotNil(stateIndex)
+            if let heartbeatIndex, let attachIndex, let stateIndex {
+                XCTAssertLessThan(heartbeatIndex, attachIndex, "an expired client must reattach after heartbeat reports it missing")
+                XCTAssertLessThan(attachIndex, stateIndex, "the ownership read must follow the viewer reattach")
+            }
+            await waitUntil("the resumed viewer to become the owner") { model.isOwner }
+            await waitUntil("the resumed owner render to be ready") { model.ownerRenderEpoch != nil && !model.isOwnershipSynchronizationPending }
+            model.setInputSurfaceReady(true)
+            XCTAssertTrue(model.acceptsInput, "the reclaimed terminal must return to its interactive owner state")
+        }
+
+        func testForegroundResumeConsumesLeaseExpiryStateThatArrivedWhileBackgrounded() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return Self.terminalStateResponse(
+                        Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: model.attachmentSnapshot, emittedAt: "2026-06-04T14:25:00Z"), isOutOfBand: false)
+
+            let backgroundTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(backgroundTakeoverCount, 0, "background state must wait for the scene to become active")
+            model.resumeAfterBackgrounding()
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "a background owner state must not hide the ownerless post-foreground result")
+        }
+
+        func testForegroundResumeDoesNotReclaimALaterLegitimateHandoffAfterOwnerConfirmation() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let stateResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await stateResponse.current() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await stateResponse.set(
+                Self.terminalStateResponse(Self.runningTerminalState(attachmentSnapshot: model.attachmentSnapshot, emittedAt: "2026-06-04T14:25:30Z"))
+            )
+            model.prepareForBackgrounding()
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: model.attachmentSnapshot, emittedAt: "2026-06-04T14:25:00Z"), isOutOfBand: false)
+            model.resumeAfterBackgrounding()
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "foreground resume must evaluate ownership after activation")
+            try await Task.sleep(for: .milliseconds(100))
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertEqual(attachCount, 0, "a heartbeat-confirmed owner must not be demoted to a viewer by reattaching")
+
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: "mac-owner", mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [], attachments: [macOwner]), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "an owner-confirming resume state must consume the one-shot intent before a later handoff")
+        }
+
+        func testForegroundResumePreemptsAnotherActiveOwnerOnce() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let macClient = TerminalClient(
+                id: "mac-owner", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-06-04T14:25:00Z")
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: macClient.id, mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            let macOwnedState = Self.runningTerminalState(
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [macClient], attachments: [macOwner]),
+                emittedAt: "2026-06-04T14:25:00Z")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return Self.terminalStateResponse(macOwnedState) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "foreground resume must evaluate the first post-background state")
+            try await Task.sleep(for: .milliseconds(100))
+
+            let didTakeOver = try await waitForTerminalControlAction(.takeover, count: 1, recorder: recorder)
+            XCTAssertTrue(didTakeOver, "foreground resume must use the existing automatic takeover path for another active owner")
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+            let laterTakeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(laterTakeoverCount, 1, "the post-foreground result must allow only one automatic takeover")
+        }
+
+        func testForegroundResumeDoesNotLeaveIntentArmedWhenItsStateReadFails() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .heartbeat {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return SpacesDeviceAPIResponse(ok: false, message: "state unavailable")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.prepareForBackgrounding()
+            model.resumeAfterBackgrounding()
+            let didReadState = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didReadState, "foreground resume must perform one bounded ownership evaluation")
+            try await Task.sleep(for: .milliseconds(100))
+
+            let macOwner = TerminalAttachment(sessionID: "terminal-session", clientID: "mac-owner", mode: .owner, attachedAt: "2026-06-04T14:26:00Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [], attachments: [macOwner]), emittedAt: "2026-06-04T14:26:00Z"),
+                isOutOfBand: false)
+            try await Task.sleep(for: .milliseconds(100))
+
+            let takeoverCount = await recorder.countTerminalControlAction(.takeover)
+            XCTAssertEqual(takeoverCount, 0, "a failed resume read must not leave automatic takeover armed for a later handoff")
+        }
+
+        func testOwnerlessTerminalSaysThatNobodyOwnsIt() async {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await model.applyLatestState(
+                Self.runningTerminalState(attachmentSnapshot: TerminalSessionAttachmentSnapshot(), emittedAt: "2026-06-04T14:25:00Z"),
+                isOutOfBand: false)
+
+            XCTAssertEqual(model.visibleText, "This terminal has no active owner.\nTake over to start typing.")
+        }
+
+        func testOwnerWithNoClientIdentityStillReadsAsAnotherClient() async {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let unknownOwner = TerminalAttachment(
+                sessionID: "terminal-session", clientID: "unknown-owner", mode: .owner, attachedAt: "2026-06-04T14:25:00Z")
+            await model.applyLatestState(
+                Self.runningTerminalState(
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [], attachments: [unknownOwner]), emittedAt: "2026-06-04T14:25:00Z"
+                ), isOutOfBand: false)
+
+            XCTAssertEqual(model.visibleText, "Live terminal rendering is limited to the active owner.\nCurrent owner: another client")
         }
 
         func testStartingSessionAttachesViewerBeforeSubscribing() async throws {
@@ -1214,6 +2140,616 @@
             XCTAssertEqual(try Data(contentsOf: secondURL), secondPayload)
         }
 
+        /// Reduction runs off the main actor, so a payload is not installed by the time the call that
+        /// submitted it returns. The routes that read this model's own state immediately afterwards
+        /// — takeover asking whether it became the owner, the connect bootstrap asking whether it is
+        /// still connecting — have to wait for their payload, and everything the stream submitted before
+        /// it has to be applied first: reduction is one chain across both routes.
+        func testAnAwaitedApplyLandsAfterEverythingSubmittedBeforeIt() async {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+
+            model.submitLatestState(Self.outputState(title: "first", emittedAt: "2026-06-04T14:23:31Z"), isOutOfBand: false)
+            model.submitLatestState(Self.outputState(title: "second", emittedAt: "2026-06-04T14:23:32Z"), isOutOfBand: false)
+            await model.applyLatestState(Self.outputState(title: "third", emittedAt: "2026-06-04T14:23:33Z"), isOutOfBand: false)
+
+            XCTAssertEqual(model.latestState?.title, "third")
+            XCTAssertEqual(model.latestState?.emittedAt, "2026-06-04T14:23:33Z")
+            XCTAssertEqual(model.title, "third")
+        }
+
+        /// The apply mailbox collapses a run of screen-content payloads to its newest member, so what
+        /// reaches the model is the newest state plus what the payloads it replaced asked for. The
+        /// inherited resync is the one that matters: a delta that failed against a stale baseline can be
+        /// coalesced away, and if the model read its own reduction's resync flag instead of the apply's,
+        /// the full frame that failed delta needed would never be requested and the pane would sit on a
+        /// stale grid.
+        func testACoalescedApplyInstallsTheNewestStateAndRequestsTheResyncItInherited() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resyncResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await resyncResponse.current()
+            }
+            // An owner-interactive model, so the only `.state` request this test can produce is the resync
+            // itself: the viewer already owns the session, so nothing takes it over or synchronizes it.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            let newest = Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:35Z")
+            let stored = try XCTUnwrap(model.latestState).merged(with: newest)
+            await resyncResponse.set(Self.terminalStateResponse(stored))
+
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: newest,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: newest, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0, coalescedAwayCount: 2, inheritedResyncRequest: true))
+
+            XCTAssertEqual(model.latestState?.title, "newest")
+            XCTAssertTrue(model.isOwner)
+            let requestedResync = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(requestedResync, "an inherited resync must ask the daemon for a full frame")
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1)
+        }
+
+        /// A session producing payloads that cannot be reduced — a device-side restart window, say — asks
+        /// for a resync on every one of them, and each of those `.state` reads costs the daemon a unicast
+        /// full-frame export. The reads are paced at one per window, and the pacing discards nothing: the
+        /// requests suppressed inside a window arm exactly one coalesced retry at its boundary, so a burst
+        /// costs one read plus one retry rather than one read per payload.
+        func testABurstOfUnappliablePayloadsCostsOneResyncReadPlusOneTrailingRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let resyncResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await resyncResponse.current()
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+            await resyncResponse.set(Self.terminalStateResponse(try XCTUnwrap(model.latestState)))
+
+            for index in 0..<6 {
+                let payload = Self.outputState(title: "unappliable-\(index)", emittedAt: "2026-06-04T14:23:4\(index)Z")
+                let stored = try XCTUnwrap(model.latestState).merged(with: payload)
+                model.applyReducedStateForTesting(
+                    TerminalRemoteStateReductionOutput(
+                        incomingPayload: payload,
+                        reduction: TerminalRemoteStateReductionResult(
+                            payload: payload, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: "missing_baseline",
+                            didRequestResync: true), reduceMS: 0))
+            }
+
+            let didRetry = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didRetry, "the resyncs the throttle suppressed must still be answered by a retry at the window boundary")
+            // Past two more windows, so a throttle that merely delayed the suppressed requests rather than
+            // coalescing them would have sent the rest by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 2, "six unappliable payloads must cost one read plus one coalesced retry")
+        }
+
+        /// The resync read in flight when a NEW failure arms the trailing retry was issued before that
+        /// failure, so it answers with the screen as the daemon captured it beforehand. That frame still
+        /// applies — it is newer than the baseline the failure broke — so retiring the retry on any frame
+        /// at all cancels a request for a gap this frame does not cover. The viewer is then parked on the
+        /// older revision while the session sits at a newer one, and a session that goes quiet leaves the
+        /// pane stale indefinitely. Only a frame at or past the failed delta's target retires the retry.
+        func testAResyncResponseOlderThanTheFailureItRacedDoesNotRetireTheTrailingRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // The held read answers for revision 6, the screen as it was before either delta below failed;
+            // the retry's read answers for revision 50, which covers both.
+            let responder = HeldTerminalStateResponder(
+                first: Self.terminalStateResponse(
+                    try Self.framedState(text: "raced", sessionRevision: 6, ownerEpoch: 1, emittedAt: "2026-06-04T14:24:00Z")),
+                later: Self.terminalStateResponse(
+                    try Self.framedState(text: "fresh", sessionRevision: 50, ownerEpoch: 1, emittedAt: "2026-06-04T14:24:10Z")))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return await responder.answer()
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+            defer { model.stop() }
+            // The frame the viewer holds, and the chain the deltas below break.
+            await model.applyLatestState(
+                try Self.framedState(text: "start", sessionRevision: 5, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            // The first delta fails and sends the resync read, which the mock holds open.
+            await model.applyLatestState(
+                try Self.unappliableDeltaState(baseRevision: 40, targetRevision: 41, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:46Z"),
+                isOutOfBand: false)
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the first unappliable delta must send the resync read")
+
+            // A second delta, targeting a higher revision, fails while that read is still in flight: the
+            // retry it arms is owed a frame at or past revision 42.
+            await model.applyLatestState(
+                try Self.unappliableDeltaState(baseRevision: 41, targetRevision: 42, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:47Z"),
+                isOutOfBand: false)
+
+            // The held read finally answers, with the pre-failure screen.
+            await responder.release()
+
+            let didRetry = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didRetry, "a frame older than the failure the retry was armed for must leave that retry owed")
+            // The retry answered with revision 50, which covers revision 42, so the cycle ends there. Past
+            // two more windows, so a retry left armed by the covering frame would have fired by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 2, "a frame that covers the failure retires the retry")
+        }
+
+        /// A revoked pairing tears the viewer down and sends the user to re-pair. A trailing resync armed
+        /// before that revocation would dial the device again afterwards, fail authentication a second
+        /// time, and ask the user to re-pair twice for one revocation, so the teardown cancels it.
+        func testARevokedPairingCancelsTheTrailingResyncRetry() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            // The device refuses this client outright, so the resync read below comes back as a revoked
+            // pairing rather than a full frame.
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+            }
+            // An owner-interactive model, so the only `.state` requests this test can produce are the
+            // resync reads themselves.
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(),
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            model.renderUpdateResyncIntervalForTesting = 0.2
+
+            // Two unappliable payloads inside one throttle window: the first sends the resync read the
+            // revoked pairing fails, the second arms the trailing retry behind it.
+            for index in 0..<2 {
+                let payload = Self.outputState(title: "unappliable-\(index)", emittedAt: "2026-06-04T14:23:5\(index)Z")
+                let stored = try XCTUnwrap(model.latestState).merged(with: payload)
+                model.applyReducedStateForTesting(
+                    TerminalRemoteStateReductionOutput(
+                        incomingPayload: payload,
+                        reduction: TerminalRemoteStateReductionResult(
+                            payload: payload, storedPayload: stored, decodedUpdate: nil, frameToApply: nil, dropReason: "missing_baseline",
+                            didRequestResync: true), reduceMS: 0))
+            }
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            // Past the trailing window, so a retry that outlived the teardown would have fired by now.
+            try await Task.sleep(for: .milliseconds(500))
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1, "a viewer torn down by a revoked pairing must not dial the device again")
+            let promptCount = await authenticationRecorder.count()
+            XCTAssertEqual(promptCount, 1, "one revocation must ask the user to re-pair exactly once")
+        }
+
+        /// A `.state` response describes the session as it was when it was asked, and it re-enters beside a
+        /// subscription that never stopped, so one that lands after the stream has already carried the
+        /// viewer further is stale by construction. Applying it would walk the pane and its metadata
+        /// backwards, so the refresh route submits out of band and the reducer refuses it.
+        func testADelayedStateResponseDoesNotWalkTheViewerBackToOlderState() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                // The takeover is accepted but answers with no state, so the confirmation refresh below is
+                // what carries the (stale) `.state` response into the model.
+                if case .state = request.command {
+                    return Self.terminalStateResponse(Self.outputState(title: "older", emittedAt: "2026-06-04T14:23:30Z"))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            // A starting session, so the viewer never auto-takes-over and the takeover below is the only
+            // one: the automatic attempt would otherwise be in flight and turn this one into a no-op.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            // `takeOver` awaits its confirmation refresh, so the stale response has landed by the time this
+            // returns — no settling window to wait out.
+            await model.takeOver()
+
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 1, "the takeover confirmation must have actually read state")
+            XCTAssertEqual(model.latestState?.title, "newest", "a response older than what the stream already delivered must not be applied")
+        }
+
+        /// A refused response is kept on the reduction for its metrics and nothing else: the reducer moved
+        /// no state, so `storedPayload` is the previous state untouched. The payload itself still carries
+        /// the attachment and screen the session had when it was asked — before whatever superseded it —
+        /// so an apply that read either off it would clear this viewer's own attachment (leaving the next
+        /// dismissal with nothing to detach) and repaint the live owner epoch with the stale screen.
+        func testARefusedStateResponseLeavesTheOwnersAttachmentAndScreenAlone() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 2)
+            // The stream's own frame, which is what the response below is ordered against.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+            XCTAssertEqual(model.ownerRenderEpoch?.bootstrapSnapshot, Self.snapshot(text: "live"))
+
+            // A `.state` read answered before the handoff that made this client the owner, delivered after
+            // the stream has carried the viewer past it: an older owner epoch, so the reducer refuses all
+            // of it — screen, attachment snapshot and metadata alike.
+            let previousOwner = TerminalClient(
+                id: "mac-window", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-06-04T14:23:30Z")
+            let preHandoffSnapshot = TerminalSessionAttachmentSnapshot(
+                clients: [previousOwner],
+                attachments: [
+                    TerminalAttachment(sessionID: "terminal-session", clientID: previousOwner.id, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+                ])
+            await model.applyLatestState(
+                try Self.framedState(
+                    text: "pre-handoff", sessionRevision: 9, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:40Z", attachmentSnapshot: preHandoffSnapshot),
+                isOutOfBand: true)
+
+            XCTAssertTrue(model.isOwner, "the refused payload's ownership must not replace the merged state's")
+            XCTAssertEqual(
+                model.ownerRenderEpoch?.bootstrapSnapshot, Self.snapshot(text: "live"),
+                "a refused payload's screen must not reach the live owner render epoch")
+            XCTAssertEqual(model.ownerRenderEpoch?.ownerEpoch, 2, "nor may it walk the epoch that every control request quotes backwards")
+
+            // The attachment this viewer holds is only observable through what dismissing it does, so this
+            // is the assertion that the refused snapshot did not rewrite it: a viewer that believes it is
+            // no longer attached detaches nothing and leaves the session holding a dead client.
+            model.stop()
+            let didDetach = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetach, "a refused payload's attachment snapshot must not clear this viewer's own attachment")
+        }
+
+        /// The apply is not the only consumer of a `.state` response. `refreshLatestState` hands its return
+        /// to the ownership handshake, which bootstraps the owner render epoch from it — and that epoch is
+        /// what every input and resize request this viewer sends quotes. A refused response describes a
+        /// session generation the stream has already left behind, so an epoch begun from it would stamp
+        /// control requests with a number the daemon has moved past until some later stream frame reseeded
+        /// it. The refusal has to reach the caller, not just the apply.
+        func testAnOwnerBootstrapDoesNotBeginItsRenderEpochFromARefusedStateResponse() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // Answered before the handoff that made this client the owner, so its frame carries an older
+            // owner epoch and the reducer refuses the whole payload. Its snapshot matches the viewport set
+            // below, which is exactly what makes it look like usable bootstrap state to anything reading
+            // the response rather than the reduction.
+            let staleResponse = Self.terminalStateResponse(
+                try Self.framedState(text: "pre-handoff", sessionRevision: 9, ownerEpoch: 1, emittedAt: "2026-06-04T14:23:40Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return staleResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:46Z"))
+            }
+            // A starting session, so no automatic takeover races the one below, and the ownership handshake
+            // it schedules is the only thing that reads `.state`.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The stream's own frame, which is what the response above is ordered against.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            await model.takeOver()
+            XCTAssertTrue(model.isOwner, "the handshake under test only runs for an owner")
+            // Drives the handshake's resize round trip, and sizes the viewport so the frame this viewer
+            // already holds cannot serve as bootstrap state: the fetched one is the only candidate.
+            model.updateViewportSize(columns: 11, rows: 1)
+
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the handshake must have actually read state to bootstrap from")
+            // The handshake asks again instead of settling, because a refused response bootstrapped
+            // nothing and this owner still has no baseline to render from. The mock answers every read
+            // with the same stale payload, so the retries continue for as long as the model lives; a real
+            // session answers the next read with its current frame and the handshake settles on that.
+            let didAskAgain = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didAskAgain, "a refused response is not a bootstrap, so the handshake must ask again rather than settle on it")
+            XCTAssertNil(model.ownerRenderEpoch, "a refused response carries no usable owner state, so no epoch may be begun from it")
+        }
+
+        /// The partial refusal, which the whole-payload refusal above cannot stand in for. A response
+        /// whose frame alone is superseded — same owner epoch, a revision this viewer already holds — has
+        /// its metadata ordered separately, and that metadata genuinely merges, so the reduction reports no
+        /// refusal and the caller is handed a payload. What that payload must not still carry is the
+        /// refused frame: the handshake bootstraps the owner render epoch from whatever it is given, and a
+        /// screen the reducer just declined is exactly what it must not seed from.
+        func testAnOwnerBootstrapDoesNotSeedItsRenderEpochFromAPartiallyRefusedStateResponse() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            // The same owner epoch as the frame this viewer holds and a lower revision, so only the frame
+            // is refused; a stamp newer than everything already reduced, so the payload's metadata merges
+            // and the reduction is not a refusal. Its snapshot matches the viewport set below, which is
+            // what makes it look like usable bootstrap state to anything reading the response rather than
+            // the reduction.
+            let supersededScreenResponse = Self.terminalStateResponse(
+                try Self.framedState(text: "stale-frame", sessionRevision: 5, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:47Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return supersededScreenResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:46Z"))
+            }
+            // A starting session, so no automatic takeover races the one below, and the ownership handshake
+            // it schedules is the only thing that reads `.state`.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The stream's own frame: the revision the response above is ordered against, and too narrow
+            // for the viewport below to bootstrap from.
+            await model.applyLatestState(
+                try Self.framedState(text: "live", sessionRevision: 9, ownerEpoch: 2, emittedAt: "2026-06-04T14:23:45Z"), isOutOfBand: false)
+
+            await model.takeOver()
+            XCTAssertTrue(model.isOwner, "the handshake under test only runs for an owner")
+            // Drives the handshake's resize round trip, and sizes the viewport so the frame this viewer
+            // already holds cannot serve as bootstrap state: the fetched one is the only candidate.
+            model.updateViewportSize(columns: 11, rows: 1)
+
+            let didRead = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRead, "the handshake must have actually read state to bootstrap from")
+            // The handshake asks again instead of settling, because the response's only screen was refused
+            // and this owner still has no baseline to render from. The mock answers every read with the
+            // same superseded frame, so the retries continue for as long as the model lives; a real session
+            // answers the next read with its current frame and the handshake settles on that.
+            let didAskAgain = try await waitForStateRequestCount(2, recorder: recorder)
+            XCTAssertTrue(didAskAgain, "a response whose frame was refused bootstrapped nothing, so the handshake must ask again")
+            XCTAssertNil(model.ownerRenderEpoch, "a refused frame must not become the owner epoch's bootstrap snapshot")
+        }
+
+        /// The other family that reads a `.state` return: the recovery that asks whether the session it
+        /// just failed to reach is simply gone. The reducer refuses an ended report only when it is
+        /// provably answering for a superseded run — a different child PID, stamped older than what the
+        /// stream already delivered — which is precisely the delayed exit report of a run that has since
+        /// been relaunched. Believed, it would retire the failure as "this session ended" and leave the
+        /// viewer parked on a live session it stopped reconnecting to.
+        func testARefusedExitReportFromASupersededRunDoesNotEndTheSession() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let exitReportResponse = Self.terminalStateResponse(
+                Self.runState(childPID: 199, state: .exited, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:40Z"))
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .state = request.command { return exitReportResponse }
+                guard case .terminalControl(let payload) = request.command, payload.action == .attach else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                // The attach the connect below starts with, answered for the run that already exited.
+                return SpacesDeviceAPIResponse(ok: false, message: "The terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+            // The relaunched run as the stream reported it: a newer stamp, and a different child PID from
+            // the exit report the read above answers with.
+            await model.applyLatestState(
+                Self.runState(childPID: 200, state: .starting, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T14:23:45Z"),
+                isOutOfBand: false)
+
+            model.start()
+
+            // A viewer that accepted the exit report reports nothing and schedules no reconnect: it
+            // believes the session it is looking at is over. Surfacing the connect failure is what says
+            // the refusal reached the caller.
+            await waitUntil("the failed connect to be reported") { model.errorMessage != nil }
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertGreaterThanOrEqual(stateRequestCount, 1, "the recovery must have actually read state")
+        }
+
+        /// The takeover response is the exception: it is the acknowledgment of a mutation this client just
+        /// made and the only carrier of the attachment snapshot that names this device the owner, so it is
+        /// submitted in band. Ordered as a `.state` response would be, a stream payload that raced it would
+        /// refuse it on its timestamp alone and leave a successful takeover reading as unconfirmed.
+        func testATakeoverResponseAppliesEvenWhenItIsStampedOlderThanTheStreamState() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                guard case .terminalControl(let payload) = request.command, payload.action == .takeover, let clientID = payload.clientID else {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+                return Self.terminalStateResponse(Self.ownedState(clientID: clientID, emittedAt: "2026-06-04T14:23:31Z"))
+            }
+            // A starting session, for the same reason as the test above: no automatic takeover races this
+            // one.
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "newest", emittedAt: "2026-06-04T14:23:46Z"), isOutOfBand: false)
+
+            await model.takeOver()
+
+            XCTAssertTrue(model.isOwner, "the takeover's own attachment snapshot must apply however it is stamped")
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(stateRequestCount, 0, "a takeover that applied needs no confirmation read")
+        }
+
+        /// An owner whose stream drops reconnects silently, and the new subscription's deltas are computed
+        /// against the daemon's baseline rather than the frame this viewer still holds. Nothing confirms
+        /// those agree, so every connect bootstraps from a direct read — the owner's included, which is the
+        /// only way `isOwner` can be true this early. Without it the divergence surfaces only when a delta
+        /// fails, costing a wrong-frame window plus the resync round trip.
+        func testAnOwnerReconnectBootstrapsFromADirectStateRead() async throws {
+            let streamServer = try HoldOpenTCPServer()
+            defer { streamServer.stop() }
+            var settings = settings()
+            settings.port = streamServer.port
+            let recorder = DeviceAPIRequestRecorder()
+            let bootstrapResponse = TerminalStateResponseHolder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .state = request.command { return await bootstrapResponse.current() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.configureOwnerInteractiveForTesting(ownerEpoch: 1)
+            await bootstrapResponse.set(Self.terminalStateResponse(try XCTUnwrap(model.latestState)))
+            XCTAssertTrue(model.isOwner)
+            defer { model.stop() }
+
+            model.start()
+
+            let didBootstrap = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didBootstrap, "an owner's reconnect must confirm its baseline with a direct read")
+            XCTAssertTrue(model.isOwner, "the bootstrap read must not disturb ownership")
+        }
+
+        /// A viewer that has been stopped has already released its stream, its queued input, and its
+        /// attachment. A payload the pipeline was still reducing when that happened must land nowhere:
+        /// installing it would put the session's attachment back and leave the next visit believing it is
+        /// still attached.
+        func testAStoppedViewerDropsAnApplyThatWasStillInTheReducer() async {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
+            await model.applyLatestState(Self.outputState(title: "before-stop", emittedAt: "2026-06-04T14:23:36Z"), isOutOfBand: false)
+
+            model.stop()
+            let afterStop = Self.outputState(title: "after-stop", emittedAt: "2026-06-04T14:23:37Z")
+            model.applyReducedStateForTesting(
+                TerminalRemoteStateReductionOutput(
+                    incomingPayload: afterStop,
+                    reduction: TerminalRemoteStateReductionResult(
+                        payload: afterStop, storedPayload: afterStop, decodedUpdate: nil, frameToApply: nil, dropReason: nil, didRequestResync: false),
+                    reduceMS: 0))
+
+            XCTAssertEqual(model.latestState?.title, "before-stop")
+        }
+
+        /// `noteStateApplied` runs from the `defer` at the very top of `applyReducedState`, ahead of the
+        /// `isStopping` guard that drops everything else about a payload reduced after `beginStop()`, so
+        /// stopping the model can never strand a caller that is awaiting `applyLatestState` for that
+        /// payload. This starts the wait and stops the model before the real, off-main reduction pipeline
+        /// has had any chance to reduce or apply the payload — `stop()` runs synchronously on the same
+        /// main actor as this test method, which has not yet suspended, so it always lands first — then
+        /// confirms the wait still resolves instead of hanging. Moving `noteStateApplied` below the
+        /// `isStopping` guard would make this test hang until XCTest's own timeout fails it.
+        func testAnAwaitedApplyReleasesItsWaiterEvenWhenTheModelStopsBeforeItLands() async {
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            let payload = Self.outputState(title: "after-stop-wait", emittedAt: "2026-06-04T14:23:38Z")
+            let waiterBox = WaiterReleaseBox()
+            let waitingTask = Task {
+                await model.applyLatestState(payload, isOutOfBand: false)
+                waiterBox.released = true
+            }
+
+            model.stop()
+
+            await waitUntil("the stop-time apply to release its waiter") { waiterBox.released }
+            XCTAssertNil(model.latestState, "a payload reduced after stop must still be dropped, not applied")
+            _ = await waitingTask.value
+        }
+
+        private final class WaiterReleaseBox: @unchecked Sendable { var released = false }
+
+        /// Polls instead of awaiting the condition directly, so a regression that strands a waiter fails
+        /// the test itself rather than hanging until XCTest's own timeout kills the whole run.
+        private func waitUntil(_ description: String, timeout: Duration = .seconds(5), _ condition: () -> Bool) async {
+            let deadline = ContinuousClock().now + timeout
+            while ContinuousClock().now < deadline {
+                if condition() { return }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            XCTFail("Timed out waiting for \(description).")
+        }
+
+        private nonisolated static func outputState(title: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt, sessionStateRevision: nil,
+                sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: title,
+                workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        /// A payload carrying a full frame, the shape a session exports whenever it includes screen state.
+        /// `sessionRevision` and `ownerEpoch` are what the reducer orders an out-of-band response by.
+        private nonisolated static func framedState(
+            text: String, sessionRevision: UInt64, ownerEpoch: UInt64, emittedAt: String, attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil
+        ) throws -> GhosttyRemoteSessionStatePayload {
+            let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial, emittedAt: emittedAt,
+                sessionStateRevision: sessionRevision, sessionStateFlags: 1, screenStateRevision: sessionRevision, runtimeState: nil,
+                attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+        }
+
+        /// A payload carrying a delta computed against a baseline this viewer does not hold, so its
+        /// reduction fails and asks for a resync. `targetRevision` is the ordering that failure owes.
+        private nonisolated static func unappliableDeltaState(baseRevision: UInt64, targetRevision: UInt64, ownerEpoch: UInt64, emittedAt: String)
+            throws -> GhosttyRemoteSessionStatePayload
+        {
+            let delta = GhosttyRenderDeltaFrame(
+                baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: 5, rows: 1, cursorColumn: 0,
+                cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0, changedCellCount: 0)
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.output, emittedAt: emittedAt,
+                sessionStateRevision: targetRevision, sessionStateFlags: 1, screenStateRevision: targetRevision, runtimeState: nil,
+                attachmentSnapshot: nil, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0,
+                renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.delta(delta)))
+        }
+
+        private nonisolated static func snapshot(text: String) -> GhosttyTerminalSnapshot {
+            let cells = text.unicodeScalars.map { scalar in
+                GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xFFFFFF, backgroundRGB: 0x000000, flags: 0)
+            }
+            return GhosttyTerminalSnapshot(
+                columns: cells.count, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: false, defaultForegroundRGB: 0xFFFFFF,
+                defaultBackgroundRGB: 0x000000, cells: cells)
+        }
+
+        /// A payload carrying runtime state and nothing else, which is what the reducer orders one run
+        /// against another by: `childPID` tells the runs apart, `emittedAt` says which is older.
+        private nonisolated static func runState(childPID: Int32, state: TerminalSessionState, reason: String, emittedAt: String)
+            -> GhosttyRemoteSessionStatePayload
+        {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: reason, emittedAt: emittedAt, sessionStateRevision: nil, sessionStateFlags: nil,
+                screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: childPID, state: state, updatedAt: emittedAt), attachmentSnapshot: nil,
+                title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        /// A payload whose attachment snapshot names `clientID` the session's owner, as a takeover response
+        /// does.
+        private nonisolated static func ownedState(clientID: String, emittedAt: String) -> GhosttyRemoteSessionStatePayload {
+            let owner = TerminalClient(
+                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-04T14:23:30Z")
+            let attachment = TerminalAttachment(sessionID: "terminal-session", clientID: clientID, mode: .owner, attachedAt: "2026-06-04T14:23:30Z")
+            return GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil, runtimeState: nil,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [owner], attachments: [attachment]), title: "terminal",
+                workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
         private nonisolated static func previewMetadata(id: String, originalLink: String, displayName: String, byteCount: Int)
             -> SpacesDeviceAPIResponse
         {
@@ -1267,6 +2803,17 @@
                     sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-06-04T14:23:30Z"),
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attachedClient], attachments: [attachment]), title: "terminal",
                 workingDirectory: "/tmp/work", outputByteCount: 0)
+        }
+
+        private nonisolated static func runningTerminalState(
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot, emittedAt: String, state: TerminalSessionState = .running
+        ) -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.attachmentState, emittedAt: emittedAt,
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: state, updatedAt: emittedAt),
+                attachmentSnapshot: attachmentSnapshot, title: "terminal", workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
         private nonisolated static func metadataResponse(_ metadata: SpacesDeviceTerminalLinkMetadata) -> SpacesDeviceAPIResponse {
@@ -1602,10 +3149,7 @@
         func testRemoteTerminalHostViewTapSendsClickWhenMouseCaptured() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
             hostView.setAcceptsTerminalInput(true)
-            hostView.debugTapLinkHandlerForTesting = { _ in
-                XCTFail("link probe should be skipped while the mirror captures the mouse")
-                return false
-            }
+            hostView.debugTapLinkHandlerForTesting = { _ in false }
             hostView.debugMouseCapturedForTesting = true
             var sentButtons: [(button: UInt8, pressed: Bool)] = []
             hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
@@ -1616,10 +3160,32 @@
             XCTAssertEqual(sentButtons.map(\.pressed), [true, false])
 
             hostView.debugMouseCapturedForTesting = false
-            hostView.debugTapLinkHandlerForTesting = { _ in false }
             sentButtons.removeAll()
             XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .focused)
             XCTAssertTrue(sentButtons.isEmpty)
+        }
+
+        /// A tap on a URL opens the link on the phone even while the session's application is tracking
+        /// the mouse, and that tap never reaches the application: on a phone a URL tap means "read this
+        /// link here", and the application keeps every tap that does not land on a link.
+        func testRemoteTerminalHostViewTapOnLinkOpensLocallyInsteadOfClickingTheTrackingApplication() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
+            hostView.setAcceptsTerminalInput(true)
+            hostView.debugMouseCapturedForTesting = true
+            var probedPoints: [CGPoint] = []
+            hostView.debugTapLinkHandlerForTesting = { point in
+                probedPoints.append(point)
+                return point.y < 100
+            }
+            var sentButtons: [(button: UInt8, pressed: Bool)] = []
+            hostView.onSendMouseButton = { button, pressed, _ in sentButtons.append((button, pressed)) }
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 18)), .openedLink)
+            XCTAssertEqual(probedPoints, [CGPoint(x: 12, y: 18)])
+            XCTAssertTrue(sentButtons.isEmpty, "a tap that opened a link must not also click the application")
+
+            XCTAssertEqual(hostView.debugTapToActivateInputForTesting(at: CGPoint(x: 12, y: 150)), .sentClick)
+            XCTAssertEqual(sentButtons.map(\.pressed), [true, false], "a tap off a link still drives the application")
         }
 
         func testRemoteTerminalHostViewDispatchesOpenURLAction() {
@@ -2154,6 +3720,60 @@
             window.isHidden = true
         }
 
+        func testRemoteTerminalHostViewSettlesKeyboardViewportOnceAfterReplacingATransition() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
+            hostView.userInterfaceIdiomOverrideForTesting = .phone
+            hostView.setAcceptsTerminalInput(true)
+            hostView.setKeyboardOccludedHeightForTesting(0)
+
+            var reportedViewports: [(columns: Int, rows: Int)] = []
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+            let baselineViewport = hostView.viewportSizeForTesting()
+            reportedViewports.removeAll()
+            let rendersBeforeTransition = hostView.renderLatestSnapshotCallCountForTesting
+
+            hostView.setSoftwareKeyboardVisible(false)
+            let firstSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
+            hostView.setKeyboardOccludedHeightForTesting(180)
+            hostView.layoutIfNeeded()
+
+            XCTAssertTrue(reportedViewports.isEmpty, "an intermediate keyboard frame must not resize the remote terminal")
+            XCTAssertEqual(
+                hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 1, "the local surface must follow the keyboard layout")
+
+            hostView.setSoftwareKeyboardVisible(true)
+            let secondSettlement = try XCTUnwrap(hostView.keyboardViewportSettlementIDForTesting())
+            XCTAssertNotEqual(firstSettlement, secondSettlement)
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.layoutIfNeeded()
+
+            XCTAssertTrue(reportedViewports.isEmpty, "the replacement transition must also suppress its interim viewport")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
+
+            hostView.completeKeyboardViewportSettlementForTesting(id: firstSettlement)
+            XCTAssertTrue(reportedViewports.isEmpty, "a cancelled transition must not report after its replacement")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 2)
+
+            hostView.completeKeyboardViewportSettlementForTesting(id: secondSettlement)
+            XCTAssertEqual(reportedViewports.count, 1)
+            let finalReport = try XCTUnwrap(reportedViewports.first)
+            let settledViewport = hostView.viewportSizeForTesting()
+            XCTAssertNotEqual(settledViewport.rows, baselineViewport.rows)
+            XCTAssertEqual(finalReport.columns, settledViewport.columns)
+            XCTAssertEqual(finalReport.rows, settledViewport.rows)
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 3)
+
+            hostView.setKeyboardOccludedHeightForTesting(260)
+            hostView.layoutIfNeeded()
+            let restoredViewport = hostView.viewportSizeForTesting()
+            let lastReportedViewport = try XCTUnwrap(reportedViewports.last)
+            XCTAssertEqual(lastReportedViewport.columns, restoredViewport.columns, "ordinary layouts still report outside keyboard transitions")
+            XCTAssertEqual(lastReportedViewport.rows, restoredViewport.rows, "ordinary layouts still report outside keyboard transitions")
+            XCTAssertEqual(hostView.renderLatestSnapshotCallCountForTesting, rendersBeforeTransition + 4)
+        }
+
         func testRemoteTerminalHostViewUsesSurfaceRowsForKeyboardHiddenPrompt() throws {
             let phoneBounds = CGRect(x: 0, y: 0, width: 393, height: 700)
             let window = UIWindow(frame: phoneBounds)
@@ -2317,6 +3937,148 @@
             wait(for: [freeCompleted], timeout: 30)
 
             window.isHidden = true
+        }
+
+        /// Applying a frame to the mirror copies the whole grid and blocks on the GPU, and the calls that
+        /// reach it are mostly not about terminal content at all: SwiftUI re-runs `updateUIView` for any
+        /// observed change (a title a coding agent rewrites many times a second is enough), and UIKit
+        /// re-runs `layoutSubviews` for keyboard and layout reasons of its own. A frame the surface
+        /// already holds must therefore cost nothing, while a frame that actually differs must still be
+        /// applied.
+        func testTheMirrorSkipsAFrameItAlreadyHoldsAndAppliesAChangedOne() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let renderStateKey = "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=identity"
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "identity")
+            defer { hostView.removeFromSuperview() }
+            let appliesAfterMount = hostView.renderFrameApplyCountForTesting
+            XCTAssertGreaterThan(appliesAfterMount, 0, "mounting has to put the first frame on the surface")
+
+            // A layout pass carries no new frame.
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+            XCTAssertEqual(hostView.renderFrameApplyCountForTesting, appliesAfterMount)
+
+            // A title-only payload leaves the owner epoch's snapshot untouched, so the viewer re-pushes
+            // exactly what it pushed before.
+            hostView.update(snapshot: sampleSnapshot(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
+            XCTAssertEqual(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "a repeated frame must not be re-applied")
+
+            hostView.update(snapshot: sampleSnapshotWithExclamation(), renderStateKey: renderStateKey, fallbackText: "Waiting for terminal state...")
+            XCTAssertGreaterThan(hostView.renderFrameApplyCountForTesting, appliesAfterMount, "changed content must reach the surface")
+        }
+
+        func testTheMirrorRefreshesGeometryWithoutReapplyingAnUnchangedFrame() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 640))
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "geometry-growth")
+            defer { hostView.removeFromSuperview() }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+            let appliesAtOriginalGeometry = hostView.renderFrameApplyCountForTesting
+
+            // Hiding the keyboard grows the view without changing the daemon snapshot. The surface
+            // refreshes its retained state at the new geometry without resetting it from that frame.
+            hostView.frame.size.height += 120
+            hostView.setNeedsLayout()
+            hostView.layoutIfNeeded()
+
+            XCTAssertEqual(
+                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry, "a geometry change must not re-apply an unchanged frame")
+        }
+
+        /// `TerminalViewerModel.updateOwnerRenderSnapshot` is the steady-streaming path: it keeps the
+        /// owner epoch's `id` fixed and only swaps the snapshot it carries, unlike a fresh
+        /// `beginOwnerRenderEpoch` which mints a new id. This pins `AppliedRenderFrameIdentity`'s
+        /// `snapshot` field against that shape directly, calling `update(ownerEpoch:endedRender:fallbackText:)`
+        /// with the same id twice: the fileprivate `update(snapshot:renderStateKey:fallbackText:)` test
+        /// helper folds the snapshot into the id it mints, so it cannot exercise this path — every
+        /// snapshot change there also changes the render key, which alone would still gate the re-apply
+        /// even if `snapshot` were dropped from the identity.
+        func testUpdateOwnerRenderSnapshotAppliesAChangedSnapshotUnderTheSameEpoch() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "same-epoch-snapshot-swap")
+            defer { hostView.removeFromSuperview() }
+
+            let fixedEpochID = "owner|same-epoch-snapshot-swap"
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: fixedEpochID, bootstrapSnapshot: sampleSnapshot()),
+                endedRender: nil, fallbackText: "Waiting for terminal state...")
+            let appliesAfterFirstSnapshot = hostView.renderFrameApplyCountForTesting
+
+            hostView.update(
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
+                    sessionID: "test-session", id: fixedEpochID, bootstrapSnapshot: sampleSnapshotWithExclamation()), endedRender: nil,
+                fallbackText: "Waiting for terminal state...")
+            XCTAssertGreaterThan(
+                hostView.renderFrameApplyCountForTesting, appliesAfterFirstSnapshot,
+                "a snapshot swap under the same owner epoch id must still reach the surface")
+        }
+
+        /// The shared mirror moves between terminal views, and an acquired surface still holds the cells
+        /// the previous holder applied. A view that takes it back must re-apply its own frame even though
+        /// nothing about that frame changed, or it renders the other session's pixels.
+        ///
+        /// This goes through the real handover rather than calling `surrenderSharedMirror()` directly on
+        /// one view: doing that leaves `GhosttySharedTerminalMirror`'s own `holder` pointed at the view
+        /// the whole time, so `acquire(for:...)`'s `holder === view` fast path (never having to park or
+        /// hand the mirror back) is what a single-view version of this test would actually exercise —
+        /// `reclaimSurrenderedSharedMirror()` clears the applied-frame identity on its own regardless of
+        /// which path `acquire` takes, so a single-view test would pass even if `acquire`'s handover
+        /// logic and `offerParkedMirrorToLatestSurrenderedHolder` were both broken. Mounting a second host
+        /// view is what forces the mirror to actually leave the first view (`holder !== view` inside
+        /// `acquire`) and actually come back through the park/offer path when the second one tears down.
+        func testAReacquiredMirrorReAppliesTheFrameTheViewAlreadyHeld() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let firstView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reapply-first")
+            defer { firstView.removeFromSuperview() }
+            let appliesBeforeSurrender = firstView.renderFrameApplyCountForTesting
+            XCTAssertTrue(firstView.hasMirrorSurfaceForTesting)
+
+            // A second view mounting takes the mirror over for real: `GhosttySharedTerminalMirror.acquire`
+            // sees a different holder, parks `firstView` (clearing its applied-frame identity as a side
+            // effect of the real handover, not of the test poking at it), and applies its own, different
+            // frame.
+            let secondView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reapply-second")
+            secondView.update(
+                snapshot: sampleSnapshotWithExclamation(),
+                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=reapply-second-frame",
+                fallbackText: "Waiting for terminal state...")
+            XCTAssertFalse(firstView.hasMirrorSurfaceForTesting, "the mirror must actually leave the first view, not merely look surrendered")
+            XCTAssertTrue(secondView.hasMirrorSurfaceForTesting)
+
+            // Tearing the second view down parks the mirror and offers it to whoever is latched waiting
+            // for it, which is `firstView` — the real path `offerParkedMirrorToLatestSurrenderedHolder`
+            // exists for. `prepareForDismantle()` alone is enough (it is also what leaving the window
+            // would trigger via `didMoveToWindow()`), so this does not also remove the view from its
+            // superview and risk running the teardown twice.
+            secondView.prepareForDismantle()
+
+            XCTAssertTrue(firstView.hasMirrorSurfaceForTesting, "the mirror must come back to the view it was parked for")
+            XCTAssertGreaterThan(
+                firstView.renderFrameApplyCountForTesting, appliesBeforeSurrender,
+                "the reacquired mirror still holds the second view's cells, so the first view's own frame must reach the surface again")
         }
 
         func testRemoteTerminalHostViewTeardownParksTheSharedMirrorWithoutBlocking() throws {

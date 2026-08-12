@@ -186,6 +186,52 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(DevicePairCommand.parsedSSHDestination("build-box").host, "build-box")
     }
 
+    func testDevicePairAutoInstallsOnlyWhenTheFailureCarriesAnInstallCommand() {
+        let linuxFailure = SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
+            message: "Spaces is not installed on build-box.", linuxInstallCommand: "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 1.2.3")
+        XCTAssertEqual(
+            DevicePairCommand.automaticInstallCommand(forPairingFailure: linuxFailure),
+            "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 1.2.3")
+        // A remote Mac reports Spaces missing with no command: it cannot be installed over SSH.
+        let macFailure = SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
+            message: "Install the Spaces app on the remote Mac, open it once, then pair again.", linuxInstallCommand: nil)
+        XCTAssertNil(DevicePairCommand.automaticInstallCommand(forPairingFailure: macFailure))
+        XCTAssertNil(DevicePairCommand.automaticInstallCommand(forPairingFailure: SpacesRemoteDevicePairingError.sshValidationFailed("no route")))
+    }
+
+    /// The install-and-pair path runs the installer and then pairs, so only the installer's own failures
+    /// may be reported as an install failure. A pairing failure raised after the installer finished (an
+    /// unreachable Device API on the freshly installed daemon, a rejected pairing) is not fixable by
+    /// re-running the installer, and dressing it up as one would also hide that the install completed.
+    func testOnlyInstallerRunFailuresAreReportedAsAnInstallFailure() {
+        XCTAssertTrue(
+            DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallFailed("exit 1: no space left on device")))
+        XCTAssertTrue(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallTimedOut("build-box")))
+        // Everything the pairing phase raises after a successful install run.
+        XCTAssertFalse(
+            DevicePairCommand.isRemoteInstallRunFailure(
+                SpacesRemoteDevicePairingError.deviceAPIUnreachable(hosts: ["build-box"], port: 47_847, message: "Connection refused.")))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.pairingRejected("The pairing code expired.")))
+        XCTAssertFalse(
+            DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remotePairCommandFailed("spaces: command not found")))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.missingAuthToken))
+        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(CocoaError(.fileNoSuchFile)))
+    }
+
+    func testRemoteDeviceInstallFailureKeepsTheUnderlyingMessageAndSpellsOutTheManualCommand() {
+        let failure = RemoteDeviceInstallFailure(
+            underlyingMessage: "Installing Spaces on build-box failed (exit 1): no space left on device.",
+            installCommand: "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 1.2.3")
+
+        XCTAssertEqual(
+            failure.errorDescription,
+            """
+            Installing Spaces on build-box failed (exit 1): no space left on device.
+            Run the installer on the device, then pair again:
+              curl -fsSL https://usespaces.dev/install.sh | bash -s -- 1.2.3
+            """)
+    }
+
     func testDeviceRemoveParsesSelector() throws { XCTAssertEqual(try DeviceRemoveCommand.parse(["linux-box"]).device, "linux-box") }
 
     func testTerminalSessionRowsReturnsEmptyListWhenNoSessionsExist() { XCTAssertEqual(terminalSessionRows([]), []) }

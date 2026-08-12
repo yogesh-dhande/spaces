@@ -33,6 +33,8 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
 public struct SpacesRemoteDevicePairingResult: Sendable, Equatable {
     public let deviceID: String
     public let name: String
+    /// The address the pairing request was redeemed against, for display. The stored record keeps every
+    /// candidate address the device offered.
     public let host: String
     public let port: Int
 
@@ -77,7 +79,9 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case remotePairCommandTimedOut(String)
     case remotePairCommandFailed(String)
     case invalidRemotePairingOutput(String)
-    case deviceAPIUnreachable(host: String, port: Int, message: String)
+    /// Names every candidate address the redemption was attempted against, since a link carries the
+    /// device's LAN and tailnet addresses and all of them are raced.
+    case deviceAPIUnreachable(hosts: [String], port: Int, message: String)
     case pairingVersionIncompatible(String)
     case pairingRejected(String)
     case missingAuthToken
@@ -86,7 +90,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .missingSSHHost: "SSH host is required to connect a remote device."
+        case .missingSSHHost: "An SSH host is required for this action. Enter one to connect, or pair the device over SSH to enable remote updates."
         case .invalidSSHPort(let port): "SSH port \(port) is invalid. Enter a port between 1 and 65535."
         case .sshUnavailable(let message): message
         case .sshValidationTimedOut(let destination):
@@ -104,8 +108,8 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
             "SSH connected to \(destination), but Spaces did not finish preparing the connection. Confirm Spaces is installed and available for that user, then retry."
         case .remotePairCommandFailed(let message): message
         case .invalidRemotePairingOutput(let message): message
-        case .deviceAPIUnreachable(let host, let port, let message):
-            "SSH succeeded, but the remote Device API is not reachable at \(host):\(port). Confirm LAN/VPN/Tailscale/firewall access to that address and port. \(message)"
+        case .deviceAPIUnreachable(let hosts, let port, let message):
+            "The remote Device API is not reachable at \(hosts.map { "\($0):\(port)" }.joined(separator: ", ")). Confirm LAN/VPN/Tailscale/firewall access to those addresses and port. \(message)"
         case .pairingVersionIncompatible(let message): message
         case .pairingRejected(let message): "The remote device rejected pairing. \(message)"
         case .missingAuthToken: "The remote device accepted pairing but did not issue an auth token."
@@ -150,9 +154,12 @@ public enum SpacesDevicePairingClient {
             destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion, profile: request.profile)
 
         try assertPairingCompatible(deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
-        let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
+        let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, port: metadata.port)
+        // Redeemed against the address SSH just proved reachable, not the daemon's advertised list: this
+        // flow reached the device over SSH to that host, so it is the one candidate already known good.
         let client = try SpacesDeviceAPIRequestClient(
-            host: deviceAPIHost, port: metadata.port, certificateFingerprint: metadata.certificateFingerprint)
+            resolver: SpacesDeviceEndpointResolver(
+                hosts: [deviceAPIHost], port: metadata.port, certificateFingerprint: metadata.certificateFingerprint))
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
@@ -165,7 +172,8 @@ public enum SpacesDevicePairingClient {
                         installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: clientPlatform,
                         deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
         } catch {
-            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: deviceAPIHost, port: metadata.port, message: error.localizedDescription)
+            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(
+                hosts: [deviceAPIHost], port: metadata.port, message: error.localizedDescription)
         }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
@@ -176,7 +184,8 @@ public enum SpacesDevicePairingClient {
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: displayName, platform: "remote", host: deviceAPIHost, port: metadata.port,
+                id: deviceID, name: displayName, platform: "remote",
+                hosts: relayedPairingHosts(deviceAPIHost: deviceAPIHost, advertisedHosts: metadata.hosts), port: metadata.port,
                 certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort, createdAt: now,
                 updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
@@ -194,9 +203,41 @@ public enum SpacesDevicePairingClient {
         openSSHControlMaster(destination: destination, port: request.sshPort)
         defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
 
-        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: normalized(request.clientAppVersion))
-        let result = try runSSH(
-            destination: destination, port: request.sshPort, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
+        try runRemoteInstaller(destination: destination, port: request.sshPort, version: normalized(request.clientAppVersion))
+        // Pairing nests inside this flow's already-open ControlMaster: openSSHControlMaster returns early
+        // when the master is live, so pairRemoteDevice reuses it, and its own defer closes it. The outer
+        // defer's `-O exit` then no-ops harmlessly (runDetachedSSHProcess swallows failures and the socket
+        // removal is `try?`). This nesting is intentional and safe.
+        return try pairRemoteDevice(request)
+    }
+
+    /// Updates Spaces on an already-paired Linux device by running the installer over SSH, pinned to
+    /// `appVersion` so the device lands on the version this client speaks. The device keeps its pairing:
+    /// there is no re-pair and no install probe, only the installer run.
+    ///
+    /// The Linux installer lands the new release beside the running one and pokes the live daemon
+    /// (`spaces daemon apply-update`), which execs the staged binary at the same pid instead of exiting
+    /// for systemd to respawn it, so the running terminals, workspace processes, and coding agents on
+    /// that device survive the update.
+    ///
+    /// Accepted consequence: once the daemon moves forward, clients on older app builds are wire-blocked
+    /// on this device until those apps update. Their sessions keep running underneath the block, so
+    /// updating the client restores the connection with nothing lost.
+    public static func updateSpacesOnRemoteDevice(device: SpacesPairedDeviceRecord, appVersion: String?) throws {
+        guard let sshHost = normalized(device.sshHost) else { throw SpacesRemoteDevicePairingError.missingSSHHost }
+        let sshUser = normalized(device.sshUser)
+        try validateSSHPort(device.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: device.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
+        try runRemoteInstaller(destination: destination, port: device.sshPort, version: normalized(appVersion))
+    }
+
+    /// Runs the Linux installer over SSH and maps its outcome. Expects the caller to have opened (and to
+    /// close) the ControlMaster for `destination`, since both callers run other SSH commands around it.
+    private static func runRemoteInstaller(destination: String, port: Int?, version: String?) throws {
+        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: version)
+        let result = try runSSH(destination: destination, port: port, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
         if result.timedOut { throw SpacesRemoteDevicePairingError.remoteInstallTimedOut(destination) }
         guard result.exitStatus == 0 else {
             throw SpacesRemoteDevicePairingError.remoteInstallFailed(
@@ -204,11 +245,6 @@ public enum SpacesDevicePairingClient {
                     destination: destination, standardOutput: result.standardOutput, standardError: result.standardError,
                     exitStatus: result.exitStatus))
         }
-        // Pairing nests inside this flow's already-open ControlMaster: openSSHControlMaster returns early
-        // when the master is live, so pairRemoteDevice reuses it, and its own defer closes it. The outer
-        // defer's `-O exit` then no-ops harmlessly (runDetachedSSHProcess swallows failures and the socket
-        // removal is `try?`). This nesting is intentional and safe.
-        return try pairRemoteDevice(request)
     }
 
     /// Pairs this client with a daemon from a `spaces://pair` link — code and nonce redeemed over
@@ -220,12 +256,19 @@ public enum SpacesDevicePairingClient {
         link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
         profile: SpacesProfile? = nil
     ) throws -> SpacesRemoteDevicePairingResult {
-        guard let host = link.hosts.first else {
+        // The link's hosts arrive ordered most-preferred first and already normalized and capped by
+        // `SpacesDevicePairingLink.parse` (a link's `host` parameter repeats, so the bound is applied
+        // once there, for every client that redeems), and all of them are stored as the record's
+        // candidates. The redemption itself races them through a throwaway resolver — one with no
+        // persistence callback, since there is no stored record to record a proven address against
+        // yet — so scanning a pairing link works away from the device's LAN, not only on it.
+        guard !link.hosts.isEmpty else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Pairing link is missing a Device API host.")
         }
         try assertPairingCompatible(deviceProtocolVersion: link.protocolVersion, deviceAppVersion: link.appVersion, deviceName: link.name)
-        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: host, port: link.port)
-        let client = try SpacesDeviceAPIRequestClient(host: host, port: link.port, certificateFingerprint: link.certificateFingerprint)
+        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, port: link.port)
+        let resolver = SpacesDeviceEndpointResolver(hosts: link.hosts, port: link.port, certificateFingerprint: link.certificateFingerprint)
+        let client = try SpacesDeviceAPIRequestClient(resolver: resolver)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
@@ -234,18 +277,23 @@ public enum SpacesDevicePairingClient {
                     clientApp: SpacesDeviceClientApp(
                         installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
                         appVersion: clientAppVersion)))
-        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: host, port: link.port, message: error.localizedDescription) }
+        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(hosts: link.hosts, port: link.port, message: error.localizedDescription) }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
+        // The candidate that answered becomes the record's proven address, so the first connect after
+        // pairing goes straight to it instead of re-racing the whole link. A redemption that got a
+        // response always proved one; `link.hosts[0]` only keeps the expression total.
+        let provenHost = resolver.currentCachedHost() ?? link.hosts[0]
         let now = ISO8601DateFormatter().string(from: Date())
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: link.name, platform: "remote", host: host, port: link.port, certificateFingerprint: link.certificateFingerprint,
-                sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now, lastSelectedAt: now))
+                id: deviceID, name: link.name, platform: "remote", hosts: link.hosts, activeHost: provenHost, port: link.port,
+                certificateFingerprint: link.certificateFingerprint, sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now,
+                lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: profile)
-        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: host, port: link.port)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: provenHost, port: link.port)
     }
 
     private static var clientPlatform: String {
@@ -276,7 +324,7 @@ public enum SpacesDevicePairingClient {
     public static func openRemotePairingWindow(for device: SpacesPairedDeviceRecord, appVersion: String? = nil, profile: SpacesProfile? = nil) throws
         -> SpacesRemoteDevicePairingWindowResult
     {
-        let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
+        let sshHost = try normalizedSSHHost(device.sshHost ?? device.dialHost ?? "")
         let sshUser = normalized(device.sshUser)
         try validateSSHPort(device.sshPort)
         let destination = sshDestination(host: sshHost, user: sshUser)
@@ -329,8 +377,14 @@ public enum SpacesDevicePairingClient {
         return "macos-\(String(hash, radix: 16))"
     }
 
-    static func stablePairedDeviceID(certificateFingerprint: String, host: String, port: Int) -> String {
-        let source = "\(certificateFingerprint)|\(host)|\(port)"
+    /// The stable id a device's pinned certificate resolves to. The source string keeps the port, but the
+    /// slug is truncated to 48 characters and a certificate fingerprint alone ("sha256-" plus 64 hex
+    /// characters) is longer than that, so the truncation always lands inside the fingerprint hex and
+    /// nothing after it can reach the output. That is why dropping the host from the historical
+    /// "<fingerprint>|<host>|<port>" formula produces byte-identical ids and no stored id is ever
+    /// rewritten.
+    static func stablePairedDeviceID(certificateFingerprint: String, port: Int) -> String {
+        let source = "\(certificateFingerprint)|\(port)"
         let slug = source.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
             in: CharacterSet(charactersIn: "-"))
         return "device-\(slug.prefix(48))"
@@ -525,7 +579,9 @@ public enum SpacesDevicePairingClient {
         // not-installed.
         if result.exitStatus != 0 {
             // A missing `spaces` binary (exit 127 / "not found") means the CLI this command named is not on
-            // the device. We never auto-install; surface actionable instructions instead.
+            // the device. The structured error carries the install command, so a caller can run the
+            // installer over SSH itself (the Mac panel and the CLI do) and render the copyable command as
+            // the fallback.
             if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
                 throw remotePairCommandBinaryMissingError(destination: destination, pairCommand: pairCommand, probe: probe, appVersion: appVersion)
             }
@@ -582,8 +638,9 @@ public enum SpacesDevicePairingClient {
     /// Builds the actionable install/setup guidance shown when SSH reaches the remote but Spaces there
     /// cannot hand back a pairing window. `lead` states what went wrong; this appends platform-specific
     /// guidance without embedding any install command (the command travels separately on the structured
-    /// `remoteSpacesNotInstalled` error). Spaces never auto-installs remote daemons: Linux users run the
-    /// installer one-liner on the device, and Mac users install and open the Spaces app there.
+    /// `remoteSpacesNotInstalled` error). Linux guidance backs the client-initiated installer run over SSH
+    /// and the copyable one-liner beside it; a remote Mac has no such path, so its guidance asks the user
+    /// to install and open the Spaces app on the device.
     static func installGuidanceMessage(lead: String, probe: RemoteInstallProbe) -> String {
         if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again." }
         return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."

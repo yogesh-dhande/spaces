@@ -43,14 +43,12 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
         var components = URLComponents()
         components.scheme = Self.scheme
         components.host = Self.host
-        components.queryItems = [
-            URLQueryItem(name: "v", value: Self.version)
-        ] + hosts.map { URLQueryItem(name: "host", value: $0) } + [
-            URLQueryItem(name: "port", value: String(port)),
-            URLQueryItem(name: "nonce", value: nonce), URLQueryItem(name: "code", value: code),
-            URLQueryItem(name: "fp", value: certificateFingerprint), URLQueryItem(name: "name", value: name),
-            URLQueryItem(name: "pv", value: String(protocolVersion)), URLQueryItem(name: "av", value: appVersion),
-        ]
+        components.queryItems =
+            [URLQueryItem(name: "v", value: Self.version)] + hosts.map { URLQueryItem(name: "host", value: $0) } + [
+                URLQueryItem(name: "port", value: String(port)), URLQueryItem(name: "nonce", value: nonce), URLQueryItem(name: "code", value: code),
+                URLQueryItem(name: "fp", value: certificateFingerprint), URLQueryItem(name: "name", value: name),
+                URLQueryItem(name: "pv", value: String(protocolVersion)), URLQueryItem(name: "av", value: appVersion),
+            ]
         return components.url ?? URL(string: "\(Self.scheme)://\(Self.host)")!
     }
 
@@ -77,6 +75,13 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
             values[item.name] = value
         }
         guard values["v"] == Self.version else { throw SpacesDevicePairingLinkError.unsupportedVersion }
+        // A link is untrusted input and `host` is the one repeatable parameter, so the list a redeeming
+        // client ends up racing and storing is bounded here rather than at each redemption site. Every
+        // client redeems through this parser (the CLI's `--link`, the Mac app's scan and deep link, the
+        // iOS scan and deep link), so one cap covers all of them and each redemption can keep treating
+        // `hosts` as already usable. Producing a link is untouched: the daemon emits its own handful of
+        // addresses and this must not reshape what it serializes.
+        hosts = SpacesDeviceHostCandidates.normalized(hosts)
         guard !hosts.isEmpty else { throw SpacesDevicePairingLinkError.missingField("host") }
         guard let portValue = trimmed(values["port"]), let port = Int(portValue), (1...65_535).contains(port) else {
             throw SpacesDevicePairingLinkError.missingField("port")

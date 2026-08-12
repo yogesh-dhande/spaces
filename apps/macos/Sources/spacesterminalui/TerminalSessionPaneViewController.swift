@@ -150,10 +150,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let onWindowFocus: (@MainActor (String) -> Void)?
     let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
     /// Runs after a user close has detached this pane's client and the daemon has processed that
-    /// detach (fired off the async detach's completion). The owner uses it to stop an ad hoc shell
-    /// that no longer has any attached client, since tearing the pane down also tears down the state
-    /// stream that would otherwise surface the detach as an attachment-state change.
-    let onCloseClientDetached: (@MainActor @Sendable () -> Void)?
+    /// detach (fired off the async detach's completion), carrying whether the pane held the session's
+    /// owner attachment when it was closed or its session had already ended. The host uses it to ask the
+    /// daemon to stop an ad hoc shell the user closed at a bare prompt, since tearing the pane down also
+    /// tears down the state stream that would otherwise surface the detach as an attachment-state change.
+    let onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)?
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
@@ -199,7 +200,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// against it (`screenContentCanChangePresentation`) to tell a first frame arriving from an
     /// unchanged blank pane.
     private var surfaceAvailabilityAtLastPresentation: Bool?
+    /// Counts every `refreshNow()` call, regardless of which observer triggered it. `refreshNow()` is
+    /// the pane's one full-refresh entry point, so this is the seam a test uses to prove a single
+    /// state-stream payload (e.g. one `session_metadata` reason) causes at most one refresh instead of
+    /// guessing from side effects — two observers doing the identical unconditional refresh on the same
+    /// notification pair would otherwise double this silently.
+    private(set) var debugRefreshNowCallCountForTesting = 0
     private var lastObservedOwnerClientID: String?
+    /// Whether this pane's client holds the session's owner attachment, as of the last snapshot it
+    /// observed. Read at close time, before the detach, so the close can report an owner close: only an
+    /// owner close asks the daemon to stop an ad hoc terminal, and closing a viewer never stops one.
+    var holdsOwnerAttachment: Bool { lastObservedOwnerClientID == client.id || lastObservedAttachmentMode == .owner }
     var lastObservedRuntimeState: TerminalSessionRuntimeState?
     var shouldShowOwnerStateLabel = true
     var inputStatusIsError = false
@@ -240,7 +251,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         defersInitialOwnerClientAttach: Bool = false, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
         onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
+        onCloseClientDetached: (@MainActor @Sendable (Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -542,6 +553,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
+        debugRefreshNowCallCountForTesting += 1
         // A refresh is where the pane resolves what it presents, so it is also where the surface
         // availability that resolution was made from is recorded. Recording on exit captures a
         // surface this refresh attached or released.

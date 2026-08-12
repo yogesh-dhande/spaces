@@ -321,6 +321,9 @@
         private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
+        /// The grid of the latest accepted resize request whose forced-full frame has not gone out yet; see
+        /// `handleTerminalGridReflow`.
+        private var pendingResizeBroadcastGrid: (columns: Int, rows: Int)?
         private var lastSessionStateRevision: UInt64?
         private var lastSessionStateFlags: GhosttyEmbeddedSessionStateChange.Flags?
         private var lastScreenStateRevision: UInt64?
@@ -438,6 +441,7 @@
                 self.lastKnownSurfaceSize = (columns, rows)
                 self.refreshRuntimeState(force: true)
             }
+            sessionDriver.onTerminalGridReflowed = { [weak self] columns, rows in self?.handleTerminalGridReflow(columns: columns, rows: rows) }
             rendererHostStorage.setOwnerClientResolver { [weak self] clientID in self?.isOwner(clientID: clientID) ?? false }
             rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
             sessionDriver.onSurfaceClosed = { [weak self] in self?.handleSessionClosed() }
@@ -915,6 +919,12 @@
         var debugOwnerEpoch: UInt64 { ownerEpoch }
 
         public func childPID() -> Int32? { observedChildPID() }
+
+        /// The session's foreground process read from the PTY right now, not the periodic sample carried
+        /// on runtime state. The conditional stop of a user-closed ad hoc terminal decides against this so
+        /// a command started an instant before the close is seen.
+        public func currentForegroundProcess() -> TerminalForegroundProcessSnapshot? { observedForegroundPID().flatMap(foregroundProcessResolver) }
+
         public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }
         // Prefer the live cwd observed from the foreground/child process (cached by refreshRuntimeState)
         // so the working directory clients see converges on reality even when the shell never reports a
@@ -1496,6 +1506,10 @@
             trace(
                 "resize_request client=\(request.clientID ?? "nil") columns=\(columns) rows=\(rows) runtime_before=\(traceSize(currentSize)) owner=\(activeOwnerClientID() ?? "nil")"
             )
+            // Armed BEFORE the surface resize, because ghostty can finish the reflow (and report it) while
+            // `resizeCellGrid` is still measuring the surface; arming afterwards would let that report land
+            // with nothing to match and lose the broadcast.
+            pendingResizeBroadcastGrid = (columns: columns, rows: rows)
             let resized = rendererHostStorage.resizeCellGrid(columns: columns, rows: rows)
             refreshRuntimeState(force: true)
             trace("resize_request_result resized=\(resized ? 1 : 0) runtime_after=\(traceSize(observedSurfaceSize()))")
@@ -1504,9 +1518,57 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: resized, detail: "columns=\(columns) rows=\(rows)")
             if resized {
                 recordAcceptedResizeSerial(from: request)
-                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
+            } else {
+                // The surface never reached the requested grid, so no reflow will ever be reported for it.
+                // Leaving the arm in place would let an unrelated later reflow that happens to land on this
+                // grid fire a resize broadcast for a request that failed.
+                pendingResizeBroadcastGrid = nil
             }
             return TerminalControlResponse(ok: resized, message: resized ? "Resized terminal." : "Unable to match the requested terminal size.")
+        }
+
+        /// Broadcasts the forced-full `resize` frame once ghostty reports the terminal reflowed to the grid
+        /// the owner asked for.
+        ///
+        /// The broadcast cannot ride the resize control request itself: setting the surface size only queues
+        /// the reflow onto ghostty's io thread, so a frame captured in that turn still carries the old grid
+        /// while the payload's runtime state already reports the new one, and the pane vetoes it as
+        /// `stale_resize_grid` and paints nothing until its throttled resync. Ghostty's host-managed resize
+        /// callback runs after the terminal has been reflowed, so a frame captured from here carries the
+        /// requested grid with the session's screen reflowed onto it.
+        ///
+        /// Only the grid of the LATEST accepted resize broadcasts. Two resizes in quick succession leave the
+        /// second one armed, and the first one's report is dropped here rather than shipping a frame at a
+        /// grid the pane has already moved off.
+        ///
+        /// The report's dimensions alone cannot decide that, because a rapid sequence can revisit a grid
+        /// (80x24 → 79x24 → 80x24): the FIRST 80x24 report matches the arm the LAST 80x24 request left, and
+        /// by the time this turn captures a frame the intervening 79x24 reflow may have applied. That ships
+        /// a 79x24 frame under an 80x24 runtime state, which the pane vetoes as `stale_resize_grid`, and the
+        /// genuine final report then finds nothing armed, leaving the blank pane this broadcast prevents.
+        /// Nothing in the report distinguishes the two: ghostty's callback carries dimensions only, and one
+        /// resize request can produce any number of reports (`resizeCellGrid` measures and rescales in a
+        /// loop), so counting them cannot identify the last one either.
+        ///
+        /// So the frame is captured here, and the one capture both decides and ships: it takes the renderer
+        /// mutex the reflow ran under and is therefore the only authority on the reflowed terminal's grid
+        /// (the surface size leads the reflow, which is what makes it useless here), and the same capture is
+        /// handed to the broadcast as the screen state to export. Verifying one capture and then letting the
+        /// broadcast take its own would reopen the race it closes, since a queued reflow can apply in the gap
+        /// between them and ship a grid-B frame under an arm cleared on grid A. A capture that does not carry
+        /// the armed grid leaves the arm in place for the report that will, and costs a later delta nothing
+        /// but its scroll-rect shortcut.
+        private func handleTerminalGridReflow(columns: Int, rows: Int) {
+            guard let pending = pendingResizeBroadcastGrid, pending.columns == columns, pending.rows == rows else { return }
+            let capturedScreenState = captureLiveSessionScreenState()
+            let capturedGrid = capturedScreenState.snapshot.map { (columns: $0.columns, rows: $0.rows) }
+            guard let capturedGrid, capturedGrid.columns == columns, capturedGrid.rows == rows else {
+                trace("resize_reflow_capture_skip columns=\(columns) rows=\(rows) captured=\(traceSize(capturedGrid))")
+                return
+            }
+            pendingResizeBroadcastGrid = nil
+            trace("resize_reflow_broadcast columns=\(columns) rows=\(rows)")
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize, preCapturedScreenState: capturedScreenState)
         }
 
         private func startRuntimeStateTimer() {
@@ -1856,11 +1918,13 @@
                 currentBellAt = TerminalSessionTimestamp.string(from: bellAt)
                 refreshRuntimeState(force: true)
                 return
-            case .openURL(_, let value):
-                // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
-                // this is effectively a no-op there, but keep it correct via an async engine→main hop
-                // rather than blocking the engine actor on the main actor.
-                Task { @MainActor in _ = GhosttyTerminalLinkOpener.open(value) }
+            case .openURL:
+                // Dropped: the daemon never opens a URL. It runs as a launchd GUI-session agent, so an
+                // open here would launch this host's browser for input that may have arrived from a
+                // phone or another Mac, which is not where the user is looking. Every client mirrors
+                // the session locally and runs its own link detection, so the link opens on the device
+                // the user activated it from. `action_cb` still reports the action as handled, which
+                // keeps Ghostty's own shell-out fallback from opening it here instead.
                 return
             case .mouseOverLink, .startSearch, .endSearch, .searchTotal, .searchSelected: return
             }
@@ -2240,7 +2304,8 @@
         }
 
         private func broadcastCurrentState(
-            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil
+            reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil, clipboardWrite: TerminalClipboardWritePayload? = nil,
+            preCapturedScreenState: LiveSessionScreenState? = nil
         ) {
             guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
@@ -2252,7 +2317,7 @@
             guard stateStreamServer != nil,
                 let payload = currentRemoteSessionState(
                     reason: reason, outputByteCount: outputByteCount, outputEndByteOffset: outputEndByteOffset, exportMode: .streamDeltaAllowed,
-                    clipboardWrite: clipboardWrite)
+                    clipboardWrite: clipboardWrite, preCapturedScreenState: preCapturedScreenState)
             else { return }
             broadcastRemoteStatePayload(payload, startedAt: startedAt, ownerClient: ownerClient, outputByteCount: outputByteCount)
         }
@@ -2298,7 +2363,7 @@
         private func currentRemoteSessionState(
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false,
-            clipboardWrite: TerminalClipboardWritePayload? = nil
+            clipboardWrite: TerminalClipboardWritePayload? = nil, preCapturedScreenState: LiveSessionScreenState? = nil
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
             // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
@@ -2322,7 +2387,8 @@
                         "reason": reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "runtime_columns": String(runtimeState?.columns ?? 0),
                         "runtime_rows": String(runtimeState?.rows ?? 0),
                     ])
-                let resolvedScreenState = resolveRemoteScreenState(runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind)
+                let resolvedScreenState = resolveRemoteScreenState(
+                    runtimeState: runtimeState, reason: reason, ownerKind: ownerClient?.kind, preCapturedScreenState: preCapturedScreenState)
                 let snapshot = resolvedScreenState.snapshot
                 let frame = snapshot.map { GhosttyRenderFrame(sessionRevision: renderFrameRevision(for: $0), ownerEpoch: ownerEpoch, snapshot: $0) }
                 let renderUpdateEncodeStartedAt = Date()
@@ -2397,6 +2463,10 @@
                 target: frame, baseline: lastRenderUpdateBaseline, forceFull: forceFull, forceFullReason: forceFullReason,
                 nativeScrollRects: nativeScrollRects)
             let shouldUpdateStreamBaseline = exportMode == .streamDeltaAllowed
+            // What actually goes out, which is `update` except where a delta that could not be applied
+            // locally is replaced below. The pending-baseline promise is answered against this rather than
+            // against `update`, so both readings agree with what the subscriber received.
+            var emittedUpdate = update
             switch update.kind {
             case .full:
                 if shouldUpdateStreamBaseline, let fullFrame = update.fullFrame {
@@ -2406,14 +2476,18 @@
                 if let appliedBaseline = try? GhosttyRenderUpdateApplier.apply(update, to: lastRenderUpdateBaseline) {
                     lastRenderUpdateBaseline = appliedBaseline
                 } else {
-                    let fullUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
+                    emittedUpdate = GhosttyRenderUpdate.full(frame, fallbackReason: "local_delta_apply_failed")
                     if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = GhosttyRenderUpdateBaseline(frame: frame) }
-                    return fullUpdate
                 }
             case .resyncRequired: if shouldUpdateStreamBaseline { lastRenderUpdateBaseline = nil }
             }
-            if hasPendingSubscriberBaselineReset { forceNextBroadcastFullRenderUpdate = false }
-            return update
+            // The arm is a promise to a subscriber whose initial carried no render update, and only a full
+            // frame keeps it. A scroll is excluded from `forceFullForSubscriberBaseline` on purpose — its
+            // delta rewrites the viewport through scroll rects and a full frame would waste that — but a
+            // delta hands the subscriber nothing to apply, so spending the promise on one would leave it
+            // with a frame it can only drop and a resync round trip before the pane shows anything.
+            if hasPendingSubscriberBaselineReset, emittedUpdate.kind == .full { forceNextBroadcastFullRenderUpdate = false }
+            return emittedUpdate
         }
 
         private func renderFrameRevision(for snapshot: GhosttyTerminalSnapshot) -> UInt64 {
@@ -2436,10 +2510,18 @@
             return renderUpdateRevision
         }
 
-        private func resolveRemoteScreenState(runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?) -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], source: String
-        ) {
-            let liveSessionScreenState = captureLiveSessionScreenState()
+        /// One read of the live terminal: the snapshot (or its text fallback) and the scroll rects ghostty
+        /// had pending when it was taken. Passing one of these back into the export path is what lets a
+        /// caller emit the exact frame it already inspected instead of racing a second capture against it.
+        private typealias LiveSessionScreenState = (
+            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation]
+        )
+
+        private func resolveRemoteScreenState(
+            runtimeState: TerminalSessionRuntimeState?, reason: String, ownerKind: TerminalClientKind?,
+            preCapturedScreenState: LiveSessionScreenState? = nil
+        ) -> (snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation], source: String) {
+            let liveSessionScreenState = preCapturedScreenState ?? captureLiveSessionScreenState()
             let sessionSnapshot = liveSessionScreenState.snapshot
             let sessionSnapshotText = liveSessionScreenState.snapshotText
             if Self.remoteScreenStateHasVisibleContent(snapshot: sessionSnapshot, snapshotText: sessionSnapshotText) {
@@ -2452,9 +2534,7 @@
             return (snapshot: nil, snapshotText: nil, scrollRects: [], source: isLiveRuntime ? "session_empty" : "session_unavailable")
         }
 
-        private func captureLiveSessionScreenState() -> (
-            snapshot: GhosttyTerminalSnapshot?, snapshotText: String?, scrollRects: [GhosttyRenderScrollRectOperation]
-        ) {
+        private func captureLiveSessionScreenState() -> LiveSessionScreenState {
             flushPendingIncomingOutputForStateExport()
             rendererHostStorage.prepareRenderStateExport()
             let capturedRenderState = rendererHostStorage.sessionRenderStateSnapshot()
@@ -2509,6 +2589,12 @@
             foregroundProcessResolver = resolver
         }
         func debugSetLastKnownSurfaceSize(columns: Int, rows: Int) { lastKnownSurfaceSize = (columns, rows) }
+        /// Test-only: arms the pending resize broadcast exactly as an accepted resize control request does.
+        /// The real arm sits behind `resizeCellGrid`, which needs a live ghostty surface, so this is what
+        /// lets a test drive `handleTerminalGridReflow` against a stubbed capture.
+        func debugArmPendingResizeBroadcastGridForTesting(columns: Int, rows: Int) { pendingResizeBroadcastGrid = (columns, rows) }
+        /// Test-only: delivers a terminal-reflow report the way ghostty's host-managed resize callback does.
+        func debugHandleTerminalGridReflowForTesting(columns: Int, rows: Int) { handleTerminalGridReflow(columns: columns, rows: rows) }
         func debugHandleSessionClosed() { handleSessionClosed() }
         func debugMarkStartedForTesting() { started = true }
 

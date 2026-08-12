@@ -20,6 +20,7 @@ final class WorkspaceSetupThread: Thread {
 final class TerminalOpenCapture: @unchecked Sendable {
     var sessionIDs: [String] = []
     var modes: [TerminalAttachmentMode] = []
+    var openIntents: [TerminalPaneOpenIntent] = []
 }
 
 final class TerminalLaunchConfigurationCapture: @unchecked Sendable {
@@ -39,7 +40,10 @@ final class TerminalLaunchConfigurationCapture: @unchecked Sendable {
     }
 }
 
-final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
+final class TerminalCloseCapture: @unchecked Sendable {
+    var sessionIDs: [String] = []
+    var dispositions: [TerminalPaneCloseDisposition] = []
+}
 
 final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
@@ -85,7 +89,7 @@ final class OrchestratorTests: XCTestCase {
         let store = try SQLiteStore(path: dbPath)
         let orchestrator = makeTestOrchestrator(
             store: store,
-            builtInTerminalWindowOpener: { sessionID, _ in
+            builtInTerminalWindowOpener: { sessionID, _, _ in
                 try! withSpacesProfileEnvironment(dbPath: dbPath) {
                     let paths = try TerminalSessionPaths.forSession(id: sessionID)
                     try paths.ensureDirectories()
@@ -124,6 +128,9 @@ final class OrchestratorTests: XCTestCase {
         return (orchestrator, store, project, workspace, root)
     }
 
+    /// A spaces.yaml as users still have it on disk, including the retired `agent_launchers:` key. The
+    /// document decoder ignores keys it does not know, so every import path below must parse this
+    /// unchanged.
     func spacesYAMLFixture(stopScript: String) -> String {
         """
         version: 1

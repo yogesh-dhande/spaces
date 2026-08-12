@@ -1,9 +1,45 @@
 import XCTest
+import spacesdevicecore
 
 @testable import spacesclientcore
 @testable import spacesterminalcore
 
 final class SpacesDevicePairingClientTests: XCTestCase {
+    /// Redeeming a link is where an attacker-shaped host list would enter: `host` repeats, and whatever
+    /// it carries is both raced by the throwaway resolver and written to the device's record. Both sides
+    /// take `link.hosts` verbatim, so this drives the normalized list through each of them.
+    func testRedeemingAnAbusiveLinkRacesAndStoresTheNormalizedCappedList() throws {
+        // Percent-encoded, because this has to be a link a client could really be handed: a
+        // whitespace-padded entry, a duplicate of it, an empty one, and far more candidates than a
+        // device has.
+        let hosts = ["%20%20192.168.1.24%20%20", "192.168.1.24", "", "100.86.197.104"] + (1...20).map { "10.0.0.\($0)" }
+        let parsed = try SpacesDevicePairingLink.parse(
+            "spaces://pair?v=4&" + hosts.map { "host=\($0)" }.joined(separator: "&")
+                + "&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0")
+        let expected = ["192.168.1.24", "100.86.197.104", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+
+        // What the redemption races: the throwaway resolver built from the link.
+        let resolver = SpacesDeviceEndpointResolver(hosts: parsed.hosts, port: parsed.port, certificateFingerprint: parsed.certificateFingerprint)
+        XCTAssertEqual(resolver.candidateHosts, expected)
+
+        // What the redemption persists: the record built from the same list.
+        let database = try makeDatabase()
+        let now = "2026-08-06T00:00:00Z"
+        try database.upsert(
+            device: SpacesPairedDeviceRecord(
+                id: "device-redeemed", name: parsed.name, platform: "remote", hosts: parsed.hosts, activeHost: parsed.hosts[0], port: parsed.port,
+                certificateFingerprint: parsed.certificateFingerprint, createdAt: now, updatedAt: now))
+
+        XCTAssertEqual(try database.pairedDevice(id: "device-redeemed")?.hosts, expected)
+    }
+
+    private func makeDatabase() throws -> SpacesClientDatabase {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
+    }
+
     func testLinuxInstallerRendersVersionPinnedOneLiner() {
         XCTAssertEqual(SpacesLinuxInstaller.installCommand(version: "0.1.0"), "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
         // A leading `v` is stripped so the pinned argument matches the release's app_version.
@@ -142,6 +178,29 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     /// single-host link off the SSH-resolved address alone.
     func testRelayedPairingHostsFallsBackToSSHResolvedHostAloneWhenNoneAdvertised() {
         XCTAssertEqual(SpacesDevicePairingClient.relayedPairingHosts(deviceAPIHost: "studio.local", advertisedHosts: []), ["studio.local"])
+    }
+
+    /// A device's stored id must not move when the address it was paired on changes, and no stored id
+    /// is ever rewritten, because the id has always been decided by the certificate fingerprint alone:
+    /// the 48-character truncation lands inside the fingerprint hex, so the host and port in the old
+    /// formula could never reach the output. Pins that against the historical formula for a realistic
+    /// fingerprint.
+    func testStablePairedDeviceIDMatchesTheHistoricalHostBearingFormula() {
+        let fingerprint = "SHA256:" + String(repeating: "a1b2c3d4", count: 8)
+        XCTAssertEqual(fingerprint.count, "SHA256:".count + 64)
+
+        func historicalID(certificateFingerprint: String, host: String, port: Int) -> String {
+            let source = "\(certificateFingerprint)|\(host)|\(port)"
+            let slug = source.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
+                in: CharacterSet(charactersIn: "-"))
+            return "device-\(slug.prefix(48))"
+        }
+
+        for host in ["studio.local", "10.0.0.5", "100.64.12.34"] {
+            XCTAssertEqual(
+                SpacesDevicePairingClient.stablePairedDeviceID(certificateFingerprint: fingerprint, port: 47_847),
+                historicalID(certificateFingerprint: fingerprint, host: host, port: 47_847))
+        }
     }
 
     func testRemotePairCommandFailureMessageIsUserFacing() {
@@ -384,6 +443,19 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(message.contains("line20"))
         XCTAssertTrue(message.contains("line11"))
         XCTAssertFalse(message.contains("line10"))
+    }
+
+    func testRemoteUpdateRefusesADeviceWithoutSSHDetails() {
+        // A link-paired device carries no SSH metadata, so the update over SSH cannot run for it. The
+        // refusal is a pure guard: no ssh process is launched, so this asserts against a device record
+        // that names an unreachable host.
+        let device = SpacesPairedDeviceRecord(
+            id: "device-linkpaired", name: "builder", platform: "remote", hosts: ["100.64.12.34"], port: 47_847, certificateFingerprint: "aa:bb",
+            sshHost: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+
+        XCTAssertThrowsError(try SpacesDevicePairingClient.updateSpacesOnRemoteDevice(device: device, appVersion: "0.1.0")) { error in
+            XCTAssertEqual(error as? SpacesRemoteDevicePairingError, .missingSSHHost)
+        }
     }
 
     func testRemoteShellCommandRunsSnippetsThroughPOSIXShell() {

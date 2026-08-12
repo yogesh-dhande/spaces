@@ -182,7 +182,8 @@
             let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             let requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                resolver: SpacesDeviceEndpointResolver(
+                    hosts: ["127.0.0.1"], port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint))
             let clientApp = SpacesDeviceClientApp(
                 installationID: "transcript-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
                 appVersion: "1.0")

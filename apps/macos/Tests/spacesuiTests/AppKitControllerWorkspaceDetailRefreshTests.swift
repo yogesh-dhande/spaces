@@ -60,6 +60,20 @@ import workspacecore
                 commandPaletteIsVisible: true))
     }
 
+    /// Codex round 5 (P1) on issue #438: `isRunning` turns true the instant an ad hoc terminal or agent
+    /// session starts, independent of whether any configured process is actually running, so gating Start
+    /// purely on `isRunning` hides it exactly in the state where it is the right (non-destructive) action.
+    @Test func workspaceLifecycleControlsOfferStartWheneverConfiguredRuntimeIsMissing() {
+        // Stopped: Start is offered regardless of the missing count (matches today's behavior).
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 0))
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: false, missingConfiguredProcessCount: 1))
+        // Running with every configured process up: Start stays hidden, matching today's behavior.
+        #expect(!AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 0))
+        // Running from ad hoc/agent runtime alone, with a configured process still missing: Start must be
+        // offered instead of forcing the user through the destructive Restart action.
+        #expect(AppKitController.workspaceLifecycleControlsOfferStart(isRunning: true, missingConfiguredProcessCount: 1))
+    }
+
     @Test func configuredBrowserSessionsAlsoShowForStoppedWorkspaces() {
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: true))
         #expect(AppKitController.shouldShowConfiguredBrowserSessions(workspaceIsRunning: false))
@@ -152,7 +166,7 @@ import workspacecore
     // Settings is intentionally not a pane case: it floats over whatever pane is shown, so it stays a
     // separate flag and is not cleared by presenting a pane.
     @Test func presentingAPaneReplacesThePreviousPanesFacets() {
-        var pane = DetailPane.workspace(id: "workspace-1")
+        var pane = DetailPane.workspace(id: "workspace-1", deviceID: "device-1")
         #expect(pane.workspaceID == "workspace-1")
         #expect(!pane.isAlerts)
         #expect(pane.compatibilityBlockDeviceID == nil)
@@ -167,7 +181,7 @@ import workspacecore
         #expect(!pane.isAlerts, "Presenting the compatibility block clears alerts")
         #expect(pane.workspaceID == nil)
 
-        pane = .workspace(id: "workspace-2")
+        pane = .workspace(id: "workspace-2", deviceID: "device-1")
         #expect(pane.workspaceID == "workspace-2")
         #expect(pane.compatibilityBlockDeviceID == nil, "Presenting a workspace clears the compatibility block")
         #expect(!pane.isAlerts)
@@ -188,19 +202,20 @@ import workspacecore
         #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .backgroundRefresh))
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .backgroundRefresh))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-1", deviceID: "device-1"),
+                presentation: .backgroundRefresh))
     }
 
     // The refresh paths change pane content on their own: a remote device turning wire-incompatible
     // swaps in its compatibility block, recovery clears the pane, a failed reload swaps in the error
-    // placeholder, and a selected workspace deleted elsewhere drops the pane back to alerts. None of
+    // placeholder, and a selected workspace deleted elsewhere drops the pane to the placeholder. None of
     // those are the user navigating, so none may dismiss a form window — which is why the rule reads the
     // caller's intent instead of inferring it from the content having changed.
     @Test func backgroundRefreshThatChangesPaneContentKeepsFormWindows() {
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .compatibilityBlock(deviceID: "device-1"), presentation: .backgroundRefresh),
-            "A device turning wire-incompatible must not close a dialog")
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-1"),
+                presentation: .backgroundRefresh), "A device turning wire-incompatible must not close a dialog")
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
                 current: .compatibilityBlock(deviceID: "device-1"), presented: .none, presentation: .backgroundRefresh),
@@ -210,20 +225,21 @@ import workspacecore
             "A failed reload's placeholder must not close a dialog")
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .backgroundRefresh),
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .none, presentation: .backgroundRefresh),
             "A selected workspace deleted elsewhere must not close a dialog")
     }
 
     @Test func userNavigationToDifferentPaneContentDismissesFormWindows() {
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .alerts, presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+                current: .alerts, presented: .workspace(id: "workspace-1", deviceID: "device-1"), presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .alerts, presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .alerts, presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-2"), presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-2", deviceID: "device-1"),
+                presentation: .userNavigation))
         #expect(
             AppKitController.detailPanePresentationDismissesFormWindows(
                 current: .compatibilityBlock(deviceID: "device-1"), presented: .compatibilityBlock(deviceID: "device-2"),
@@ -233,11 +249,49 @@ import workspacecore
 
     // Clicking the Alerts row while Alerts is already showing, or re-selecting the selected workspace,
     // moves nothing out from under the dialog, so it stays open.
+    // The workspace pane's footer strip is rebuilt from scratch on every refresh that reaches it, and
+    // refreshes arrive many times a second while a coding agent streams, so the Launch/Stop/notes
+    // buttons were being destroyed between mouse-down and mouse-up. The signature is what decides
+    // whether a refresh redraws them, so it has to carry everything the strip shows and nothing that
+    // moves on its own.
+    private func footerSignature(
+        workspaceID: String = "workspace-1", displayName: String = "feature", branch: String = "feature", directory: String = "/tmp/feature",
+        notes: String = "", isLifecycleRunning: Bool = true, isRunning: Bool = true, offersStart: Bool = false, warningSummary: String? = nil,
+        deviceAcceptsDaemonActions: Bool = true, unreachableDeviceTooltip: String? = nil
+    ) -> AppKitController.WorkspaceDetailFooterSignature {
+        AppKitController.WorkspaceDetailFooterSignature(
+            workspaceID: workspaceID, displayName: displayName, branch: branch, directory: directory, notes: notes,
+            isLifecycleRunning: isLifecycleRunning, isRunning: isRunning, offersStart: offersStart, warningSummary: warningSummary,
+            deviceAcceptsDaemonActions: deviceAcceptsDaemonActions, unreachableDeviceTooltip: unreachableDeviceTooltip)
+    }
+
+    @Test func anUnchangedWorkspaceLeavesTheFooterStripAlone() { #expect(footerSignature() == footerSignature()) }
+
+    /// Each of these draws or removes a control, a label, or its dimming, so each has to redraw the strip.
+    @Test func everythingTheFooterDrawsIsPartOfItsSignature() {
+        let rendered = footerSignature()
+
+        #expect(footerSignature(workspaceID: "workspace-2") != rendered)
+        #expect(footerSignature(displayName: "renamed") != rendered)
+        #expect(footerSignature(branch: "other") != rendered)
+        #expect(footerSignature(directory: "/tmp/other") != rendered)
+        #expect(footerSignature(notes: "check the flake") != rendered)
+        #expect(footerSignature(isLifecycleRunning: false) != rendered, "the status dot follows the lifecycle state")
+        #expect(footerSignature(isRunning: false) != rendered, "a stopped workspace offers Launch alone, with no Stop button")
+        #expect(
+            footerSignature(offersStart: true) != rendered,
+            "Start becomes reachable alongside Restart/Stop when a configured process is missing (issue #438)")
+        #expect(footerSignature(warningSummary: "1 process exited") != rendered)
+        #expect(footerSignature(deviceAcceptsDaemonActions: false) != rendered, "an unreachable device's controls are disabled and dimmed")
+        #expect(footerSignature(unreachableDeviceTooltip: "linux-box is offline") != rendered)
+    }
+
     @Test func userNavigationToTheSamePaneKeepsFormWindows() {
         #expect(!AppKitController.detailPanePresentationDismissesFormWindows(current: .alerts, presented: .alerts, presentation: .userNavigation))
         #expect(
             !AppKitController.detailPanePresentationDismissesFormWindows(
-                current: .workspace(id: "workspace-1"), presented: .workspace(id: "workspace-1"), presentation: .userNavigation))
+                current: .workspace(id: "workspace-1", deviceID: "device-1"), presented: .workspace(id: "workspace-1", deviceID: "device-1"),
+                presentation: .userNavigation))
     }
 
 }

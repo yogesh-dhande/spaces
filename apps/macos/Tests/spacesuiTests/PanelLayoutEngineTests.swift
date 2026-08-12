@@ -20,6 +20,73 @@ import Testing
         #expect(layout.focusedPaneID == "b")
     }
 
+    /// A pane installed for a programmatically launched process lands behind whatever the user is looking
+    /// at: the panel keeps its selected tab and its focused pane, and the new tab waits in the tab bar.
+    @Test func appendUnselectedTabKeepsTheCurrentSelectionAndFocus() {
+        var layout = layoutWithTab()
+
+        layout = PanelLayoutEngine.appendUnselectedTab(tabID: "tab-2", pane: pane("b"), to: layout)
+
+        #expect(layout.tabs.map(\.id) == ["tab-1", "tab-2"])
+        #expect(layout.selectedTabID == "tab-1")
+        #expect(layout.focusedPaneID == "a")
+    }
+
+    /// A panel with no tabs has no selection to preserve, and a panel that has tabs must show one, so the
+    /// first pane installed this way is selected. Nothing is brought forward or focused by the install
+    /// itself, so this still moves nothing the user was using.
+    @Test func appendUnselectedTabSelectsTheFirstTabOfAnEmptyPanel() {
+        let layout = PanelLayoutEngine.appendUnselectedTab(tabID: "tab-1", pane: pane("a"), to: PanelLayout())
+
+        #expect(layout.selectedTabID == "tab-1")
+        #expect(layout.focusedPaneID == "a")
+    }
+
+    /// A restart's replacement takes over its predecessor's pane: same tab, same position, and the
+    /// panel's selection and focus untouched, because those name pane ids rather than sessions.
+    @Test func retargetPaneKeepsThePanesPlaceSelectionAndFocus() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        let before = layout
+
+        layout = PanelLayoutEngine.retargetPane(paneID: "a", to: .terminalSession(deviceID: "device", sessionID: "sess-replacement"), in: layout)
+
+        #expect(layout.tabs.map(\.id) == before.tabs.map(\.id))
+        #expect(layout.selectedTabID == before.selectedTabID)
+        #expect(layout.focusedPaneID == before.focusedPaneID)
+        #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: layout) == ["sess-replacement", "sess-b"])
+        #expect(PanelLayoutEngine.pane(withID: "a", in: layout)?.id == "a")
+    }
+
+    /// Retargeting inside a split leaves the split's shape and weights alone: the replacement appears
+    /// where the user put the pane, not as a new tab.
+    @Test func retargetPaneInsideASplitLeavesTheSplitIntact() throws {
+        let layout = try #require(
+            PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layoutWithTab()))
+
+        let retargeted = PanelLayoutEngine.retargetPane(
+            paneID: "b", to: .terminalSession(deviceID: "device", sessionID: "sess-replacement"), in: layout)
+
+        guard case .split(let split) = retargeted.tabs[0].root else {
+            Issue.record("expected split root")
+            return
+        }
+        #expect(split.weights == [0.5, 0.5])
+        #expect(PanelLayoutEngine.panes(in: retargeted.tabs[0]).map(\.id) == ["a", "b"])
+        #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: retargeted) == ["sess-a", "sess-replacement"])
+        #expect(retargeted.focusedPaneID == layout.focusedPaneID)
+    }
+
+    /// A pane id the layout does not hold changes nothing, so a replacement whose predecessor's pane is
+    /// already gone cannot corrupt the layout on its way to the ordinary install path.
+    @Test func retargetPaneIgnoresAnUnknownPane() {
+        let layout = layoutWithTab()
+
+        let retargeted = PanelLayoutEngine.retargetPane(paneID: "missing", to: .terminalSession(deviceID: "device", sessionID: "x"), in: layout)
+
+        #expect(retargeted == layout)
+    }
+
     @Test func splitLeafWrapsIntoSplitAndFocusesNewPane() throws {
         let layout = try #require(
             PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layoutWithTab()))

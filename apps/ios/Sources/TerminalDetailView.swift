@@ -22,12 +22,16 @@ struct TerminalDetailView: View {
     @State private var hasMountedTerminalSurface = false
     @State private var isBackNavigationInProgress = false
     @State private var isShowingComposer = false
+    /// The row awaiting Stop confirmation from the toolbar menu. A separate state from `SpacesTabView`'s
+    /// `pendingStop` because this is a different view with no shared owner to hold it.
+    @State private var pendingStopRow: SpacesMobileWorkspaceRuntimeRow?
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
     /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(TerminalFontSizeStorage.key) private var terminalFontSize: TerminalFontSize = .default
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
@@ -94,9 +98,9 @@ struct TerminalDetailView: View {
                                 isShowingComposer = true
                                 return true
                             }
-                        ).accessibilityIdentifier("terminal.surface").allowsHitTesting(model.shouldPresentLiveSurface).accessibilityHidden(
-                            !model.shouldPresentLiveSurface
-                        ).background(Self.surfaceBackground)
+                        ).ignoresSafeArea(.keyboard, edges: .bottom).accessibilityIdentifier("terminal.surface").allowsHitTesting(
+                            model.shouldPresentLiveSurface
+                        ).accessibilityHidden(!model.shouldPresentLiveSurface).background(Self.surfaceBackground)
 
                         if !model.shouldPresentLiveSurface { statusShell.onAppear { renderedText = "" } }
                     }
@@ -109,19 +113,40 @@ struct TerminalDetailView: View {
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
         }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
             .hidden, for: .navigationBar
-        ).task { model.start() }.task(id: session.id) { await refreshRuntimeRowsWhileVisible() }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }
-            .task(id: e2eCommandRequestPath) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) {
-                showsTerminalSurface in
-                if showsTerminalSurface { hasMountedTerminalSurface = true }
-                if !showsTerminalSurface { renderedText = "" }
-            }.onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
-                writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
-            }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
-                item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
-            ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
-                TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
-            }.onDisappear { model.stop() }
+        ).task {
+            if scenePhase != .active { model.prepareForBackgrounding() }
+            model.start()
+            if scenePhase == .active { model.resumeAfterBackgrounding() }
+        }.task(id: session.id) { await refreshRuntimeRowsWhileVisible() }.task(id: e2eDumpStateKey) { writeE2EDumpIfNeeded() }.task(
+            id: e2eCommandRequestPath
+        ) { await consumeE2ECommandRequestsIfNeeded() }.onChange(of: model.showsTerminalSurface) { showsTerminalSurface in
+            if showsTerminalSurface { hasMountedTerminalSurface = true }
+            if !showsTerminalSurface { renderedText = "" }
+        }.onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
+            writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
+        }.onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background: model.prepareForBackgrounding()
+            case .active: model.resumeAfterBackgrounding()
+            case .inactive: break
+            @unknown default: break
+            }
+        }.onChange(of: colorScheme) { newColorScheme in Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) } }.sheet(
+            item: Binding(get: { model.linkPreview }, set: { preview in if preview == nil { model.dismissLinkPreview() } })
+        ) { preview in TerminalLinkPreviewSheet(preview: preview) }.sheet(isPresented: $isShowingComposer) {
+            TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
+        }.confirmationDialog(
+            pendingStopRow.map { StopConfirmationCopy.rowTitle($0.title) } ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible,
+            presenting: pendingStopRow
+        ) { row in
+            Button("Stop", role: .destructive) { Task { await appModel.stop(row: row) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text(StopConfirmationCopy.rowMessage)
+        }.onDisappear { model.stop() }
     }
+
+    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStopRow != nil }, set: { if !$0 { pendingStopRow = nil } }) }
 
     private var linkPreviewBannerOverlay: some View {
         VStack(spacing: 0) {
@@ -199,7 +224,7 @@ struct TerminalDetailView: View {
                     }
                     if row.canStopFromTerminalDetail {
                         Button(role: .destructive) {
-                            Task { await appModel.stop(row: row) }
+                            pendingStopRow = row
                         } label: {
                             Label("Stop", systemImage: "stop.fill")
                         }.disabled(appModel.isMutating)
@@ -340,15 +365,20 @@ struct TerminalDetailView: View {
             .accessibilityIdentifier("terminal.previewStatus")
     }
 
+    /// Change identity for the e2e dump task, and nothing else. Building it reads seventeen model
+    /// properties and joins them, on every body evaluation of a view that re-evaluates at the session's
+    /// flush rate; `writeE2EDumpIfNeeded` is gated on the same condition, so outside an e2e run the key
+    /// collapses to a constant and the task never re-runs.
     private var e2eDumpStateKey: String {
-        [
+        guard shouldCaptureRenderedText else { return "" }
+        return [
             model.title, model.renderStateKey, model.isOwner ? "owner" : "viewer", model.showsTerminalSurface ? "surface" : "status",
             model.isConnecting ? "connecting" : "steady", model.isBusy ? "busy" : "idle",
             model.isOwnershipSynchronizationScheduled ? "syncScheduled" : "syncNotScheduled", model.isSynchronizingOwnership ? "syncing" : "synced",
             model.isPreparingInput ? "preparing" : "prepared", model.isInputSurfaceReady ? "inputReady" : "inputPending", model.errorMessage ?? "",
             model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle", model.linkPreview?.title ?? "",
             model.linkPreview?.kind?.rawValue ?? "", model.linkPreview?.content.caseName ?? "", model.linkPreviewErrorMessage ?? "",
-            model.linkNotice ?? "", shouldCaptureRenderedText ? renderedText : "",
+            model.linkNotice ?? "", renderedText,
         ].joined(separator: "|")
     }
 

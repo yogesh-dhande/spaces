@@ -167,4 +167,43 @@ import workspacecore
 
         #expect(visible.map(\.id) == ["workspace-b::0"])
     }
+
+    @Test func searchQueryMatchesProjectTitle() {
+        let workspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .browser, label: "Docs",
+            detail: "http://localhost:4000", focusRequest: .workspaceBrowserSession(workspaceID: "workspace-b", targetURL: "http://localhost:4000"),
+            workspaceTitle: "main", workspaceBranch: "main", projectTitle: "Customer Portal")
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [workspaceItem], query: "customer portal", currentWorkspaceID: nil, recentFocusIdentities: [])
+
+        #expect(visible.map(\.id) == ["workspace-b::0"])
+    }
+
+    @Test func workspaceContextOmitsWorkspaceTitleWhenItDuplicatesBranch() {
+        let workspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-b", processID: "proc-1"), workspaceTitle: "main", workspaceBranch: "main",
+            projectTitle: "Customer Portal")
+
+        #expect(workspaceItem.workspaceContextText == "Customer Portal")
+    }
+
+    @Test func workspaceContextKeepsNamedWorkspaceAlongsideDistinctBranch() {
+        let workspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-b", processID: "proc-1"), workspaceTitle: "Release QA",
+            workspaceBranch: "release/2.0", projectTitle: "Customer Portal")
+
+        #expect(workspaceItem.workspaceContextText == "Customer Portal › Release QA")
+    }
+
+    @Test func workspaceContextKeepsNonGitWorkspaceTitle() {
+        let workspaceItem = makeItem(
+            id: "workspace-b::0", source: .workspaceTarget, workspaceID: "workspace-b", kind: .process, label: "Frontend", detail: "bun dev",
+            focusRequest: .workspaceProcess(workspaceID: "workspace-b", processID: "proc-1"), workspaceTitle: "Local Scripts", workspaceBranch: nil,
+            projectTitle: "Automation")
+
+        #expect(workspaceItem.workspaceContextText == "Automation › Local Scripts")
+    }
 }

@@ -22,14 +22,14 @@ struct SpacesE2ECommand: ParsableCommand {
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
             LookupWorkspaceCommand.self, ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self,
             SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self,
-            RestartWorkspaceProcessCommand.self, LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
-            ArchiveWorkspaceCommand.self, HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self,
-            SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self,
-            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
-            CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
+            RestartWorkspaceProcessCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
+            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
+            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
+            FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, TerminalSessionWindowShortcutCommand.self,
+            StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self,
+            TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, SeedPairedDeviceCommand.self, RecordScreenCommand.self, ProfileShowCommand.self,
             ProfileAppOwnerCommand.self, MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
@@ -396,7 +396,7 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
 
     func run() throws {
         let device = SpacesPairedDeviceRecord(
-            id: "remote-pairing-window", name: "Remote Device", platform: "remote", host: sshHost, port: SpacesDeviceAPIEndpointDefaults.port,
+            id: "remote-pairing-window", name: "Remote Device", platform: "remote", hosts: [sshHost], port: SpacesDeviceAPIEndpointDefaults.port,
             certificateFingerprint: "", sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: nowISO8601(),
             updatedAt: nowISO8601())
         let result = try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: AppVersion.short)
@@ -442,7 +442,7 @@ private struct SeedPairedDeviceCommand: ParsableCommand {
         // The only device a harness seeds this way is the Linux remote daemon under test, and its
         // seeding stands in for a pairing that already happened, so it is also the last selected one.
         let device = SpacesPairedDeviceRecord(
-            id: deviceID, name: name, platform: "linux", host: host, port: port, certificateFingerprint: certificateFingerprint,
+            id: deviceID, name: name, platform: "linux", hosts: [host], port: port, certificateFingerprint: certificateFingerprint,
             sshHost: normalizedOptional(sshHost), sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: timestamp, updatedAt: timestamp,
             lastSelectedAt: timestamp)
         try SpacesClientDatabase.withDefaultDatabase { try $0.upsert(device: device) }
@@ -1069,7 +1069,8 @@ private struct MobileRequestCommand: ParsableCommand {
     }
 
     private func sendRequestLines(host: String, port: Int, certificateFingerprint: String, pairingLink link: SpacesDevicePairingLink?) throws {
-        let client = try SpacesDeviceAPIRequestSessionClient(host: host, port: port, certificateFingerprint: certificateFingerprint)
+        let client = try SpacesDeviceAPIRequestSessionClient(
+            resolver: SpacesDeviceEndpointResolver(hosts: [host], port: port, certificateFingerprint: certificateFingerprint))
         defer { client.cancel() }
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1628,19 +1629,16 @@ private struct DemoRecordingTransform {
 }
 
 /// Shared resolve + post + emit flow for commands that look up a workspace and tell the
-/// running app to act on one named target inside it (a configured process or coding agent).
-/// The four call sites differ only in which notification to post, the label used in the
-/// "Missing ..." validation error, and the key used for the target name in the emitted JSON.
-private func postWorkspaceTargetIPC(
-    _ notification: Notification.Name, workspaceDir: String, targetName: String, targetLabel: String, targetKey: String
-) throws {
+/// running app to act on one named configured process inside it. The call sites differ
+/// only in which notification to post.
+private func postWorkspaceTargetIPC(_ notification: Notification.Name, workspaceDir: String, processName: String) throws {
     let workspace = try resolveWorkspace(dir: workspaceDir).workspace
-    let trimmedTargetName = targetName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedTargetName.isEmpty else { throw ValidationError("Missing \(targetLabel).") }
+    let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
     try IPCNotification.post(
         notification,
-        userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedTargetName])
-    try emitJSON(["workspaceID": workspace.id, targetKey: trimmedTargetName])
+        userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
+    try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
 }
 
 private struct RunWorkspaceProcessCommand: ParsableCommand {
@@ -1651,11 +1649,7 @@ private struct RunWorkspaceProcessCommand: ParsableCommand {
 
     /// Tells the running Spaces app to launch one configured process through
     /// the same app-side path used by GUI recovery or focus actions.
-    func run() throws {
-        try postWorkspaceTargetIPC(
-            IPCNotification.runWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
-            targetKey: "processName")
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.runWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct StopWorkspaceProcessCommand: ParsableCommand {
@@ -1664,11 +1658,7 @@ private struct StopWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var processName: String
 
-    func run() throws {
-        try postWorkspaceTargetIPC(
-            IPCNotification.stopWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
-            targetKey: "processName")
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.stopWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct RestartWorkspaceProcessCommand: ParsableCommand {
@@ -1677,25 +1667,7 @@ private struct RestartWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var processName: String
 
-    func run() throws {
-        try postWorkspaceTargetIPC(
-            IPCNotification.restartWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
-            targetKey: "processName")
-    }
-}
-
-private struct LaunchWorkspaceAgentCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "launch-workspace-agent")
-
-    @Option(name: .long) var workspaceDir: String
-    @Option(name: .long) var name: String
-
-    /// Tells the running Spaces app to launch one configured coding agent
-    /// through the same app-side path used by the GUI.
-    func run() throws {
-        try postWorkspaceTargetIPC(
-            IPCNotification.launchWorkspaceAgent, workspaceDir: workspaceDir, targetName: name, targetLabel: "coding agent name", targetKey: "name")
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.restartWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct CleanupFixturesCommand: ParsableCommand {
@@ -1772,9 +1744,7 @@ private struct SeedFixtureCommand: ParsableCommand {
             The seeded project serves one of the hand-authored Lighthouse demo templates \
             (harbor, lantern, atlas). Pass --template to pick which one; when the project \
             directory has no pre-seeded .spaces-e2e-demo payload the matching template is \
-            materialized into it. The primary `harbor` template additionally wires a coding-agent \
-            launcher (`spaces_e2e_demo agent`) so the workspace can produce an agent-waiting-on-input \
-            state for the mobile demo recording and E2E suite.
+            materialized into it.
             """)
 
     @Option(name: .long) var projectDir: String
@@ -1806,24 +1776,12 @@ private struct SeedFixtureCommand: ParsableCommand {
             ProcessTemplate(name: "frontend", command: frontendCommand), ProcessTemplate(name: "backend", command: backendCommand),
         ]
         let fixtureBrowserSessions = [BrowserSession(name: "docs", url: docsURL), BrowserSession(name: "admin", url: adminURL)]
-        // Only the primary harbor project carries a coding-agent launcher. Launching it
-        // runs the scripted `spaces_e2e_demo agent`, which prints agent-style output and
-        // then blocks on stdin, settling the workspace into an "agent waiting on input"
-        // state for the mobile demo recording and the macOS E2E suite.
-        let fixtureAgentLaunchers: [AgentLauncher]
-        if template == "harbor" {
-            let agentCommand = fixtureServiceCommand(executable: "/usr/bin/env", arguments: ["python3", "-m", "spaces_e2e_demo", "agent"])
-            fixtureAgentLaunchers = [AgentLauncher(name: "Fix checkout 500", command: agentCommand)]
-        } else {
-            fixtureAgentLaunchers = []
-        }
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.ports = fixturePorts
             config.stopScript = fixtureStopScript
             config.processes = fixtureProcesses
             config.browserSessions = fixtureBrowserSessions
-            config.agentLaunchers = fixtureAgentLaunchers
         }
 
         // The default workspace inherits project port definitions lazily, but
@@ -1835,7 +1793,6 @@ private struct SeedFixtureCommand: ParsableCommand {
                 settings.ports = fixturePorts
                 settings.processes = fixtureProcesses.map { ProcessTemplate(name: $0.name, command: $0.command, kind: $0.kind, onExit: $0.onExit) }
                 settings.browserSessions = fixtureBrowserSessions
-                settings.agentLaunchers = fixtureAgentLaunchers
             }
         }
 
@@ -2106,7 +2063,12 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
         guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
-        try IPCNotification.post(IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID])
+        try IPCNotification.post(
+            IPCNotification.closeTerminalSessionWindow,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                IPCNotification.terminalCloseDispositionUserInfoKey: TerminalPaneCloseDisposition.teardown.rawValue,
+            ])
         try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
     }
 }
@@ -2120,7 +2082,11 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
         let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
         try IPCNotification.post(
-            IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID])
+            IPCNotification.closeTerminalSessionWindow,
+            userInfo: [
+                IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID,
+                IPCNotification.terminalCloseDispositionUserInfoKey: TerminalPaneCloseDisposition.teardown.rawValue,
+            ])
         try emitJSON(["sessionID": trimmedSessionID])
     }
 }
@@ -2200,36 +2166,6 @@ private struct SurfaceSnapshotCommand: ParsableCommand {
             SurfaceSnapshotPayload(
                 frontmostProcessID: frontmostPID, frontmostApplicationName: frontmostApplication?.localizedName,
                 frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, spaces: spacesSurface))
-    }
-}
-
-private struct SetWorkspaceAgentLaunchersCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "set-workspace-agent-launchers")
-
-    @Option(name: .long) var workspaceDir: String
-    @Option(name: .long) var name: String?
-    @Option(name: .long) var command: String?
-    @Flag(name: .long) var clear = false
-
-    /// Replaces workspace coding-agent launchers through the production
-    /// workspace-settings path so the manual harness can launch a mock agent
-    /// without driving the nested settings UI.
-    func run() throws {
-        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
-        if clear && (name != nil || command != nil) { throw ValidationError("--clear cannot be combined with --name or --command") }
-        if !clear
-            && (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-                || command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
-        {
-            throw ValidationError("--name and --command are required unless --clear is used")
-        }
-        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            if clear { settings.agentLaunchers = [] } else { settings.agentLaunchers = [AgentLauncher(name: name!, command: command!)] }
-        }
-        guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
-            throw ValidationError("Workspace settings missing at: \(workspace.dir)")
-        }
-        try emitJSON(workspaceSettingsPayload(updated))
     }
 }
 
@@ -2468,7 +2404,6 @@ private struct WorkspaceSettingsPayload: Codable {
     let ports: [String]
     let processes: [NamedCommandPayload]
     let browserSessions: [NamedURLPayload]
-    let agentLaunchers: [NamedCommandPayload]
 }
 
 private struct NamedCommandPayload: Codable {
@@ -2695,8 +2630,7 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
     WorkspaceSettingsPayload(
         stopScript: settings.stopScript, ports: settings.ports.map(\.name),
         processes: settings.processes.map { .init(name: $0.name, command: $0.command) },
-        browserSessions: settings.browserSessions.map { .init(name: $0.name, url: $0.url) },
-        agentLaunchers: settings.agentLaunchers.map { .init(name: $0.name, command: $0.command) })
+        browserSessions: settings.browserSessions.map { .init(name: $0.name, url: $0.url) })
 }
 
 /// Shared JSON encoder for the shell harness.
