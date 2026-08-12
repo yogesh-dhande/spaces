@@ -61,6 +61,7 @@ public final class AutomationService: @unchecked Sendable {
     /// Command processes signaled during a timeout/cancel teardown, awaiting SIGKILL escalation. Keyed by
     /// run id so escalation continues on later ticks even after the run row reached its terminal status.
     private struct PendingKill {
+        let automationID: String
         let childPID: Int32
         /// The command's process group id captured at SIGTERM time, when the child was its own group leader
         /// and that group was not the daemon's own; nil otherwise. Escalation signals THIS stored group
@@ -124,8 +125,10 @@ public final class AutomationService: @unchecked Sendable {
             return
         }
         let zone = timeZone()
-        try store.setAutomationNextFireTime(
-            id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: zone), anchorTimeZoneIdentifier: zone.identifier)
+        guard let nextFireTime = schedule.nextFireDate(after: now(), timeZone: zone) else {
+            throw AutomationValidationError("Cron schedule has no future occurrence.")
+        }
+        try store.setAutomationNextFireTime(id: automationID, nextFireTime: nextFireTime, anchorTimeZoneIdentifier: zone.identifier)
     }
 
     /// One scheduler + executor step: poll running runs for completion/timeout, fire due cron automations,
@@ -440,7 +443,9 @@ public final class AutomationService: @unchecked Sendable {
             let active = try store.activeAutomationRuns(automationID: automation.id)
             let running = active.contains { $0.status == .running }
             let queued = active.contains { $0.status == .queued }
-            let blocking = try running || (automation.kind == .agent && automationHasLiveAttributedSession(automationID: automation.id))
+            let blocking =
+                try running || automationHasPendingTermination(automationID: automation.id)
+                || (automation.kind == .agent && automationHasLiveAttributedSession(automationID: automation.id))
             switch automation.concurrencyPolicy {
             case .allow: return try startRun(automation: automation, trigger: trigger)
             case .skip:
@@ -467,6 +472,13 @@ public final class AutomationService: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    /// A script remains concurrency-active after its run row becomes terminal while SIGTERM grace is still
+    /// in flight. Starting its replacement before the promised SIGKILL completes would overlap processes
+    /// under the Skip/Queue policies even though the database no longer has a running row.
+    private func automationHasPendingTermination(automationID: String) -> Bool {
+        pendingKills.values.contains { $0.automationID == automationID && pendingKillIsOutstanding($0) }
     }
 
     private func recordSkippedRun(automation: Automation, trigger: AutomationRunTrigger, reason: AutomationRunSkipReason) throws -> AutomationRun {
@@ -803,6 +815,7 @@ public final class AutomationService: @unchecked Sendable {
                 guard !queuedAutomationIDs.contains(automation.id) else { continue }
                 guard try !store.activeAutomationRuns(automationID: automation.id).contains(where: { $0.status == .running }) else { continue }
                 guard let queued = try store.queuedAutomationRun(automationID: automation.id) else { continue }
+                guard !automationHasPendingTermination(automationID: automation.id) else { continue }
                 // An agent automation's session outlives its run row, so a queued run waits for every
                 // attributed session to end (not just for the running run row to clear) before promoting.
                 if automation.kind == .agent, try automationHasLiveAttributedSession(automationID: automation.id) { continue }
@@ -880,7 +893,8 @@ public final class AutomationService: @unchecked Sendable {
             let processGroupID = signalableProcessGroupID(childPID: childPID)
             signalProcessGroup(childPID: childPID, processGroupID: processGroupID, signal: SIGTERM)
             pendingKills[run.id] = PendingKill(
-                childPID: childPID, processGroupID: processGroupID, sigkillDeadline: now().addingTimeInterval(terminationGrace))
+                automationID: run.automationID, childPID: childPID, processGroupID: processGroupID,
+                sigkillDeadline: now().addingTimeInterval(terminationGrace))
         } else {
             // Fallback for the no-PID window: under write-behind persistence the runtime row (or its childPID)
             // can be absent while the session is genuinely live — a cancel, or a short timeout expiring while

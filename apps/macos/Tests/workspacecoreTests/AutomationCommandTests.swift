@@ -17,10 +17,10 @@ import spacesterminalcore
     }
 
     private func draft(
-        name: String = "Nightly", enabled: Bool = true, trigger: AutomationTriggerKind = .manual, cron: String? = nil,
-        kind: AutomationKind = .script, script: String = "echo hi", agentCommand: String? = nil, agentPrompt: String? = nil,
-        workspaceID: String? = nil, workingDirectory: String = "/tmp", timeoutSeconds: Int? = nil,
-        concurrency: AutomationConcurrencyPolicy = .allow, missedRun: AutomationMissedRunPolicy = .runOnce
+        name: String = "Nightly", enabled: Bool = true, trigger: AutomationTriggerKind = .manual, cron: String? = nil, kind: AutomationKind = .script,
+        script: String = "echo hi", agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil,
+        workingDirectory: String = "/tmp", timeoutSeconds: Int? = nil, concurrency: AutomationConcurrencyPolicy = .allow,
+        missedRun: AutomationMissedRunPolicy = .runOnce
     ) -> AutomationDraft {
         AutomationDraft(
             name: name, enabled: enabled, triggerKind: trigger, cronExpression: cron, kind: kind, script: script, agentCommand: agentCommand,
@@ -52,8 +52,7 @@ import spacesterminalcore
 
     func testCreateAgentKindRejectsMissingWorkspaceID() throws {
         let (service, _) = try makeService()
-        XCTAssertThrowsError(
-            try service.createAutomation(draft(kind: .agent, agentCommand: "claude", agentPrompt: "do the thing", workspaceID: nil)))
+        XCTAssertThrowsError(try service.createAutomation(draft(kind: .agent, agentCommand: "claude", agentPrompt: "do the thing", workspaceID: nil)))
     }
 
     func testCreateAgentKindRejectsUnsupportedAgentCommand() throws {
@@ -63,9 +62,7 @@ import spacesterminalcore
         // persists an automation whose every run would fail at launch.
         XCTAssertThrowsError(
             try service.createAutomation(draft(kind: .agent, agentCommand: "bash", agentPrompt: "do the thing", workspaceID: "ws-1"))
-        ) { error in
-            XCTAssertTrue(error is AutomationValidationError, "an unspawnable agent command is a validation error")
-        }
+        ) { error in XCTAssertTrue(error is AutomationValidationError, "an unspawnable agent command is a validation error") }
     }
 
     func testCreateAgentKindAcceptsSupportedAgentCommand() throws {
@@ -133,6 +130,15 @@ import spacesterminalcore
         XCTAssertEqual(automation.triggerKind, .cron)
         XCTAssertNotNil(automation.nextFireTime, "an enabled cron automation gets an initial next fire time")
         XCTAssertEqual(try store.automation(id: automation.id)?.cronExpression, "*/15 * * * *")
+    }
+
+    func testCreateRejectsCronWithNoFutureOccurrence() throws {
+        let (service, store) = try makeService()
+
+        XCTAssertThrowsError(try service.createAutomation(draft(trigger: .cron, cron: "0 0 30 2 *"))) { error in
+            XCTAssertTrue(error is AutomationValidationError)
+        }
+        XCTAssertTrue(try store.automations().isEmpty, "an enabled schedule that can never fire is not persisted")
     }
 
     func testCreateDisabledCronDoesNotComputeNextFireTime() throws {
@@ -287,13 +293,10 @@ import spacesterminalcore
             terminalSessionID: "session-1", startedAt: Date(timeIntervalSince1970: 100), endedAt: Date(timeIntervalSince1970: 105),
             createdAt: Date(timeIntervalSince1970: 99))
         let agents = [
-            TerminalServiceAutomationAgentSummary(
-                terminalSessionID: "session-1", status: "done", live: true, title: "Reviewer", workspaceID: "ws-1"),
-            TerminalServiceAutomationAgentSummary(
-                terminalSessionID: "session-2", status: "idle", live: true, title: nil, workspaceID: "ws-1"),
+            TerminalServiceAutomationAgentSummary(terminalSessionID: "session-1", status: "done", live: true, title: "Reviewer", workspaceID: "ws-1"),
+            TerminalServiceAutomationAgentSummary(terminalSessionID: "session-2", status: "idle", live: true, title: nil, workspaceID: "ws-1"),
         ]
-        let summary = TerminalServiceAutomationRunSummary(
-            run, automationName: "Deploy", attributedAgents: agents)
+        let summary = TerminalServiceAutomationRunSummary(run, automationName: "Deploy", attributedAgents: agents)
         let decoded = try JSONDecoder().decode(TerminalServiceAutomationRunSummary.self, from: JSONEncoder().encode(summary))
         XCTAssertEqual(decoded, summary)
         XCTAssertEqual(decoded.attributedAgents, agents)

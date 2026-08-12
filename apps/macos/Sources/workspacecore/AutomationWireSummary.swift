@@ -46,7 +46,7 @@ public enum AutomationAttributedAgents {
     /// or the session collector reclaims the session row. A session that is not agent-launch kind — the run's
     /// own `.automation` wrapper — is not an agent and is omitted, as is one whose session row is gone.
     ///
-    /// The agent rows and the persisted attributed-session rows are each batch-fetched once (the agent rows
+    /// The agent rows and requested runs' attributed-session rows are each batch-fetched once (the agent rows
     /// across every workspace, keyed by the terminal tracking id each attributed agent binds to) rather than
     /// queried per attributed session in a loop; liveness comes from the caller's already-loaded live-session
     /// catalog.
@@ -61,13 +61,13 @@ public enum AutomationAttributedAgents {
                 if let trackingID = agent.terminalTrackingID { agentRowsByTrackingID[trackingID] = agent }
             }
         }
-        let attributedSessionsByID = try store.automationAttributedSessions()
+        let attributedSessionsByRunID = try store.automationAttributedSessionsByRunID(runIDs: runs.map(\.id))
 
         var summariesByRunID: [String: [TerminalServiceAutomationAgentSummary]] = [:]
         for run in runs {
-            let sessionIDs = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
             var agents: [TerminalServiceAutomationAgentSummary] = []
-            for sessionID in sessionIDs {
+            for session in attributedSessionsByRunID[run.id] ?? [] {
+                let sessionID = session.sessionID
                 let live = liveSessionsByID[sessionID] != nil
                 if let agentRow = agentRowsByTrackingID[sessionID] {
                     agents.append(
@@ -81,7 +81,7 @@ public enum AutomationAttributedAgents {
                         TerminalServiceAutomationAgentSummary(
                             terminalSessionID: sessionID, status: AgentWindowStatus.idle.rawValue, live: true, title: entry.name,
                             workspaceID: entry.workspaceID))
-                } else if !live, let session = attributedSessionsByID[sessionID], session.kind == .agent {
+                } else if !live, session.kind == .agent {
                     // Ended agent whose row is finalized away: the persisted session row is all that still
                     // describes it. `exited` is the status the client renders as the ended dot.
                     agents.append(

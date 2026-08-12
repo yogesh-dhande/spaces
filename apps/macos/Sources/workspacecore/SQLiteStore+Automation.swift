@@ -267,23 +267,29 @@ extension SQLiteStore {
         ).compactMap { $0.first }
     }
 
-    /// The persisted identity of every automation-attributed terminal session, keyed by session id. Read once
-    /// for a whole runs listing (the listing's runs share one fetch) rather than per attributed session.
-    public func automationAttributedSessions() throws -> [String: AutomationAttributedSession] {
+    /// The persisted attributed sessions for exactly the requested run window, grouped by run id and ordered
+    /// by session creation. One statement replaces both a full-table attribution scan and a query per run on
+    /// the frequently-pushed overview path.
+    public func automationAttributedSessionsByRunID(runIDs: [String]) throws -> [String: [AutomationAttributedSession]] {
+        let runIDs = Array(Set(runIDs)).sorted()
+        guard !runIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: runIDs.count).joined(separator: ", ")
         let rows = try queryRows(
             sql: """
-                SELECT session_id, kind, title, user_title, workspace_id
+                SELECT automation_run_id, session_id, kind, title, user_title, workspace_id
                 FROM terminal_sessions
-                WHERE automation_run_id IS NOT NULL
-                """)
-        var sessionsByID: [String: AutomationAttributedSession] = [:]
-        for row in rows where row.count >= 5 {
-            guard let kind = TerminalSessionKind(rawValue: row[1]) else { continue }
-            sessionsByID[row[0]] = AutomationAttributedSession(
-                sessionID: row[0], kind: kind, name: TerminalSessionTitle.name(userTitle: row[3].isEmpty ? nil : row[3], launchTitle: row[2]),
-                workspaceID: row[4].isEmpty ? nil : row[4])
+                WHERE automation_run_id IN (\(placeholders))
+                ORDER BY automation_run_id, created_at, session_id
+                """, bindings: runIDs)
+        var sessionsByRunID: [String: [AutomationAttributedSession]] = [:]
+        for row in rows where row.count >= 6 {
+            guard let kind = TerminalSessionKind(rawValue: row[2]) else { continue }
+            sessionsByRunID[row[0], default: []].append(
+                AutomationAttributedSession(
+                    sessionID: row[1], kind: kind, name: TerminalSessionTitle.name(userTitle: row[4].isEmpty ? nil : row[4], launchTitle: row[3]),
+                    workspaceID: row[5].isEmpty ? nil : row[5]))
         }
-        return sessionsByID
+        return sessionsByRunID
     }
 
     /// Every terminal session attributed to a run row that still exists: the automation half of the daemon's

@@ -70,6 +70,28 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automationRun(id: queued.id)?.status, .running, "the queued run executes once the current one finishes")
     }
 
+    func testQueuePolicyWaitsForPendingTerminationBeforePromoting() throws {
+        let harness = try Harness(self, realCommands: true)
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-queued-survivor-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let script = """
+            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
+            sleep 60
+            """
+        let automation = try harness.insertAutomation(script: script, concurrency: .queue)
+        let first = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let queued = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+
+        harness.service.cancelRun(runID: first.id)
+        harness.service.tick()
+
+        XCTAssertEqual(kill(survivorPID, 0), 0, "the predecessor is still alive during its termination grace")
+        XCTAssertEqual(
+            try harness.store.automationRun(id: queued.id)?.status, .queued,
+            "queue concurrency includes a predecessor whose SIGKILL escalation is still pending")
+    }
+
     /// A tick admitted while ticks are suspended (the daemon sets this during an exec handoff) must be a
     /// complete no-op — firing against quiesced cores would misread preserved sessions as dead — and the
     /// suspended occurrence fires normally on the first tick after suspension lifts.
@@ -916,6 +938,22 @@ import spacesterminalcore
         let byRunID = try AutomationAttributedAgents.summariesByRunID(
             runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
         XCTAssertEqual(byRunID[run.id], [], "a released session leaves no agent behind")
+    }
+
+    func testAttributedSessionBatchIncludesOnlyRequestedRuns() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let requested = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let unrelated = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let requestedSessionID = UUID().uuidString
+        let unrelatedSessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: "ws-1", runID: requested.id, sessionID: requestedSessionID, kind: .agent, live: false)
+        try harness.writeAttributedSessionFiles(workspaceID: "ws-1", runID: unrelated.id, sessionID: unrelatedSessionID, kind: .agent, live: false)
+
+        let sessions = try harness.store.automationAttributedSessionsByRunID(runIDs: [requested.id])
+
+        XCTAssertEqual(sessions[requested.id]?.map(\.sessionID), [requestedSessionID])
+        XCTAssertNil(sessions[unrelated.id], "the batch does not scan or return attribution outside the requested run window")
     }
 
     // MARK: - Timeout + cancel
