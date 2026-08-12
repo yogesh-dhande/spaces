@@ -905,6 +905,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         saveDismissedAlertIDs()
     }
 
+    /// Dismisses one failed/timed-out automation run, leaving the rest of the Automations band in place.
+    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) {
+        dismissedAlertIDs.insert(entry.id)
+        saveDismissedAlertIDs()
+    }
+
     /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
     /// bounded by what the device currently reports rather than growing for the life of the install.
     private func pruneDismissedAlertIDs(against overview: SpacesDeviceOverviewPayload) {

@@ -182,6 +182,13 @@ struct AutomationsViewModelTests {
 
     // MARK: - Editor field building (kind round-trip + validation)
 
+    @Test func scheduleIntegerFieldsRejectBlankNonnumericAndOutOfRangeValues() {
+        #expect(AutomationScheduleFieldValidation.integer("", range: 0...59) == nil)
+        #expect(AutomationScheduleFieldValidation.integer("noon", range: 0...23) == nil)
+        #expect(AutomationScheduleFieldValidation.integer("60", range: 0...59) == nil)
+        #expect(AutomationScheduleFieldValidation.integer(" 09 ", range: 0...23) == 9)
+    }
+
     @Test func buildAgentFieldsRoundTripsKindAndAgentFields() {
         let result = AutomationsViewModel.buildAutomationFields(
             name: "  Nightly agent  ", kind: .agent, enabled: true, triggerKind: .cron, cronExpression: "0 9 * * *", workspaceID: " ws-1 ",

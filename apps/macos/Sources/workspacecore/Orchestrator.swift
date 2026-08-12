@@ -1453,11 +1453,13 @@ public final class WorkspaceOrchestrator {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : defaultTitle
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
-            base: buildWorkspaceEnv(
-                project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-                runtimeManifest: runtimeManifest
-            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
+        var baseEnvironment = buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }
+        // An agent automation can ask its agent to spawn more agents through the CLI or MCP server. Those
+        // child-spawn paths read this environment value so every descendant stays attributed to the run.
+        if let automationRunID { baseEnvironment[Self.automationRunIDEnvVar] = automationRunID }
+        let env = terminalLaunchEnvironment(base: baseEnvironment, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let launchCommand = commandPrefixedWithShellEnvironment(shellCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(

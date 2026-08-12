@@ -281,10 +281,12 @@ extension OrchestratorTests {
         let launchConfiguration = try XCTUnwrap(launchCapture.snapshot().first)
         XCTAssertEqual(launchConfiguration.kind, .agent)
         XCTAssertEqual(launchConfiguration.automationRunID, "run-99")
+        XCTAssertTrue(launchConfiguration.command?.contains("export SPACES_AUTOMATION_RUN_ID=run-99") == true)
         // An ordinary spawn (no automation) leaves the attribution stamp nil.
         _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: "Interactive")
         let interactiveConfiguration = try XCTUnwrap(launchCapture.snapshot().last)
         XCTAssertNil(interactiveConfiguration.automationRunID)
+        XCTAssertFalse(interactiveConfiguration.command?.contains("SPACES_AUTOMATION_RUN_ID") == true)
     }
 
     /// With no command the session IS the user's shell — a bare interactive login shell on the PTY — so

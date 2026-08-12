@@ -312,6 +312,20 @@
             XCTAssertEqual(model.undismissedAlertCount, 0)
         }
 
+        func testDismissAutomationAlertRemovesOnlyThatRunAlert() {
+            let model = makeModel()
+            model.overview = makeOverview(automationRuns: [
+                makeRun(id: "run-a", automationID: "a", automationName: "Deploy", status: "failed"),
+                makeRun(id: "run-b", automationID: "b", automationName: "Backup", status: "timed_out"),
+            ])
+            let dismissed = model.automationAlerts.first { $0.runID == "run-a" }!
+
+            model.dismissAutomationAlert(dismissed)
+
+            XCTAssertEqual(model.automationAlerts.map(\.runID), ["run-b"])
+            XCTAssertEqual(model.undismissedAlertCount, 1)
+        }
+
         func testTriggerAutomationSendsTriggerThenReloadsOverview() async {
             let recorder = SpacesMobileAutomationsRequestRecorder()
             let settings = SpacesMobileConnectionSettings()

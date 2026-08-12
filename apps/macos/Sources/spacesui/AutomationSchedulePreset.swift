@@ -145,3 +145,13 @@ enum AutomationSchedulePreview {
         return runs
     }
 }
+
+/// Parses the schedule builder's freeform numeric fields without `NSTextField.integerValue`'s coercion
+/// of blank or nonnumeric text to zero. Kept pure so preview and save share the same validation contract.
+enum AutomationScheduleFieldValidation {
+    static func integer(_ rawValue: String, range: ClosedRange<Int>) -> Int? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Int(trimmed), range.contains(value) else { return nil }
+        return value
+    }
+}

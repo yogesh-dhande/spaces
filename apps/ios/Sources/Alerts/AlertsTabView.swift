@@ -42,7 +42,15 @@ struct AlertsTabView: View {
             Spacer(minLength: 0)
             Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
         }.accessibilityIdentifier("alerts.band.automations").bandListHeaderRow()
-        ForEach(entries) { entry in automationAlertRow(entry).bandListRow() }
+        ForEach(entries) { entry in
+            automationAlertRow(entry).bandListRow().swipeActions(edge: .trailing) {
+                Button(role: .destructive) {
+                    model.dismissAutomationAlert(entry)
+                } label: {
+                    Label("Dismiss", systemImage: "bell.slash")
+                }.accessibilityIdentifier("alert.dismiss.\(entry.id)")
+            }
+        }
     }
 
     /// Status-level only: there is no terminal/replay to open for an automation run in this feature, so

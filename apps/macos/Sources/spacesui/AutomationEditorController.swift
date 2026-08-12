@@ -141,7 +141,9 @@ import workspacecore
             addRow(host.settingsLabeledField(name: "Device", hint: "An automation stays on its device.", control: label), to: stack)
         }
 
-        addRow(host.settingsLabeledField(name: "Type", hint: "Spawn a coding agent, or run a shell script.", control: makeKindControl(seed: seed)), to: stack)
+        addRow(
+            host.settingsLabeledField(name: "Type", hint: "Spawn a coding agent, or run a shell script.", control: makeKindControl(seed: seed)),
+            to: stack)
 
         // Agent-kind rows.
         let workspaceRow = host.settingsLabeledField(
@@ -153,7 +155,8 @@ import workspacecore
             control: makeAgentCommandField(seed: seed))
         addRow(agentCommandRow, to: stack)
         self.agentCommandRow = agentCommandRow
-        let agentPromptRow = host.settingsLabeledField(name: "Prompt", hint: "Sent to the agent once it starts.", control: makeAgentPromptEditor(seed: seed))
+        let agentPromptRow = host.settingsLabeledField(
+            name: "Prompt", hint: "Sent to the agent once it starts.", control: makeAgentPromptEditor(seed: seed))
         addRow(agentPromptRow, to: stack)
         self.agentPromptRow = agentPromptRow
 
@@ -166,11 +169,14 @@ import workspacecore
         addRow(workingDirectoryRow, to: stack)
         self.workingDirectoryRow = workingDirectoryRow
 
-        addRow(host.settingsLabeledField(name: "Trigger", hint: "Run manually or on a cron schedule.", control: makeTriggerControl(seed: seed)), to: stack)
+        addRow(
+            host.settingsLabeledField(name: "Trigger", hint: "Run manually or on a cron schedule.", control: makeTriggerControl(seed: seed)),
+            to: stack)
         appendCronSection(to: stack, seed: seed)
 
         addRow(
-            host.settingsLabeledField(name: "Timeout (seconds)", hint: "Leave empty for no timeout.", control: makeTimeoutField(seed: seed)), to: stack)
+            host.settingsLabeledField(name: "Timeout (seconds)", hint: "Leave empty for no timeout.", control: makeTimeoutField(seed: seed)),
+            to: stack)
         addRow(host.settingsLabeledField(name: "On overlap", hint: concurrencyHint(), control: makeConcurrencyPopUp(seed: seed)), to: stack)
         addRow(host.settingsLabeledField(name: "Missed runs", hint: missedRunHint(), control: makeMissedRunPopUp(seed: seed)), to: stack)
 
@@ -293,7 +299,8 @@ import workspacecore
         // The Browse folder picker is only meaningful for the local device — a remote path can't be resolved
         // from this Mac's file system — so it is offered for local automations only.
         guard isLocalDevice else { return field }
-        let browse = host.actionButton(title: "Browse…", symbol: "folder", tooltip: "Choose a folder", action: #selector(browseTapped), primary: false)
+        let browse = host.actionButton(
+            title: "Browse…", symbol: "folder", tooltip: "Choose a folder", action: #selector(browseTapped), primary: false)
         browse.target = self
         let row = NSStackView(views: [field, browse])
         row.orientation = .horizontal
@@ -304,8 +311,7 @@ import workspacecore
     }
 
     private func makeTriggerControl(seed: TerminalServiceAutomationSummary?) -> NSView {
-        let segmented = NSSegmentedControl(
-            labels: ["Manual", "Cron"], trackingMode: .selectOne, target: self, action: #selector(triggerChanged(_:)))
+        let segmented = NSSegmentedControl(labels: ["Manual", "Cron"], trackingMode: .selectOne, target: self, action: #selector(triggerChanged(_:)))
         segmented.selectedSegment = (seed.flatMap { AutomationTriggerKind(rawValue: $0.triggerKind) } ?? .manual) == .cron ? 1 : 0
         triggerSegmented = segmented
         return segmented
@@ -360,7 +366,8 @@ import workspacecore
         let dailyMinuteField = makeIntegerField(range: 0...59, value: 0)
         self.dailyHourField = dailyHourField
         self.dailyMinuteField = dailyMinuteField
-        let dailyRow = host.settingsLabeledField(name: "Daily at", hint: "Hour (0–23) and minute (0–59).", control: makeTimeRow(dailyHourField, dailyMinuteField))
+        let dailyRow = host.settingsLabeledField(
+            name: "Daily at", hint: "Hour (0–23) and minute (0–59).", control: makeTimeRow(dailyHourField, dailyMinuteField))
         addRow(dailyRow, to: stack)
         self.dailyRow = dailyRow
         cronSectionRows.append(dailyRow)
@@ -417,16 +424,12 @@ import workspacecore
             weeklyHourField?.integerValue = hour
             weeklyMinuteField?.integerValue = minute
             for (index, checkbox) in weeklyDayCheckboxes.enumerated() { checkbox.state = days.contains(index) ? .on : .off }
-        case .advanced(let expression):
-            advancedCronField?.stringValue = expression
-        case nil:
-            break
+        case .advanced(let expression): advancedCronField?.stringValue = expression
+        case nil: break
         }
     }
 
-    private func indexOfKind(_ kind: AutomationSchedulePreset.Kind) -> Int {
-        AutomationSchedulePreset.Kind.allCases.firstIndex(of: kind) ?? 0
-    }
+    private func indexOfKind(_ kind: AutomationSchedulePreset.Kind) -> Int { AutomationSchedulePreset.Kind.allCases.firstIndex(of: kind) ?? 0 }
 
     /// Builds the every-N-minutes popup from the preset's canonical divisor choices, each item carrying its
     /// integer value as its represented object so the read path recovers it directly.
@@ -600,40 +603,52 @@ import workspacecore
         (presetKindPopUp?.selectedItem?.representedObject as? String).flatMap(AutomationSchedulePreset.Kind.init(rawValue:)) ?? .everyNMinutes
     }
 
-    /// The builder state currently expressed by the controls (nil for a manual automation).
-    private func currentPreset() -> AutomationSchedulePreset? {
+    private struct ScheduleFieldError: LocalizedError { let errorDescription: String? }
+
+    /// The builder state currently expressed by the controls (nil for a manual automation). Numeric
+    /// fields are parsed from their raw strings so blank or nonnumeric input cannot silently become zero.
+    private func currentPreset() throws -> AutomationSchedulePreset? {
         guard (triggerSegmented?.selectedSegment ?? 0) == 1 else { return nil }
         let mode = CronMode(rawValue: cronModeSegmented?.selectedSegment ?? 0) ?? .builder
         if mode == .advanced { return .advanced(expression: advancedCronField?.stringValue ?? "") }
         switch selectedKind() {
         case .everyNMinutes:
             return .everyNMinutes(minutes: (everyNPopUp?.selectedItem?.representedObject as? Int) ?? AutomationSchedulePreset.everyNMinutesChoices[0])
-        case .hourlyAtMinute: return .hourlyAtMinute(minute: hourlyMinuteField?.integerValue ?? 0)
-        case .dailyAtTime: return .dailyAtTime(hour: dailyHourField?.integerValue ?? 0, minute: dailyMinuteField?.integerValue ?? 0)
+        case .hourlyAtMinute: return .hourlyAtMinute(minute: try scheduleInteger(hourlyMinuteField, range: 0...59, fieldName: "Minute"))
+        case .dailyAtTime:
+            return .dailyAtTime(
+                hour: try scheduleInteger(dailyHourField, range: 0...23, fieldName: "Hour"),
+                minute: try scheduleInteger(dailyMinuteField, range: 0...59, fieldName: "Minute"))
         case .weeklyOnDaysAtTime:
             let days = Set(weeklyDayCheckboxes.enumerated().filter { $0.element.state == .on }.map(\.offset))
-            return .weeklyOnDaysAtTime(days: days, hour: weeklyHourField?.integerValue ?? 0, minute: weeklyMinuteField?.integerValue ?? 0)
+            return .weeklyOnDaysAtTime(
+                days: days, hour: try scheduleInteger(weeklyHourField, range: 0...23, fieldName: "Hour"),
+                minute: try scheduleInteger(weeklyMinuteField, range: 0...59, fieldName: "Minute"))
         }
+    }
+
+    private func scheduleInteger(_ field: NSTextField?, range: ClosedRange<Int>, fieldName: String) throws -> Int {
+        guard let value = AutomationScheduleFieldValidation.integer(field?.stringValue ?? "", range: range) else {
+            throw ScheduleFieldError(errorDescription: "\(fieldName) must be a number from \(range.lowerBound) to \(range.upperBound).")
+        }
+        return value
     }
 
     private func updatePreview() {
         guard let previewLabel else { return }
-        guard let preset = currentPreset() else {
-            previewLabel.stringValue = ""
-            return
-        }
-        if case .weeklyOnDaysAtTime(let days, _, _) = preset, days.isEmpty {
-            previewLabel.textColor = .systemRed
-            previewLabel.stringValue = "Select at least one day."
-            return
-        }
         do {
+            guard let preset = try currentPreset() else {
+                previewLabel.stringValue = ""
+                return
+            }
+            if case .weeklyOnDaysAtTime(let days, _, _) = preset, days.isEmpty {
+                throw ScheduleFieldError(errorDescription: "Select at least one day.")
+            }
             // Preview in the zone the target device evaluates cron in: the Mac's own zone for the local
             // device, else the remote device's daemon-reported zone. A cross-zone remote preview would
             // otherwise show the Mac's wall-clock times, not the device's.
             let reportedZoneID = deviceInputs.first(where: { $0.deviceID == deviceID })?.timeZoneIdentifier
-            let previewZone = AutomationsViewModel.schedulePreviewTimeZone(
-                isLocalDevice: isLocalDevice, reportedTimeZoneIdentifier: reportedZoneID)
+            let previewZone = AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: isLocalDevice, reportedTimeZoneIdentifier: reportedZoneID)
             let runs = try AutomationSchedulePreview.nextRuns(cronExpression: preset.cronExpression, after: Date(), timeZone: previewZone, count: 3)
             previewLabel.textColor = .secondaryLabelColor
             if runs.isEmpty {
@@ -768,7 +783,11 @@ import workspacecore
         let triggerKind: AutomationTriggerKind = isCron ? .cron : .manual
         var cronExpression: String?
         if isCron {
-            guard let preset = currentPreset() else { return failValidation("Configure the schedule.") }
+            let preset: AutomationSchedulePreset
+            do {
+                guard let resolved = try currentPreset() else { return failValidation("Configure the schedule.") }
+                preset = resolved
+            } catch { return failValidation(error.localizedDescription) }
             if case .weeklyOnDaysAtTime(let days, _, _) = preset, days.isEmpty { return failValidation("Select at least one day.") }
             let expression = preset.cronExpression
             // Validate locally so a bad expression is caught inline before the round-trip.
@@ -782,21 +801,22 @@ import workspacecore
         let result = AutomationsViewModel.buildAutomationFields(
             name: nameField?.stringValue ?? "", kind: currentKind, enabled: currentEnabled(), triggerKind: triggerKind,
             cronExpression: cronExpression, workspaceID: workspacePopUp?.selectedItem?.representedObject as? String,
-            agentCommand: agentCommandField?.stringValue ?? "", agentPrompt: agentPromptTextView?.string ?? "",
-            script: scriptTextView?.string ?? "", workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutSeconds,
-            concurrencyPolicy: concurrency, missedRunPolicy: missed)
+            agentCommand: agentCommandField?.stringValue ?? "", agentPrompt: agentPromptTextView?.string ?? "", script: scriptTextView?.string ?? "",
+            workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
+            missedRunPolicy: missed)
         switch result {
         case .success(let fields):
             errorLabel?.isHidden = true
             return fields
-        case .failure(let error):
-            return failValidation(error.message)
+        case .failure(let error): return failValidation(error.message)
         }
     }
 
     /// Preserves the automation's enabled state across edits; a newly created automation is enabled.
     private func currentEnabled() -> Bool {
-        guard let editingAutomationID, let automation = host.automationSummary(deviceID: deviceID, automationID: editingAutomationID) else { return true }
+        guard let editingAutomationID, let automation = host.automationSummary(deviceID: deviceID, automationID: editingAutomationID) else {
+            return true
+        }
         return automation.enabled
     }
 
@@ -822,10 +842,11 @@ import workspacecore
         let isCron = (triggerSegmented?.selectedSegment ?? 0) == 1
         return TerminalServiceAutomationSummary(
             id: editingAutomationID ?? "", name: nameField?.stringValue ?? "", enabled: currentEnabled(),
-            triggerKind: (isCron ? AutomationTriggerKind.cron : .manual).rawValue, cronExpression: isCron ? currentPreset()?.cronExpression : nil,
-            kind: currentKind.rawValue, script: scriptTextView?.string ?? "", agentCommand: agentCommandField?.stringValue,
-            agentPrompt: agentPromptTextView?.string, workspaceID: workspacePopUp?.selectedItem?.representedObject as? String,
-            workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
+            triggerKind: (isCron ? AutomationTriggerKind.cron : .manual).rawValue,
+            cronExpression: isCron ? (try? currentPreset())?.cronExpression : nil, kind: currentKind.rawValue, script: scriptTextView?.string ?? "",
+            agentCommand: agentCommandField?.stringValue, agentPrompt: agentPromptTextView?.string,
+            workspaceID: workspacePopUp?.selectedItem?.representedObject as? String, workingDirectory: workingDirectoryField?.stringValue ?? "",
+            timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
             concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue,
             missedRunPolicy: (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue,
             nextFireTime: nil, createdAt: "", updatedAt: "")
