@@ -575,8 +575,8 @@ enum SpacesDaemonErrorClassification {
             WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
                 try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
             }
-            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, operation in
-                try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, operation: operation)
+            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+                try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
             }
             // Set the main-actor identity immediately (the lifecycle/identity guard below depends on it) but
             // publish the off-main box only after reconciliation. Transports (Device API listeners already
@@ -603,9 +603,10 @@ enum SpacesDaemonErrorClassification {
                     // dead and falsely finalize their runs, so skip ticking while a handoff is in progress.
                     // `performExecHandoff` drains any tick already in flight before quiescing.
                     let livenessState = self.livenessState
+                    let tickCoalescer = AutomationTickCoalescer { service.tick() }
                     let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
                         guard !livenessState.snapshot().handoffInProgress else { return }
-                        Task.detached(priority: .utility) { service.tick() }
+                        tickCoalescer.submit()
                     }
                     RunLoop.main.add(timer, forMode: .common)
                     self.automationTimer = timer

@@ -196,8 +196,8 @@ extension OrchestratorTests {
         let terminated = TerminalTerminateCapture()
         let orchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
         let automationService = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
-        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, operation in
-            try automationService.cancelRunsForWorkspaceStop(workspaceID: workspaceID, operation: operation)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try automationService.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
         }
         defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
         try orchestrator.stopWorkspace(workspaceID: retargetedWorkspace.id)
@@ -238,8 +238,8 @@ extension OrchestratorTests {
         let holder = makeTestOrchestrator(store: store)
         let contender = makeTestOrchestrator(store: store)
         let service = AutomationService(store: store, orchestrator: contender, binaryDirectory: "/usr/bin", logError: { _ in })
-        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, operation in
-            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, operation: operation)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
         }
         defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
 
@@ -281,8 +281,8 @@ extension OrchestratorTests {
 
         let orchestrator = makeTestOrchestrator(store: store, daemonHandoffInProgress: { true })
         let service = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
-        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, operation in
-            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, operation: operation)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
         }
         defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
 

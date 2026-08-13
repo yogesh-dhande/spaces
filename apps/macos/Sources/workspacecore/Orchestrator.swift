@@ -46,11 +46,11 @@ public final class WorkspaceOrchestrator {
     /// caller holds that workspace's lifecycle gate. Its teardown-specific implementation performs direct
     /// session finalization and never tries to claim the held gate again.
     public typealias AutomationWorkspaceTeardown = @Sendable (String) throws -> Void
-    /// Serializes automation-run cancellation with a workspace stop or restart. The caller has already
-    /// admitted the workspace lifecycle gate before invoking this callback; the daemon keeps its
-    /// automation-service queue through `operation`, so a scheduler tick cannot launch another run into
-    /// a workspace after cancellation but before terminal teardown completes.
-    public typealias AutomationWorkspaceCancellation = @Sendable (String, @escaping () throws -> Void) throws -> Void
+    /// Coordinates automation-run cancellation with a workspace stop or restart. The callback receives an
+    /// orchestration closure and invokes its begin-cancellation callback only after admitting the workspace
+    /// lifecycle gate; this keeps the target marker active through the complete gate-held operation while
+    /// leaving unrelated workspace automation work available.
+    public typealias AutomationWorkspaceCancellation = @Sendable (String, @escaping (@escaping () throws -> Void) throws -> Void) throws -> Void
     /// Reports whether the owning daemon is mid exec-in-place handoff. Installed process-wide so every
     /// transient daemon orchestrator (discovery scans, reconcilers, Device API handlers) consults the
     /// same handoff flag the profile orchestrator does, not just the one built by `makeProfileOrchestrator`.
@@ -209,10 +209,17 @@ public final class WorkspaceOrchestrator {
             guard try !hasActiveAutomationRunTargetingWorkspace(workspaceID) else {
                 throw WorkspaceError.dependencyMissing(message: "Automation cancellation is unavailable.")
             }
-            try operation()
+            try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                try operation()
+            }
             return
         }
-        try cancellation(workspaceID, operation)
+        try cancellation(workspaceID) { beginCancellation in
+            try self.withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                try beginCancellation()
+                try operation()
+            }
+        }
     }
 
     /// A running run stays in the workspace persisted by its launched terminal; queued and launch-pending
@@ -919,11 +926,7 @@ public final class WorkspaceOrchestrator {
         // Reject a quiescing daemon before recording any automation cancellation. The inner stop repeats
         // this guard at its destructive-row boundary to cover a handoff that begins during teardown.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
-                try restartWorkspaceUnlocked(workspaceID: workspaceID)
-            }
-        }
+        try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in try restartWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
     /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
@@ -944,10 +947,8 @@ public final class WorkspaceOrchestrator {
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
         if restartIfRunning {
             guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-            try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-                try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
-                    try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: true, background: background)
-                }
+            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+                try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: true, background: background)
             }
         } else {
             try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: false, background: background)
@@ -1079,10 +1080,8 @@ public final class WorkspaceOrchestrator {
         // See `restartWorkspace`: this guard and the gate claim must happen before queue-owned run state
         // is changed, so a handoff or busy rejection preserves both automation execution and history.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+        try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
                 outcome.set(try stopWorkspaceUnlocked(workspaceID: workspaceID))
-            }
         }
         guard let resolvedOutcome = outcome.get() else {
             throw WorkspaceError.dependencyMissing(message: "Automation cancellation did not perform the workspace stop.")

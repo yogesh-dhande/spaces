@@ -776,6 +776,73 @@ import spacesterminalcore
         XCTAssertTrue(harness.host.terminated.contains(sessionID), "the pending agent session is torn down on timeout")
     }
 
+    func testWorkspaceStopMarkerAllowsUnrelatedWorkspaceProgressAndPreservesTargetCronAnchor() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let (_, workspaceA) = try harness.makeProjectAndWorkspace()
+        let (_, workspaceB) = try harness.makeProjectAndWorkspace()
+        let target = try harness.insertAutomation(triggerKind: .cron, cronExpression: "* * * * *", concurrency: .queue, nextFireTime: clock.now(), workspaceID: workspaceA.id)
+        let unrelated = try harness.insertAutomation(concurrency: .allow, workspaceID: workspaceB.id)
+        let started = expectation(description: "workspace stop operation started")
+        let release = DispatchSemaphore(value: 0)
+        let finished = expectation(description: "workspace stop operation finished")
+        Thread.detachNewThread {
+            do {
+                try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspaceA.id) { begin in
+                    try begin()
+                    started.fulfill()
+                    _ = release.wait(timeout: .now() + 2)
+                }
+                finished.fulfill()
+            } catch { XCTFail("workspace stop failed: \(error)") }
+        }
+        wait(for: [started], timeout: 2)
+        let beforeAnchor = try XCTUnwrap(try harness.store.automation(id: target.id)?.nextFireTime)
+        let queued = try harness.insertRun(automationID: target.id, kind: .script, status: .queued)
+        XCTAssertNil(harness.service.triggerManually(automationID: target.id), "target workspace cannot launch during stop")
+        XCTAssertNotNil(harness.service.triggerManually(automationID: unrelated.id), "unrelated workspace remains usable")
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automation(id: target.id)?.nextFireTime, beforeAnchor, "target cron anchor is preserved")
+        XCTAssertEqual(try harness.store.automationRun(id: queued.id)?.status, .queued, "target queued run is not promoted during stop")
+        release.signal()
+        wait(for: [finished], timeout: 2)
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRun(id: queued.id)?.status, .running, "target queued run promotes after stop completes")
+        XCTAssertNotNil(try harness.store.automationRuns(automationID: target.id).first { $0.status == .running }, "target fires after stop completes")
+    }
+
+    func testWorkspaceStopMarkerClearsWhenOperationThrows() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        XCTAssertThrowsError(try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in throw NSError(domain: "test", code: 1) })
+        let automation = try harness.insertAutomation(concurrency: .allow, workspaceID: workspace.id)
+        XCTAssertNotNil(harness.service.triggerManually(automationID: automation.id), "marker must clear after operation failure")
+    }
+
+    func testCompetingWorkspaceStopCannotClearFirstMarker() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAutomation(concurrency: .allow, workspaceID: workspace.id)
+        let began = expectation(description: "first cancellation began")
+        let finished = expectation(description: "first cancellation finished")
+        let release = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { begin in
+                try begin()
+                began.fulfill()
+                _ = release.wait(timeout: .now() + 2)
+            }
+            finished.fulfill()
+        }
+        wait(for: [began], timeout: 2)
+        XCTAssertThrowsError(try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in
+            throw WorkspaceError.dependencyMissing(message: "busy")
+        })
+        XCTAssertNil(harness.service.triggerManually(automationID: automation.id), "the first stop marker remains active")
+        release.signal()
+        wait(for: [finished], timeout: 2)
+    }
+
     // MARK: - End attributed agents
 
     /// End-agents over a terminal run reaps its still-live attributed agent session through the agent-kill
@@ -1653,11 +1720,11 @@ import spacesterminalcore
     func insertAutomation(
         script: String = "true", kind: AutomationKind = .script, triggerKind: AutomationTriggerKind = .manual, cronExpression: String? = nil,
         concurrency: AutomationConcurrencyPolicy = .allow, missedRunPolicy: AutomationMissedRunPolicy = .runOnce, timeoutSeconds: Int? = nil,
-        nextFireTime: Date? = nil
+        nextFireTime: Date? = nil, workspaceID: String = "workspace-1"
     ) throws -> Automation {
         let automation = Automation(
             id: UUID().uuidString, name: "Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
-            workspaceID: "workspace-1", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy,
+            workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy,
             nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation

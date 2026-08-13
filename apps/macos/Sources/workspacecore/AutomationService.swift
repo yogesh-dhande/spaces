@@ -70,6 +70,7 @@ public final class AutomationService: @unchecked Sendable {
         let sigkillDeadline: Date
     }
     private var pendingKills: [String: PendingKill] = [:]
+    private var workspaceCancellationsInProgress: Set<String> = []
 
     public init(
         store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String, timeZone: @escaping @Sendable () -> TimeZone = { .current },
@@ -411,16 +412,25 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     /// Cancels every active run whose execution belongs to `workspaceID`, then performs the caller's
-    /// workspace stop/restart while this service still owns its serial queue. The caller has already
-    /// admitted and claimed that workspace's lifecycle gate. Holding the queue through `operation`
-    /// prevents a timer tick from launching another run between cancellation and teardown.
-    public func cancelRunsForWorkspaceStop(workspaceID: String, operation: @escaping () throws -> Void) throws {
-        try queue.sync {
-            for run in try activeRunsTargetingWorkspace(workspaceID) {
-                try terminateRunSessionsDuringWorkspaceStop(run)
-                try markRunCanceledDuringWorkspaceStop(run)
+    /// workspace stop/restart. The caller has already admitted and claimed that workspace's lifecycle gate.
+    /// A workspace marker blocks only launches and promotions targeting that workspace while the operation
+    /// runs; the service queue remains available for unrelated workspaces.
+    public func cancelRunsForWorkspaceStop(
+        workspaceID: String, orchestration: @escaping (@escaping () throws -> Void) throws -> Void
+    ) throws {
+        var installedMarker = false
+        defer {
+            if installedMarker { queue.sync { _ = workspaceCancellationsInProgress.remove(workspaceID) } }
+        }
+        try orchestration {
+            try self.queue.sync {
+                self.workspaceCancellationsInProgress.insert(workspaceID)
+                installedMarker = true
+                for run in try self.activeRunsTargetingWorkspace(workspaceID) {
+                    try self.terminateRunSessionsDuringWorkspaceStop(run)
+                    try self.markRunCanceledDuringWorkspaceStop(run)
+                }
             }
-            try operation()
         }
     }
 
@@ -480,6 +490,7 @@ public final class AutomationService: @unchecked Sendable {
                 guard let schedule = automation.parsedCronSchedule, let nextFireTime = automation.nextFireTime, nextFireTime <= currentTime else {
                     continue
                 }
+                guard !workspaceCancellationsInProgress.contains(automation.workspaceID) else { continue }
                 // At-most-once firing: the persisted anchor is the durable claim on this occurrence, advanced
                 // BEFORE the launch. `fire` swallows its own errors and the two writes are independent, so if the
                 // launch ran first an anchor-write failure (or a crash between the two) would leave a due anchor
@@ -507,6 +518,7 @@ public final class AutomationService: @unchecked Sendable {
     /// run row is running.
     @discardableResult private func fire(automation: Automation, trigger: AutomationRunTrigger) -> AutomationRun? {
         do {
+            guard !workspaceCancellationsInProgress.contains(automation.workspaceID) else { return nil }
             let active = try store.activeAutomationRuns(automationID: automation.id)
             let running = active.contains { $0.status == .running }
             let queued = active.contains { $0.status == .queued }
@@ -890,6 +902,7 @@ public final class AutomationService: @unchecked Sendable {
             // Any automation that has a queued run but no running run is ready to promote. Enumerate
             // automations (cheap) rather than tracking a separate index.
             for automation in try store.automations() {
+                guard !workspaceCancellationsInProgress.contains(automation.workspaceID) else { continue }
                 guard !queuedAutomationIDs.contains(automation.id) else { continue }
                 guard try !store.activeAutomationRuns(automationID: automation.id).contains(where: { $0.status == .running }) else { continue }
                 guard let queued = try store.queuedAutomationRun(automationID: automation.id) else { continue }
