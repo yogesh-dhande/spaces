@@ -11,6 +11,10 @@ import spacesterminalcore
 @MainActor final class AutomationCommandTests: XCTestCase {
     private func makeService(now: @escaping () -> Date = { Date(timeIntervalSince1970: 1_700_000_000) }) throws -> (AutomationService, SQLiteStore) {
         let store = try makeTemporaryStore()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let project = makeProjectRecord(dir: directory)
+        try store.upsert(project: project)
+        try store.upsert(workspace: makeWorkspaceRecord(id: "ws-1", projectID: project.id, dir: directory))
         let service = AutomationService(
             store: store, orchestrator: WorkspaceOrchestrator(store: store), binaryDirectory: "/usr/bin", now: now, logError: { _ in })
         return (service, store)

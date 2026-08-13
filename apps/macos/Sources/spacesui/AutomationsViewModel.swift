@@ -114,6 +114,23 @@ enum AutomationsViewModel {
     /// documented thread-safe, so one shared instance is safe from these nonisolated helpers.
     nonisolated(unsafe) private static let iso8601Formatter = ISO8601DateFormatter()
 
+    /// Augments the bounded overview run slice with the full retained history loaded for each reachable
+    /// device. The overview wins for duplicate ids because it keeps live status current between history
+    /// loads. Offline inputs keep their last overview snapshot so a failed request never looks authoritative.
+    static func mergingRetainedRuns(
+        in inputs: [AutomationDeviceInput], with retainedRunsByDeviceID: [String: [TerminalServiceAutomationRunSummary]]
+    ) -> [AutomationDeviceInput] {
+        inputs.map { input in
+            guard input.isReachable, let retainedRuns = retainedRunsByDeviceID[input.deviceID] else { return input }
+            var runsByID = Dictionary(uniqueKeysWithValues: retainedRuns.map { ($0.id, $0) })
+            for run in input.runs { runsByID[run.id] = run }
+            return AutomationDeviceInput(
+                deviceID: input.deviceID, deviceName: input.deviceName, isLocal: input.isLocal, isReachable: true,
+                offlineMessage: input.offlineMessage, automations: input.automations, runs: Array(runsByID.values),
+                timeZoneIdentifier: input.timeZoneIdentifier)
+        }
+    }
+
     /// The merged automations table across every reachable device, sorted by automation name (locale-aware)
     /// then device name so the same automation name on two devices stays adjacent and stable.
     static func mergedAutomations(from inputs: [AutomationDeviceInput]) -> [AutomationTableRow] {

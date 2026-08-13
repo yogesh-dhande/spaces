@@ -34,6 +34,12 @@ import workspacecore
     private var relativeTimeLabelRefreshers: [(Date) -> Void] = []
     /// The device filter, or nil for "All devices". Persisted across re-renders.
     private var deviceFilterID: String?
+    /// Full retained run history is loaded only while Runs is selected. The overview intentionally carries
+    /// a bounded activity slice, so it cannot be the data source for transcript history.
+    private var retainedRunsByDeviceID: [String: [TerminalServiceAutomationRunSummary]] = [:]
+    private var retainedRunHistoryLoadedDeviceIDs: Set<String> = []
+    private var retainedRunHistoryLoadingDeviceIDs: Set<String> = []
+    private var retainedRunHistoryGeneration = 0
 
     private let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -61,6 +67,8 @@ import workspacecore
     }
 
     func showAutomationsDetail() {
+        let isReenteringPane = !host.showingAutomations
+        if isReenteringPane { resetRetainedRunHistory() }
         host.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.presentDetailPane(.automations)
@@ -75,6 +83,11 @@ import workspacecore
         host.updateAlertsRowAppearance()
         host.updateAutomationsSidebarRow()
 
+        let overviewInputs = renderAutomationsDetail()
+        if selectedTab == .runs { loadRetainedRunHistoryIfNeeded(for: overviewInputs) }
+    }
+
+    @discardableResult private func renderAutomationsDetail() -> [AutomationDeviceInput] {
         host.clearWorkspaceDetailFooter()
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
@@ -82,7 +95,12 @@ import workspacecore
             view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
         }
 
-        let inputs = host.automationDeviceInputs()
+        let overviewInputs = host.automationDeviceInputs()
+        let inputs = if selectedTab == .runs {
+            AutomationsViewModel.mergingRetainedRuns(in: overviewInputs, with: retainedRunsByDeviceID)
+        } else {
+            overviewInputs
+        }
         // A dropped device would otherwise vanish from the filter; keep "All devices" selected instead.
         if let filter = deviceFilterID, !inputs.contains(where: { $0.deviceID == filter }) { deviceFilterID = nil }
 
@@ -112,6 +130,48 @@ import workspacecore
 
         host.showScrollableDetailStack(stack)
         armRelativeTimeRefresh()
+        return overviewInputs
+    }
+
+    /// Fetches every retained run through the dedicated list API without blocking AppKit. A pane render
+    /// merges each successful result with that device's bounded overview slice; requests that fail keep
+    /// the device's existing reachable/offline presentation and remain eligible for the next refresh.
+    private func loadRetainedRunHistoryIfNeeded(for inputs: [AutomationDeviceInput]) {
+        let requests: [(deviceID: String, device: SpacesPairedDeviceRecord)] = inputs.compactMap { input in
+            guard input.isReachable, !retainedRunHistoryLoadedDeviceIDs.contains(input.deviceID),
+                !retainedRunHistoryLoadingDeviceIDs.contains(input.deviceID),
+                let device = host.automationDeviceRecord(deviceID: input.deviceID)
+            else { return nil }
+            return (input.deviceID, device)
+        }
+        guard !requests.isEmpty else { return }
+        retainedRunHistoryLoadingDeviceIDs.formUnion(requests.map { $0.deviceID })
+        let generation = retainedRunHistoryGeneration
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        Task { @MainActor [weak self] in
+            let results = await Task.detached(priority: .userInitiated) {
+                requests.map { request -> (String, [TerminalServiceAutomationRunSummary]?) in
+                    do { return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(device: request.device, clientApp: clientApp)) }
+                    catch { return (request.deviceID, nil) }
+                }
+            }.value
+            guard let self, retainedRunHistoryGeneration == generation else { return }
+            retainedRunHistoryLoadingDeviceIDs.subtract(requests.map { $0.deviceID })
+            for (deviceID, runs) in results {
+                guard let runs else { continue }
+                retainedRunsByDeviceID[deviceID] = runs
+                retainedRunHistoryLoadedDeviceIDs.insert(deviceID)
+            }
+            guard host.showingAutomations, selectedTab == .runs else { return }
+            renderAutomationsDetail()
+        }
+    }
+
+    private func resetRetainedRunHistory() {
+        retainedRunHistoryGeneration += 1
+        retainedRunsByDeviceID = [:]
+        retainedRunHistoryLoadedDeviceIDs = []
+        retainedRunHistoryLoadingDeviceIDs = []
     }
 
     /// Rewrites the rendered time labels in place on a slow beat so relative values (next-run countdowns,
@@ -666,7 +726,9 @@ import workspacecore
     }
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
-        selectedTab = Tab(rawValue: sender.selectedSegment) ?? .automations
+        let nextTab = Tab(rawValue: sender.selectedSegment) ?? .automations
+        if nextTab != selectedTab { resetRetainedRunHistory() }
+        selectedTab = nextTab
         showAutomationsDetail()
     }
 
@@ -766,6 +828,7 @@ import workspacecore
             host.showDeviceNotLoadedError()
             return
         }
+        resetRetainedRunHistory()
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
         Task { @MainActor [weak self] in
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in

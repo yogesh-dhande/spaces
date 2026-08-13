@@ -85,6 +85,31 @@ struct AutomationsViewModelTests {
         #expect(AutomationsViewModel.mergedRuns(from: inputs).map(\.run.id) == ["r-new", "r-mid", "r-old"])
     }
 
+    @Test func retainedRunHistoryAugmentsTheBoundedOverviewSliceForReachableDevices() {
+        let overviewRun = run(
+            id: "overview", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-02T08:00:00Z",
+            createdAt: "2026-01-02T08:00:00Z")
+        let retainedRun = run(
+            id: "retained", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z",
+            createdAt: "2026-01-01T08:00:00Z")
+        let offlineRun = run(
+            id: "offline", automationID: "b", name: "B", status: "running", startedAt: "2026-01-02T09:00:00Z",
+            createdAt: "2026-01-02T09:00:00Z")
+        let inputs = [
+            AutomationDeviceInput(deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, runs: [overviewRun]),
+            AutomationDeviceInput(
+                deviceID: "offline", deviceName: "Server", isLocal: false, isReachable: false, offlineMessage: "unreachable",
+                runs: [offlineRun]),
+        ]
+
+        let merged = AutomationsViewModel.mergingRetainedRuns(in: inputs, with: ["mac": [retainedRun], "offline": []])
+
+        #expect(merged[0].runs.map(\.id).sorted() == ["overview", "retained"])
+        // An unreachable section keeps its stale overview solely for the offline presentation; a failed
+        // history request must not make that device look freshly loaded.
+        #expect(merged[1].runs.map(\.id) == ["offline"])
+    }
+
     @Test func runningSidebarBadgeExcludesUnreachableDeviceSnapshots() {
         let inputs = [
             AutomationDeviceInput(

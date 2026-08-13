@@ -490,7 +490,8 @@ import spacesterminalcore
         // must keep its original script kind.
         let agentDraft = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "codex",
-            agentPrompt: "investigate", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+            agentPrompt: "investigate", workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
         let updated = try harness.service.updateAutomation(id: automation.id, draft: agentDraft)
         XCTAssertEqual(updated.kind, .agent)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.kind, .script, "the retained run keeps the kind it ran with, not the new one")
@@ -1268,6 +1269,34 @@ import spacesterminalcore
         XCTAssertFalse(try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning)
     }
 
+    // MARK: - Workspace target validation
+
+    func testCreateRejectsAutomationTargetingMissingWorkspace() throws {
+        let harness = try Harness(self)
+        let draft = AutomationDraft(
+            name: "Missing target", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: "deleted-workspace", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+
+        XCTAssertThrowsError(try harness.service.createAutomation(draft)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "a missing workspace is a user-facing validation error")
+        }
+        XCTAssertTrue(try harness.service.listAutomations().isEmpty, "the rejected draft must not persist")
+    }
+
+    func testUpdateRejectsAutomationWhoseWorkspaceWasDeleted() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation()
+        try harness.store.deleteWorkspace(id: automation.workspaceID)
+        let draft = AutomationDraft(
+            name: "Retargeted", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+
+        XCTAssertThrowsError(try harness.service.updateAutomation(id: automation.id, draft: draft)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "a deleted workspace is a user-facing validation error")
+        }
+        XCTAssertEqual(try harness.store.automation(id: automation.id)?.name, automation.name, "the rejected update must not persist")
+    }
+
     // MARK: - Kind-change guard
 
     /// Switching an automation between Script and Agent while a run is queued or running is rejected — the
@@ -1281,7 +1310,8 @@ import spacesterminalcore
 
         let switchToAgent = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
-            agentPrompt: "do the thing", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+            agentPrompt: "do the thing", workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
         XCTAssertThrowsError(try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)) { error in
             XCTAssertTrue(error is AutomationValidationError, "the kind cannot change while a run is active")
         }
@@ -1302,7 +1332,8 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(script: "echo hi", concurrency: .allow)
         let switchToAgent = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
-            agentPrompt: "do the thing", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+            agentPrompt: "do the thing", workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
         let updated = try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)
         XCTAssertEqual(updated.kind, .agent)
     }

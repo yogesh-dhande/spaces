@@ -258,6 +258,7 @@ public final class AutomationService: @unchecked Sendable {
 
     private func createAutomationLocked(_ draft: AutomationDraft) throws -> Automation {
         let validated = try draft.validated()
+        try validateWorkspaceTarget(validated.workspaceID)
         let timestamp = now()
         let automation = Automation(
             id: UUID().uuidString, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
@@ -286,6 +287,7 @@ public final class AutomationService: @unchecked Sendable {
     private func updateAutomationLocked(id: String, draft: AutomationDraft) throws -> Automation {
         let existing = try requireAutomation(id: id)
         let validated = try draft.validated()
+        try validateWorkspaceTarget(validated.workspaceID)
         // The poll path dispatches on the automation's current kind, so switching Script↔Agent while a run is
         // queued or running would misclassify that in-flight run. Reject only the kind change; every other
         // edit stays allowed even mid-run.
@@ -306,6 +308,12 @@ public final class AutomationService: @unchecked Sendable {
             try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
         }
         return try requireAutomation(id: automation.id)
+    }
+
+    private func validateWorkspaceTarget(_ workspaceID: String) throws {
+        guard try store.workspace(id: workspaceID) != nil else {
+            throw AutomationValidationError("Workspace not found: \(workspaceID).")
+        }
     }
 
     public func listAutomations() throws -> [Automation] { try queue.sync { try store.automations() } }
