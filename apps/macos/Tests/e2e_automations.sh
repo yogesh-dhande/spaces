@@ -15,7 +15,7 @@
 #   c. concurrency=skip: a sleeping run, a second trigger records a skipped(concurrency) row, then the
 #      sleeping run is canceled -> canceled.
 #   d. timeout 2s on a long sleep -> timed_out.
-#   e. attribution stamp for the run's own workspace-less .automation session (see the note in part_e for
+#   e. attribution stamp for the run's own workspace-bound .automation session (see the note in part_e for
 #      why the spawned-agent sweep cycle needs a real provider and is covered by unit tests instead).
 #   f. agent-kind automation whose workspace does not resolve -> the launch fails cleanly (failed run), the
 #      run's attributed-agent list is empty, and end-agents on the terminal run is an accepted no-op (see the
@@ -75,11 +75,14 @@ bind_worktree_profile() {
 }
 
 provision_fixture() {
-  local profile_root
+  local profile_root workspace
   profile_root="$(dirname "$SPACES_DB_PATH")"
   FIXTURE_DIR="$profile_root/automation-e2e-fixture"
   mkdir -p "$FIXTURE_DIR"
-  printf '[automation-e2e] fixture dir=%s\n' "$FIXTURE_DIR"
+  workspace="$("$SPACES_E2E" register-project --project-dir "$FIXTURE_DIR")"
+  WORKSPACE_ID="$(json_field "$workspace" 'd["id"]')"
+  [[ -n "$WORKSPACE_ID" ]] || fail "could not resolve fixture workspace from: $workspace"
+  printf '[automation-e2e] fixture dir=%s workspace=%s\n' "$FIXTURE_DIR" "$WORKSPACE_ID"
 }
 
 # Creates an automation, records it for cleanup, and returns its id in AUTOMATION_ID.
@@ -137,7 +140,7 @@ part_a() {
   local marker="$FIXTURE_DIR/marker-a.txt"
   rm -f "$marker"
   create_automation --name "e2e-success" --script "echo MARKER_A > '$marker'; echo run-output-marker; exit 0" \
-    --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow
+    --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "succeeded" || fail "run did not succeed"
 
@@ -150,12 +153,14 @@ part_a() {
   session_id="$(run_field "$AUTOMATION_ID" "$RUN_ID" '"terminalSessionID"')"
   [[ -n "$session_id" && "$session_id" != "None" ]] || fail "run carried no terminal session id"
 
-  # The run's workspace-less command session must be stamped kind=automation + this run id.
-  local db_kind db_run
+  # The run's workspace-bound command session must be stamped kind=automation + this run id.
+  local db_kind db_run db_workspace
   db_kind="$(sqlite3 "$SPACES_DB_PATH" "SELECT kind FROM terminal_sessions WHERE session_id='$session_id';")"
   db_run="$(sqlite3 "$SPACES_DB_PATH" "SELECT automation_run_id FROM terminal_sessions WHERE session_id='$session_id';")"
+  db_workspace="$(sqlite3 "$SPACES_DB_PATH" "SELECT workspace_id FROM terminal_sessions WHERE session_id='$session_id';")"
   [[ "$db_kind" == "automation" ]] || fail "session kind was '$db_kind', expected automation"
   [[ "$db_run" == "$RUN_ID" ]] || fail "session automation_run_id was '$db_run', expected $RUN_ID"
+  [[ "$db_workspace" == "$WORKSPACE_ID" ]] || fail "session workspace_id was '$db_workspace', expected $WORKSPACE_ID"
 
   # output.log capture is a best-effort assertion: an embedded-Ghostty session's output.log is a
   # render-dependent snapshot that may be truncated or already reaped by the time the run settles, so the
@@ -172,7 +177,7 @@ part_a() {
 
 part_b() {
   printf '\n=== Scenario b: failing command, exit 3 ===\n'
-  create_automation --name "e2e-fail" --script "exit 3" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow
+  create_automation --name "e2e-fail" --script "exit 3" --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "failed" || fail "run did not fail"
   local exit_code
@@ -183,7 +188,7 @@ part_b() {
 
 part_c() {
   printf '\n=== Scenario c: concurrency=skip + cancel ===\n'
-  create_automation --name "e2e-skip" --script "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency skip
+  create_automation --name "e2e-skip" --script "sleep 60" --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency skip
   trigger_run "$AUTOMATION_ID"
   local running_run="$RUN_ID"
   # Give the first run time to become running before the second trigger.
@@ -205,7 +210,7 @@ part_c() {
 
 part_d() {
   printf '\n=== Scenario d: timeout ===\n'
-  create_automation --name "e2e-timeout" --script "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow \
+  create_automation --name "e2e-timeout" --script "sleep 60" --workspace-id "$WORKSPACE_ID" --trigger manual --concurrency allow \
     --timeout-seconds 2
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "timed_out" 25 || fail "run did not time out"
@@ -221,8 +226,8 @@ part_e() {
   # PATH. That sweep path is covered instead by the workspacecore unit test
   # `AutomationServiceTests.testSweepFinalizesEndedAttributedSessionAndKeepsLiveOne`, which injects a fake
   # ended attributed session directly. Here we assert the directly-launched attributed session the product
-  # always creates: the run's own workspace-less .automation session, stamped with the run id.
-  create_automation --name "e2e-attribution" --script "echo attributed; exit 0" --working-directory "$FIXTURE_DIR" --trigger manual \
+  # always creates: the run's own workspace-bound .automation session, stamped with the run id.
+  create_automation --name "e2e-attribution" --script "echo attributed; exit 0" --workspace-id "$WORKSPACE_ID" --trigger manual \
     --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "succeeded" || fail "attribution run did not succeed"

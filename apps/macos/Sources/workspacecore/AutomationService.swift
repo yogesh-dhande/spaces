@@ -9,8 +9,8 @@ import spacesterminalcore
 
 /// Daemon-side scheduler and executor for scheduled automations. One instance owns the whole automation
 /// lifecycle: firing cron automations on their persisted schedule, catching up (or skipping) runs missed
-/// while the daemon was down, executing a run — a `script`-kind run in a workspace-less command session, or
-/// an `agent`-kind run as a coding agent spawned into a workspace and seeded with a prompt — watching it to
+/// while the daemon was down, executing each run in its selected workspace — a `script` command at the
+/// workspace root or an `agent` coding session seeded with a prompt — watching it to
 /// completion, enforcing concurrency and timeout policies, sweeping and finalizing the coding-agent
 /// sessions a run spawned, and pruning old run history.
 ///
@@ -146,6 +146,7 @@ public final class AutomationService: @unchecked Sendable {
             guard !ticksSuspended() else { return }
             recomputeCronAnchorsIfTimeZoneChanged()
             pollRunningRuns()
+            detachExitedAutomationSessionRuntimeTargets()
             fireDueCronAutomations()
             processPendingKills()
             promoteQueuedRuns()
@@ -261,9 +262,9 @@ public final class AutomationService: @unchecked Sendable {
         let automation = Automation(
             id: UUID().uuidString, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
             cronExpression: validated.cronExpression, kind: validated.kind, script: validated.script, agentCommand: validated.agentCommand,
-            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
-            timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
-            nextFireTime: nil, createdAt: timestamp, updatedAt: timestamp)
+            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, timeoutSeconds: validated.timeoutSeconds,
+            concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy, nextFireTime: nil, createdAt: timestamp,
+            updatedAt: timestamp)
         // The row and its cron anchor must land atomically: a failure between the two writes would otherwise
         // persist an enabled cron automation with a NULL anchor (one that never fires) while surfacing an
         // error the caller would retry into a duplicate.
@@ -294,9 +295,9 @@ public final class AutomationService: @unchecked Sendable {
         let automation = Automation(
             id: existing.id, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
             cronExpression: validated.cronExpression, kind: validated.kind, script: validated.script, agentCommand: validated.agentCommand,
-            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
-            timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
-            nextFireTime: nil, createdAt: existing.createdAt, updatedAt: now())
+            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, timeoutSeconds: validated.timeoutSeconds,
+            concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy, nextFireTime: nil,
+            createdAt: existing.createdAt, updatedAt: now())
         // The row and its recomputed cron anchor must land atomically: a failure between the two writes would
         // otherwise leave an enabled cron automation with a NULL anchor (one that never fires) while surfacing
         // an error to the caller.
@@ -381,6 +382,60 @@ public final class AutomationService: @unchecked Sendable {
         try queue.sync {
             _ = try requireAutomation(id: id)
             try deleteAutomationLocked(id: id)
+        }
+    }
+
+    /// Deletes target automations while their workspace's lifecycle gate is already held for teardown. The
+    /// caller has already claimed the workspace lifecycle gate, so this path terminates/finalizes remaining
+    /// run sessions directly instead of routing an agent cancellation back through that same gate. It remains
+    /// queue-owned, so no scheduler tick can start another target run mid-deletion.
+    public func deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: String) throws {
+        try queue.sync {
+            for automationID in try store.automationIDs(workspaceID: workspaceID) {
+                try deleteAutomationLockedDuringWorkspaceTeardown(id: automationID)
+            }
+        }
+    }
+
+    /// Cancels every active run whose execution belongs to `workspaceID`, then performs the caller's
+    /// workspace stop/restart while this service still owns its serial queue. The caller has already
+    /// admitted and claimed that workspace's lifecycle gate. Holding the queue through `operation`
+    /// prevents a timer tick from launching another run between cancellation and teardown.
+    public func cancelRunsForWorkspaceStop(workspaceID: String, operation: @escaping () throws -> Void) throws {
+        try queue.sync {
+            for run in try activeRunsTargetingWorkspace(workspaceID) {
+                try terminateRunSessionsDuringWorkspaceStop(run)
+                try markRunCanceledDuringWorkspaceStop(run)
+            }
+            try operation()
+        }
+    }
+
+    /// The workspace lifecycle gate is already held. Automation sessions are workspace-bound, so this
+    /// direct no-reclaim path terminates and finalizes their live runtime representation without deleting
+    /// `terminal_sessions`, transcripts, or run attribution; Runs-tab replay remains intact. Ordinary
+    /// cancellation would try to reclaim this same gate through agent finalization.
+    private func terminateRunSessionsDuringWorkspaceStop(_ run: AutomationRun) throws {
+        for sessionID in try store.terminalSessionIDs(automationRunID: run.id) {
+            try orchestrator.terminateAutomationTerminalSessionDuringWorkspaceTeardown(sessionID: sessionID)
+        }
+    }
+
+    /// Recording a terminal status during a gate-held workspace stop deliberately skips retention pruning:
+    /// ordinary pruning uses the gate-taking artifact cleanup path, while this stop must retain the run's
+    /// terminal session and transcript for replay.
+    private func markRunCanceledDuringWorkspaceStop(_ run: AutomationRun) throws {
+        try store.updateAutomationRun(
+            id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
+            endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
+    }
+
+    /// A started terminal fixes a run to the workspace persisted on that terminal. Before such a terminal
+    /// exists, queued and launch-pending runs still follow the automation's selected workspace.
+    private func activeRunsTargetingWorkspace(_ workspaceID: String) throws -> [AutomationRun] {
+        try store.activeAutomationRuns().filter { run in
+            if run.status == .running, run.terminalSessionID != nil { return try store.workspaceID(automationRunID: run.id) == workspaceID }
+            return try store.automation(id: run.automationID)?.workspaceID == workspaceID
         }
     }
 
@@ -502,7 +557,7 @@ public final class AutomationService: @unchecked Sendable {
     // MARK: - Executor
 
     /// Begins executing a run: insert (or promote an existing queued) row to `running`, sweep the ended
-    /// coding-agent sessions of this automation's prior runs, then launch the workspace-less command
+    /// coding-agent sessions of this automation's prior runs, then launch the workspace-bound command
     /// session and record its terminal session id. A launch failure records the run `failed`.
     @discardableResult private func startRun(automation: Automation, trigger: AutomationRunTrigger, promoting existing: AutomationRun? = nil) throws
         -> AutomationRun
@@ -531,21 +586,19 @@ public final class AutomationService: @unchecked Sendable {
         return try requireAutomationRun(id: runID)
     }
 
-    /// Launches a script-kind run's workspace-less command session and records its terminal session id. A
+    /// Launches a script-kind run at its selected workspace root and records its terminal session id. A
     /// launch failure records the run `failed`.
     private func launchScriptRun(automation: Automation, runID: String, startedAt: Date) throws {
-        let sessionID = UUID().uuidString
         // Set once the session is live; distinguishes a post-launch persist failure from a launch failure.
         var launchedSessionID: String?
         do {
             try AutomationPaths.ensureRunDirectory(runID: runID)
             let command = try wrappedCommand(automation: automation, runID: runID)
-            _ = try orchestrator.launchAutomationSession(
-                runID: runID, sessionID: sessionID, title: automation.name, workingDirectory: automation.workingDirectory, command: command,
-                environment: [WorkspaceOrchestrator.automationRunIDEnvVar: runID])
-            launchedSessionID = sessionID
+            let session = try orchestrator.createWorkspaceAutomationSession(
+                workspaceID: automation.workspaceID, runID: runID, title: automation.name, command: command)
+            launchedSessionID = session.id
             try store.updateAutomationRun(
-                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: startedAt, endedAt: nil,
+                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: startedAt, endedAt: nil,
                 promptDeliveredAt: nil)
         } catch {
             logError("automation_launch_error run=\(runID) error=\(error)")
@@ -567,7 +620,7 @@ public final class AutomationService: @unchecked Sendable {
         // Set once the session is spawned; distinguishes a post-launch persist failure from a spawn failure.
         var launchedSessionID: String?
         do {
-            guard let workspaceID = automation.workspaceID, let command = automation.agentCommand else {
+            guard let command = automation.agentCommand else {
                 throw AutomationValidationError("Agent automation is missing its workspace or command.")
             }
             // Same command gate the interactive `agent spawn` uses: the command must launch a supported
@@ -575,7 +628,7 @@ public final class AutomationService: @unchecked Sendable {
             _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command)
             try AutomationPaths.ensureRunDirectory(runID: runID)
             let session = try orchestrator.createWorkspaceAgentSession(
-                workspaceID: workspaceID, command: command, title: automation.name, automationRunID: runID)
+                workspaceID: automation.workspaceID, command: command, title: automation.name, automationRunID: runID)
             launchedSessionID = session.id
             try store.updateAutomationRun(
                 id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: startedAt, endedAt: nil,
@@ -634,6 +687,18 @@ public final class AutomationService: @unchecked Sendable {
                 pollRunningRun(run, automation: automation)
             }
         } catch { logError("automation_poll_error error=\(error)") }
+    }
+
+    /// Workspace runtime targets represent live activity. Once any retained automation session exits, remove
+    /// only that live representation while keeping the terminal session, attribution, and run row intact for
+    /// Runs-tab replay. This also catches the delayed exit after a cancel, whose run is already terminal and
+    /// therefore no longer appears in the ordinary poll set.
+    private func detachExitedAutomationSessionRuntimeTargets() {
+        do {
+            for sessionID in try store.exitedAutomationSessionIDsWithRuntimeTargets() {
+                try orchestrator.detachExitedAutomationSessionRuntimeTarget(sessionID: sessionID)
+            }
+        } catch { logError("automation_runtime_target_detach_error error=\(error)") }
     }
 
     private func pollRunningRun(_ run: AutomationRun, automation: Automation) {
@@ -985,12 +1050,11 @@ public final class AutomationService: @unchecked Sendable {
             // session live, and dropping its rows/directories without ending it would leave that process running
             // but unreachable through the product.
             if orchestrator.automationSessionIsLive(sessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
-            // Finalize the attributed agent row for BOTH the just-terminated live session and an already-ended
-            // one: an agent session that ended before the foreground reconciler registered its row still holds
-            // spawn-time workspace tracking (a tracked terminal window plus the workspace-running flag), which
-            // `finalizeAttributedAgentRow`'s row-less fallback releases. Deleting the session rows/files without
-            // it would leak that tracking permanently — no later sweep can reach the gone rows.
-            try finalizeAttributedAgentRow(sessionID: sessionID)
+            // Delete every workspace-side reference before terminal persistence. This applies to the script
+            // wrapper too: it has no agent row, so `finalizeAttributedAgentRow` would refuse its `.automation`
+            // launch kind and leave the tracked target and workspace-running state stranded after deletion.
+            // The shared orchestrator cleanup finalizes any agent row and subscriber state when present.
+            try orchestrator.removeAutomationTerminalSessionRuntimeTargetForDeletion(sessionID: sessionID)
             try store.deleteTerminalSession(sessionID: sessionID)
             if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                 try? FileManager.default.removeItem(atPath: paths.rootDirectory)
@@ -1015,6 +1079,40 @@ public final class AutomationService: @unchecked Sendable {
         for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRunLocked(runID: run.id) }
         for run in try store.automationRuns(automationID: id) { try deleteRunArtifactsAndSessions(runID: run.id) }
         try store.deleteAutomation(id: id)
+    }
+
+    /// The workspace lifecycle gate is already held. Calling `killAgentSession` here would try to claim
+    /// it again, so terminate and finalize remaining run sessions directly before removing artifacts.
+    private func deleteAutomationLockedDuringWorkspaceTeardown(id: String) throws {
+        for run in try store.activeAutomationRuns(automationID: id) where !run.status.isTerminal { try markRunCanceledDuringWorkspaceTeardown(run) }
+        for run in try store.automationRuns(automationID: id) { try deleteRunArtifactsAndSessionsDuringWorkspaceTeardown(runID: run.id) }
+        try store.deleteAutomation(id: id)
+    }
+
+    /// The containing automation and all of its run rows are removed immediately afterwards, so recording
+    /// cancellation here must not invoke retention pruning: that uses ordinary artifact cleanup, whose
+    /// row-less-agent branch acquires the workspace gate already held by the caller.
+    private func markRunCanceledDuringWorkspaceTeardown(_ run: AutomationRun) throws {
+        try store.updateAutomationRun(
+            id: run.id, status: .canceled, skipReason: nil, exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
+            endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
+    }
+
+    /// Artifact cleanup paired with workspace/project teardown. The workspace lifecycle gate is owned by
+    /// the caller, so cleanup must use the explicit no-reclaim terminal path rather than the ordinary
+    /// row-less-agent finalizer, which routes through the public gate-taking agent-stop endpoint.
+    private func deleteRunArtifactsAndSessionsDuringWorkspaceTeardown(runID: String) throws {
+        let sessionIDs = try store.terminalSessionIDs(automationRunID: runID)
+        for sessionID in sessionIDs {
+            try orchestrator.terminateAutomationTerminalSessionDuringWorkspaceTeardown(sessionID: sessionID)
+            try store.deleteTerminalSession(sessionID: sessionID)
+            if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
+                try? FileManager.default.removeItem(atPath: paths.rootDirectory)
+                try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+                try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+            }
+        }
+        if let runDirectory = try? AutomationPaths.runDirectory(runID: runID) { try? FileManager.default.removeItem(at: runDirectory) }
     }
 
     // MARK: - Process control

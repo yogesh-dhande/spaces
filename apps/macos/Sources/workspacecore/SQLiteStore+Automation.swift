@@ -15,7 +15,7 @@ extension SQLiteStore {
     // MARK: - Automations CRUD
 
     private static let automationColumns = """
-        id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id, working_directory,
+        id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
         timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
         """
 
@@ -23,10 +23,10 @@ extension SQLiteStore {
         try execute(
             sql: """
                 INSERT INTO automations(
-                  id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id, working_directory,
+                  id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
                   timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   enabled = excluded.enabled,
@@ -37,7 +37,6 @@ extension SQLiteStore {
                   agent_command = excluded.agent_command,
                   agent_prompt = excluded.agent_prompt,
                   workspace_id = excluded.workspace_id,
-                  working_directory = excluded.working_directory,
                   timeout_seconds = excluded.timeout_seconds,
                   concurrency_policy = excluded.concurrency_policy,
                   missed_run_policy = excluded.missed_run_policy,
@@ -47,10 +46,10 @@ extension SQLiteStore {
                 """,
             bindings: [
                 automation.id, automation.name, automation.enabled ? "1" : "0", automation.triggerKind.rawValue, automation.cronExpression ?? "",
-                automation.kind.rawValue, automation.script, automation.agentCommand ?? "", automation.agentPrompt ?? "",
-                automation.workspaceID ?? "", automation.workingDirectory, automation.timeoutSeconds.map(String.init) ?? "",
-                automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue, automation.nextFireTime.map(Self.epochString) ?? "",
-                automation.anchorTimeZoneIdentifier ?? "", Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
+                automation.kind.rawValue, automation.script, automation.agentCommand ?? "", automation.agentPrompt ?? "", automation.workspaceID,
+                automation.timeoutSeconds.map(String.init) ?? "", automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue,
+                automation.nextFireTime.map(Self.epochString) ?? "", automation.anchorTimeZoneIdentifier ?? "",
+                Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
             ])
     }
 
@@ -79,19 +78,23 @@ extension SQLiteStore {
 
     public func deleteAutomation(id: String) throws { try execute(sql: "DELETE FROM automations WHERE id = ?", bindings: [id]) }
 
+    public func automationIDs(workspaceID: String) throws -> [String] {
+        try queryRows(sql: "SELECT id FROM automations WHERE workspace_id = ? ORDER BY created_at, id", bindings: [workspaceID]).compactMap(\.first)
+    }
+
     private static func decodeAutomation(row: [String]) -> Automation? {
-        guard row.count >= 18 else { return nil }
+        guard row.count >= 17 else { return nil }
         guard let triggerKind = AutomationTriggerKind(rawValue: row[3]) else { return nil }
         guard let kind = AutomationKind(rawValue: row[5]) else { return nil }
-        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: row[12]) else { return nil }
-        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: row[13]) else { return nil }
-        guard let createdAt = date(fromEpoch: row[16]), let updatedAt = date(fromEpoch: row[17]) else { return nil }
+        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: row[11]) else { return nil }
+        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: row[12]) else { return nil }
+        guard let createdAt = date(fromEpoch: row[15]), let updatedAt = date(fromEpoch: row[16]) else { return nil }
         return Automation(
             id: row[0], name: row[1], enabled: row[2] == "1", triggerKind: triggerKind, cronExpression: row[4].isEmpty ? nil : row[4], kind: kind,
-            script: row[6], agentCommand: row[7].isEmpty ? nil : row[7], agentPrompt: row[8].isEmpty ? nil : row[8],
-            workspaceID: row[9].isEmpty ? nil : row[9], workingDirectory: row[10], timeoutSeconds: row[11].isEmpty ? nil : Int(row[11]),
-            concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy, nextFireTime: date(fromEpoch: row[14]), createdAt: createdAt,
-            updatedAt: updatedAt, anchorTimeZoneIdentifier: row[15].isEmpty ? nil : row[15])
+            script: row[6], agentCommand: row[7].isEmpty ? nil : row[7], agentPrompt: row[8].isEmpty ? nil : row[8], workspaceID: row[9],
+            timeoutSeconds: row[10].isEmpty ? nil : Int(row[10]), concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy,
+            nextFireTime: date(fromEpoch: row[13]), createdAt: createdAt, updatedAt: updatedAt,
+            anchorTimeZoneIdentifier: row[14].isEmpty ? nil : row[14])
     }
 
     // MARK: - Automation runs
@@ -265,6 +268,66 @@ extension SQLiteStore {
         try queryRows(
             sql: "SELECT session_id FROM terminal_sessions WHERE automation_run_id = ? ORDER BY created_at, session_id", bindings: [automationRunID]
         ).compactMap { $0.first }
+    }
+
+    /// The automation run that owns a terminal session, when the session was launched by an automation.
+    public func automationRunID(terminalSessionID: String) throws -> String? {
+        try queryRow(sql: "SELECT automation_run_id FROM terminal_sessions WHERE session_id = ?", bindings: [terminalSessionID])?.first.flatMap {
+            $0.isEmpty ? nil : $0
+        }
+    }
+
+    /// The persisted workspace of an automation run's own terminal session. It remains valid after the
+    /// automation is edited, which is why replay reads it rather than the automation's current target.
+    public func workspaceID(automationRunID: String) throws -> String? {
+        try queryRow(
+            sql: """
+                SELECT terminal_sessions.workspace_id
+                FROM automation_runs
+                JOIN terminal_sessions ON terminal_sessions.session_id = automation_runs.terminal_session_id
+                WHERE automation_runs.id = ?
+                """, bindings: [automationRunID])?.first.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The persisted workspace for each requested run's own terminal session. The mapping follows
+    /// `automation_runs.terminal_session_id`, not the broader set of attributed sessions, so replay stays
+    /// with the terminal that actually executed the run even when its automation is later retargeted.
+    public func workspaceIDs(automationRunIDs: [String]) throws -> [String: String] {
+        let runIDs = Array(Set(automationRunIDs)).sorted()
+        guard !runIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: runIDs.count).joined(separator: ", ")
+        let rows = try queryRows(
+            sql: """
+                SELECT automation_runs.id, terminal_sessions.workspace_id
+                FROM automation_runs
+                JOIN terminal_sessions ON terminal_sessions.session_id = automation_runs.terminal_session_id
+                WHERE automation_runs.id IN (\(placeholders))
+                """, bindings: runIDs)
+        return Dictionary(
+            uniqueKeysWithValues: rows.compactMap { row in
+                guard row.count >= 2, !row[1].isEmpty else { return nil }
+                return (row[0], row[1])
+            })
+    }
+
+    /// Exited automation sessions that still have a live workspace runtime target. Restricting the scheduler
+    /// sweep to this set avoids rescanning every retained historical run on every tick. A missing runtime row
+    /// becomes detachable only after its run is terminal, preserving the launch-persistence grace for a run
+    /// whose runtime write has not landed yet.
+    public func exitedAutomationSessionIDsWithRuntimeTargets() throws -> [String] {
+        let interactiveStates = TerminalSessionState.allCases.filter(\.isInteractive).map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return try queryRows(
+            sql: """
+                SELECT DISTINCT s.session_id
+                FROM terminal_sessions s
+                JOIN automation_runs ar ON ar.id = s.automation_run_id
+                JOIN runtime_targets rt ON rt.tracking_id = s.session_id
+                LEFT JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
+                WHERE r.state NOT IN (\(interactiveStates))
+                   OR (r.state IS NULL AND ar.status NOT IN ('queued', 'running'))
+                ORDER BY s.session_id
+                """
+        ).compactMap(\.first)
     }
 
     /// The persisted attributed sessions for exactly the requested run window, grouped by run id and ordered

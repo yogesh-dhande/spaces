@@ -248,7 +248,13 @@ extension WorkspaceOrchestrator {
             // record that has already been removed.
             guard let project = try store.project(id: project.id) else { return }
             let workspaces = try store.workspaces(projectID: project.id)
-            return try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) { try removeProjectUnlocked(project, workspaces: workspaces) }
+            return try withWorkspaceLifecycleLocks(workspaceIDs: workspaces.map(\.id)) {
+                // All workspace gates are claimed before irreversible automation teardown. The service uses
+                // the teardown-specific path, so it never reenters these held lifecycle gates while it
+                // terminates sessions and finalizes their records.
+                for workspace in workspaces { try deleteAutomationsTargetingWorkspaceDuringTeardown(workspace.id) }
+                try removeProjectUnlocked(project, workspaces: workspaces)
+            }
         }
     }
 

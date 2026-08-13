@@ -261,11 +261,9 @@ public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equata
 /// `workspacecore` domain enums; the daemon validates the raw values (and the cron expression, and the
 /// kind-specific required fields) when it maps this to a stored automation, so an unknown value is a
 /// descriptive boundary error, not a decode crash. `name` is enforced non-empty at decode; `cronExpression`
-/// is optional here and required-when-cron is enforced by the daemon's validation. `script` and
-/// `workingDirectory` are likewise not enforced non-empty at decode: only a `script`-kind automation
-/// requires them (the directory its script runs in); an `agent`-kind automation has no working directory of
-/// its own — its coding agent's location comes from `workspaceID` — and instead requires
-/// `agentCommand`/`agentPrompt`/`workspaceID`. The daemon's `AutomationDraft.validated()` is the single
+/// is optional here and required-when-cron is enforced by the daemon's validation. `workspaceID` is required
+/// for every kind; scripts run at that workspace's root, while agents also require `agentCommand` and
+/// `agentPrompt`. The daemon's `AutomationDraft.validated()` is the single
 /// place that enforces these kind-specific requirements.
 public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
     public let name: String
@@ -277,16 +275,15 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
     public let script: String
     public let agentCommand: String?
     public let agentPrompt: String?
-    public let workspaceID: String?
-    public let workingDirectory: String
+    public let workspaceID: String
     public let timeoutSeconds: Int?
     public let concurrencyPolicy: String
     public let missedRunPolicy: String
 
     public init(
         name: String, enabled: Bool, triggerKind: String, cronExpression: String? = nil, kind: String = "script", script: String,
-        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String, timeoutSeconds: Int? = nil,
-        concurrencyPolicy: String, missedRunPolicy: String
+        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String, timeoutSeconds: Int? = nil, concurrencyPolicy: String,
+        missedRunPolicy: String
     ) {
         self.name = name
         self.enabled = enabled
@@ -297,7 +294,6 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
         self.agentCommand = agentCommand
         self.agentPrompt = agentPrompt
         self.workspaceID = workspaceID
-        self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy
         self.missedRunPolicy = missedRunPolicy
@@ -313,7 +309,6 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
         case agentCommand
         case agentPrompt
         case workspaceID
-        case workingDirectory
         case timeoutSeconds
         case concurrencyPolicy
         case missedRunPolicy
@@ -329,8 +324,7 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
         script = try container.decodeIfPresent(String.self, forKey: .script) ?? ""
         agentCommand = try container.decodeIfPresent(String.self, forKey: .agentCommand)
         agentPrompt = try container.decodeIfPresent(String.self, forKey: .agentPrompt)
-        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
-        workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory) ?? ""
+        workspaceID = try container.decodeRequiredNonEmpty(forKey: .workspaceID)
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
         concurrencyPolicy = try container.decodeRequiredNonEmpty(forKey: .concurrencyPolicy)
         missedRunPolicy = try container.decodeRequiredNonEmpty(forKey: .missedRunPolicy)
@@ -461,6 +455,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case workspaceList(TerminalServiceWorkspaceListPayload)
     case workspaceCreate(TerminalServiceWorkspaceCreatePayload)
     case workspaceStart(workspaceID: String)
+    case workspaceStop(workspaceID: String)
     case workspaceRestart(workspaceID: String)
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
     case agentList(TerminalServiceAgentListPayload)
@@ -494,6 +489,7 @@ extension TerminalServiceProfileCommand: Codable {
         case workspaceList
         case workspaceCreate
         case workspaceStart
+        case workspaceStop
         case workspaceRestart
         case agentSignal
         case agentList
@@ -532,6 +528,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceList: self = .workspaceList(try container.decode(TerminalServiceWorkspaceListPayload.self, forKey: key))
         case .workspaceCreate: self = .workspaceCreate(try container.decode(TerminalServiceWorkspaceCreatePayload.self, forKey: key))
         case .workspaceStart: self = .workspaceStart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .workspaceStop: self = .workspaceStop(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
         case .workspaceRestart: self = .workspaceRestart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
@@ -566,6 +563,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceList(let payload): try container.encode(payload, forKey: .workspaceList)
         case .workspaceCreate(let payload): try container.encode(payload, forKey: .workspaceCreate)
         case .workspaceStart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStart)
+        case .workspaceStop(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStop)
         case .workspaceRestart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceRestart)
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)

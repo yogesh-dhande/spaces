@@ -450,6 +450,29 @@ final class OrchestratorTests: XCTestCase {
         return GitClient(gitExecutable: script.path, metadataCommandTimeout: 30)
     }
 
+    /// Runs real git commands except `worktree remove`, which fails deterministically so archive ordering
+    /// can prove it preserves automation history before the worktree is actually gone.
+    func makeWorktreeRemoveFailingGitClient() throws -> GitClient {
+        let toolsRoot = try makeExecutableTestToolsDirectory()
+        let script = toolsRoot.appendingPathComponent("git")
+        let contents = """
+            #!/bin/sh
+            saw_worktree=0
+            for arg in "$@"; do
+              if [ "$arg" = "worktree" ]; then
+                saw_worktree=1
+              elif [ "$saw_worktree" -eq 1 ] && [ "$arg" = "remove" ]; then
+                echo "worktree remove failed" >&2
+                exit 1
+              fi
+            done
+            exec /usr/bin/git "$@"
+            """
+        try contents.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return GitClient(gitExecutable: script.path, metadataCommandTimeout: 30)
+    }
+
     func makeExecutableTestToolsDirectory() throws -> URL {
         let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let directory = packageRoot.appendingPathComponent(".build/test-tools/\(UUID().uuidString)", isDirectory: true)

@@ -83,34 +83,6 @@ import Testing
         #expect(target == nil)
     }
 
-    @Test func keyboardNavigationExpandsAutomationsAsATransientPreview() {
-        let state = AppKitController.sidebarAutomationExpansionAfterSelection(
-            isExpanded: false, wasExpandedByKeyboard: false, selectingAutomations: true, canExpand: true)
-
-        #expect(state.isExpanded)
-        #expect(state.wasExpandedByKeyboard)
-    }
-
-    @Test func keyboardNavigationAwayCollapsesOnlyItsTransientAutomationPreview() {
-        let transient = AppKitController.sidebarAutomationExpansionAfterSelection(
-            isExpanded: true, wasExpandedByKeyboard: true, selectingAutomations: false, canExpand: true)
-        let pinned = AppKitController.sidebarAutomationExpansionAfterSelection(
-            isExpanded: true, wasExpandedByKeyboard: false, selectingAutomations: false, canExpand: true)
-
-        #expect(!transient.isExpanded)
-        #expect(!transient.wasExpandedByKeyboard)
-        #expect(pinned.isExpanded)
-        #expect(!pinned.wasExpandedByKeyboard)
-    }
-
-    @Test func keyboardNavigationDoesNotExpandAutomationsWithoutRunningChildren() {
-        let state = AppKitController.sidebarAutomationExpansionAfterSelection(
-            isExpanded: false, wasExpandedByKeyboard: false, selectingAutomations: true, canExpand: false)
-
-        #expect(!state.isExpanded)
-        #expect(!state.wasExpandedByKeyboard)
-    }
-
     @Test func collapsedProjectSelectionSkipsToNextVisibleWorkspace() {
         let target = AppKitController.sidebarArrowSelectionTarget(
             visibleWorkspaceIDsByProject: [("project-a", []), ("project-b", ["workspace-b1"]), ("project-c", ["workspace-c1"])],

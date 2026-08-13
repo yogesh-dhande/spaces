@@ -5,8 +5,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let sessionID: String
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
-    /// The owning workspace, or nil for a workspace-less session. Automation sessions run their command
-    /// outside any workspace, so they carry no workspace id; workspace-scoped launch paths always set it.
+    /// The owning workspace, or nil for a generic workspace-less session. Automation sessions always set it.
     public let workspaceID: String?
     public let kind: TerminalSessionKind
     public let title: String
@@ -19,7 +18,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let command: String?
     public let createdAt: String
     /// The automation execution this session was spawned for, or nil for a normal session. Present only
-    /// on `.automation`-kind sessions; it attributes the workspace-less session back to its run row.
+    /// on `.automation`-kind sessions; it attributes the workspace-bound session back to its run row.
     public let automationRunID: String?
 
     public init(

@@ -175,7 +175,8 @@ import spacesterminalcore
             id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .cron, exitCode: nil,
             terminalSessionID: staleSessionID, startedAt: staleStart, endedAt: nil, createdAt: staleStart)
         try harness.store.insertAutomationRun(staleRun)
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: staleRun.id, sessionID: staleSessionID, kind: .automation, live: false)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: staleRun.id, sessionID: staleSessionID, kind: .automation, live: false)
 
         harness.service.reconcileMissedRunsOnStart()
 
@@ -355,8 +356,13 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(concurrency: .allow)
         let priorRun = try harness.insertRun(automationID: automation.id, status: .succeeded, createdAt: harness.now())
         let sessionID = UUID().uuidString
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: priorRun.id, sessionID: sessionID, kind: .automation, live: false)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: priorRun.id, sessionID: sessionID, kind: .automation, live: false)
         let rootDirectory = try TerminalSessionPaths.forSession(id: sessionID).rootDirectory
+        try harness.store.upsert(
+            window: WindowRecord(
+                id: "pruned-script-runtime-target", workspaceID: automation.workspaceID, app: TerminalHost.spaces.appName, name: "Test",
+                terminalTrackingID: sessionID, role: .terminal, orderIndex: 0, lastSeenAt: "2026-06-06T00:00:00Z"))
 
         // Starting a new run of the same automation triggers the prior-run sweep.
         _ = harness.service.triggerManually(automationID: automation.id)
@@ -375,6 +381,9 @@ import spacesterminalcore
         XCTAssertNil(try harness.store.automationRun(id: priorRun.id), "the over-cap run is pruned")
         XCTAssertTrue(try harness.store.terminalSessionIDs(automationRunID: priorRun.id).isEmpty, "its session row goes with it")
         XCTAssertFalse(FileManager.default.fileExists(atPath: rootDirectory), "and so does its transcript directory")
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: automation.workspaceID).contains { $0.terminalTrackingID == sessionID },
+            "retention uses the same cleanup to remove the pruned script terminal's runtime target")
     }
 
     func testRetentionPrunesToNewestHundredAndDeletesArtifacts() throws {
@@ -444,8 +453,15 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(script: "exit 0", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let finished = try harness.runUntilTerminal(runID: run.id)
+        let sessionID = try XCTUnwrap(finished.terminalSessionID)
         XCTAssertEqual(finished.status, .succeeded)
         XCTAssertEqual(finished.exitCode, 0)
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: automation.workspaceID).contains { $0.terminalTrackingID == sessionID },
+            "an exited automation disappears from the workspace runtime list")
+        XCTAssertEqual(
+            try harness.store.terminalSessionIDs(automationRunID: run.id), [sessionID],
+            "detaching the live runtime target preserves the Runs-tab replay session")
     }
 
     func testExecutorRecordsNonZeroExitCode() throws {
@@ -474,8 +490,7 @@ import spacesterminalcore
         // must keep its original script kind.
         let agentDraft = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "codex",
-            agentPrompt: "investigate", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
-            missedRunPolicy: .runOnce)
+            agentPrompt: "investigate", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
         let updated = try harness.service.updateAutomation(id: automation.id, draft: agentDraft)
         XCTAssertEqual(updated.kind, .agent)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.kind, .script, "the retained run keeps the kind it ran with, not the new one")
@@ -862,14 +877,15 @@ import spacesterminalcore
         XCTAssertTrue(agent.live)
     }
 
-    /// A script run's own workspace-less `.automation` wrapper session is attributed but is not a coding
+    /// A script run's own workspace-bound `.automation` wrapper session is attributed but is not a coding
     /// agent, so it never appears in the attributed-agent breakdown.
     func testAttributedAgentSummariesExcludeNonAgentSessions() throws {
         let harness = try Harness(self)
         let automation = try harness.insertAutomation(concurrency: .allow)
         let run = try harness.insertRun(automationID: automation.id, status: .running)
         let sessionID = UUID().uuidString
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
 
         let byRunID = try AutomationAttributedAgents.summariesByRunID(
             runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
@@ -888,7 +904,8 @@ import spacesterminalcore
         let wrapperSessionID = UUID().uuidString
         try harness.writeAttributedSessionFiles(
             workspaceID: workspace.id, runID: run.id, sessionID: agentSessionID, kind: .agent, live: false, title: "Codex CLI")
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: wrapperSessionID, kind: .automation, live: false)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: wrapperSessionID, kind: .automation, live: false)
 
         let byRunID = try AutomationAttributedAgents.summariesByRunID(
             runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
@@ -987,7 +1004,8 @@ import spacesterminalcore
             terminalSessionID: sessionID, startedAt: clock.now(), endedAt: nil, createdAt: clock.now())
         try harness.store.insertAutomationRun(run)
         // The session's runtime row still reads interactive (write-behind: the exited state has not landed) ...
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
         // ... but the wrapped command already recorded its exit code at exit.
         try harness.writeExitCodeSentinel(runID: run.id, exitCode: 0)
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
@@ -1017,7 +1035,8 @@ import spacesterminalcore
         try harness.store.insertAutomationRun(run)
         // No runtime row, only a fresh launch config → launch-pending. The pending check reads the real wall
         // clock, so the config is written at `Date()` while the MutableClock advances only the timeout budget.
-        try harness.writeLaunchConfigurationOnly(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
+        try harness.writeLaunchConfigurationOnly(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
 
         clock.advance(by: 10)  // past the 5s budget while still launch-pending
         harness.service.tick()
@@ -1158,6 +1177,42 @@ import spacesterminalcore
         XCTAssertNil(try harness.store.automation(id: automation.id), "the automation is deleted")
     }
 
+    /// Script wrapper sessions are workspace runtime targets too, even though they never have an agent row.
+    /// Explicit deletion terminates a live wrapper, removes that target before deleting the run's session and
+    /// artifacts, and leaves a workspace with no other runtime indicators stopped.
+    func testDeleteAutomationReleasesWorkspaceTrackingForLiveScriptSession() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let workspace = try XCTUnwrap(harness.store.workspace(id: automation.workspaceID))
+        let run = try harness.insertRun(automationID: automation.id, status: .running)
+        let sessionID = UUID().uuidString
+        try harness.store.updateAutomationRun(
+            id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
+            promptDeliveredAt: nil)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: workspace.id, runID: run.id, sessionID: sessionID, kind: .automation, live: true, title: "Test")
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try harness.store.upsert(
+            window: WindowRecord(
+                id: "script-delete-runtime-target", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Test",
+                terminalTrackingID: sessionID, role: .terminal, orderIndex: 0, lastSeenAt: "2026-06-06T00:00:00Z"))
+        try harness.store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-06-06T00:00:00Z")
+
+        try harness.service.deleteAutomation(id: automation.id)
+
+        XCTAssertNil(try harness.store.automation(id: automation.id))
+        XCTAssertNil(try harness.store.automationRun(id: run.id), "automation deletion removes its run row")
+        XCTAssertTrue(harness.host.terminated.contains(sessionID), "explicit deletion terminates the live script session")
+        XCTAssertTrue(try harness.store.terminalSessionIDs(automationRunID: run.id).isEmpty, "the script session persistence is deleted")
+        XCTAssertThrowsError(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths), "the script replay session is removed by explicit deletion")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory), "the script transcript artifact is removed")
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == sessionID },
+            "the script runtime target is removed before its terminal persistence")
+        XCTAssertFalse(try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning, "the workspace no longer has a runtime indicator")
+    }
+
     /// Deleting an automation must finalize an ENDED attributed agent session too — including one that died
     /// before its agent row was registered — releasing its spawn-time workspace tracking (a tracked terminal
     /// window and the workspace-running flag). Without the row-less finalize the delete would drop the session
@@ -1189,6 +1244,30 @@ import spacesterminalcore
         )
     }
 
+    /// Project/workspace deletion holds the workspace lifecycle gate while it asks AutomationService to
+    /// remove targeting automations. A spawned child can exit before its first hook signal, leaving only
+    /// its terminal runtime target; teardown must release that row-less tracking directly instead of
+    /// routing through the public agent-stop path, which would try to claim the gate again.
+    func testWorkspaceTeardownDeletesRowlessAttributedAgentWithoutReclaimingLifecycleGate() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, kind: .agent, status: .succeeded)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: workspace.id, runID: run.id, sessionID: sessionID, kind: .agent, live: false)
+        try harness.seedSpawnedAgentWorkspaceTracking(workspace: workspace, sessionID: sessionID)
+
+        XCTAssertNoThrow(
+            try harness.orchestrator.withWorkspaceLifecycleLock(workspaceID: workspace.id) {
+                try harness.service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspace.id)
+            })
+        XCTAssertNil(try harness.store.automation(id: automation.id))
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == sessionID },
+            "the row-less runtime target is removed while the held-gate teardown is still in progress")
+        XCTAssertFalse(try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning)
+    }
+
     // MARK: - Kind-change guard
 
     /// Switching an automation between Script and Agent while a run is queued or running is rejected — the
@@ -1202,8 +1281,7 @@ import spacesterminalcore
 
         let switchToAgent = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
-            agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
-            missedRunPolicy: .runOnce)
+            agentPrompt: "do the thing", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
         XCTAssertThrowsError(try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)) { error in
             XCTAssertTrue(error is AutomationValidationError, "the kind cannot change while a run is active")
         }
@@ -1211,7 +1289,7 @@ import spacesterminalcore
 
         let renameOnly = AutomationDraft(
             name: "Renamed", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "sleep 60", agentCommand: nil,
-            agentPrompt: nil, workspaceID: nil, workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+            agentPrompt: nil, workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
         let updated = try harness.service.updateAutomation(id: automation.id, draft: renameOnly)
         XCTAssertEqual(updated.name, "Renamed", "a non-kind edit is allowed while the run is active")
 
@@ -1224,8 +1302,7 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(script: "echo hi", concurrency: .allow)
         let switchToAgent = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
-            agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
-            missedRunPolicy: .runOnce)
+            agentPrompt: "do the thing", workspaceID: "ws-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
         let updated = try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)
         XCTAssertEqual(updated.kind, .agent)
     }
@@ -1268,7 +1345,8 @@ import spacesterminalcore
             id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
             terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
         try harness.store.insertAutomationRun(run)
-        try harness.writeLaunchConfigurationOnly(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
+        try harness.writeLaunchConfigurationOnly(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
 
         harness.service.tick()
         XCTAssertEqual(
@@ -1288,7 +1366,7 @@ import spacesterminalcore
             terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
         try harness.store.insertAutomationRun(run)
         try harness.writeLaunchConfigurationOnly(
-            workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date().addingTimeInterval(-120))
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date().addingTimeInterval(-120))
 
         harness.service.tick()
         let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
@@ -1334,7 +1412,8 @@ import spacesterminalcore
             terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
         try harness.store.insertAutomationRun(run)
         // A live session whose runtime row has no childPID (write-behind: the pid has not landed yet).
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
 
         harness.service.cancelRun(runID: run.id)
@@ -1390,7 +1469,8 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(concurrency: .allow)
         let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
         let sessionID = UUID().uuidString
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
 
         // A pending agent-signal row keyed by the session id — the signal history a signaling agent leaves in
         // the profile store (not a per-session database), so it is not swept away by removing session files.
@@ -1425,7 +1505,8 @@ import spacesterminalcore
         let automation = try harness.insertAutomation(concurrency: .allow)
         let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
         let sessionID = UUID().uuidString
-        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
+        try harness.writeAttributedSessionFiles(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
 
         // The deleted session watches a live child agent (local edge), holds a coalesced notification for it,
         // and watches a remote agent on a paired device.
@@ -1476,6 +1557,11 @@ import spacesterminalcore
         ticksSuspended: @escaping @Sendable () -> Bool = { false }
     ) throws {
         store = try testCase.makeTemporaryStore()
+        let workspaceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("automation-workspace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: workspaceDirectory, withIntermediateDirectories: true)
+        let project = makeProjectRecord(dir: workspaceDirectory.deletingLastPathComponent().path)
+        try store.upsert(project: project)
+        try store.upsert(workspace: makeWorkspaceRecord(id: "workspace-1", projectID: project.id, dir: workspaceDirectory.path))
         let host = FakeAutomationTerminalHost(realCommands: realCommands)
         self.host = host
         host.install()
@@ -1504,8 +1590,8 @@ import spacesterminalcore
     ) throws -> Automation {
         let automation = Automation(
             id: UUID().uuidString, name: "Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
-            workingDirectory: FileManager.default.temporaryDirectory.path, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
-            missedRunPolicy: missedRunPolicy, nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
+            workspaceID: "workspace-1", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy,
+            nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation
     }
@@ -1516,8 +1602,8 @@ import spacesterminalcore
     ) throws -> Automation {
         let automation = Automation(
             id: UUID().uuidString, name: "Agent Test", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "",
-            agentCommand: command, agentPrompt: prompt, workspaceID: workspaceID, workingDirectory: "", timeoutSeconds: timeoutSeconds,
-            concurrencyPolicy: concurrency, missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: now(), updatedAt: now())
+            agentCommand: command, agentPrompt: prompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
+            missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation
     }
@@ -1566,8 +1652,7 @@ import spacesterminalcore
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: live ? getpid() : 1, childPID: nil, state: live ? .running : .exited,
-                updatedAt: "2026-06-06T00:00:01Z", exitedAt: live ? nil : "2026-06-06T00:00:01Z", title: title, workingDirectory: "/tmp"),
-            paths: paths)
+                updatedAt: "2026-06-06T00:00:01Z", exitedAt: live ? nil : "2026-06-06T00:00:01Z", title: title), paths: paths)
         if live { FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()) }
     }
 
@@ -1590,7 +1675,7 @@ import spacesterminalcore
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: childPID, state: .running,
-                updatedAt: "2026-06-06T00:00:01Z", title: "cmd", workingDirectory: "/tmp"), paths: paths)
+                updatedAt: "2026-06-06T00:00:01Z", title: "cmd"), paths: paths)
     }
 
     /// Writes an attributed coding-agent terminal session (workspace-scoped, stamped with the run id) plus

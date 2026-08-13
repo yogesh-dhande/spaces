@@ -154,9 +154,12 @@ enum AutomationsViewModel {
         }
     }
 
-    /// The currently-running runs across every reachable device, newest first — the sidebar row's children.
-    static func runningRuns(from inputs: [AutomationDeviceInput]) -> [AutomationRunTableRow] {
-        mergedRuns(from: inputs).filter { $0.run.status == "running" }
+    /// The live-run badge shown beside Automations. Unreachable devices remain visible in the pane as
+    /// markers, but their stale overview snapshots never contribute live activity to the sidebar.
+    static func runningRunCount(from inputs: [AutomationDeviceInput]) -> Int {
+        inputs.reduce(0) { count, input in
+            count + (input.isReachable ? input.runs.count(where: { $0.status == AutomationRunStatus.running.rawValue }) : 0)
+        }
     }
 
     /// Filters merged automation rows to a single device id, or returns them unchanged for nil (All devices).
@@ -419,16 +422,15 @@ enum AutomationsViewModel {
     /// name check and the kind-specific required-field checks.
     static func buildAutomationFields(
         name: String, kind: AutomationKind, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, workspaceID: String?,
-        agentCommand: String, agentPrompt: String, script: String, workingDirectory: String, timeoutSeconds: Int?, concurrencyPolicy: String,
-        missedRunPolicy: String
+        agentCommand: String, agentPrompt: String, script: String, timeoutSeconds: Int?, concurrencyPolicy: String, missedRunPolicy: String
     ) -> Result<TerminalServiceAutomationFields, ValidationError> {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return .failure(ValidationError(message: "Enter a name.")) }
 
+        let workspace = workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !workspace.isEmpty else { return .failure(ValidationError(message: "Choose a workspace.")) }
         switch kind {
         case .agent:
-            let workspace = workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !workspace.isEmpty else { return .failure(ValidationError(message: "Choose a workspace.")) }
             let command = agentCommand.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !command.isEmpty else { return .failure(ValidationError(message: "Enter an agent command.")) }
             let prompt = agentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -437,19 +439,16 @@ enum AutomationsViewModel {
                 TerminalServiceAutomationFields(
                     name: trimmedName, enabled: enabled, triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
                     kind: AutomationKind.agent.rawValue, script: "", agentCommand: command, agentPrompt: prompt, workspaceID: workspace,
-                    workingDirectory: "", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
+                    timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
         case .script:
             guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return .failure(ValidationError(message: "Enter a script."))
             }
-            let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !directory.isEmpty else { return .failure(ValidationError(message: "Enter a working directory.")) }
             return .success(
                 TerminalServiceAutomationFields(
                     name: trimmedName, enabled: enabled, triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
-                    kind: AutomationKind.script.rawValue, script: script, agentCommand: nil, agentPrompt: nil, workspaceID: nil,
-                    workingDirectory: directory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
-                    missedRunPolicy: missedRunPolicy))
+                    kind: AutomationKind.script.rawValue, script: script, agentCommand: nil, agentPrompt: nil, workspaceID: workspace,
+                    timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
         }
     }
 }

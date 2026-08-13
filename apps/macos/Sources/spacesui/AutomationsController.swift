@@ -433,7 +433,7 @@ import workspacecore
         var metaParts = [row.deviceName, runTriggerDescription(run), startedDescription(run), durationDescription(run)]
         if let exitCode = run.exitCode { metaParts.append("exit \(exitCode)") }
         if status == .skipped, let reason = run.skipReason { metaParts.append("skipped: \(reason)") }
-        // Count only live coding agents (attributedAgents already excludes a script run's own workspace-less
+        // Count only live coding agents (attributedAgents already excludes a script run's own `.automation`
         // wrapper session), so a running script automation with no agent shows no "live agent" meta.
         let liveAgentCount = run.attributedAgents.filter(\.live).count
         if liveAgentCount > 0 { metaParts.append("\(liveAgentCount) live agent\(liveAgentCount == 1 ? "" : "s")") }

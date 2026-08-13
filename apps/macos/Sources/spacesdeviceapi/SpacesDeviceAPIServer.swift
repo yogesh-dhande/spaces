@@ -1842,9 +1842,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             recentTerminal: try store.terminalAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
             latestPerAutomation: try store.latestTerminalAutomationRunPerAutomation(), active: try store.activeAutomationRuns())
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: ordered, store: store, liveSessions: liveSessions)
+        let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: ordered.map(\.id))
         let runSummaries = ordered.map { run in
             TerminalServiceAutomationRunSummary(
-                run, automationName: namesByAutomationID[run.automationID], attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+                run, automationName: namesByAutomationID[run.automationID], workspaceID: workspaceIDsByRunID[run.id],
+                attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
         return (automationSummaries, runSummaries)
     }
@@ -2414,7 +2416,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
         let orchestrator = try context.orchestrator()
-        if orchestrator.workspaceTerminalSessionIsSpawnedAgent(workspaceID: workspaceID, sessionID: sessionID) {
+        if let runID = try context.store().automationRunID(terminalSessionID: sessionID), let run = try context.store().automationRun(id: runID) {
+            guard let automationOperations else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Automations are unavailable on this daemon.", errorCode: .internalError)
+            }
+            // Only a cancellation that actually won while the run was active owns Stop outright. The
+            // service can serialize behind a completion: its returned terminal status then leaves a live
+            // agent session for the normal agent/session path below.
+            let wasActiveBeforeCancel = !run.status.isTerminal
+            let canceledRun = try automationOperations.cancelRun(runID)
+            if wasActiveBeforeCancel, canceledRun.status == .canceled {
+                return try refreshedMutationResponse(context: context, message: "Canceled automation run.", workspaceID: workspaceID)
+            }
+        }
+        // A hook-registered agent can run inside a configured process terminal. Its launch kind stays
+        // `.process`, so resolve the persisted agent row before the `.agent` launch-kind check reserved for
+        // pre-signal sessions.
+        let isRegisteredAgent = try context.store().agentWindowByTerminalSession(terminalSessionID: sessionID) != nil
+        if isRegisteredAgent || orchestrator.workspaceTerminalSessionIsSpawnedAgent(workspaceID: workspaceID, sessionID: sessionID) {
             guard let agentSessionKiller else {
                 return SpacesDeviceAPIResponse(ok: false, message: "Agent stop is unavailable on this daemon.", errorCode: .internalError)
             }
@@ -2696,8 +2715,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return AutomationDraft(
             name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, kind: kind,
             script: fields.script, agentCommand: fields.agentCommand, agentPrompt: fields.agentPrompt, workspaceID: fields.workspaceID,
-            workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
-            missedRunPolicy: missedRunPolicy)
+            timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy)
     }
 
     /// Maps runs to wire summaries, denormalizing each run's automation name and its attributed coding-agent
@@ -2706,6 +2724,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard !runs.isEmpty else { return [] }
         let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
+        let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: runs.map(\.id))
         var namesByAutomationID: [String: String] = [:]
         return try runs.map { run in
             let name: String?
@@ -2716,7 +2735,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 if let resolved { namesByAutomationID[run.automationID] = resolved }
                 name = resolved
             }
-            return TerminalServiceAutomationRunSummary(run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+            return TerminalServiceAutomationRunSummary(
+                run, automationName: name, workspaceID: workspaceIDsByRunID[run.id], attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 

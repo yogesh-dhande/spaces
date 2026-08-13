@@ -7,9 +7,8 @@ public enum AutomationTriggerKind: String, Codable, Sendable, CaseIterable {
     case cron
 }
 
-/// What a scheduled automation runs. A `script` automation runs `script` verbatim in its workspace-less
-/// session. An `agent` automation instead spawns a coding agent (`agentCommand`) seeded with `agentPrompt`
-/// in `workspaceID`'s workspace.
+/// What a scheduled automation runs. Both kinds target a workspace: a `script` runs verbatim at its root;
+/// an `agent` spawns a coding agent (`agentCommand`) seeded with `agentPrompt` there.
 public enum AutomationKind: String, Codable, Sendable, CaseIterable {
     case script
     case agent
@@ -32,8 +31,7 @@ public enum AutomationMissedRunPolicy: String, Codable, Sendable, CaseIterable {
     case skip
 }
 
-/// A daemon-owned scheduled automation that runs a shell script in a workspace-less terminal session or
-/// spawns a coding agent into a workspace-owned terminal session.
+/// A daemon-owned scheduled automation that runs in a selected workspace.
 public struct Automation: Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String
@@ -48,11 +46,8 @@ public struct Automation: Equatable, Sendable, Identifiable {
     public let agentCommand: String?
     /// The prompt seeded into the spawned coding agent, for an `agent`-kind automation; nil for `script`.
     public let agentPrompt: String?
-    /// The workspace an `agent`-kind automation's coding agent spawns into; nil for `script`.
-    public let workspaceID: String?
-    /// The directory a `script`-kind automation's script runs in. Empty for an `agent`-kind automation,
-    /// whose coding agent's location comes from `workspaceID` instead.
-    public let workingDirectory: String
+    /// The workspace this automation runs in. Scripts use its root as their working directory.
+    public let workspaceID: String
     /// Optional wall-clock budget after which a running run is terminated and recorded `timed_out`.
     public let timeoutSeconds: Int?
     public let concurrencyPolicy: AutomationConcurrencyPolicy
@@ -67,9 +62,9 @@ public struct Automation: Equatable, Sendable, Identifiable {
 
     public init(
         id: String, name: String, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, kind: AutomationKind = .script,
-        script: String, agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String,
-        timeoutSeconds: Int?, concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy, nextFireTime: Date?,
-        createdAt: Date, updatedAt: Date, anchorTimeZoneIdentifier: String? = nil
+        script: String, agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String, timeoutSeconds: Int?,
+        concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy, nextFireTime: Date?, createdAt: Date,
+        updatedAt: Date, anchorTimeZoneIdentifier: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -81,7 +76,6 @@ public struct Automation: Equatable, Sendable, Identifiable {
         self.agentCommand = agentCommand
         self.agentPrompt = agentPrompt
         self.workspaceID = workspaceID
-        self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy
         self.missedRunPolicy = missedRunPolicy

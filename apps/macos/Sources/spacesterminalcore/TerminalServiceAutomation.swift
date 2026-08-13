@@ -21,10 +21,8 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
     public let agentCommand: String?
     /// The prompt seeded into the spawned coding agent, for an `agent`-kind automation; nil for `script`.
     public let agentPrompt: String?
-    /// The workspace an `agent`-kind automation's coding agent spawns into; nil for `script`.
-    public let workspaceID: String?
-    /// The directory a `script`-kind automation's script runs in. Empty for an `agent`-kind automation.
-    public let workingDirectory: String
+    /// The workspace this automation runs in. Scripts use its root as their working directory.
+    public let workspaceID: String
     /// Wall-clock budget in seconds after which a running run is terminated and recorded timed_out, or nil.
     public let timeoutSeconds: Int?
     public let concurrencyPolicy: String
@@ -36,8 +34,8 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
 
     public init(
         id: String, name: String, enabled: Bool, triggerKind: String, cronExpression: String?, kind: String = "script", script: String,
-        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String, timeoutSeconds: Int?,
-        concurrencyPolicy: String, missedRunPolicy: String, nextFireTime: String?, createdAt: String, updatedAt: String
+        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String, timeoutSeconds: Int?, concurrencyPolicy: String,
+        missedRunPolicy: String, nextFireTime: String?, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.name = name
@@ -49,7 +47,6 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
         self.agentCommand = agentCommand
         self.agentPrompt = agentPrompt
         self.workspaceID = workspaceID
-        self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy
         self.missedRunPolicy = missedRunPolicy
@@ -62,7 +59,7 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
 /// Client-facing wire summary of one coding agent a run is attributed with. An automation run's attributed
 /// agents are the terminal sessions stamped with the run id that carry a coding agent: an `agent`-kind run's
 /// own spawned agent session, plus any coding agent a `script`-kind run's command spawned. The run's own
-/// workspace-less `.automation` wrapper session (a `script`-kind run) is stamped too but is NOT an agent, so
+/// workspace-bound `.automation` wrapper session (a `script`-kind run) is stamped too but is NOT an agent, so
 /// it never appears here.
 ///
 /// `status` is the agent's raw `AgentWindowStatus` (idle/spinning/waiting/done/exited) once the agent has an
@@ -100,7 +97,7 @@ public struct TerminalServiceAutomationAgentSummary: Codable, Sendable, Equatabl
 /// its command terminal session, and its timestamps. `automationName` is denormalized in so a run-centric
 /// list (e.g. an alerts feed) can render without a second lookup. `attributedAgents` is the per-agent
 /// breakdown of the run's attributed sessions that carry a coding agent, each with its own status and its
-/// own `live` flag (a live-agent count is derived from these; a script run's own workspace-less wrapper
+/// own `live` flag (a live-agent count is derived from these; a script run's own workspace-bound wrapper
 /// session is never one of them).
 public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
@@ -116,14 +113,17 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
     public let skipReason: String?
     public let exitCode: Int?
     public let terminalSessionID: String?
+    /// The workspace persisted on this run's own terminal session. This is intentionally run-scoped so a
+    /// historical replay keeps opening in its original workspace after the automation is retargeted.
+    public let workspaceID: String?
     public let startedAt: String?
     public let endedAt: String?
     public let createdAt: String
     public let attributedAgents: [TerminalServiceAutomationAgentSummary]
 
     public init(
-        id: String, automationID: String, automationName: String?, kind: String, status: String, trigger: String, skipReason: String?,
-        exitCode: Int?, terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String,
+        id: String, automationID: String, automationName: String?, kind: String, status: String, trigger: String, skipReason: String?, exitCode: Int?,
+        terminalSessionID: String?, workspaceID: String? = nil, startedAt: String?, endedAt: String?, createdAt: String,
         attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.id = id
@@ -135,6 +135,7 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
         self.skipReason = skipReason
         self.exitCode = exitCode
         self.terminalSessionID = terminalSessionID
+        self.workspaceID = workspaceID
         self.startedAt = startedAt
         self.endedAt = endedAt
         self.createdAt = createdAt

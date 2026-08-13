@@ -197,7 +197,7 @@ enum SpacesDaemonProfileCommandRouting {
         // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
         // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
         // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
-        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal: true
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal: true
         // Every automation command is peeled off main for two reasons. First, trigger/cancel/end-agents/delete
         // reach the automation executor's launcher/terminator call graph directly (starting or tearing down a
         // run's terminal/agent session), which hops the engine actor. Second, ALL of them — create/update/list/
@@ -570,6 +570,12 @@ enum SpacesDaemonErrorClassification {
                 // quiesced cores mid-handoff.
                 ticksSuspended: { [livenessState] in livenessState.snapshot().handoffInProgress },
                 logError: { writeStandardError("spacesd automation_error \($0)\n") })
+            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
+                try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
+            }
+            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, operation in
+                try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, operation: operation)
+            }
             // Set the main-actor identity immediately (the lifecycle/identity guard below depends on it) but
             // publish the off-main box only after reconciliation. Transports (Device API listeners already
             // opened by `startSharedServices`) may reach the service through the box, so exposing it before
@@ -835,6 +841,8 @@ enum SpacesDaemonErrorClassification {
         automationTimer = nil
         automationService = nil
         automationServiceBox.set(nil)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil)
         if let databaseChangeObserver {
             NotificationCenter.default.removeObserver(databaseChangeObserver)
             self.databaseChangeObserver = nil
@@ -916,6 +924,7 @@ enum SpacesDaemonErrorClassification {
         // the main actor (the one-way rule). `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`
         // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
         case .profileCommand(.workspaceStart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: false)
+        case .profileCommand(.workspaceStop(let workspaceID)): return workspaceStopOffMain(workspaceID: workspaceID)
         case .profileCommand(.workspaceRestart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: true)
         case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
         case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
@@ -1661,12 +1670,13 @@ enum SpacesDaemonErrorClassification {
             let workspace = try orchestrator.createWorkspaceOnDevice(
                 projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
-        // Workspace start/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
-        // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `agentKillOffMain`,
+        // Workspace start/stop/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
+        // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `workspaceStopOffMain`, `agentKillOffMain`,
         // `agentSignalOffMain`) because their call graph reaches the launcher/terminator, whose engine hop
         // would trap on the main-actor `runProfileCommand` switch (see `SpacesDaemonProfileCommandRouting`).
         // Kept in the switch for exhaustiveness and to fail loudly if that peeling ever regresses.
         case .workspaceStart: preconditionFailure("`.workspaceStart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .workspaceStop: preconditionFailure("`.workspaceStop` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .workspaceRestart: preconditionFailure("`.workspaceRestart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSignal: preconditionFailure("`.agentSignal` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentList(let payload):
@@ -1801,8 +1811,7 @@ enum SpacesDaemonErrorClassification {
         return AutomationDraft(
             name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, kind: kind,
             script: fields.script, agentCommand: fields.agentCommand, agentPrompt: fields.agentPrompt, workspaceID: fields.workspaceID,
-            workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
-            missedRunPolicy: missedRunPolicy)
+            timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy)
     }
 
     /// Maps runs to wire summaries, denormalizing each run's automation name and its attributed coding-agent
@@ -1812,6 +1821,7 @@ enum SpacesDaemonErrorClassification {
         let store = try makeProfileOrchestrator().store
         let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
+        let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: runs.map(\.id))
         var namesByAutomationID: [String: String] = [:]
         return try runs.map { run in
             let name: String?
@@ -1822,7 +1832,8 @@ enum SpacesDaemonErrorClassification {
                 if let resolved { namesByAutomationID[run.automationID] = resolved }
                 name = resolved
             }
-            return TerminalServiceAutomationRunSummary(run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+            return TerminalServiceAutomationRunSummary(
+                run, automationName: name, workspaceID: workspaceIDsByRunID[run.id], attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 
@@ -1888,6 +1899,20 @@ enum SpacesDaemonErrorClassification {
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(
                 message: restartIfRunning ? "Workspace restarted." : "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.workspaceStop)` handler. Stop reaches automation cancellation and terminal
+    /// termination, both daemon-owned and potentially engine-touching, so the synchronous profile route
+    /// stays off the main actor just like workspace start/restart.
+    private nonisolated func workspaceStopOffMain(workspaceID: String) -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            _ = try orchestrator.stopWorkspace(workspaceID: workspaceID)
+            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+            let profile = TerminalServiceProfileCommandResponse(message: "Workspace stopped.", workspace: profileWorkspaceRecord(workspace))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }

@@ -56,7 +56,7 @@ public struct AutomationRun: Equatable, Sendable, Identifiable {
     public let skipReason: AutomationRunSkipReason?
     public let trigger: AutomationRunTrigger
     public let exitCode: Int?
-    /// The workspace-less terminal session that carried the command, or nil for a queued/skipped run.
+    /// The workspace-bound terminal session that carried the command, or nil for a queued/skipped run.
     public let terminalSessionID: String?
     public let startedAt: Date?
     public let endedAt: Date?

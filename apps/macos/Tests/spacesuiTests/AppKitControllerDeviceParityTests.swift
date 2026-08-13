@@ -589,27 +589,27 @@ import workspacecore
     }
 
     private func automationSummary(
-        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String? = nil, workingDirectory: String = ""
+        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String = "workspace-1"
     ) -> TerminalServiceAutomationSummary {
         TerminalServiceAutomationSummary(
             id: id, name: name, enabled: true, triggerKind: "manual", cronExpression: nil, kind: kind.rawValue, script: script,
-            agentCommand: kind == .agent ? "codex" : nil, agentPrompt: kind == .agent ? "do it" : nil, workspaceID: workspaceID,
-            workingDirectory: workingDirectory, timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil,
-            createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:00Z")
+            agentCommand: kind == .agent ? "codex" : nil, agentPrompt: kind == .agent ? "do it" : nil, workspaceID: workspaceID, timeoutSeconds: nil,
+            concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:00Z")
     }
 
-    private func automationRunSummary(automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?)
-        -> TerminalServiceAutomationRunSummary
-    {
+    private func automationRunSummary(
+        automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?, workspaceID: String? = "workspace-1"
+    ) -> TerminalServiceAutomationRunSummary {
         TerminalServiceAutomationRunSummary(
             id: "run-1", automationID: automationID, automationName: nil, kind: kind.rawValue, status: status, trigger: "manual", skipReason: nil,
-            exitCode: nil, terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "2026-06-22T12:00:00Z")
+            exitCode: nil, terminalSessionID: terminalSessionID, workspaceID: workspaceID, startedAt: nil, endedAt: nil,
+            createdAt: "2026-06-22T12:00:00Z")
     }
 
-    // A script-kind run's session is workspace-less, so its open request is synthesized as a `.automation`
-    // pane carrying the automation's script/working-directory and the seeded login shell.
+    // A script-kind run's terminal opens in its persisted workspace.
     @Test func automationRunTerminalRequestSynthesizesScriptKindPane() {
-        let automation = automationSummary(name: "Nightly", kind: .script, script: "echo hi", workingDirectory: "/tmp/work")
+        let automation = automationSummary(name: "Nightly", kind: .script, script: "echo hi")
         let run = automationRunSummary(kind: .script, status: "running", terminalSessionID: "auto-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -618,12 +618,11 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work", kind: .automation,
-                    shell: "/bin/zsh", command: "echo hi", initialState: .running))
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .running))
     }
 
-    // An agent-kind run's session is a real workspace agent session present in the overview, so its request
-    // resolves that session's true workspace/kind/command/shell rather than a synthesized workspace-less one.
+    // A live agent session resolves from the overview.
     @Test func automationRunTerminalRequestResolvesAgentKindFromOverview() {
         let session = SpacesDeviceTerminalSessionSummary(
             id: "agent-session", title: "Codex", workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: "codex", state: .running,
@@ -646,13 +645,10 @@ import workspacecore
                     servicePID: 321, childPID: 654, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
-    // An ended agent-kind run's session leaves the overview, so its request is synthesized the same way the
-    // script branch is: the automation's name, workspace, working directory, and agent command, plus the
-    // seeded login shell: a panel window opens with no cold-resolution step, so a request with no shell has
-    // no launch configuration to build the replay pane from.
+    // An ended agent session replays in the workspace persisted on its run.
     @Test func automationRunTerminalRequestFallsBackForEndedAgentSession() {
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
-        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1", workingDirectory: "/tmp/agent")
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
         let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -661,12 +657,11 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "/tmp/agent",
-                    kind: .agent, shell: "/bin/zsh", command: "codex", initialState: .exited))
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: "codex", initialState: .exited))
     }
 
-    // A run whose automation was deleted still opens: the synthesized fallback drops to its neutral defaults
-    // rather than failing to build a request.
+    // A run without a persisted session workspace has no pane destination.
     @Test func automationRunTerminalRequestFallsBackForEndedAgentSessionWithNoAutomation() {
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
         let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
@@ -677,17 +672,21 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Automation", workingDirectory: "", kind: .agent,
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Automation", workingDirectory: "", kind: .agent,
                     shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
-    // Dispatch keys off the RUN's kind, not the automation's current kind. A historical script-kind run whose
-    // automation was later edited to Agent still opens as a workspace-less `.automation` pane carrying the
-    // automation's current script metadata — if it dispatched on the automation's kind it would take the agent
-    // branch, which supplies no shell and can't cold-resolve a workspace-less session.
+    @Test func automationRunTerminalRequestRequiresPersistedSessionWorkspace() {
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "gone-session", workspaceID: nil)
+
+        #expect(
+            AppKitController.automationRunTerminalOpenRequest(
+                deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: nil, loginShell: "/bin/zsh") == nil)
+    }
+
+    // Dispatch keys off the run's kind, not the automation's current kind.
     @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameAgent() {
-        let automation = automationSummary(
-            name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "workspace-1", workingDirectory: "/tmp/work")
+        let automation = automationSummary(name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "edited-workspace")
         let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "auto-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -696,16 +695,14 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work", kind: .automation,
-                    shell: "/bin/zsh", command: "echo hi", initialState: .exited))
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .exited))
     }
 
-    // The reverse: a historical agent-kind run whose automation was later edited to Script still resolves as an
-    // agent (here falling back to a synthesized `.agent` request for its gone session), rather than opening as a
-    // workspace-less `.automation` pane with the script automation's metadata.
+    // The reverse uses the run's agent shape with its persisted workspace.
     @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameScript() {
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
-        let automation = automationSummary(name: "Reviewer", kind: .script, script: "echo hi", workingDirectory: "/tmp/work")
+        let automation = automationSummary(name: "Reviewer", kind: .script, script: "echo hi")
         let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -714,7 +711,7 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "/tmp/work", kind: .agent,
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
                     shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
@@ -1183,7 +1180,7 @@ import workspacecore
     private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp",
             outputByteCount: nil)
     }
 

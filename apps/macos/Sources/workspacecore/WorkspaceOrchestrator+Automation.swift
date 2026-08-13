@@ -2,27 +2,53 @@ import Foundation
 import spacesterminalcore
 
 extension WorkspaceOrchestrator {
-    /// Launches the workspace-less terminal session that carries a scheduled automation's command. The
-    /// sibling of `launchWorkspaceCommandSession` for automations: the launch configuration carries
-    /// `workspaceID = nil`, `kind = .automation`, and the owning `automationRunID`, so the daemon's normal
-    /// terminal-service session machinery runs the command while attributing the session back to its run.
-    /// The command runs through the user's login shell (`$SHELL -l -c`, applied by the session core's
-    /// `execCommand`); `environment` entries are exported ahead of the command exactly as ad-hoc sessions
-    /// export their workspace environment.
-    @discardableResult func launchAutomationSession(
-        runID: String, sessionID: String, title: String, workingDirectory: String, command: String, environment: [String: String]
-    ) throws -> TerminalServiceSessionSummary {
-        let shellPath = terminalShellPathOverride() ?? defaultInteractiveShellPath()
-        let launchCommand = commandPrefixedWithShellEnvironment(command, env: environment)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: nil, kind: .automation, automationRunID: runID)
-        return try builtInTerminalSessionLauncher(launchConfiguration)
+    /// Removes an exited automation session from its workspace's live runtime targets without touching the
+    /// retained terminal session or its automation-run attribution. Runs-tab replay continues to use those
+    /// persisted records; the workspace sidebar represents only live automation activity.
+    @discardableResult func detachExitedAutomationSessionRuntimeTarget(sessionID: String) throws -> Bool {
+        guard let (sessionID, workspaceID) = automationSessionWorkspace(sessionID: sessionID) else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard !automationSessionIsLive(sessionID: sessionID) else { return false }
+            try cleanupAutomationTerminalSessionRuntimeTarget(sessionID: sessionID, workspaceID: workspaceID)
+            return true
+        }
     }
 
-    /// The login shell path an automation command runs under. Exposed for the automation executor, which
-    /// resolves the same login shell the ad-hoc terminal launch path uses.
-    func automationLoginShellPath() -> String { terminalShellPathOverride() ?? defaultInteractiveShellPath() }
+    /// Removes the workspace-side representation of an automation terminal that is about to have its
+    /// persisted session, transcript, and run attribution deleted. Unlike the exited-session path, this
+    /// accepts a live session because explicit automation deletion is terminating. It intentionally handles
+    /// every automation launch kind: a script wrapper has no agent row, while agent-owned and attributed
+    /// sessions may have rows and subscriber state that need the normal finalization chokepoint.
+    @discardableResult func removeAutomationTerminalSessionRuntimeTargetForDeletion(sessionID: String) throws -> Bool {
+        guard let (sessionID, workspaceID) = automationSessionWorkspace(sessionID: sessionID) else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try cleanupAutomationTerminalSessionRuntimeTarget(sessionID: sessionID, workspaceID: workspaceID)
+            return true
+        }
+    }
+
+    /// Workspace/project teardown already owns the lifecycle gate. It uses the identical runtime-target,
+    /// agent-row, subscriber, and running-state cleanup as ordinary automation deletion without reclaiming
+    /// the gate.
+    func removeAutomationTerminalSessionRuntimeTargetDuringWorkspaceTeardown(sessionID: String) throws {
+        guard let (sessionID, workspaceID) = automationSessionWorkspace(sessionID: sessionID) else { return }
+        try cleanupAutomationTerminalSessionRuntimeTarget(sessionID: sessionID, workspaceID: workspaceID)
+    }
+
+    private func automationSessionWorkspace(sessionID: String) -> (String, String)? {
+        guard let sessionID = normalizedTerminalSessionID(sessionID), let launch = terminalSessionLaunchConfiguration(sessionID: sessionID),
+            launch.automationRunID != nil, let workspaceID = launch.workspaceID
+        else { return nil }
+        return (sessionID, workspaceID)
+    }
+
+    /// Deletes the runtime target first so terminal-session persistence cannot disappear while the workspace
+    /// still points at it. `deleteAgentRows` also tears down subscriber state for row-less script sessions.
+    func cleanupAutomationTerminalSessionRuntimeTarget(sessionID: String, workspaceID: String) throws {
+        for window in try store.windowsReferencingTerminalSession(terminalSessionID: sessionID) { try store.deleteWindow(id: window.id) }
+        try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspaceID)
+        try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+    }
 
     /// Single-quotes a token for safe interpolation into an automation command string.
     func automationShellQuoted(_ token: String) -> String { shellSingleQuoted(token) }

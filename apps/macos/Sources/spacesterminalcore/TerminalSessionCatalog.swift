@@ -27,7 +27,7 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     }
 
     public var sessionID: String { launchConfiguration.sessionID }
-    /// nil for a workspace-less session (e.g. an automation run). Workspace-scoped enumeration must
+    /// nil for a generic workspace-less session. Workspace-scoped enumeration must
     /// tolerate nil rather than assume every session belongs to a workspace.
     public var workspaceID: String? { launchConfiguration.workspaceID }
     public var kind: TerminalSessionKind { launchConfiguration.kind }

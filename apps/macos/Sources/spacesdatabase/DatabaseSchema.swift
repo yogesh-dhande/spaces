@@ -89,17 +89,10 @@ public enum DatabaseSchema {
             );
         """
 
-    /// Daemon-owned scheduled automations that run a shell script or spawn a coding agent in a
-    /// workspace-less terminal session. `trigger_kind` is `manual` or `cron`; `cron_expression` holds the
-    /// 5-field cron string and is NULL for manual automations. `kind` is `script` or `agent`: a `script`
-    /// automation runs `script` verbatim in `working_directory`; an `agent` automation instead runs
-    /// `agent_command` (the shell command that launches the coding agent) seeded with `agent_prompt` in
-    /// `workspace_id`'s workspace — its location comes from the workspace, so it carries no
-    /// `working_directory` of its own. `script`, `working_directory`, `agent_command`, `agent_prompt`, and
-    /// `workspace_id` are mutually exclusive by convention (only the fields matching `kind` are populated —
-    /// `working_directory` is `''` for an `agent`-kind row, kept NOT NULL rather than nullable so every
-    /// reader can treat it as a plain string; see `AutomationDraft.validated()`), not by a CHECK constraint,
-    /// so a kind switch is a plain column update rather than a row rebuild. `next_fire_time` is the
+    /// Daemon-owned scheduled automations that run a shell script or coding agent in a selected workspace.
+    /// `trigger_kind` is `manual` or `cron`; `cron_expression` holds the 5-field cron string and is NULL for
+    /// manual automations. Scripts run verbatim at the selected workspace root; agents run `agent_command`
+    /// seeded with `agent_prompt` there. `workspace_id` is required for every kind. `next_fire_time` is the
     /// persisted next-due epoch for a cron automation and doubles as the missed-run anchor a restarted
     /// daemon reads to decide whether a fire was missed while it was down. `anchor_time_zone_identifier`
     /// records the zone that produced that absolute instant, so a restart after an offline zone change can
@@ -116,8 +109,7 @@ public enum DatabaseSchema {
               script TEXT NOT NULL,
               agent_command TEXT,
               agent_prompt TEXT,
-              workspace_id TEXT,
-              working_directory TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
               timeout_seconds INTEGER,
               concurrency_policy TEXT NOT NULL,
               missed_run_policy TEXT NOT NULL,
@@ -141,8 +133,7 @@ public enum DatabaseSchema {
               script TEXT NOT NULL,
               agent_command TEXT,
               agent_prompt TEXT,
-              workspace_id TEXT,
-              working_directory TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
               timeout_seconds INTEGER,
               concurrency_policy TEXT NOT NULL,
               missed_run_policy TEXT NOT NULL,
@@ -157,7 +148,7 @@ public enum DatabaseSchema {
     /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
     /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
     /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
-    /// `terminal_session_id` links to the workspace-less session that carried the command. `kind` is the
+    /// `terminal_session_id` links to the workspace-bound session that carried the command. `kind` is the
     /// automation's `script`/`agent` kind stamped onto the run at creation time: an automation's kind can be
     /// edited once its runs are terminal, but a retained historical run keeps the session shape it actually
     /// ran with, so opening its history dispatches on the run's own kind rather than the automation's current
@@ -470,9 +461,8 @@ public enum DatabaseSchema {
                     """)
         },
         // Adds the scheduled-automation surface (`automations`, `automation_runs`) and makes terminal
-        // sessions workspace-optional so an automation's command can run in a workspace-less session,
-        // attributed back to its run via `automation_run_id`. SQLite cannot drop a column's NOT NULL or
-        // add a column mid-table in place, so `terminal_sessions` is rebuilt: create the new shape, copy
+        // sessions carry `automation_run_id` so an automation command is attributed back to its run.
+        // SQLite cannot add a column mid-table in place, so `terminal_sessions` is rebuilt: create the new shape, copy
         // every row (workspace_id carried forward unchanged; automation_run_id defaults NULL), drop the
         // old table, and rename. No table declares a foreign key onto `terminal_sessions`, so the
         // drop/rename touches nothing else even with foreign_keys ON inside the migration transaction. The
@@ -568,9 +558,8 @@ public enum DatabaseSchema {
             ON terminal_agent_signal_events(session_id, acknowledged_at, created_at);
         """
 
-    /// The `terminal_sessions` table. `workspace_id` is nullable: a workspace-scoped session carries its
-    /// owning workspace, while an automation's command runs in a workspace-less session (NULL). That
-    /// session is attributed back to the automation execution that spawned it via `automation_run_id`.
+    /// The `terminal_sessions` table. `workspace_id` is nullable for generic session persistence, while
+    /// automation sessions always carry their selected workspace and `automation_run_id` attribution.
     /// The unique `root_directory` constraint keeps one live session per session directory. Named
     /// separately so the fresh-schema SQL and the v13→v14 rebuild step share one column shape.
     static let terminalSessionsTableSQL = """

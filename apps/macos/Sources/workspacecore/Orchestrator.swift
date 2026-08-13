@@ -42,6 +42,15 @@ public final class WorkspaceOrchestrator {
     /// profile command uses; workspacecore has no session I/O of its own, so with none installed the write
     /// throws (non-daemon callers never spawn agent automations).
     public typealias BuiltInTerminalSessionInputWriter = @Sendable (String, TerminalProfileInput, _ appendNewline: Bool) throws -> Void
+    /// Deletes every automation targeting a workspace through the daemon's AutomationService while the
+    /// caller holds that workspace's lifecycle gate. Its teardown-specific implementation performs direct
+    /// session finalization and never tries to claim the held gate again.
+    public typealias AutomationWorkspaceTeardown = @Sendable (String) throws -> Void
+    /// Serializes automation-run cancellation with a workspace stop or restart. The caller has already
+    /// admitted the workspace lifecycle gate before invoking this callback; the daemon keeps its
+    /// automation-service queue through `operation`, so a scheduler tick cannot launch another run into
+    /// a workspace after cancellation but before terminal teardown completes.
+    public typealias AutomationWorkspaceCancellation = @Sendable (String, @escaping () throws -> Void) throws -> Void
     /// Reports whether the owning daemon is mid exec-in-place handoff. Installed process-wide so every
     /// transient daemon orchestrator (discovery scans, reconcilers, Device API handlers) consults the
     /// same handoff flag the profile orchestrator does, not just the one built by `makeProfileOrchestrator`.
@@ -63,6 +72,8 @@ public final class WorkspaceOrchestrator {
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
     static let builtInTerminalSessionInputWriterOverrideStore = LockedBox<BuiltInTerminalSessionInputWriter?>(nil)
     private static let daemonHandoffInProgressOverrideStore = LockedBox<DaemonHandoffInProgressPredicate?>(nil)
+    private static let automationWorkspaceTeardownOverrideStore = LockedBox<AutomationWorkspaceTeardown?>(nil)
+    private static let automationWorkspaceCancellationOverrideStore = LockedBox<AutomationWorkspaceCancellation?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -165,6 +176,56 @@ public final class WorkspaceOrchestrator {
     /// an exec-in-place handoff, matching the profile orchestrator. See `daemonHandoffInProgress`'s doc.
     public static func setProcessWideDaemonHandoffInProgress(_ predicate: DaemonHandoffInProgressPredicate?) {
         daemonHandoffInProgressOverrideStore.set(predicate)
+    }
+
+    public static func setProcessWideAutomationWorkspaceTeardown(_ teardown: AutomationWorkspaceTeardown?) {
+        automationWorkspaceTeardownOverrideStore.set(teardown)
+    }
+
+    public static func setProcessWideAutomationWorkspaceCancellation(_ cancellation: AutomationWorkspaceCancellation?) {
+        automationWorkspaceCancellationOverrideStore.set(cancellation)
+    }
+
+    /// Deletes target automations only after the caller has claimed the workspace lifecycle. The daemon
+    /// callback uses a teardown-specific service path that finalizes sessions without attempting to claim
+    /// the already-held lifecycle gate again.
+    func deleteAutomationsTargetingWorkspaceDuringTeardown(_ workspaceID: String) throws {
+        guard let teardown = Self.automationWorkspaceTeardownOverrideStore.get() else {
+            guard try store.automationIDs(workspaceID: workspaceID).isEmpty else {
+                throw WorkspaceError.dependencyMissing(message: "Automation teardown is unavailable.")
+            }
+            return
+        }
+        try teardown(workspaceID)
+    }
+
+    /// Runs a workspace operation under the service's automation queue after its lifecycle gate has been
+    /// claimed. This ordering makes a busy rejection non-destructive. Without a daemon coordinator there
+    /// is no safe way to cancel a live run: its terminal teardown and scheduler state are queue-owned, so
+    /// fail loudly instead of mutating run rows out of band. A workspace with no active target runs remains
+    /// usable by plain orchestrators.
+    private func coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: String, operation: @escaping () throws -> Void) throws {
+        guard let cancellation = Self.automationWorkspaceCancellationOverrideStore.get() else {
+            guard try !hasActiveAutomationRunTargetingWorkspace(workspaceID) else {
+                throw WorkspaceError.dependencyMissing(message: "Automation cancellation is unavailable.")
+            }
+            try operation()
+            return
+        }
+        try cancellation(workspaceID, operation)
+    }
+
+    /// A running run stays in the workspace persisted by its launched terminal; queued and launch-pending
+    /// runs have no persisted terminal workspace and therefore follow the automation's selected target.
+    private func hasActiveAutomationRunTargetingWorkspace(_ workspaceID: String) throws -> Bool {
+        for run in try store.activeAutomationRuns() {
+            if run.status == .running, run.terminalSessionID != nil {
+                if try store.workspaceID(automationRunID: run.id) == workspaceID { return true }
+            } else if try store.automation(id: run.automationID)?.workspaceID == workspaceID {
+                return true
+            }
+        }
+        return false
     }
 
     /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding
@@ -801,7 +862,7 @@ public final class WorkspaceOrchestrator {
 
                 guard !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
-                try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
+                _ = try archiveWorkspace(workspaceID: workspace.id)
             }
             for worktree in worktrees {
                 let normalizedPath = normalizePath(worktree.path)
@@ -833,14 +894,6 @@ public final class WorkspaceOrchestrator {
         return try git.remoteBranchLookupStatus(path: project.dir, branch: branch) == .exists
     }
 
-    /// A workspace whose worktree is gone has nothing left to run in; discovery retires it exactly as the
-    /// Archive action does, by removing the record.
-    private func archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: String) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
-        try deleteWorkspaceRecord(workspace)
-    }
-
     private func isDiscoverableWorktreePath(project: ProjectRecord, path: String) -> Bool {
         var isDirectory = ObjCBool(false)
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
@@ -863,7 +916,14 @@ public final class WorkspaceOrchestrator {
     public func launchWorkspace(workspaceID: String) throws { try upWorkspace(workspaceID: workspaceID, restartIfRunning: false) }
 
     public func restartWorkspace(workspaceID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try restartWorkspaceUnlocked(workspaceID: workspaceID) }
+        // Reject a quiescing daemon before recording any automation cancellation. The inner stop repeats
+        // this guard at its destructive-row boundary to cover a handoff that begins during teardown.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+                try restartWorkspaceUnlocked(workspaceID: workspaceID)
+            }
+        }
     }
 
     /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
@@ -882,40 +942,59 @@ public final class WorkspaceOrchestrator {
     }
 
     public func upWorkspace(workspaceID: String, restartIfRunning: Bool = false, background: Bool = false) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            let (_, workspace) = try resolveWorkspace(id: workspaceID)
-            try validateWorkspaceFocusNames(workspaceID: workspace.id)
-            let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
-            if workspace.isRunning || hasTrackedRuntime {
-                if restartIfRunning {
-                    try restartWorkspaceUnlocked(workspaceID: workspaceID, background: background)
-                } else {
-                    // The setup recovery screen keeps ad hoc terminal access open while setup is pending,
-                    // running, or failed, so a workspace can reach this branch (tracked runtime present)
-                    // with setup never having succeeded. `launchWorkspaceUnlocked` runs this same sequence
-                    // before touching any configured process; this branch has to run it too, or Start would
-                    // launch configured processes into a worktree setup never finished, or silently report
-                    // success on a workspace whose setup failed. Same call order and same lock as
-                    // `launchWorkspaceUnlocked`: `withWorkspaceSetupLock` inside these calls is a separate
-                    // gate keyed by workspace id, so running them under the already-held lifecycle lock does
-                    // not deadlock (`launchWorkspaceUnlocked` already does exactly this from inside the same
-                    // lifecycle lock in the other two branches below).
-                    try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
-                    try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
-                    try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-                    try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
-                    try restartExitedProcesses(workspaceID: workspaceID, background: background)
-                    // Restarting exited rows above only revives processes that were already tracked. A
-                    // workspace whose only runtime is ad hoc (an ad hoc terminal or a coding-agent session,
-                    // issue #438) has no rows at all for its configured processes, so it needs its own step
-                    // to launch those: the ones neither running nor exited.
-                    try launchMissingConfiguredProcesses(workspaceID: workspaceID, background: background)
-                    if try hasTrackedRuntimeIndicators(workspaceID: workspaceID) { try markWorkspaceRunningIfNeeded(workspaceID: workspaceID) }
+        if restartIfRunning {
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+            try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+                    try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: true, background: background)
                 }
-                return
             }
-            try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+        } else {
+            try upWorkspaceLocked(workspaceID: workspaceID, restartIfRunning: false, background: background)
         }
+    }
+
+    private func upWorkspaceLocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try upWorkspaceUnlocked(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: background)
+        }
+    }
+
+    /// Runs with the workspace lifecycle gate already held. The restart callers claim that gate before
+    /// entering the automation-service queue, so a busy lifecycle request cannot cancel an active run.
+    private func upWorkspaceUnlocked(workspaceID: String, restartIfRunning: Bool, background: Bool) throws {
+        let (_, workspace) = try resolveWorkspace(id: workspaceID)
+        try validateWorkspaceFocusNames(workspaceID: workspace.id)
+        let hasTrackedRuntime = try hasTrackedRuntimeIndicators(workspaceID: workspace.id)
+        if workspace.isRunning || hasTrackedRuntime {
+            if restartIfRunning {
+                try restartWorkspaceUnlocked(workspaceID: workspaceID, background: background)
+            } else {
+                // The setup recovery screen keeps ad hoc terminal access open while setup is pending,
+                // running, or failed, so a workspace can reach this branch (tracked runtime present)
+                // with setup never having succeeded. `launchWorkspaceUnlocked` runs this same sequence
+                // before touching any configured process; this branch has to run it too, or Start would
+                // launch configured processes into a worktree setup never finished, or silently report
+                // success on a workspace whose setup failed. Same call order and same lock as
+                // `launchWorkspaceUnlocked`: `withWorkspaceSetupLock` inside these calls is a separate
+                // gate keyed by workspace id, so running them under the already-held lifecycle lock does
+                // not deadlock (`launchWorkspaceUnlocked` already does exactly this from inside the same
+                // lifecycle lock in the other two branches below).
+                try triggerDeferredWorkspaceSetupIfNeeded(workspaceID: workspaceID)
+                try waitForWorkspaceSetupToComplete(workspaceID: workspaceID)
+                try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
+                try refreshProcessStatuses(workspaceID: workspaceID, ignoreStartupGracePeriod: true)
+                try restartExitedProcesses(workspaceID: workspaceID, background: background)
+                // Restarting exited rows above only revives processes that were already tracked. A
+                // workspace whose only runtime is ad hoc (an ad hoc terminal or a coding-agent session,
+                // issue #438) has no rows at all for its configured processes, so it needs its own step
+                // to launch those: the ones neither running nor exited.
+                try launchMissingConfiguredProcesses(workspaceID: workspaceID, background: background)
+                if try hasTrackedRuntimeIndicators(workspaceID: workspaceID) { try markWorkspaceRunningIfNeeded(workspaceID: workspaceID) }
+            }
+            return
+        }
+        try launchWorkspaceUnlocked(workspaceID: workspaceID, background: background)
     }
 
     /// - Parameter reservations: The panes a restart is holding for these launches, so each configured
@@ -996,16 +1075,28 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult public func stopWorkspace(workspaceID: String) throws -> WorkspaceStopOutcome {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
+        let outcome = LockedBox<WorkspaceStopOutcome?>(nil)
+        // See `restartWorkspace`: this guard and the gate claim must happen before queue-owned run state
+        // is changed, so a handoff or busy rejection preserves both automation execution and history.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+                outcome.set(try stopWorkspaceUnlocked(workspaceID: workspaceID))
+            }
+        }
+        guard let resolvedOutcome = outcome.get() else {
+            throw WorkspaceError.dependencyMissing(message: "Automation cancellation did not perform the workspace stop.")
+        }
+        return resolvedOutcome
     }
 
     /// - Parameter reservations: A restart's captured sessions, whose panes are closed as held for their
     ///   replacements rather than torn down. The stop records each hold through the reservations as it
     ///   sends it, so the restart releases exactly what went out. Nil for a plain stop, which is every
     ///   caller but the restart.
-    private func stopWorkspaceUnlocked(
-        workspaceID: String, waitForTerminalExit: Bool = true, reservations: ReplacedTerminalSessionReservations? = nil
-    ) throws -> WorkspaceStopOutcome {
+    func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true, reservations: ReplacedTerminalSessionReservations? = nil) throws
+        -> WorkspaceStopOutcome
+    {
         // Refuse a stop that races a daemon handoff before touching anything: the daemon's terminator
         // no-ops during handoff (sessions are quiesced and carried across the exec), so proceeding would
         // delete the workspace's rows while its terminals stay live. Rejecting here keeps both the
@@ -1102,8 +1193,11 @@ public final class WorkspaceOrchestrator {
     public func archiveWorkspace(workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false) throws
         -> WorkspaceArchiveOutcome
     {
-        try withProjectAndWorkspaceLifecycleLocks(workspaceID: workspaceID) {
-            try archiveWorkspaceUnlocked(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
+        let projectID = try resolveWorkspace(id: workspaceID).0.id
+        return try withProjectLifecycleLock(projectID: projectID) {
+            return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+                try archiveWorkspaceUnlocked(workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
+            }
         }
     }
 
@@ -1119,6 +1213,10 @@ public final class WorkspaceOrchestrator {
         // Branch deletion reads the record's branch, so it happens before the record is gone.
         let notice = try branchDeletionNotice(
             project: project, workspace: workspace, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
+        // Validation, lifecycle admission, worktree removal, and branch handling have all completed.
+        // Automation deletion is irreversible, so a failed git removal leaves the workspace and its Runs
+        // history intact; it still runs before the workspace record's cascading database deletion.
+        try deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID)
         try deleteWorkspaceRecord(workspace)
         return WorkspaceArchiveOutcome(notice: notice)
     }
@@ -1433,6 +1531,20 @@ public final class WorkspaceOrchestrator {
             return try launchWorkspaceCommandSession(
                 project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(trimmedCommand), kind: .agent,
                 defaultTitle: defaultTitle, automationRunID: automationRunID)
+        }
+    }
+
+    /// Creates a workspace-bound automation command session. It uses the same environment, runtime target,
+    /// and workspace-running machinery as an ordinary workspace terminal while retaining the automation run
+    /// attribution needed for Runs-tab replay.
+    @discardableResult public func createWorkspaceAutomationSession(workspaceID: String, runID: String, title: String, command: String) throws
+        -> TerminalServiceSessionSummary
+    {
+        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            return try launchWorkspaceCommandSession(
+                project: project, workspace: workspace, title: title, shellCommand: interactiveLoginShellCommand(command), kind: .automation,
+                defaultTitle: title, automationRunID: runID)
         }
     }
 

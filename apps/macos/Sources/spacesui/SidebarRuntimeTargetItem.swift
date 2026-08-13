@@ -163,9 +163,9 @@ extension AppKitController {
                     device: device, clientApp: clientApp)
             }
         case .agent:
-            guard let agentID = item.agentID else { return }
+            guard let sessionID = item.sessionID else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
-                try SpacesDeviceClient.stopCodingAgent(workspaceID: workspaceID, agentID: agentID, device: device, clientApp: clientApp)
+                try SpacesDeviceClient.stopWorkspaceTerminal(workspaceID: workspaceID, sessionID: sessionID, device: device, clientApp: clientApp)
             }
         case .window:
             guard let sessionID = item.sessionID else { return }

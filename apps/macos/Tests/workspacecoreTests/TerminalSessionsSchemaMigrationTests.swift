@@ -12,8 +12,8 @@ import spacesdatabase
 /// database that first climbs every intermediate migration): the `terminal_sessions` rebuild that makes
 /// `workspace_id` optional and adds `automation_run_id`, plus the new `automations`/`automation_runs`
 /// tables. Asserts every existing terminal-session row is carried forward untouched (workspace_id
-/// intact, new column NULL), the unique `root_directory` constraint survives the rebuild, and a
-/// workspace-less session can now be written.
+/// intact, new column NULL), the unique `root_directory` constraint survives the rebuild, and generic
+/// workspace-less session persistence remains supported.
 final class TerminalSessionsSchemaMigrationTests: XCTestCase {
     func testMigrationFromV7PreservesTerminalSessionsAndAddsAutomationSurface() throws {
         let dir = try makeTempDirectory()
@@ -50,16 +50,15 @@ final class TerminalSessionsSchemaMigrationTests: XCTestCase {
                     VALUES ('dup', '/root/full', 'ghosttyEmbedded', 'persistent', 'ws-9', 'shell', 'Dup', '/root/full', '/bin/zsh', NULL, 'now')
                     """))
 
-        // workspace_id is now nullable: a workspace-less session (e.g. an automation run) can be written.
+        // workspace_id is nullable for generic workspace-less terminal persistence.
         try database.execute(
             sql: """
                 INSERT INTO terminal_sessions(session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title,
-                  working_directory, shell, command, created_at, automation_run_id)
-                VALUES ('session-automation', '/root/automation', 'ghosttyEmbedded', 'persistent', NULL, 'automation', 'Nightly',
-                  '/root/automation', '/bin/zsh', 'backup.sh', 'now', 'run-1')
+                  working_directory, shell, command, created_at)
+                VALUES ('session-workspace-less', '/root/workspace-less', 'ghosttyEmbedded', 'persistent', NULL, 'shell', 'Detached',
+                  '/root/workspace-less', '/bin/zsh', 'echo detached', 'now')
                 """)
-        XCTAssertEqual(try scalar(database, "SELECT workspace_id IS NULL FROM terminal_sessions WHERE session_id = 'session-automation'"), "1")
-        XCTAssertEqual(try scalar(database, "SELECT automation_run_id FROM terminal_sessions WHERE session_id = 'session-automation'"), "run-1")
+        XCTAssertEqual(try scalar(database, "SELECT workspace_id IS NULL FROM terminal_sessions WHERE session_id = 'session-workspace-less'"), "1")
     }
 
     private func scalar(_ database: SpacesSQLiteDatabase, _ sql: String) throws -> String? { try database.queryRow(sql: sql)?.first }

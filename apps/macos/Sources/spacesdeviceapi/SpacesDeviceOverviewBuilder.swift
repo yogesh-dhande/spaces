@@ -131,7 +131,7 @@ struct SpacesDeviceOverviewBuilder {
             }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }.compactMap { session -> SpacesDeviceTerminalSessionSummary? in
-            // Workspace-less sessions (e.g. automation runs) are not workspace-owned and stay invisible
+            // Workspace-less sessions are not workspace-owned and stay invisible
             // in the workspace-scoped overview; only sessions with a workspace id produce a summary.
             guard let workspaceID = session.workspaceID else { return nil }
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
@@ -163,9 +163,9 @@ struct SpacesDeviceOverviewBuilder {
     ///
     /// `automationAttributedSessionIDs` covers the automation-run arm of that rule, which no workspace
     /// descriptor can supply: an automation run's terminals are replayable from the Runs tab until the run is
-    /// pruned, and a script run's terminal is workspace-less while an ended agent run's agent row is already
-    /// finalized away, so neither would otherwise appear here and the client would close the replay pane on
-    /// the next overview. It is read from the store rather than derived from `automationRuns` so the keep-set
+    /// pruned. An exited automation terminal has already shed its live runtime target, so it would not
+    /// otherwise appear here and the client would close the replay pane on the next overview. This is read
+    /// from the store rather than derived from `automationRuns` so the keep-set
     /// covers every retained run, not just the ones inside the overview's bounded run window.
     private static func retainedTerminalSessionIDs(
         liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor], automationAttributedSessionIDs: [String]

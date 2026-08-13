@@ -8,7 +8,7 @@ import workspacecore
 /// Owns the create/edit automation form window. `AppKitController` holds one instance; the unowned `host`
 /// gives access to the shared form-window chrome and device services. A type toggle switches between an
 /// **Agent** automation (spawn a coding agent in a workspace, seeded with a prompt — the default for a new
-/// automation) and a **Script** automation (a shell script in a working directory); the shared name/device/
+/// automation) and a **Script** automation (a shell script at its selected workspace root); the shared name/device/
 /// trigger/schedule/timeout/concurrency fields apply to both. The cron schedule builder serializes to a cron
 /// string via `AutomationSchedulePreset` — the string is the only stored form — and shows a live next-3-runs
 /// preview plus inline parse validation. The device is chosen only at create time; an automation lives on its
@@ -50,7 +50,6 @@ import workspacecore
     private var agentCommandField: NSTextField?
     private var agentPromptTextView: NSTextView?
     private var scriptTextView: NSTextView?
-    private var workingDirectoryField: NSTextField?
     private var triggerSegmented: NSSegmentedControl?
     private var cronModeSegmented: NSSegmentedControl?
     private var presetKindPopUp: NSPopUpButton?
@@ -81,7 +80,6 @@ import workspacecore
     private var agentCommandRow: NSView?
     private var agentPromptRow: NSView?
     private var scriptRow: NSView?
-    private var workingDirectoryRow: NSView?
 
     // Rows whose visibility depends on trigger/mode/preset selection.
     private var cronSectionRows: [NSView] = []
@@ -143,7 +141,7 @@ import workspacecore
 
         addRow(host.settingsLabeledField(name: "Type", hint: "", control: makeKindControl(seed: seed)), to: stack)
 
-        // Agent-kind rows.
+        // Workspace is shared by both automation kinds.
         let workspaceRow = host.settingsLabeledField(name: "Workspace", hint: "", control: makeWorkspacePopUp(seed: seed))
         addRow(workspaceRow, to: stack)
         self.workspaceRow = workspaceRow
@@ -161,9 +159,6 @@ import workspacecore
         let scriptRow = host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed))
         addRow(scriptRow, to: stack)
         self.scriptRow = scriptRow
-        let workingDirectoryRow = host.settingsLabeledField(name: "Working directory", hint: "", control: makeWorkingDirectoryControl(seed: seed))
-        addRow(workingDirectoryRow, to: stack)
-        self.workingDirectoryRow = workingDirectoryRow
 
         addRow(host.settingsLabeledField(name: "Trigger", hint: "", control: makeTriggerControl(seed: seed)), to: stack)
         appendCronSection(to: stack, seed: seed)
@@ -283,25 +278,6 @@ import workspacecore
         textView.autoresizingMask = [.width]
         scriptTextView = textView
         return host.scrollableTextView(textView, height: 72)
-    }
-
-    private func makeWorkingDirectoryControl(seed: TerminalServiceAutomationSummary?) -> NSView {
-        let field = NSTextField(string: seed?.workingDirectory ?? "")
-        field.placeholderString = "/path/to/project"
-        field.font = Typography.body
-        workingDirectoryField = field
-        // The Browse folder picker is only meaningful for the local device — a remote path can't be resolved
-        // from this Mac's file system — so it is offered for local automations only.
-        guard isLocalDevice else { return field }
-        let browse = host.actionButton(
-            title: "Browse…", symbol: "folder", tooltip: "Choose a folder", action: #selector(browseTapped), primary: false)
-        browse.target = self
-        let row = NSStackView(views: [field, browse])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        return row
     }
 
     private func makeTriggerControl(seed: TerminalServiceAutomationSummary?) -> NSView {
@@ -555,16 +531,15 @@ import workspacecore
     /// Shows the agent form or the script form for the current kind. Shared fields stay visible for both.
     private func applyKindVisibility() {
         let isAgent = currentKind == .agent
-        workspaceRow?.isHidden = !isAgent
+        workspaceRow?.isHidden = false
         agentCommandRow?.isHidden = !isAgent
         agentPromptRow?.isHidden = !isAgent
         scriptRow?.isHidden = isAgent
-        workingDirectoryRow?.isHidden = isAgent
     }
 
     /// Prefills the script editor with the CLI equivalent of the current agent form when switching
     /// Agent → Script — but only when the editor is empty or still holds a previous auto-prefill, so
-    /// script the user typed themselves is never clobbered. The working directory is left for the user to fill.
+    /// script the user typed themselves is never clobbered.
     private func prefillScriptFromAgentIfAppropriate() {
         let current = scriptTextView?.string ?? ""
         guard current.isEmpty || current == lastGeneratedScriptPrefill else { return }
@@ -670,8 +645,7 @@ import workspacecore
         guard newDeviceID != deviceID else { return }
         deviceID = newDeviceID
         isLocalDevice = deviceInputs.first(where: { $0.deviceID == deviceID })?.isLocal ?? false
-        // Re-present so the workspace list (agent form) and the working-directory Browse button (local only)
-        // match the newly selected device.
+        // Re-present so the workspace picker matches the newly selected device.
         rebuildPreservingValues()
     }
 
@@ -703,16 +677,6 @@ import workspacecore
 
     /// Live-updates the schedule preview as the user types in an integer or advanced-cron field.
     func controlTextDidChange(_ obj: Notification) { updatePreview() }
-
-    @objc private func browseTapped() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        if let current = workingDirectoryField?.stringValue, !current.isEmpty { panel.directoryURL = URL(fileURLWithPath: current) }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        workingDirectoryField?.stringValue = url.path
-    }
 
     @objc private func cancelTapped() { window?.performClose(nil) }
 
@@ -796,8 +760,7 @@ import workspacecore
             name: nameField?.stringValue ?? "", kind: currentKind, enabled: currentEnabled(), triggerKind: triggerKind,
             cronExpression: cronExpression, workspaceID: workspacePopUp?.selectedItem?.representedObject as? String,
             agentCommand: agentCommandField?.stringValue ?? "", agentPrompt: agentPromptTextView?.string ?? "", script: scriptTextView?.string ?? "",
-            workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
-            missedRunPolicy: missed)
+            timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missed)
         switch result {
         case .success(let fields):
             errorLabel?.isHidden = true
@@ -839,7 +802,7 @@ import workspacecore
             triggerKind: (isCron ? AutomationTriggerKind.cron : .manual).rawValue,
             cronExpression: isCron ? (try? currentPreset())?.cronExpression : nil, kind: currentKind.rawValue, script: scriptTextView?.string ?? "",
             agentCommand: agentCommandField?.stringValue, agentPrompt: agentPromptTextView?.string,
-            workspaceID: workspacePopUp?.selectedItem?.representedObject as? String, workingDirectory: workingDirectoryField?.stringValue ?? "",
+            workspaceID: (workspacePopUp?.selectedItem?.representedObject as? String) ?? "",
             timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
             concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue,
             missedRunPolicy: (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue,

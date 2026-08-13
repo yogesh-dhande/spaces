@@ -181,7 +181,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .projectList, .terminalList, .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
-            .workspaceRestart(workspaceID: "workspace-1"),
+            .workspaceStop(workspaceID: "workspace-1"), .workspaceRestart(workspaceID: "workspace-1"),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),

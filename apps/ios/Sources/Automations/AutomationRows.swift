@@ -113,13 +113,11 @@ enum SpacesMobileAutomations {
         return ""
     }
 
-    /// The display name of an `agent`-kind automation's target workspace, resolved from the overview
-    /// already on hand — nil if the automation has no workspace (a `script`-kind automation) or the
-    /// workspace is not in the current overview (e.g. archived/hidden and filtered out upstream). Never
-    /// triggers a separate fetch; a workspace that cannot be resolved this way is simply omitted.
+    /// The display name of an automation's target workspace, resolved from the overview already on hand.
+    /// A workspace absent from the current overview (for example, hidden and filtered out upstream) is
+    /// simply omitted; this never triggers a separate fetch.
     static func workspaceName(for automation: TerminalServiceAutomationSummary, in workspaces: [SpacesDeviceWorkspaceSummary]) -> String? {
-        guard let workspaceID = automation.workspaceID else { return nil }
-        return workspaces.first(where: { $0.id == workspaceID })?.displayName
+        workspaces.first(where: { $0.id == automation.workspaceID })?.displayName
     }
 
     /// Whether a run's still-live attributed coding agents should offer "End agents": only once the run

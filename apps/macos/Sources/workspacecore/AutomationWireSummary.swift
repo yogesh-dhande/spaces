@@ -11,9 +11,8 @@ extension TerminalServiceAutomationSummary {
             id: automation.id, name: automation.name, enabled: automation.enabled, triggerKind: automation.triggerKind.rawValue,
             cronExpression: automation.cronExpression, kind: automation.kind.rawValue, script: automation.script,
             agentCommand: automation.agentCommand, agentPrompt: automation.agentPrompt, workspaceID: automation.workspaceID,
-            workingDirectory: automation.workingDirectory, timeoutSeconds: automation.timeoutSeconds,
-            concurrencyPolicy: automation.concurrencyPolicy.rawValue, missedRunPolicy: automation.missedRunPolicy.rawValue,
-            nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.string(from:)),
+            timeoutSeconds: automation.timeoutSeconds, concurrencyPolicy: automation.concurrencyPolicy.rawValue,
+            missedRunPolicy: automation.missedRunPolicy.rawValue, nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.string(from:)),
             createdAt: TerminalSessionTimestamp.string(from: automation.createdAt),
             updatedAt: TerminalSessionTimestamp.string(from: automation.updatedAt))
     }
@@ -23,12 +22,15 @@ extension TerminalServiceAutomationRunSummary {
     /// `automationName` is denormalized in by the caller (from the run's automation lookup, when it still
     /// exists); `attributedAgents` is the run's coding-agent breakdown, which the caller builds once for the
     /// whole listing (see `AutomationAttributedAgents`).
-    public init(_ run: AutomationRun, automationName: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []) {
+    public init(
+        _ run: AutomationRun, automationName: String?, workspaceID: String? = nil, attributedAgents: [TerminalServiceAutomationAgentSummary] = []
+    ) {
         self.init(
             id: run.id, automationID: run.automationID, automationName: automationName, kind: run.kind.rawValue, status: run.status.rawValue,
             trigger: run.trigger.rawValue, skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
-            startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)), endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
-            createdAt: TerminalSessionTimestamp.string(from: run.createdAt), attributedAgents: attributedAgents)
+            workspaceID: workspaceID, startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
+            endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)), createdAt: TerminalSessionTimestamp.string(from: run.createdAt),
+            attributedAgents: attributedAgents)
     }
 }
 

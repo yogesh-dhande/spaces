@@ -98,8 +98,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let countsTowardBadge: Bool
         let eventDate: Date?
         let focusRequest: WindowFocusRequest?
-        /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab (a
-        /// workspace-less run has no `WindowFocusRequest` window to focus), so `focusRequest` stays nil.
+        /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab rather than
+        /// focusing the workspace runtime target, which may already be detached, so `focusRequest` stays nil.
         let automationRunTarget: AutomationRunAlertTarget?
 
         init(
@@ -2387,10 +2387,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// their row kind, and process/agent rows identify configured workspace sessions.
     /// Automation runs are also consulted before falling back to `.shell`: a run's own
     /// command session resolves to `.automation` and any coding agent it spawned resolves
-    /// to `.agent`. Those sessions are workspace-less and never appear in
-    /// `overview.sessions`, so without this they would fall through to `.shell` and the
-    /// ad-hoc cleanup would reap a live scheduled command (or automation-spawned agent)
-    /// when its pane closes.
+    /// to `.agent`. This keeps retained sessions correctly typed after their live workspace
+    /// runtime target leaves the overview.
     nonisolated static func terminalSessionKind(sessionID: String, overviews: [SpacesDeviceOverviewPayload]) -> TerminalSessionKind {
         for overview in overviews {
             if let session = overview.sessions.first(where: { $0.id == sessionID }) { return terminalSessionKind(rowKind: session.rowKind) }
@@ -3230,9 +3228,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
                     workspaceBranch: workspace.branch, items: items))
         }
-        // Failed/timed-out automation runs draw attention too. Automation runs are workspace-less, so they
-        // form their own synthetic group ("Automations / <device>") whose cards deep-link to the Runs tab
-        // instead of focusing a workspace window.
+        // Failed/timed-out automation runs form their own synthetic group ("Automations / <device>") whose
+        // cards deep-link to the Runs tab instead of focusing a live workspace target that may be detached.
         let automationEntries = AutomationsViewModel.alertEntries(deviceID: deviceID, deviceName: deviceName, runs: overview.automationRuns)
         if !automationEntries.isEmpty {
             let items = automationEntries.map { entry in
@@ -4134,36 +4131,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// once its runs are terminal, but a retained historical run keeps the session shape it actually ran with,
     /// so a script run whose automation later became Agent must still open as a script pane (and vice versa).
     ///
-    /// A `script`-kind run's session is workspace-less and deliberately excluded from the overview's
-    /// `sessions`, so its request is synthesized as a `.automation` pane. The seeded shell is display
-    /// metadata only — the pane attaches to the daemon's existing session and streams its real render — so
-    /// the user's login shell is a faithful label locally and a reasonable one remotely.
-    ///
-    /// An `agent`-kind run's session IS a real workspace agent session, so while it is live the overview
-    /// carries it and `deviceTerminalOpenRequest` resolves its true workspace/kind/command/shell (which is
-    /// what makes pane dedup and correct labeling work). An ENDED agent session is absent from the overview
-    /// (the overview lists live sessions, and the run's agent row is finalized away by the next run's sweep),
-    /// so the fallback synthesizes the request the same way the script branch does, seeding the automation's
-    /// workspace, working directory, agent command, and the login shell so the pane has display metadata to
-    /// label the replay with. Metadata (name, script, workspace) still comes from the automation when it
-    /// exists, with the same nil-automation fallbacks for a deleted automation.
+    /// Automation sessions are workspace-bound. A live one resolves its complete persisted metadata from the
+    /// overview; an ended replay uses the selected workspace and stored command metadata.
     nonisolated static func automationRunTerminalOpenRequest(
         deviceID: String, sessionID: String, run: TerminalServiceAutomationRunSummary, automation: TerminalServiceAutomationSummary?,
         overview: SpacesDeviceOverviewPayload?, loginShell: String
-    ) -> DeviceTerminalOpenRequest {
+    ) -> DeviceTerminalOpenRequest? {
         let initialState: TerminalSessionState = AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited
-        guard run.kind == AutomationKind.agent.rawValue else {
-            return DeviceTerminalOpenRequest(
-                workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
-                workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.script,
-                initialState: initialState)
-        }
-        let workspaceID = automation?.workspaceID ?? ""
+        // A retained run reopens in the workspace its terminal session was launched from. The automation
+        // can later be edited to target another workspace, which must not move historical replay.
+        guard let workspaceID = run.workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !workspaceID.isEmpty else { return nil }
         guard let resolved = deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview) else {
             return DeviceTerminalOpenRequest(
-                workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
-                workingDirectory: automation?.workingDirectory ?? "", kind: .agent, shell: loginShell, command: automation?.agentCommand,
-                initialState: initialState)
+                workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation", workingDirectory: "",
+                kind: run.kind == AutomationKind.agent.rawValue ? .agent : .automation, shell: loginShell,
+                command: run.kind == AutomationKind.agent.rawValue ? automation?.agentCommand : automation?.script, initialState: initialState)
         }
         return DeviceTerminalOpenRequest(
             workspaceID: resolved.workspaceID, deviceID: deviceID, sessionID: sessionID, title: resolved.title,
@@ -4476,11 +4458,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     // MARK: - Automations
 
-    @objc func automationsRowClicked() {
-        sidebar.toggleAutomationsExpanded()
-        automations.showAutomationsDetail()
-    }
-    @objc func toggleAutomationsSidebarDisclosure() { sidebar.toggleAutomationsExpanded() }
+    @objc func automationsRowClicked() { automations.showAutomationsDetail() }
     func showAutomationsDetail() { automations.showAutomationsDetail() }
     func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
 
@@ -4516,20 +4494,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         TerminalServiceAutomationFields(
             name: summary.name, enabled: enabled ?? summary.enabled, triggerKind: summary.triggerKind, cronExpression: summary.cronExpression,
             kind: summary.kind, script: summary.script, agentCommand: summary.agentCommand, agentPrompt: summary.agentPrompt,
-            workspaceID: summary.workspaceID, workingDirectory: summary.workingDirectory, timeoutSeconds: summary.timeoutSeconds,
-            concurrencyPolicy: summary.concurrencyPolicy, missedRunPolicy: summary.missedRunPolicy)
+            workspaceID: summary.workspaceID, timeoutSeconds: summary.timeoutSeconds, concurrencyPolicy: summary.concurrencyPolicy,
+            missedRunPolicy: summary.missedRunPolicy)
     }
 
-    /// Opens an automation run's terminal in a standalone panel window: a live pane for a running run, or the
-    /// read-only transcript replay for an ended one (the pane shows its read-only banner once the ended
-    /// session's final render lands).
-    ///
-    /// A `script`-kind run's session is workspace-less and deliberately excluded from the workspace-scoped
-    /// overview's `sessions`, so its request is synthesized as a `.automation` pane. A LIVE `agent`-kind
-    /// run's session is a real workspace agent session present in the overview, so it resolves its true
-    /// workspace/kind/command identity from that overview instead (see `automationRunTerminalOpenRequest`),
-    /// which is what keeps pane dedup and labeling correct. An ended one is synthesized the same way the
-    /// script branch is.
+    /// Opens or focuses an automation run's workspace pane: a live pane for a running run, or the read-only
+    /// transcript replay for an ended one. Live metadata resolves from the overview; replay uses the run
+    /// summary's persisted original workspace so retargeting an automation never moves its history.
     func openAutomationRunTerminal(deviceID: String, run: TerminalServiceAutomationRunSummary) {
         guard let sessionID = run.terminalSessionID else {
             showError(Self.terminalSessionNotFoundError())
@@ -4537,22 +4508,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let automation = automationSummary(deviceID: deviceID, automationID: run.automationID)
         let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let request = Self.automationRunTerminalOpenRequest(
-            deviceID: deviceID, sessionID: sessionID, run: run, automation: automation, overview: deviceSection(id: deviceID)?.overview,
-            loginShell: loginShell)
-        panelCoordinator.moveSessionToNewPanelWindow(request)
+        guard
+            let request = Self.automationRunTerminalOpenRequest(
+                deviceID: deviceID, sessionID: sessionID, run: run, automation: automation, overview: deviceSection(id: deviceID)?.overview,
+                loginShell: loginShell)
+        else {
+            showError(Self.terminalSessionNotFoundError())
+            return
+        }
+        _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
     }
 
     /// Opens an automation run's attributed coding-agent terminal session, device-qualified so a remote run's
     /// agent resolves on its own device. The agent runs in a workspace, so the request is resolved from that
     /// device's overview when the session is present (for the real shell/command/state) and synthesized
-    /// otherwise; it opens in a standalone panel window like the run's own terminal, since the Automations
-    /// pane has no workspace pane to host it.
-    ///
-    /// The synthesized fallback is the ENDED agent's path (an ended session leaves the overview), and it
-    /// seeds the login shell for the same reason the run's own request does: a panel window opens with no
-    /// cold-resolution step, so a request with no shell and no overview summary has no launch configuration
-    /// to build the pane from and the replay would fail to open.
+    /// otherwise. It opens or focuses a normal pane in the persisted workspace, matching the run's own
+    /// terminal behavior.
     func openAutomationAgentSession(deviceID: String, agent: TerminalServiceAutomationAgentSummary) {
         let workspaceID = agent.workspaceID ?? ""
         let overview = deviceSection(id: deviceID)?.overview
@@ -4564,7 +4535,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             shell: resolved?.shell ?? loginShell, command: resolved?.command,
             initialState: resolved?.initialState ?? (agent.live ? .running : .exited), servicePID: resolved?.servicePID, childPID: resolved?.childPID,
             createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
-        panelCoordinator.moveSessionToNewPanelWindow(request)
+        _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
     }
 
     /// One workspace the editor's Agent form can target, sourced from the sidebar's loaded overview model.
@@ -5478,7 +5449,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// switching away from a workspace also clears the workspace-only titlebar tab strip, and the user
     /// navigating to different content dismisses the free-standing add/settings form windows.
     func presentDetailPane(_ pane: DetailPane, presentation: DetailPanePresentation = .backgroundRefresh) {
-        if !pane.isAutomations { sidebar.collapseTransientAutomationsExpansion() }
         if Self.detailPanePresentationDismissesFormWindows(current: detailPane, presented: pane, presentation: presentation) {
             clearActiveAddFormStateAndCloseWindows()
         }
@@ -10790,20 +10760,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         if let hiddenWorkspaceID = hiddenWorkspaceIDs.first { return .workspace(hiddenWorkspaceID) }
         return nil
-    }
-
-    /// Automation children follow workspace keyboard-preview semantics: entering the row expands a
-    /// collapsed list transiently, leaving collapses only that transient expansion, and a mouse-pinned
-    /// expansion survives keyboard navigation.
-    nonisolated static func sidebarAutomationExpansionAfterSelection(
-        isExpanded: Bool, wasExpandedByKeyboard: Bool, selectingAutomations: Bool, canExpand: Bool
-    ) -> (isExpanded: Bool, wasExpandedByKeyboard: Bool) {
-        if selectingAutomations {
-            guard canExpand, !isExpanded else { return (isExpanded, wasExpandedByKeyboard) }
-            return (true, true)
-        }
-        if wasExpandedByKeyboard { return (false, false) }
-        return (isExpanded, false)
     }
 
     private func handleGlobalHotkey(id: UInt32) {

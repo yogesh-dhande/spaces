@@ -64,6 +64,17 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Destroys an automation-attributed terminal while its workspace lifecycle gate is already held by
+    /// workspace/project teardown. This deliberately performs the same terminal-window, agent-row, and
+    /// subscriber cleanup as the public stop paths without trying to claim the gate a second time.
+    /// Automation deletion supplies only sessions stamped with its run id; callers must therefore never
+    /// use this as a general terminal-stop shortcut.
+    func terminateAutomationTerminalSessionDuringWorkspaceTeardown(sessionID: String) throws {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
+        terminateBuiltInTerminalSession(sessionID)
+        try removeAutomationTerminalSessionRuntimeTargetDuringWorkspaceTeardown(sessionID: sessionID)
+    }
+
     @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
@@ -474,7 +485,7 @@ extension WorkspaceOrchestrator {
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
         switch terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind {
         case .agent: return true
-        // An automation session is workspace-less and never a workspace's configured coding agent.
+        // An automation session is never a workspace's configured coding agent.
         case .shell, .process, .automation: return false
         case nil: return ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
         }
@@ -663,7 +674,7 @@ extension WorkspaceOrchestrator {
         if ownership.process != nil { return true }
         switch ownership.launchKind {
         case .process, .agent: return true
-        // An automation session is workspace-less, so it is never a workspace's configured owner.
+        // An automation session is never a workspace's configured owner.
         case .shell, .automation: return false
         case nil: return false
         }

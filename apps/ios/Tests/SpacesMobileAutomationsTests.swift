@@ -187,7 +187,7 @@
             let workspaces = [makeWorkspace(id: "workspace-1", branch: "feature/x")]
             let agentAutomation = makeAutomation(kind: "agent", workspaceID: "workspace-1")
             let unresolvableAutomation = makeAutomation(kind: "agent", workspaceID: "workspace-missing")
-            let scriptAutomation = makeAutomation(kind: "script", workspaceID: nil)
+            let scriptAutomation = makeAutomation(kind: "script", workspaceID: "workspace-missing")
 
             XCTAssertEqual(SpacesMobileAutomations.workspaceName(for: agentAutomation, in: workspaces), "feature/x")
             XCTAssertNil(SpacesMobileAutomations.workspaceName(for: unresolvableAutomation, in: workspaces))
@@ -444,12 +444,12 @@
         private func makeAutomation(
             id: String = "automation-a", name: String = "Automation", enabled: Bool = true, triggerKind: String = "manual",
             cronExpression: String? = nil, kind: String = "script", script: String = "echo hi", agentPrompt: String? = nil,
-            workspaceID: String? = nil, nextFireTime: String? = nil
+            workspaceID: String = "workspace-1", nextFireTime: String? = nil
         ) -> TerminalServiceAutomationSummary {
             TerminalServiceAutomationSummary(
                 id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
-                agentPrompt: agentPrompt, workspaceID: workspaceID, workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "skip",
-                missedRunPolicy: "skip", nextFireTime: nextFireTime, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
+                agentPrompt: agentPrompt, workspaceID: workspaceID, timeoutSeconds: nil, concurrencyPolicy: "skip", missedRunPolicy: "skip",
+                nextFireTime: nextFireTime, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
         }
 
         private func makeRun(

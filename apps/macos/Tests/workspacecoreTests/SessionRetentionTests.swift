@@ -219,7 +219,8 @@ final class SessionRetentionTests: XCTestCase {
 
     /// An automation run listed in the Runs tab offers its terminal for read-only replay, so a session
     /// stamped with that run's id must read as referenced for as long as the run row exists, even with no
-    /// process, agent, or window row of its own, which is exactly a script run's workspace-less session.
+    /// process, agent, or window row of its own, which is exactly an exited automation session after its live
+    /// workspace runtime target is detached.
     /// Deleting the run (retention pruning, or automation deletion) is what makes it collectable.
     func testRunAttributedSessionIsReferencedUntilItsRunRowIsDeleted() throws {
         let store = try makeTemporaryStore()
@@ -275,15 +276,49 @@ final class SessionRetentionTests: XCTestCase {
         XCTAssertTrue(try store.terminalSessionIDsAttributedToExistingAutomationRuns().isEmpty)
     }
 
+    /// An agent child inherits the automation-run attribution but is not the run's terminal. Replay must
+    /// use the exact session named by `automation_runs.terminal_session_id`, not the first attributed
+    /// session in another workspace.
+    func testAutomationRunWorkspaceMappingUsesItsOwnTerminalRatherThanAnEarlierAttributedChild() throws {
+        let store = try makeTemporaryStore()
+        let (_, ownWorkspace) = try makeProjectAndWorkspace(store: store)
+        let (_, childWorkspace) = try makeProjectAndWorkspace(store: store)
+        let automation = Automation(
+            id: "automation-workspace", name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: ownWorkspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-workspace", automationID: automation.id, kind: .script, status: .succeeded, skipReason: nil, trigger: .manual, exitCode: 0,
+            terminalSessionID: "own-terminal", startedAt: Date(), endedAt: Date(), createdAt: Date())
+        try store.insertAutomationRun(run)
+
+        let childPaths = try TerminalSessionPaths.forSession(id: "child-terminal")
+        try childPaths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "child-terminal", title: "Child", workingDirectory: childWorkspace.dir, shell: "/bin/zsh", command: "codex",
+                createdAt: "2026-01-01T00:00:00Z", workspaceID: childWorkspace.id, kind: .agent, automationRunID: run.id), paths: childPaths)
+        let ownPaths = try TerminalSessionPaths.forSession(id: "own-terminal")
+        try ownPaths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "own-terminal", title: "Nightly", workingDirectory: ownWorkspace.dir, shell: "/bin/zsh", command: "true",
+                createdAt: "2026-01-02T00:00:00Z", workspaceID: ownWorkspace.id, kind: .automation, automationRunID: run.id), paths: ownPaths)
+
+        XCTAssertEqual(try store.workspaceID(automationRunID: run.id), ownWorkspace.id)
+        XCTAssertEqual(try store.workspaceIDs(automationRunIDs: [run.id, "missing-run"]), [run.id: ownWorkspace.id])
+    }
+
     // MARK: - Fixtures
 
-    /// A terminal run with one workspace-less `.automation` terminal session stamped to it: the shape a
+    /// A terminal run with one workspace-bound `.automation` terminal session stamped to it: the shape a
     /// finished script run leaves behind, with no process, agent, or window row referencing the session.
     @discardableResult private func seedAutomationRunWithAttributedSession(store: SQLiteStore, sessionID: String) throws -> AutomationRun {
         let automation = Automation(
             id: UUID().uuidString, name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
-            workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: Date(),
-            updatedAt: Date())
+            workspaceID: "workspace-1", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
         try store.upsertAutomation(automation)
         let run = AutomationRun(
             id: UUID().uuidString, automationID: automation.id, kind: .script, status: .succeeded, skipReason: nil, trigger: .manual, exitCode: 0,
@@ -294,7 +329,7 @@ final class SessionRetentionTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: "Nightly", workingDirectory: "/tmp", shell: "/bin/zsh", command: "true",
-                createdAt: "2026-06-06T00:00:00Z", workspaceID: nil, kind: .automation, automationRunID: run.id), paths: paths)
+                createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .automation, automationRunID: run.id), paths: paths)
         return run
     }
 

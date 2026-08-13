@@ -494,6 +494,16 @@ extension OrchestratorTests {
         let project = try holder.addProject(dir: repo.path)
         let busyWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-busy")
         let otherWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-other")
+        let automation = Automation(
+            id: "project-busy-automation", name: "Project busy", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "true", workspaceID: otherWorkspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce,
+            nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let service = AutomationService(store: store, orchestrator: contender, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown {
+            try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: $0)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
         let workspaceCountBeforeDelete = try store.workspaces(projectID: project.id).count
 
         let lockHeld = expectation(description: "a workspace action is in flight")
@@ -513,6 +523,7 @@ extension OrchestratorTests {
         XCTAssertNotNil(try store.project(id: project.id), "the project survives a rejected delete")
         XCTAssertEqual(try store.workspaces(projectID: project.id).count, workspaceCountBeforeDelete, "no workspace record is dropped")
         XCTAssertTrue(FileManager.default.fileExists(atPath: otherWorkspace.dir), "no worktree is removed by a rejected delete")
+        XCTAssertNotNil(try store.automation(id: automation.id), "a rejected project delete keeps targeting automations")
     }
 
     /// A workspace created while its project is being deleted would outlive the project as an orphan, and

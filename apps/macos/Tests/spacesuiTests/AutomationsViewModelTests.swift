@@ -12,8 +12,8 @@ struct AutomationsViewModelTests {
         kind: String = AutomationKind.script.rawValue, nextFireTime: String? = nil
     ) -> TerminalServiceAutomationSummary {
         TerminalServiceAutomationSummary(
-            id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cron, kind: kind, script: "echo hi",
-            workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nextFireTime,
+            id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cron, kind: kind, script: "echo hi", workspaceID: "ws-1",
+            timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nextFireTime,
             createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
     }
 
@@ -85,6 +85,29 @@ struct AutomationsViewModelTests {
         #expect(AutomationsViewModel.mergedRuns(from: inputs).map(\.run.id) == ["r-new", "r-mid", "r-old"])
     }
 
+    @Test func runningSidebarBadgeExcludesUnreachableDeviceSnapshots() {
+        let inputs = [
+            AutomationDeviceInput(
+                deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
+                runs: [
+                    run(
+                        id: "live-local", automationID: "a", name: "A", status: "running", startedAt: "2026-08-05T09:00:00Z",
+                        createdAt: "2026-08-05T09:00:00Z")
+                ]),
+            // An offline device can retain its last overview in memory, but that snapshot cannot report
+            // current live activity and must not inflate the sidebar badge.
+            AutomationDeviceInput(
+                deviceID: "offline", deviceName: "Offline Mac", isLocal: false, isReachable: false, offlineMessage: "unreachable",
+                runs: [
+                    run(
+                        id: "stale-live", automationID: "b", name: "B", status: "running", startedAt: "2026-08-05T10:00:00Z",
+                        createdAt: "2026-08-05T10:00:00Z")
+                ]),
+        ]
+
+        #expect(AutomationsViewModel.runningRunCount(from: inputs) == 1)
+    }
+
     @Test func queuedRunSortsByCreationWhenNotStarted() {
         let inputs = [
             AutomationDeviceInput(
@@ -98,25 +121,6 @@ struct AutomationsViewModelTests {
         ]
         // The queued run has no start time; its creation (09:30) is newer than the started run's 09:00.
         #expect(AutomationsViewModel.mergedRuns(from: inputs).map(\.run.id) == ["r-queued", "r-started"])
-    }
-
-    // MARK: - Running runs (sidebar children)
-
-    @Test func runningRunsAreOnlyRunningStatus() {
-        let inputs = [
-            AutomationDeviceInput(
-                deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true,
-                runs: [
-                    run(
-                        id: "r1", automationID: "a", name: "A", status: "running", startedAt: "2026-01-01T09:00:00Z",
-                        createdAt: "2026-01-01T09:00:00Z"),
-                    run(id: "r2", automationID: "a", name: "A", status: "queued", startedAt: nil, createdAt: "2026-01-01T09:30:00Z"),
-                    run(
-                        id: "r3", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z",
-                        createdAt: "2026-01-01T08:00:00Z"),
-                ])
-        ]
-        #expect(AutomationsViewModel.runningRuns(from: inputs).map(\.run.id) == ["r1"])
     }
 
     // MARK: - Filter by device
@@ -192,8 +196,8 @@ struct AutomationsViewModelTests {
     @Test func buildAgentFieldsRoundTripsKindAndAgentFields() {
         let result = AutomationsViewModel.buildAutomationFields(
             name: "  Nightly agent  ", kind: .agent, enabled: true, triggerKind: .cron, cronExpression: "0 9 * * *", workspaceID: " ws-1 ",
-            agentCommand: " claude --model opus ", agentPrompt: "  review the diff  ", script: "leftover script", workingDirectory: "/leftover",
-            timeoutSeconds: 120, concurrencyPolicy: "queue", missedRunPolicy: "skip")
+            agentCommand: " claude --model opus ", agentPrompt: "  review the diff  ", script: "leftover script", timeoutSeconds: 120,
+            concurrencyPolicy: "queue", missedRunPolicy: "skip")
         guard case .success(let fields) = result else {
             Issue.record("expected success, got \(result)")
             return
@@ -203,9 +207,8 @@ struct AutomationsViewModelTests {
         #expect(fields.workspaceID == "ws-1")
         #expect(fields.agentCommand == "claude --model opus")
         #expect(fields.agentPrompt == "review the diff")
-        // Agent-kind fields never carry script/working-directory forward, even if the editor still held some.
+        // Agent-kind fields never carry script forward, even if the editor still held some.
         #expect(fields.script == "")
-        #expect(fields.workingDirectory == "")
         #expect(fields.triggerKind == AutomationTriggerKind.cron.rawValue)
         #expect(fields.cronExpression == "0 9 * * *")
         #expect(fields.timeoutSeconds == 120)
@@ -216,31 +219,29 @@ struct AutomationsViewModelTests {
     @Test func buildScriptFieldsRoundTripsKindAndScriptFields() {
         let result = AutomationsViewModel.buildAutomationFields(
             name: "Nightly script", kind: .script, enabled: false, triggerKind: .manual, cronExpression: nil, workspaceID: "ws-1",
-            agentCommand: "claude", agentPrompt: "ignored", script: "echo hi", workingDirectory: " /tmp ", timeoutSeconds: nil,
-            concurrencyPolicy: "allow", missedRunPolicy: "run_once")
+            agentCommand: "claude", agentPrompt: "ignored", script: "echo hi", timeoutSeconds: nil, concurrencyPolicy: "allow",
+            missedRunPolicy: "run_once")
         guard case .success(let fields) = result else {
             Issue.record("expected success, got \(result)")
             return
         }
         #expect(fields.kind == AutomationKind.script.rawValue)
         #expect(fields.script == "echo hi")
-        #expect(fields.workingDirectory == "/tmp")
         // Script-kind fields never carry agent config forward.
         #expect(fields.agentCommand == nil)
         #expect(fields.agentPrompt == nil)
-        #expect(fields.workspaceID == nil)
+        #expect(fields.workspaceID == "ws-1")
         #expect(fields.enabled == false)
     }
 
     @Test func agentValidationRequiresWorkspaceCommandAndPrompt() {
-        func failure(workspaceID: String?, command: String, prompt: String, name: String = "N") -> String? {
+        func failure(workspaceID: String, command: String, prompt: String, name: String = "N") -> String? {
             let result = AutomationsViewModel.buildAutomationFields(
                 name: name, kind: .agent, enabled: true, triggerKind: .manual, cronExpression: nil, workspaceID: workspaceID, agentCommand: command,
-                agentPrompt: prompt, script: "", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once")
+                agentPrompt: prompt, script: "", timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once")
             if case .failure(let error) = result { return error.message }
             return nil
         }
-        #expect(failure(workspaceID: nil, command: "claude", prompt: "go") == "Choose a workspace.")
         #expect(failure(workspaceID: "  ", command: "claude", prompt: "go") == "Choose a workspace.")
         #expect(failure(workspaceID: "ws-1", command: "  ", prompt: "go") == "Enter an agent command.")
         #expect(failure(workspaceID: "ws-1", command: "claude", prompt: "   ") == "Enter a prompt.")
@@ -249,18 +250,17 @@ struct AutomationsViewModelTests {
         #expect(failure(workspaceID: "ws-1", command: "claude", prompt: "go") == nil)
     }
 
-    @Test func scriptValidationRequiresScriptAndWorkingDirectory() {
-        func failure(script: String, workingDirectory: String) -> String? {
+    @Test func scriptValidationRequiresWorkspaceAndScript() {
+        func failure(workspaceID: String, script: String) -> String? {
             let result = AutomationsViewModel.buildAutomationFields(
-                name: "N", kind: .script, enabled: true, triggerKind: .manual, cronExpression: nil, workspaceID: nil, agentCommand: "claude",
-                agentPrompt: "go", script: script, workingDirectory: workingDirectory, timeoutSeconds: nil, concurrencyPolicy: "allow",
-                missedRunPolicy: "run_once")
+                name: "N", kind: .script, enabled: true, triggerKind: .manual, cronExpression: nil, workspaceID: workspaceID, agentCommand: "claude",
+                agentPrompt: "go", script: script, timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once")
             if case .failure(let error) = result { return error.message }
             return nil
         }
-        #expect(failure(script: "   ", workingDirectory: "/tmp") == "Enter a script.")
-        #expect(failure(script: "echo hi", workingDirectory: "  ") == "Enter a working directory.")
-        #expect(failure(script: "echo hi", workingDirectory: "/tmp") == nil)
+        #expect(failure(workspaceID: "ws-1", script: "   ") == "Enter a script.")
+        #expect(failure(workspaceID: "  ", script: "echo hi") == "Choose a workspace.")
+        #expect(failure(workspaceID: "ws-1", script: "echo hi") == nil)
     }
 
     // MARK: - Agent → Script prefill generation
@@ -323,8 +323,8 @@ struct AutomationsViewModelTests {
     @Test func excerptIsPromptForAgentAndScriptForScriptKind() {
         let agentAutomation = TerminalServiceAutomationSummary(
             id: "a1", name: "Agent", enabled: true, triggerKind: "manual", cronExpression: nil, kind: AutomationKind.agent.rawValue, script: "",
-            agentCommand: "claude", agentPrompt: "\n  first prompt line  \nsecond line", workspaceID: "ws-1", workingDirectory: "",
-            timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "", updatedAt: "")
+            agentCommand: "claude", agentPrompt: "\n  first prompt line  \nsecond line", workspaceID: "ws-1", timeoutSeconds: nil,
+            concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "", updatedAt: "")
         #expect(AutomationsViewModel.excerpt(for: agentAutomation) == "first prompt line")
 
         let scriptAutomation = automation(id: "s1", name: "Script")  // script "echo hi"

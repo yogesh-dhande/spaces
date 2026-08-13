@@ -2645,12 +2645,12 @@ private func sendAutomationProfileCommand(_ command: TerminalServiceProfileComma
 
 private func automationFields(
     name: String, enabled: Bool, trigger: String, cron: String?, kind: String, script: String, agentCommand: String?, agentPrompt: String?,
-    workspaceID: String?, workingDirectory: String, timeoutSeconds: Int?, concurrency: String, missedRun: String
+    workspaceID: String, timeoutSeconds: Int?, concurrency: String, missedRun: String
 ) -> TerminalServiceAutomationFields {
     TerminalServiceAutomationFields(
         name: name, enabled: enabled, triggerKind: trigger, cronExpression: normalizedOptional(cron), kind: kind, script: script,
-        agentCommand: normalizedOptional(agentCommand), agentPrompt: normalizedOptional(agentPrompt), workspaceID: normalizedOptional(workspaceID),
-        workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
+        agentCommand: normalizedOptional(agentCommand), agentPrompt: normalizedOptional(agentPrompt), workspaceID: workspaceID,
+        timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
 }
 
 private struct AutomationCreateCommand: ParsableCommand {
@@ -2658,9 +2658,6 @@ private struct AutomationCreateCommand: ParsableCommand {
 
     @Option(name: .long) var name: String
     @Option(name: .long) var script: String
-    /// Required for a `script`-kind automation (the directory its script runs in); an `agent`-kind
-    /// automation has no working directory of its own, so this is left empty for that kind.
-    @Option(name: .long) var workingDirectory: String = ""
     @Option(name: .long) var trigger: String = "manual"
     @Option(name: .long) var cron: String?
     /// `script` or `agent` — plumbed through so a later commit can e2e agent-kind automations; the daemon's
@@ -2668,7 +2665,7 @@ private struct AutomationCreateCommand: ParsableCommand {
     @Option(name: .long) var kind: String = "script"
     @Option(name: .long) var agentCommand: String?
     @Option(name: .long) var agentPrompt: String?
-    @Option(name: .long) var workspaceID: String?
+    @Option(name: .long) var workspaceID: String
     @Option(name: .long) var concurrency: String = "allow"
     @Option(name: .long) var missedRun: String = "run_once"
     @Option(name: .long) var timeoutSeconds: Int?
@@ -2677,8 +2674,7 @@ private struct AutomationCreateCommand: ParsableCommand {
     func run() throws {
         let fields = automationFields(
             name: name, enabled: enabled, trigger: trigger, cron: cron, kind: kind, script: script, agentCommand: agentCommand,
-            agentPrompt: agentPrompt, workspaceID: workspaceID, workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds,
-            concurrency: concurrency, missedRun: missedRun)
+            agentPrompt: agentPrompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
         try emitJSON(try sendAutomationProfileCommand(.automationCreate(fields)).automations ?? [])
     }
 }
@@ -2689,15 +2685,12 @@ private struct AutomationUpdateCommand: ParsableCommand {
     @Option(name: .long) var id: String
     @Option(name: .long) var name: String
     @Option(name: .long) var script: String
-    /// Required for a `script`-kind automation (the directory its script runs in); an `agent`-kind
-    /// automation has no working directory of its own, so this is left empty for that kind.
-    @Option(name: .long) var workingDirectory: String = ""
     @Option(name: .long) var trigger: String = "manual"
     @Option(name: .long) var cron: String?
     @Option(name: .long) var kind: String = "script"
     @Option(name: .long) var agentCommand: String?
     @Option(name: .long) var agentPrompt: String?
-    @Option(name: .long) var workspaceID: String?
+    @Option(name: .long) var workspaceID: String
     @Option(name: .long) var concurrency: String = "allow"
     @Option(name: .long) var missedRun: String = "run_once"
     @Option(name: .long) var timeoutSeconds: Int?
@@ -2706,8 +2699,7 @@ private struct AutomationUpdateCommand: ParsableCommand {
     func run() throws {
         let fields = automationFields(
             name: name, enabled: enabled, trigger: trigger, cron: cron, kind: kind, script: script, agentCommand: agentCommand,
-            agentPrompt: agentPrompt, workspaceID: workspaceID, workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds,
-            concurrency: concurrency, missedRun: missedRun)
+            agentPrompt: agentPrompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
         try emitJSON(try sendAutomationProfileCommand(.automationUpdate(.init(id: id, fields: fields))).automations ?? [])
     }
 }

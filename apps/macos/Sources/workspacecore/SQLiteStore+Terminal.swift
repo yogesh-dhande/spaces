@@ -132,7 +132,7 @@ extension SQLiteStore {
                 ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1
                 """, bindings: [sessionID, sessionID, sessionID, sessionID])
-        // A workspace-less terminal session (e.g. an automation run) resolves to a NULL workspace_id,
+        // A generic workspace-less terminal session resolves to a NULL workspace_id,
         // which surfaces as an empty string; report it as nil so it never leaks into workspace-scoped UI.
         guard let workspaceID = row?.first, !workspaceID.isEmpty else { return nil }
         return workspaceID
