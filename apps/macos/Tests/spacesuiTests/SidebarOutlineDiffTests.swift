@@ -50,19 +50,20 @@ struct SidebarOutlineDiffTests {
             cacheKey: "p:\(project.id)",
             signature: .project(
                 SidebarProjectRowSignature(
-                    device: device, project: project, standInWorkspace: nil, standInRuntimeStatus: nil, standInIsPendingDeletion: false,
-                    isExpandable: true)))
+                    device: device, project: project, standInWorkspace: nil, standInRuntimeStatus: nil, standInAttentionStatus: nil,
+                    standInIsPendingDeletion: false, isExpandable: true)))
     }
 
     private func workspaceRow(
-        _ workspace: WorkspaceSummary, device: SidebarRowDeviceTreatment, status: WorkspaceRuntimeStatus? = nil, isPendingDeletion: Bool = false
+        _ workspace: WorkspaceSummary, device: SidebarRowDeviceTreatment, status: WorkspaceRuntimeStatus? = nil,
+        attentionStatus: SidebarAttentionStatus = .working, isPendingDeletion: Bool = false
     ) -> SidebarOutlineRow {
         SidebarOutlineRow(
             cacheKey: "w:\(workspace.id)",
             signature: .workspace(
                 SidebarWorkspaceRowSignature(
                     device: device, workspace: workspace, runtimeStatus: status ?? runtimeStatus(workspace.id, isRunning: true),
-                    isPendingDeletion: isPendingDeletion, isExpanded: true, hasRuntimeTargets: true)))
+                    attentionStatus: attentionStatus, isPendingDeletion: isPendingDeletion, isExpanded: true, hasRuntimeTargets: true)))
     }
 
     private func targetRow(_ item: SidebarRuntimeTargetItem, workspaceID: String, device: SidebarRowDeviceTreatment) -> SidebarOutlineRow {
@@ -93,6 +94,13 @@ struct SidebarOutlineDiffTests {
         let device = loadedDevice()
         var current = populatedSnapshot(device: device)
         current[2] = workspaceRow(workspace("ws-1"), device: device, status: runtimeStatus("ws-1", isRunning: false))
+        #expect(SidebarOutlineDiff.compute(previous: populatedSnapshot(device: device), current: current) == .rowsChanged(["w:ws-1"]))
+    }
+
+    @Test func descendantAttentionChangeRepaintsTheWorkspaceHeader() {
+        let device = loadedDevice()
+        var current = populatedSnapshot(device: device)
+        current[2] = workspaceRow(workspace("ws-1"), device: device, attentionStatus: .blocked)
         #expect(SidebarOutlineDiff.compute(previous: populatedSnapshot(device: device), current: current) == .rowsChanged(["w:ws-1"]))
     }
 

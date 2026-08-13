@@ -86,9 +86,9 @@ public struct ThemeAppearanceTokens: Sendable {
     public let green: ThemeColor
     public let red: ThemeColor
     public let orange: ThemeColor
-    /// The "this stopped and you may care" tint: an exited runtime target, an offline device, a
-    /// dead terminal pane. Distinct from `red`, which is a truer red-orange; this one carries the
-    /// sidebar's rose/salmon so every surface reporting the same stopped state matches.
+    public let blue: ThemeColor
+    /// The "this stopped and you may care" tint for persistent stopped-pane chrome and other
+    /// warning surfaces. Distinct from the operational sidebar's truer red-orange `red` token.
     public let statusFailed: ThemeColor
 
     // Row states
@@ -111,10 +111,10 @@ public struct ThemeAppearanceTokens: Sendable {
         background: ThemeColor, surface: ThemeColor, surface2: ThemeColor, paletteSurface: ThemeColor, sidebarBackground: ThemeColor,
         text: ThemeColor, muted: ThemeColor, mutedSecondary: ThemeColor, border: ThemeColor, borderStrong: ThemeColor, accent: ThemeColor,
         accentStrong: ThemeColor, accentTint: ThemeColor, onAccent: ThemeColor, primaryButtonFill: ThemeColor, primaryButtonText: ThemeColor,
-        green: ThemeColor, red: ThemeColor, orange: ThemeColor, statusFailed: ThemeColor, rowHover: ThemeColor, rowSelected: ThemeColor,
-        rowSelectedCard: ThemeColor,
-        rowSelectedCardBorder: ThemeColor, chipBackground: ThemeColor, iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor,
-        iconPortBackground: ThemeColor, statusRunningHalo: ThemeColor, terminal: GhosttyThemeExport
+        green: ThemeColor, red: ThemeColor, orange: ThemeColor, blue: ThemeColor, statusFailed: ThemeColor, rowHover: ThemeColor,
+        rowSelected: ThemeColor, rowSelectedCard: ThemeColor, rowSelectedCardBorder: ThemeColor, chipBackground: ThemeColor,
+        iconProcessBackground: ThemeColor, iconAgentBackground: ThemeColor, iconPortBackground: ThemeColor, statusRunningHalo: ThemeColor,
+        terminal: GhosttyThemeExport
     ) {
         self.background = background
         self.surface = surface
@@ -135,6 +135,7 @@ public struct ThemeAppearanceTokens: Sendable {
         self.green = green
         self.red = red
         self.orange = orange
+        self.blue = blue
         self.statusFailed = statusFailed
         self.rowHover = rowHover
         self.rowSelected = rowSelected

@@ -75,6 +75,21 @@ import workspacecore
         #expect(visible.map(\.id) == ["alerts::frontend"])
     }
 
+    @Test func bellAlertAndWorkspaceTerminalDedupeEvenWhenSecondaryDetailDiffers() {
+        let alert = makeItem(
+            id: "alerts::bell", source: .alertsAttention, workspaceID: "workspace-a", kind: .window, label: "shell-1", detail: "vim main.swift",
+            focusRequest: .terminalSession(workspaceID: "workspace-a", sessionID: "session-1"), alertsAttentionID: "attention-bell")
+        let workspace = makeItem(
+            id: "workspace-a::shell", source: .workspaceTarget, workspaceID: "workspace-a", kind: .window, label: "shell-1",
+            detail: "foreground changed", focusRequest: .workspaceWindow(workspaceID: "workspace-a", index: 1))
+
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: [alert, workspace], query: "", currentWorkspaceID: "workspace-a", recentFocusIdentities: [])
+
+        #expect(visible.map(\.id) == ["alerts::bell"])
+        #expect(visible.first?.detail == "vim main.swift")
+    }
+
     @Test func emptyQueryWithoutCurrentWorkspaceStillShowsRecentTargets() {
         let alertsItem = makeItem(
             id: "alerts::attention", source: .alertsAttention, workspaceID: "workspace-a", kind: .agent, label: "Claude", detail: nil,

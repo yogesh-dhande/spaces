@@ -186,9 +186,20 @@ final class CommandPalettePanel: NSPanel {
 
     func matchesCommandPaletteDismissShortcut(event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let selectedItemIsAlert =
+            commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex)
+            && commandPaletteFilteredItems[commandPaletteSelectedIndex].alertsAttentionID != nil
         return AppKitController.commandPaletteDismissShortcutMatches(
             charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: host.shortcutModifiers(from: flags),
-            leaderModifiers: host.shortcutLeaderModifiers)
+            selectedItemIsAlert: selectedItemIsAlert, searchEditorCanCutSelectedText: commandPaletteSearchEditorCanCutSelectedText())
+    }
+
+    /// The palette monitor runs before the app's ordinary text-editing shortcuts. Let a focused
+    /// field editor keep Command-X when it has an editable selection; an alert dismissal only owns
+    /// the otherwise-unused chord.
+    private func commandPaletteSearchEditorCanCutSelectedText() -> Bool {
+        guard let editor = commandPaletteSearchField?.currentEditor() as? NSTextView, editor.isEditable else { return false }
+        return editor.selectedRange().length > 0
     }
 
     func executeCommandPaletteShortcut(index: Int) {

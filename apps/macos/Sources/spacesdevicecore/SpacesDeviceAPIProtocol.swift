@@ -499,6 +499,9 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     /// than a hard-coded default.
     public let shell: String
     public let command: String?
+    /// Readable argv for the already-inspected foreground process. It is nil when the daemon has no
+    /// foreground sample and is separate from `liveTitle`, which is reported by the terminal program.
+    public let foregroundCommand: String?
     public let state: TerminalSessionState
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
@@ -533,7 +536,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
         rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
-        foregroundDetectedAgentKind: String? = nil, bellAt: String? = nil
+        foregroundDetectedAgentKind: String? = nil, foregroundCommand: String? = nil, bellAt: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -541,6 +544,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.workingDirectory = workingDirectory
         self.shell = shell
         self.command = command
+        self.foregroundCommand = foregroundCommand
         self.state = state
         self.backend = backend
         self.lifetimePolicy = lifetimePolicy
@@ -569,6 +573,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case workingDirectory
         case shell
         case command
+        case foregroundCommand
         case state
         case backend
         case lifetimePolicy
@@ -598,6 +603,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
         command = try container.decodeIfPresent(String.self, forKey: .command)
+        foregroundCommand = try container.decodeIfPresent(String.self, forKey: .foregroundCommand)
         state = try container.decode(TerminalSessionState.self, forKey: .state)
         backend = try container.decode(TerminalSessionBackendKind.self, forKey: .backend)
         lifetimePolicy = try container.decode(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy)

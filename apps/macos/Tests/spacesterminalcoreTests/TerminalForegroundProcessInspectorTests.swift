@@ -129,6 +129,14 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
         XCTAssertEqual(detected?.displayCommand, "codex 'hello world' \(String(repeating: "x", count: 160))...")
     }
 
+    func testDisplayCommandUsesAlreadyInspectedGenericForegroundState() {
+        XCTAssertEqual(
+            TerminalForegroundProcessInspector.displayCommand(executableName: "/usr/bin/vim", argv: ["/usr/bin/vim", "README with spaces.md"]),
+            "vim 'README with spaces.md'")
+        XCTAssertEqual(TerminalForegroundProcessInspector.displayCommand(executableName: "/bin/zsh", argv: []), "zsh")
+        XCTAssertNil(TerminalForegroundProcessInspector.displayCommand(executableName: nil, argv: nil))
+    }
+
     func testWorkingDirectoryReadsLiveProcessCurrentDirectory() throws {
         // Anchor under /private/tmp so the kernel-reported cwd path matches exactly (the default
         // temporary directory lives under /var/folders, where /var is a symlink to /private/var).

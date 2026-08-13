@@ -7,6 +7,8 @@ import spacesterminalcore
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
     func testWireProtocolVersionCoversAgentHooksCommands() { XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 2) }
 
+    func testWireProtocolVersionCoversTerminalForegroundCommandSummary() { XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 26) }
+
     func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
         let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
         XCTAssertTrue(request.command.isSubscriptionCommand)
@@ -354,7 +356,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1",
             workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundDetectedAgentKind: "codex")
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundDetectedAgentKind: "codex", foregroundCommand: "codex --model gpt-5")
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
@@ -371,6 +373,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.overview?.sessions.first?.shell, "/bin/zsh")
         XCTAssertEqual(decoded.overview?.sessions.first?.command, "npm run dev")
         XCTAssertEqual(decoded.overview?.sessions.first?.foregroundDetectedAgentKind, "codex")
+        XCTAssertEqual(decoded.overview?.sessions.first?.foregroundCommand, "codex --model gpt-5")
         let encodedResponse = try SpacesDeviceAPICodec.encodeResponse(SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)))
         XCTAssertFalse(String(data: encodedResponse, encoding: .utf8)?.contains("authToken") == true)
     }

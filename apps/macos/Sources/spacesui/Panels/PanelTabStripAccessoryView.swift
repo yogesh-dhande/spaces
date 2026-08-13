@@ -37,6 +37,7 @@ import AppKit
         tabBar.hostingOwner = nil
         tabBar.onSelectTab = nil
         tabBar.onCloseTab = nil
+        tabBar.onMoveTab = nil
         tabBar.onNewTab = nil
         tabBar.onRenameTab = nil
         tabBar.onSplitFocusedPane = nil

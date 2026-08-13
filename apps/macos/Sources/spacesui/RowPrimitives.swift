@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import spacesterminalcore
 
 /// Small view builders shared across the workspace detail, sidebar, and
@@ -33,6 +34,12 @@ enum RowPrimitives {
     @MainActor static func compactStatusDot(filled: Bool, tint: NSColor, tooltip: String) -> CompactStatusDotView {
         CompactStatusDotView(filled: filled, tint: tint, tooltip: tooltip)
     }
+
+    /// Operational state shared with sidebar runtime rows. Unlike the generic status dot,
+    /// this preserves the agent-specific done/inactive meanings and workspace-attention colors.
+    @MainActor static func attentionStatusDot(_ status: SidebarAttentionStatus) -> AttentionStatusDotView { AttentionStatusDotView(status: status) }
+
+    @MainActor static func attentionSpinner(_ status: SidebarAttentionStatus) -> AttentionSpinnerView { AttentionSpinnerView(status: status) }
 
     /// Fixed-width leading slot for a status indicator. When `content` is nil,
     /// the empty slot preserves shortcut alignment across rows.
@@ -251,6 +258,26 @@ enum RowPrimitives {
     override var intrinsicContentSize: NSSize { NSSize(width: 10, height: 10) }
 }
 
+extension SidebarAttentionStatus {
+    /// One color vocabulary for managed runtime state wherever it is rendered.
+    @MainActor var indicatorColor: NSColor {
+        switch self {
+        case .failed: return Theme.red
+        case .blocked: return Theme.orange
+        case .done: return Theme.blue
+        case .working: return Theme.green
+        case .inactive: return Self.dynamicIndicatorColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85)
+        }
+    }
+
+    @MainActor private static func dynamicIndicatorColor(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let source = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat(source.0) / 255, green: CGFloat(source.1) / 255, blue: CGFloat(source.2) / 255, alpha: alpha)
+        }
+    }
+}
+
 // MARK: - Row click helper
 
 /// Lightweight NSObject target that holds a click closure for use with
@@ -371,4 +398,86 @@ nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
+}
+
+/// Draws a palette indicator from the same semantic state and colors as the sidebar.
+@MainActor final class AttentionStatusDotView: NSView {
+    let status: SidebarAttentionStatus
+
+    init(status: SidebarAttentionStatus) {
+        self.status = status
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 14), heightAnchor.constraint(equalToConstant: 14)])
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 14, height: 14) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let dotPath = NSBezierPath(ovalIn: NSRect(x: 3, y: 3, width: 8, height: 8))
+        if status == .working {
+            Theme.statusRunningHalo.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: 14, height: 14)).fill()
+        }
+        if !status.usesFilledIndicator {
+            status.indicatorColor.setStroke()
+            dotPath.lineWidth = 1.5
+            dotPath.stroke()
+        } else {
+            status.indicatorColor.setFill()
+            dotPath.fill()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
+/// Compact rotating status ring whose stroke uses the shared attention color.
+@MainActor final class AttentionSpinnerView: NSView {
+    private let status: SidebarAttentionStatus
+    private let ringLayer = CAShapeLayer()
+
+    init(status: SidebarAttentionStatus) {
+        self.status = status
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        ringLayer.fillColor = NSColor.clear.cgColor
+        ringLayer.lineWidth = 1.5
+        ringLayer.lineCap = .round
+        ringLayer.strokeStart = 0
+        ringLayer.strokeEnd = 0.72
+        layer?.addSublayer(ringLayer)
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 12), heightAnchor.constraint(equalToConstant: 12)])
+
+        let rotation = CABasicAnimation(keyPath: "transform.rotation")
+        rotation.fromValue = 0
+        rotation.toValue = CGFloat.pi * 2
+        rotation.duration = 0.8
+        rotation.repeatCount = .infinity
+        ringLayer.add(rotation, forKey: "attention-spinner-rotation")
+        updateRingColor()
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) not available") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 12, height: 12) }
+
+    override func layout() {
+        super.layout()
+        ringLayer.frame = bounds
+        ringLayer.path = CGPath(ellipseIn: bounds.insetBy(dx: 1.25, dy: 1.25), transform: nil)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateRingColor()
+    }
+
+    private func updateRingColor() { effectiveAppearance.performAsCurrentDrawingAppearance { ringLayer.strokeColor = status.indicatorColor.cgColor } }
 }

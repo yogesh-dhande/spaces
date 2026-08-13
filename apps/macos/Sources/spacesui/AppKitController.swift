@@ -3187,8 +3187,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 items.append(
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
-                        icon: "cpu.fill", iconTint: iconTint, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
-                        agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
+                        icon: "cpu.fill", iconTint: iconTint, label: agent.name,
+                        detail: terminalPaletteSecondaryLabel(liveTitle: agent.liveTitle, sessionID: agent.sessionID, sessions: overview.sessions),
+                        shortcut: "", processStatus: nil, agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue),
+                        countsTowardBadge: true, eventDate: eventDate,
                         // Mirror `agentWindows(from:)` so the `.agentWindow` resolution finds the row by
                         // `agentID`/`id` and opens its session.
                         focusRequest: .agentWindow(
@@ -3212,8 +3214,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         attentionID: "alert:\(deviceID):session:\(session.id):bell:\(bellAt)", icon: "terminal", iconTint: .terminal,
                         // The row reads exactly as the session's sidebar row does — name, then what the
                         // program is doing — because its presence under Alerts is what says the bell rang.
-                        label: session.title, detail: session.liveTitle, shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true,
-                        eventDate: eventDate, focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
+                        label: session.title,
+                        detail: terminalPaletteSecondaryLabel(liveTitle: session.liveTitle, sessionID: session.id, sessions: overview.sessions),
+                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
+                        focusRequest: .terminalSession(workspaceID: workspace.id, sessionID: session.id)))
             }
             guard !items.isEmpty else { continue }
             items.sort {
@@ -7793,24 +7797,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return slot
     }
 
-    nonisolated static func codingAgentWindowTitleByAgentID(agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]) -> [String: String] {
-        agentWindows.reduce(into: [:]) { result, agentWindow in
-            guard
-                let window = trackedWindows.first(where: {
-                    guard $0.roleValue == .terminal else { return false }
-                    if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
-                    return false
-                })
-            else { return }
-
-            // The agent row already shows its own name, so its secondary text is the terminal's live
-            // title and only carries when it says something the name does not.
-            guard let detail = window.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty else { return }
-            let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if normalizedRunRowName(detail) != normalizedRunRowName(label) { result[agentWindow.id] = detail }
-        }
-    }
-
     static func browserSessionDisplayURLs(configuredSessions: [BrowserSession], resolvedSessions: [BrowserSession]) -> [String?] {
         var resolvedSessionCursor = 0
         return configuredSessions.map { session in
@@ -7958,6 +7944,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let cleanedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
             of: #"^[*-]\s*"#, with: "", options: .regularExpression)
         return (cleanedName?.isEmpty == false ? cleanedName! : "Terminal", cleanedDetail?.isEmpty == false ? cleanedDetail : nil)
+    }
+
+    /// The command palette describes a named terminal with program-provided title state first, then
+    /// the generic foreground command the daemon already included in its overview. It deliberately
+    /// performs no process inspection and has no launch-command or shell fallback.
+    nonisolated static func terminalPaletteSecondaryLabel(liveTitle: String?, sessionID: String?, sessions: [SpacesDeviceTerminalSessionSummary])
+        -> String?
+    {
+        if let liveTitle = liveTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !liveTitle.isEmpty { return liveTitle }
+        guard let sessionID,
+            let command = sessions.first(where: { $0.id == sessionID })?.foregroundCommand?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !command.isEmpty
+        else { return nil }
+        return command
     }
 
     func windowRow(
@@ -11703,10 +11703,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
 
     nonisolated static func commandPaletteDismissShortcutMatches(
-        charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, leaderModifiers: Set<HotkeyModifier>
+        charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, selectedItemIsAlert: Bool, searchEditorCanCutSelectedText: Bool = false
     ) -> Bool {
+        guard selectedItemIsAlert else { return false }
+        guard !searchEditorCanCutSelectedText else { return false }
         guard charactersIgnoringModifiers?.lowercased() == "x" else { return false }
-        return modifiers == leaderModifiers
+        return modifiers == [.cmd]
     }
 
     func toggleWindowFromHotkey() {
@@ -12129,6 +12131,10 @@ struct CommandPaletteItem: Sendable {
     var visibleIdentity: String {
         let normalizedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        // Ad hoc terminal names are unique within a workspace and remain stable while their live
+        // title/foreground command changes. A bell alert and the workspace target therefore describe
+        // one visible row even if their overview snapshots carried different secondary text.
+        if kind == .window { return "\(workspaceID):\(kind):\(normalizedLabel)" }
         return "\(workspaceID):\(kind):\(normalizedLabel):\(normalizedDetail)"
     }
 
@@ -12165,6 +12171,31 @@ struct CommandPaletteItem: Sendable {
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey): return "missing:\(workspaceID):\(processKey)"
         case .agentWindow(let record): return "agent:\(record.workspaceID):\(record.id)"
         case .terminalSession(let workspaceID, let sessionID): return "terminal-session:\(workspaceID):\(sessionID)"
+        }
+    }
+}
+
+extension CommandPaletteItem.Status {
+    /// The operational status represented by the palette indicator. Keeping this semantic
+    /// conversion separate from drawing lets every surface share one status vocabulary.
+    var attentionStatus: SidebarAttentionStatus? {
+        switch self {
+        case .none: return nil
+        case .idle: return .inactive
+        case .process(let processStatus):
+            switch processStatus {
+            case .running: return .working
+            case .exited: return .failed
+            case .idle: return .inactive
+            }
+        case .agent(let agentStatus):
+            switch agentStatus {
+            case .spinning: return .working
+            case .waiting: return .blocked
+            case .done: return .done
+            case .idle: return .inactive
+            case .exited: return .inactive
+            }
         }
     }
 }
@@ -12363,33 +12394,9 @@ struct CommandPaletteItem: Sendable {
     }
 
     private func statusView(for status: CommandPaletteItem.Status) -> NSView? {
-        switch status {
-        case .none: return nil
-        case .idle: return RowPrimitives.statusDot(.idle)
-        case .process(let processStatus):
-            switch processStatus {
-            case .running: return RowPrimitives.statusDot(.running)
-            case .exited: return RowPrimitives.statusDot(.exited)
-            case .idle: return RowPrimitives.statusDot(.idle)
-            }
-        case .agent(let agentStatus):
-            switch agentStatus {
-            case .spinning:
-                let spinner = NSProgressIndicator()
-                spinner.style = .spinning
-                spinner.controlSize = .mini
-                spinner.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    spinner.widthAnchor.constraint(equalToConstant: 12), spinner.heightAnchor.constraint(equalToConstant: 12),
-                ])
-                spinner.startAnimation(nil)
-                return spinner
-            case .waiting: return RowPrimitives.statusDot(.waiting)
-            case .done: return RowPrimitives.statusDot(.running)
-            case .idle: return RowPrimitives.statusDot(.idle)
-            case .exited: return RowPrimitives.statusDot(.exited)
-            }
-        }
+        guard let attentionStatus = status.attentionStatus else { return nil }
+        if case .agent(.spinning) = status { return RowPrimitives.attentionSpinner(attentionStatus) }
+        return RowPrimitives.attentionStatusDot(attentionStatus)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -12512,18 +12519,18 @@ extension AppKitController {
                     if let processStatus = entry.processStatus { .process(processStatus) } else if let agentStatus = entry.agentStatus {
                         .agent(agentStatus)
                     } else { .none }
+                let detail = entry.detail?.nilIfEmpty
 
                 return CommandPaletteItem(
                     id: "alerts::\(entry.attentionID)", source: .alertsAttention, alertsAttentionID: entry.attentionID,
                     workspaceID: group.workspaceID, workspaceTitle: group.workspaceName, workspaceBranch: group.workspaceBranch,
-                    projectTitle: group.projectName, kind: kind, label: entry.label, detail: entry.detail, status: status, focusRequest: focusRequest,
-                    recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest, detail: entry.detail))
+                    projectTitle: group.projectName, kind: kind, label: entry.label, detail: detail, status: status, focusRequest: focusRequest,
+                    recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest, detail: detail))
             }
         }
     }
 
-    nonisolated private static func buildCommandPaletteItems(overview: SpacesDeviceOverviewPayload, alertsGroups: [AlertsGroup] = [])
-        -> [CommandPaletteItem]
+    nonisolated static func buildCommandPaletteItems(overview: SpacesDeviceOverviewPayload, alertsGroups: [AlertsGroup] = []) -> [CommandPaletteItem]
     {
         var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
         items.append(contentsOf: deviceCommandPaletteWorkspaceItems(from: overview))
@@ -12550,8 +12557,6 @@ extension AppKitController {
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 let shortcutTargets = orderedWorkspaceRunShortcutTargets(
                     browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindows)
-                let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
-
                 for (offset, target) in shortcutTargets.enumerated() {
                     let itemID = "\(workspace.id)::\(offset)"
                     switch target.kind {
@@ -12578,13 +12583,15 @@ extension AppKitController {
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
                     case .window:
                         guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                        let rowText = terminalFallbackRowText(
-                            name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
+                        let window = windows[windowListIndex]
+                        let rowText = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
                                 workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
-                                kind: target.kind, label: rowText.label, detail: rowText.detail, status: .none,
+                                kind: target.kind, label: rowText.label,
+                                detail: terminalPaletteSecondaryLabel(
+                                    liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessions: overview.sessions), status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
                                 // Recency is keyed off the row's name: which row was last focused must not
                                 // turn on what its program happens to be printing.
@@ -12601,9 +12608,12 @@ extension AppKitController {
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey))))
                     case .agent:
-                        guard let agentWindow = target.agentWindow else { continue }
+                        guard let agentWindow = target.agentWindow,
+                            let agentRow = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
+                        else { continue }
                         let label = agentWindow.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
-                        let detail = runtimeWindowTitleByAgentID[agentWindow.id]
+                        let detail = terminalPaletteSecondaryLabel(
+                            liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessions: overview.sessions)
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,

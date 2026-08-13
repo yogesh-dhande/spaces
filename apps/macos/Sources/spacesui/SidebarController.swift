@@ -1294,6 +1294,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             SidebarProjectRowSignature(
                 device: device, project: project, standInWorkspace: standInWorkspace,
                 standInRuntimeStatus: standInWorkspace.flatMap { host.workspaceRuntimeStatusByID[$0.id] },
+                standInAttentionStatus: standInWorkspace.map { workspaceAttentionStatus(workspaceID: $0.id) },
                 standInIsPendingDeletion: standInWorkspace.map { host.isWorkspaceMarkedDeleting($0.id) } ?? false,
                 isExpandable: project.isGitRepo || !nonGitProjectRuntimeTargetChildren(project).isEmpty))
     }
@@ -1302,8 +1303,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         .workspace(
             SidebarWorkspaceRowSignature(
                 device: device, workspace: workspace, runtimeStatus: host.workspaceRuntimeStatusByID[workspace.id],
-                isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id), isExpanded: isWorkspaceExpanded(workspace.id),
-                hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
+                attentionStatus: workspaceAttentionStatus(workspaceID: workspace.id), isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id),
+                isExpanded: isWorkspaceExpanded(workspace.id), hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
     }
 
     private func runtimeTargetRowSignature(
@@ -1427,6 +1428,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let items = host.sidebarRuntimeTargetItems(workspaceID: workspaceID)
         runtimeTargetItemsCache[workspaceID] = items
         return items
+    }
+
+    private func workspaceAttentionStatus(workspaceID: String) -> SidebarAttentionStatus {
+        SidebarAttentionStatus.highest(runtimeTargetItems(workspaceID: workspaceID).compactMap(\.attentionStatus))
     }
 
     /// A non-git project row stands in for its single workspace, so its outline
@@ -1668,6 +1673,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let usesGroupedWorkspaceSelection = isSelected && !project.isGitRepo && host.selectedWorkspaceID != nil
         // A non-git project row is its single workspace's row, so it carries that workspace's delete.
         let rowState = projectRowState(project)
+        let standInAttentionStatus = nonGitProjectTargetWorkspace(project).map { workspaceAttentionStatus(workspaceID: $0.id) }
         cell.alphaValue = rowState.alpha
 
         let rowBackground = NSView()
@@ -1684,7 +1690,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = Typography.sectionTitle
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
+        titleLabel.textColor =
+            standInAttentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarPrimaryTextColor(isSelected: isSelected)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
 
@@ -1714,13 +1721,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 leadingIcon.contentTintColor = .tertiaryLabelColor
                 leadingIcon.toolTip = "Git repository"
             } else {
-                let workspace = nonGitProjectTargetWorkspace(project)
-                let lifecycleRunning =
-                    (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
-                        ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
-                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
-                leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-                leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+                let attentionStatus = standInAttentionStatus ?? .inactive
+                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: sidebarAttentionDescription(attentionStatus))
+                leadingIcon.contentTintColor = sidebarAttentionColor(attentionStatus)
+                leadingIcon.toolTip = sidebarAttentionDescription(attentionStatus)
             }
             leadingIndicator = leadingIcon
         }
@@ -1850,27 +1854,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         titleRow.spacing = 6
         titleRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let runtimeStatus =
-            host.workspaceRuntimeStatusByID[workspace.id]
-            ?? WorkspaceRuntimeStatus(
-                workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
-                missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
+        let attentionStatus = workspaceAttentionStatus(workspaceID: workspace.id)
         // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
         // its way out and says nothing the user can act on, so the row reports the delete instead.
-        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
+        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(attentionStatus)
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = Typography.controlLabel
         nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
+        nameLabel.textColor = sidebarAttentionTextColor(attentionStatus, isSelected: isSelected)
         nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         titleRow.addArrangedSubview(statusIndicator)
         titleRow.addArrangedSubview(nameLabel)
-        if let warningSummary = runtimeStatus.warningSummary {
+        if let warningSummary = host.workspaceRuntimeStatusByID[workspace.id]?.warningSummary {
             let warningIcon = NSImageView()
             warningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
             warningIcon.contentTintColor = sidebarFailedIndicatorColor()
@@ -1924,12 +1923,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return cell
     }
 
-    /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
-    private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
-        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        return RowPrimitives.compactStatusDot(
-            filled: isLifecycleRunning, tint: isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor(),
-            tooltip: isLifecycleRunning ? "Running" : "Stopped")
+    /// A workspace row reports the highest-attention semantic status among its descendant targets.
+    private func statusDot(_ status: SidebarAttentionStatus) -> NSView {
+        RowPrimitives.compactStatusDot(
+            filled: status.usesFilledIndicator, tint: sidebarAttentionColor(status), tooltip: sidebarAttentionDescription(status))
     }
 
     /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
@@ -1958,20 +1955,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func runtimeTargetSymbolColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
-        switch item.runState {
-        case .running: return sidebarRunningIndicatorColor()
-        case .exited: return sidebarFailedIndicatorColor()
-        case .notStarted, nil: return sidebarMetadataTextColor(isSelected: isSelected)
-        }
+        item.attentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarMetadataTextColor(isSelected: isSelected)
     }
 
     private func runtimeTargetTextColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
-        switch item.runState {
-        case .running: return sidebarRunningIndicatorColor()
-        case .exited: return sidebarFailedIndicatorColor()
-        case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
-        case nil: return sidebarPrimaryTextColor(isSelected: isSelected)
-        }
+        item.attentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarPrimaryTextColor(isSelected: isSelected)
     }
 
     private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool) -> NSTableCellView {
@@ -2007,7 +1995,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
             .init(pointSize: 10, weight: .medium))
         icon.contentTintColor = runtimeTargetSymbolColor(item: item, isSelected: isWorkspaceSelected)
-        icon.toolTip = item.runState.map { $0 == .running ? "Running" : ($0 == .exited ? "Exited" : "Not started") }
+        icon.toolTip = item.attentionStatus.map(sidebarAttentionDescription)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
@@ -2390,7 +2378,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func sidebarFailedIndicatorColor() -> NSColor { Theme.statusFailed }
 
-    func sidebarIdleIndicatorColor() -> NSColor { sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85) }
+    func sidebarIdleIndicatorColor() -> NSColor { SidebarAttentionStatus.inactive.indicatorColor }
+
+    func sidebarAttentionColor(_ status: SidebarAttentionStatus) -> NSColor { status.indicatorColor }
+
+    func sidebarAttentionTextColor(_ status: SidebarAttentionStatus, isSelected: Bool) -> NSColor {
+        status == .inactive ? sidebarMetadataTextColor(isSelected: isSelected) : sidebarAttentionColor(status)
+    }
+
+    func sidebarAttentionDescription(_ status: SidebarAttentionStatus) -> String {
+        switch status {
+        case .failed: return "Exited"
+        case .blocked: return "Blocked"
+        case .done: return "Done"
+        case .working: return "Working"
+        case .inactive: return "Not running"
+        }
+    }
 
     func sidebarThemeColor(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1) -> NSColor {
         NSColor(name: nil) { appearance in
