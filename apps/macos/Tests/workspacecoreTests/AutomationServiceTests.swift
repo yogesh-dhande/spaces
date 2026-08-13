@@ -785,13 +785,14 @@ import spacesterminalcore
         let unrelated = try harness.insertAutomation(concurrency: .allow, workspaceID: workspaceB.id)
         let started = expectation(description: "workspace stop operation started")
         let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
         let finished = expectation(description: "workspace stop operation finished")
         Thread.detachNewThread {
             do {
                 try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspaceA.id) { begin in
                     try begin()
                     started.fulfill()
-                    _ = release.wait(timeout: .now() + 2)
+                    release.wait()
                 }
                 finished.fulfill()
             } catch { XCTFail("workspace stop failed: \(error)") }
@@ -1209,7 +1210,8 @@ import spacesterminalcore
     /// kill the survivor. If escalation keyed only on the leader pid, the leader's death would drop the
     /// pending kill and leave the descendant running forever.
     func testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits() throws {
-        let harness = try Harness(self, realCommands: true)
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, realCommands: true, now: clock.now)
         let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-survivor-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: pidFile) }
         // The user script backgrounds a child shell that ignores SIGTERM (the ignore survives `exec sleep`)
@@ -1224,13 +1226,17 @@ import spacesterminalcore
             """
         let automation = try harness.insertAutomation(script: script, concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let leaderPID = try XCTUnwrap(harness.host.lastChildPID)
 
         let survivorPID = try harness.waitForRecordedPID(at: pidFile)
         harness.service.cancelRun(runID: run.id)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
-        // SIGTERM alone does not kill the survivor (it ignores it); only the group SIGKILL escalation does.
+        // Establish the behavior this regression protects before allowing escalation: SIGTERM has reaped the
+        // group leader while the descendant that ignored it remains in that leader's captured process group.
+        try harness.waitForProcessReaped(pid: leaderPID)
         XCTAssertTrue(harness.processIsRunning(survivorPID), "the TERM-ignoring child survives the initial SIGTERM")
 
+        clock.advance(by: 1)
         try harness.assertProcessDies(pid: survivorPID, drivingTicks: harness.service.tick)
     }
 
@@ -1926,18 +1932,35 @@ import spacesterminalcore
         throw XCTSkip("child pid was not recorded at \(url.path) within \(timeout)s")
     }
 
-    /// Asserts a process is killed within a deadline, driving the escalation ticks so a SIGTERM that the
-    /// command ignored escalates to SIGKILL.
+    /// Waits for a child owned by the fake terminal host to be reaped, rather than merely becoming a zombie.
+    /// The leader-reaped ordering is part of the SIGKILL regression's setup: the descendant must survive after
+    /// its leader has completely left the process table.
+    func waitForProcessReaped(pid: Int32, timeout: TimeInterval = 3) throws {
+        let pollInterval: TimeInterval = 0.03
+        let attempts = max(1, Int(ceil(timeout / pollInterval)))
+        for _ in 0..<attempts {
+            if Self.processLifecycle(pid) == .reaped { return }
+            usleep(useconds_t(pollInterval * 1_000_000))
+        }
+        XCTFail("process \(pid) was not reaped after \(attempts) polls (\(Self.processDiagnostics(pid)))")
+    }
+
+    /// Asserts a process dies across a bounded polling budget, driving escalation ticks so a command that
+    /// ignored SIGTERM receives SIGKILL without making CI scheduler latency consume its observation window.
     func assertProcessDies(pid: Int32, drivingTicks tick: () -> Void, timeout: TimeInterval = 3) throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        // Count polling opportunities rather than ending against a wall-clock deadline. A heavily loaded CI
+        // worker can deschedule this test for the whole nominal interval after the first check; it must still
+        // get enough chances to observe the already-delivered signal when it resumes.
+        let pollInterval: TimeInterval = 0.03
+        let attempts = max(1, Int(ceil(timeout / pollInterval)))
+        for _ in 0..<attempts {
             // A SIGKILLed child may remain as a zombie until its owner reaps it. Both states mean it
             // cannot execute; only the running state indicates that escalation failed.
             if Self.processLifecycle(pid) != .running { return }
             tick()
-            usleep(30_000)
+            usleep(useconds_t(pollInterval * 1_000_000))
         }
-        XCTFail("process \(pid) was not terminated within \(timeout)s (\(Self.processDiagnostics(pid)))")
+        XCTFail("process \(pid) was not terminated after \(attempts) polls (\(Self.processDiagnostics(pid)))")
     }
 }
 
