@@ -1507,6 +1507,26 @@ import spacesterminalcore
         XCTAssertEqual(finished.status, .failed, "a vanished session outside the grace window finalizes (no exit code → failed)")
     }
 
+    /// An agent run whose runtime row never lands is finalized only after the attributed agent session is
+    /// torn down. This prevents an unreachable live agent from surviving a failed run and falsely holding
+    /// concurrency open elsewhere.
+    func testAgentRunWithNoRuntimeStateAndStaleLaunchTearsDownSessionBeforeFinalizing() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAgentAutomation(workspaceID: "workspace-1")
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .agent, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
+        try harness.store.insertAutomationRun(run)
+        try harness.writeLaunchConfigurationOnly(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .agent, createdAt: Date().addingTimeInterval(-120))
+
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .failed)
+        XCTAssertTrue(harness.host.terminated.contains(sessionID), "the vanished agent session is torn down before finalization")
+    }
+
     // MARK: - Stale nil-session running row
 
     /// A `.running` run row with no session id is a stale crash leftover: the daemon died between inserting

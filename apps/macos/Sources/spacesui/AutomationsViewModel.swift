@@ -112,10 +112,6 @@ struct AutomationAlertEntry: Sendable, Equatable {
 enum AutomationsViewModel {
     static let retainedRunHistoryRefreshInterval: TimeInterval = 30
 
-    /// Reused for parsing the ISO8601 run timestamps the wire summaries carry. `ISO8601DateFormatter` is
-    /// documented thread-safe, so one shared instance is safe from these nonisolated helpers.
-    nonisolated(unsafe) private static let iso8601Formatter = ISO8601DateFormatter()
-
     /// Augments the bounded overview run slice with the full retained history loaded for each reachable
     /// device. The overview wins for duplicate ids because it keeps live status current between history
     /// loads. Offline inputs keep their last overview snapshot so a failed request never looks authoritative.
@@ -233,7 +229,7 @@ enum AutomationsViewModel {
             AutomationAlertEntry(
                 attentionID: "alert:\(deviceID):automationrun:\(run.id):\(run.status)", text: alertText(run: run, deviceName: deviceName),
                 deviceID: deviceID, runID: run.id, status: run.status,
-                eventDate: (run.endedAt ?? run.createdAt).flatMap { iso8601Formatter.date(from: $0) })
+                eventDate: (run.endedAt ?? run.createdAt).flatMap(TerminalSessionTimestamp.date(from:)))
         }.sorted { lhs, rhs in
             switch (lhs.eventDate, rhs.eventDate) {
             case (let a?, let b?): return a > b
@@ -295,7 +291,7 @@ enum AutomationsViewModel {
     /// The next-run column: a countdown while the fire is near, a short absolute time beyond that, and a
     /// placeholder for an automation that has no scheduled fire (manual, disabled, or never scheduled).
     static func nextRunDescription(for automation: TerminalServiceAutomationSummary, now: Date, timeZone: TimeZone = .current) -> String {
-        guard automation.enabled, let iso = automation.nextFireTime, let date = iso8601Formatter.date(from: iso) else { return placeholderText }
+        guard automation.enabled, let iso = automation.nextFireTime, let date = TerminalSessionTimestamp.date(from: iso) else { return placeholderText }
         let interval = date.timeIntervalSince(now)
         // A fire time already in the past means the daemon has not caught up to it yet; say so rather than
         // counting up from it, which would read like the run had been going for that long.

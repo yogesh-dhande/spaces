@@ -267,6 +267,18 @@ import spacesterminalcore
         XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy").status, "timed_out")
     }
 
+    func testRunSummaryWireTimestampPreservesFractionalOrdering() {
+        let run = AutomationRun(
+            id: "run-fractional", automationID: "auto-1", kind: .script, status: .failed, skipReason: nil, trigger: .manual, exitCode: 1,
+            terminalSessionID: nil, startedAt: Date(timeIntervalSince1970: 200.125), endedAt: Date(timeIntervalSince1970: 200.875),
+            createdAt: Date(timeIntervalSince1970: 199.125))
+
+        let summary = TerminalServiceAutomationRunSummary(run, automationName: "Deploy")
+
+        XCTAssertTrue(summary.endedAt?.contains(".875") == true)
+        XCTAssertEqual(TerminalSessionTimestamp.date(from: summary.endedAt!), run.endedAt)
+    }
+
     /// A run summary carrying attributed agents survives a JSON encode/decode round-trip unchanged — the
     /// contract every transport (profile response, Device API result, device overview) relies on.
     func testRunSummaryAttributedAgentsRoundTripThroughJSON() throws {

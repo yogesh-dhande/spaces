@@ -79,7 +79,6 @@ import workspacecore
         formatter.maximumUnitCount = 2
         return formatter
     }()
-    nonisolated(unsafe) private static let iso8601Formatter = ISO8601DateFormatter()
 
     // MARK: - Presentation
 
@@ -732,15 +731,15 @@ import workspacecore
     }
 
     private func startedDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
-        guard let iso = run.startedAt, let date = Self.iso8601Formatter.date(from: iso) else { return "" }
+        guard let iso = run.startedAt, let date = TerminalSessionTimestamp.date(from: iso) else { return "" }
         return "started \(relativeFormatter.localizedString(for: date, relativeTo: Date()))"
     }
 
     /// How long an ended run took. A run still going reports nothing: "took 3 m" alongside its own live
     /// spinner would claim a total it has not reached, and "started 3 m ago" already carries that fact.
     private func durationDescription(_ run: TerminalServiceAutomationRunSummary) -> String {
-        guard let startISO = run.startedAt, let start = Self.iso8601Formatter.date(from: startISO), let endISO = run.endedAt,
-            let end = Self.iso8601Formatter.date(from: endISO)
+        guard let startISO = run.startedAt, let start = TerminalSessionTimestamp.date(from: startISO), let endISO = run.endedAt,
+            let end = TerminalSessionTimestamp.date(from: endISO)
         else { return "" }
         let interval = max(0, end.timeIntervalSince(start))
         return durationFormatter.string(from: interval).map { "took \($0)" } ?? ""

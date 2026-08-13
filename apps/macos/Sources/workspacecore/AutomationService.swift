@@ -840,6 +840,7 @@ public final class AutomationService: @unchecked Sendable {
             // is still coming up. Treat a not-yet-landed launch as still detecting — the next tick re-checks —
             // rather than failing the run. The detection deadline below remains the overall bound.
             if orchestrator.automationSessionLaunchIsPending(sessionID: sessionID) { return }
+            try teardownAgentRunSession(run)
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }

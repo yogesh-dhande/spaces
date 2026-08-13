@@ -319,7 +319,14 @@ public enum GhosttyRemoteSessionStateTimestamp {
 /// spacesterminalui, workspacecore) since several call sites sit on hot terminal-event paths.
 public enum TerminalSessionTimestamp {
     nonisolated(unsafe) private static let formatter = ISO8601DateFormatter()
+    nonisolated(unsafe) private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     public static func string(from date: Date) -> String { formatter.string(from: date) }
-    public static func date(from string: String) -> Date? { formatter.date(from: string) }
+    /// Wire summaries retain sub-second ordering while older persisted timestamps remain readable.
+    public static func fractionalString(from date: Date) -> String { fractionalFormatter.string(from: date) }
+    public static func date(from string: String) -> Date? { fractionalFormatter.date(from: string) ?? formatter.date(from: string) }
 }

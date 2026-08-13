@@ -276,6 +276,15 @@
             XCTAssertEqual(entries.last?.outcome, "Failed (exit 3)")
         }
 
+        func testAlertEntriesUseFractionalWireTimestampsForSameSecondRuns() {
+            let runs = [
+                makeRun(id: "older", automationID: "a", automationName: "Deploy", status: "failed", endedAt: "2026-01-01T00:00:00.125Z"),
+                makeRun(id: "newer", automationID: "a", automationName: "Deploy", status: "failed", endedAt: "2026-01-01T00:00:00.875Z"),
+            ]
+
+            XCTAssertEqual(SpacesMobileAutomationAlerts.entries(runs: runs).map(\.runID), ["newer", "older"])
+        }
+
         // MARK: - Model integration
 
         func testModelAutomationRowsReflectOverview() {

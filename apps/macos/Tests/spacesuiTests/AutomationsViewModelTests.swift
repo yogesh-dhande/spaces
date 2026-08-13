@@ -474,6 +474,13 @@ struct AutomationsViewModelTests {
         #expect(next("2026-08-05T13:59:00Z") == "due")
     }
 
+    @Test func nextRunAcceptsFractionalWireTimestamp() {
+        let description = AutomationsViewModel.nextRunDescription(
+            for: automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", nextFireTime: "2026-08-05T14:04:00.875Z"),
+            now: now, timeZone: Self.utc)
+        #expect(description == "in 4 m")
+    }
+
     @Test func nextRunIsBlankWithoutAScheduledFire() {
         let placeholder = "—"
         #expect(AutomationsViewModel.nextRunDescription(for: automation(id: "a", name: "A"), now: now, timeZone: Self.utc) == placeholder)

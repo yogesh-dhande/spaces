@@ -12,9 +12,9 @@ extension TerminalServiceAutomationSummary {
             cronExpression: automation.cronExpression, kind: automation.kind.rawValue, script: automation.script,
             agentCommand: automation.agentCommand, agentPrompt: automation.agentPrompt, workspaceID: automation.workspaceID,
             timeoutSeconds: automation.timeoutSeconds, concurrencyPolicy: automation.concurrencyPolicy.rawValue,
-            missedRunPolicy: automation.missedRunPolicy.rawValue, nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.string(from:)),
-            createdAt: TerminalSessionTimestamp.string(from: automation.createdAt),
-            updatedAt: TerminalSessionTimestamp.string(from: automation.updatedAt))
+            missedRunPolicy: automation.missedRunPolicy.rawValue, nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.fractionalString(from:)),
+            createdAt: TerminalSessionTimestamp.fractionalString(from: automation.createdAt),
+            updatedAt: TerminalSessionTimestamp.fractionalString(from: automation.updatedAt))
     }
 }
 
@@ -28,8 +28,8 @@ extension TerminalServiceAutomationRunSummary {
         self.init(
             id: run.id, automationID: run.automationID, automationName: automationName, kind: run.kind.rawValue, status: run.status.rawValue,
             trigger: run.trigger.rawValue, skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
-            workspaceID: workspaceID, startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
-            endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)), createdAt: TerminalSessionTimestamp.string(from: run.createdAt),
+            workspaceID: workspaceID, startedAt: run.startedAt.map(TerminalSessionTimestamp.fractionalString(from:)),
+            endedAt: run.endedAt.map(TerminalSessionTimestamp.fractionalString(from:)), createdAt: TerminalSessionTimestamp.fractionalString(from: run.createdAt),
             attributedAgents: attributedAgents)
     }
 }
