@@ -107,6 +107,8 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
 
         case .stopCodingAgent(let request):
             return serveStopAgent(workspaceID: request.workspaceID, matches: { matchesAgent($0, agentID: request.agentID) })
+        case .stopWorkspaceTerminal(let request):
+            return serveStopAgent(workspaceID: request.workspaceID, matches: { $0.sessionID == request.sessionID })
 
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk:

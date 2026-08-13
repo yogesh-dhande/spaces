@@ -2032,9 +2032,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 // Automation agents share the workspace terminal stop route: the daemon first cancels an
                 // active automation run, then stops the registered or pre-signal session. The server still
                 // recognizes ordinary configured-process agent rows on this route.
-                guard let sessionID = agent.sessionID else { return }
-                response = try await bridgeClient.stopWorkspaceTerminal(
-                    workspaceID: agent.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+                if let sessionID = agent.sessionID {
+                    response = try await bridgeClient.stopWorkspaceTerminal(
+                        workspaceID: agent.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+                } else if let agentID = agent.agentID {
+                    response = try await bridgeClient.stopCodingAgent(
+                        workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
+                } else {
+                    return
+                }
             case .terminal(let terminal):
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(
