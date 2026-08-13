@@ -17,9 +17,10 @@ public final class TerminalEndedSessionScrollbackModel: @unchecked Sendable {
     /// session cannot be created or the transcript cannot be replayed, so the caller can mark
     /// scrollback unavailable rather than present a broken viewport.
     public init?(
-        columns: Int, rows: Int, maxScrollbackBytes: Int = TerminalScrollbackBudget.defaultMaxBytes, theme: GhosttyThemeExport, transcript: Data
+        columns: Int, rows: Int, maxScrollbackBytes: Int = TerminalScrollbackBudget.defaultMaxBytes, theme: GhosttyThemeExport,
+        appearance: ThemeAppearance, transcript: Data
     ) {
-        var packedTheme = GhosttyVtSessionBridge.packTheme(theme)
+        var packedTheme = GhosttyVtSessionBridge.packTheme(theme, appearance: appearance)
         guard
             let session = withUnsafePointer(
                 to: &packedTheme,

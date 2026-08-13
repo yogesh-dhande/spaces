@@ -129,6 +129,9 @@ struct SpacesGhosttyVtSession {
     GhosttyRenderState render_state;
     GhosttyRenderStateRowIterator row_iterator;
     GhosttyRenderStateRowCells row_cells;
+    uint16_t columns;
+    uint16_t rows;
+    GhosttyColorScheme color_scheme;
     // Filled by the effect callbacks (only once `spaces_ghostty_vt_session_enable_events` has run) and
     // emptied by `spaces_ghostty_vt_session_drain_events`.
     SpacesGhosttyVtSessionEvents pending;
@@ -488,7 +491,9 @@ static void spaces_ghostty_vt_build_palette_256(GhosttyColorRgb out[256], const 
 // Applies the Spaces theme to a freshly created terminal's default colors via ghostty_terminal_set.
 // A no-op when the library predates the color-configuration API (terminal_set unresolved).
 static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
-    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return;
+    if (session == NULL || theme == NULL) return;
+    session->color_scheme = theme->is_dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT;
+    if (session->symbols.terminal_set == NULL) return;
     GhosttyColorRgb foreground = spaces_ghostty_vt_unpack_rgb(theme->foreground_rgb);
     GhosttyColorRgb background = spaces_ghostty_vt_unpack_rgb(theme->background_rgb);
     GhosttyColorRgb cursor = spaces_ghostty_vt_unpack_rgb(theme->cursor_rgb);
@@ -635,6 +640,9 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
         return NULL;
     }
 
+    session->columns = columns;
+    session->rows = rows;
+    session->color_scheme = GHOSTTY_COLOR_SCHEME_DARK;
     spaces_ghostty_vt_apply_theme(session, theme);
 
     return session;
@@ -692,6 +700,41 @@ static void spaces_ghostty_vt_on_write_pty(GhosttyTerminal terminal, void *userd
     memcpy(grown + existing, data, take);
     session->pending.pty_response = grown;
     session->pending.pty_response_len = existing + take;
+}
+
+static bool spaces_ghostty_vt_on_device_attributes(
+    GhosttyTerminal terminal, void *userdata, GhosttyDeviceAttributes *out_attributes
+) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || out_attributes == NULL) return false;
+    memset(out_attributes, 0, sizeof(*out_attributes));
+    out_attributes->primary.conformance_level = GHOSTTY_DA_CONFORMANCE_VT220;
+    out_attributes->primary.features[0] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
+    out_attributes->primary.num_features = 1;
+    out_attributes->secondary.device_type = GHOSTTY_DA_DEVICE_TYPE_VT220;
+    return true;
+}
+
+static bool spaces_ghostty_vt_on_size(GhosttyTerminal terminal, void *userdata, GhosttySizeReportSize *out_size) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || out_size == NULL || session->columns == 0 || session->rows == 0) return false;
+    *out_size = (GhosttySizeReportSize){
+        .rows = session->rows,
+        .columns = session->columns,
+        .cell_width = 1,
+        .cell_height = 1,
+    };
+    return true;
+}
+
+static bool spaces_ghostty_vt_on_color_scheme(GhosttyTerminal terminal, void *userdata, GhosttyColorScheme *out_scheme) {
+    (void)terminal;
+    SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)userdata;
+    if (session == NULL || out_scheme == NULL) return false;
+    *out_scheme = session->color_scheme;
+    return true;
 }
 
 static GhosttyClipboardWriteResult spaces_ghostty_vt_on_clipboard_write(
@@ -764,6 +807,9 @@ bool spaces_ghostty_vt_session_enable_events(SpacesGhosttyVtSession *session) {
     } registrations[] = {
         {GHOSTTY_TERMINAL_OPT_USERDATA, session},
         {GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)(uintptr_t)spaces_ghostty_vt_on_write_pty},
+        {GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, (const void *)(uintptr_t)spaces_ghostty_vt_on_device_attributes},
+        {GHOSTTY_TERMINAL_OPT_SIZE, (const void *)(uintptr_t)spaces_ghostty_vt_on_size},
+        {GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, (const void *)(uintptr_t)spaces_ghostty_vt_on_color_scheme},
         {GHOSTTY_TERMINAL_OPT_BELL, (const void *)(uintptr_t)spaces_ghostty_vt_on_bell},
         {GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_title_changed},
         {GHOSTTY_TERMINAL_OPT_PWD_CHANGED, (const void *)(uintptr_t)spaces_ghostty_vt_on_pwd_changed},
@@ -828,7 +874,10 @@ bool spaces_ghostty_vt_session_resize(SpacesGhosttyVtSession *session, uint16_t 
     // Session creation leaves the pixel cell metrics unset (GhosttyTerminalOptions carries only
     // cols/rows/max_scrollback), so the in-place resize keeps that same convention and passes zero
     // pixel metrics. Only the cell grid is reflowed; image-protocol pixel geometry stays unset.
-    return session->symbols.terminal_resize(session->terminal, columns, rows, 0, 0) == GHOSTTY_SUCCESS;
+    if (session->symbols.terminal_resize(session->terminal, columns, rows, 0, 0) != GHOSTTY_SUCCESS) return false;
+    session->columns = columns;
+    session->rows = rows;
+    return true;
 }
 
 bool spaces_ghostty_vt_session_encode_paste(

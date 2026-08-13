@@ -130,5 +130,37 @@
             let modeReply = try #require(transcript.range(of: "\u{1B}[?2026;"))
             #expect(cursorReply.lowerBound < modeReply.lowerBound, "replies must reach the program in the order it asked")
         }
+
+        /// Startup probes see a conservative terminal identity and dimensions that agree with the
+        /// headless session's character grid. Pixel dimensions use the daemon's one-pixel-per-cell
+        /// convention because there is no rendered surface on Linux.
+        @Test func deviceAttributesAndSizeQueriesAreAnswered() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let queries = "\\033[c\\033[>c\\033[=c\\033[14t\\033[16t\\033[18t"
+            let core = try await startCore(makeConfiguration(named: "query-identity-size", queries: queries), paths: paths).value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+            try await waitForTranscript(paths.outputPath, toContain: "\u{1B}[8;24;80t")
+            let transcript = try #require(try? String(contentsOfFile: paths.outputPath, encoding: .utf8))
+            #expect(transcript.contains("\u{1B}[?62;22c"))
+            #expect(transcript.contains("\u{1B}[>1;0;0c"))
+            #expect(transcript.contains("\u{1B}P!|00000000\u{1B}\\"))
+            #expect(transcript.contains("\u{1B}[4;24;80t"))
+            #expect(transcript.contains("\u{1B}[6;1;1t"))
+        }
+
+        /// Color-scheme probes follow the appearance attached to the remote session. A fresh daemon
+        /// session starts dark until its client supplies another appearance.
+        @Test func colorSchemeQueryIsAnswered() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let core = try await startCore(makeConfiguration(named: "query-color-scheme", queries: "\\033[?996n"), paths: paths).value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
+
+            try await waitForTranscript(paths.outputPath, toContain: "\u{1B}[?997;1n")
+        }
     }
 #endif
