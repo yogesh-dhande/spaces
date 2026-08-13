@@ -86,7 +86,7 @@ import spacesterminalcore
         harness.service.cancelRun(runID: first.id)
         harness.service.tick()
 
-        XCTAssertEqual(kill(survivorPID, 0), 0, "the predecessor is still alive during its termination grace")
+        XCTAssertTrue(harness.processIsRunning(survivorPID), "the predecessor is still alive during its termination grace")
         XCTAssertEqual(
             try harness.store.automationRun(id: queued.id)?.status, .queued,
             "queue concurrency includes a predecessor whose SIGKILL escalation is still pending")
@@ -1141,7 +1141,7 @@ import spacesterminalcore
         harness.service.cancelRun(runID: run.id)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
         // SIGTERM alone does not kill the survivor (it ignores it); only the group SIGKILL escalation does.
-        XCTAssertEqual(kill(survivorPID, 0), 0, "the TERM-ignoring child survives the initial SIGTERM")
+        XCTAssertTrue(harness.processIsRunning(survivorPID), "the TERM-ignoring child survives the initial SIGTERM")
 
         try harness.assertProcessDies(pid: survivorPID, drivingTicks: harness.service.tick)
     }
@@ -1161,7 +1161,7 @@ import spacesterminalcore
         let survivorPID = try harness.waitForRecordedPID(at: pidFile)
 
         harness.service.cancelRun(runID: run.id)
-        XCTAssertEqual(kill(survivorPID, 0), 0)
+        XCTAssertTrue(harness.processIsRunning(survivorPID))
         await harness.service.completePendingTerminationsForHandoff()
 
         try harness.assertProcessDies(pid: survivorPID, drivingTicks: {})
@@ -1776,13 +1776,40 @@ import spacesterminalcore
         throw XCTSkip("run \(runID) did not reach a terminal status within \(timeout)s")
     }
 
+    /// What actually became of a child process. `kill(pid, 0)` cannot distinguish a zombie from a running
+    /// process, so use Darwin's process table to make termination assertions meaningful in CI.
+    private enum ProcessLifecycle: String {
+        case running
+        case zombie
+        case reaped
+    }
+
+    private static func processLifecycle(_ pid: Int32) -> ProcessLifecycle {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return .reaped }
+        return Int32(info.kp_proc.p_stat) == SZOMB ? .zombie : .running
+    }
+
+    func processIsRunning(_ pid: Int32) -> Bool {
+        Self.processLifecycle(pid) == .running
+    }
+
+    private static func processDiagnostics(_ pid: Int32) -> String {
+        let lifecycle = processLifecycle(pid).rawValue
+        let processGroup = getpgid(pid)
+        let processGroupDescription = processGroup >= 0 ? String(processGroup) : "unavailable (errno \(errno))"
+        return "lifecycle=\(lifecycle), processGroup=\(processGroupDescription)"
+    }
+
     /// Polls a pid file a spawned child writes its own pid into, returning the pid once present and the
-    /// process is confirmed alive. Fails if it does not appear within the deadline.
+    /// process is confirmed genuinely running. Fails if it does not appear within the deadline.
     func waitForRecordedPID(at url: URL, timeout: TimeInterval = 5) throws -> Int32 {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let text = try? String(contentsOf: url, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-                pid > 0, kill(pid, 0) == 0
+                pid > 0, Self.processLifecycle(pid) == .running
             {
                 return pid
             }
@@ -1796,11 +1823,13 @@ import spacesterminalcore
     func assertProcessDies(pid: Int32, drivingTicks tick: () -> Void, timeout: TimeInterval = 3) throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if kill(pid, 0) != 0 { return }
+            // A SIGKILLed child may remain as a zombie until its owner reaps it. Both states mean it
+            // cannot execute; only the running state indicates that escalation failed.
+            if Self.processLifecycle(pid) != .running { return }
             tick()
             usleep(30_000)
         }
-        XCTFail("process \(pid) was not terminated within \(timeout)s")
+        XCTFail("process \(pid) was not terminated within \(timeout)s (\(Self.processDiagnostics(pid)))")
     }
 }
 
