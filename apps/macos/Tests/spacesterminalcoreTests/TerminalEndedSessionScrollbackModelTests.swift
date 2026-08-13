@@ -31,7 +31,7 @@ final class TerminalEndedSessionScrollbackModelTests: XCTestCase {
 
     func testScrollUpRevealsEarlierRows() throws {
         let model = try XCTUnwrap(
-            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), transcript: numberedTranscript(count: 60)))
+            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), appearance: .dark, transcript: numberedTranscript(count: 60)))
 
         let bottom = plainText(model.currentSnapshot())
         XCTAssertTrue(bottom.contains("row-060"), bottom)
@@ -45,7 +45,7 @@ final class TerminalEndedSessionScrollbackModelTests: XCTestCase {
 
     func testScrollClampsAtTop() throws {
         let model = try XCTUnwrap(
-            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), transcript: numberedTranscript(count: 60)))
+            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), appearance: .dark, transcript: numberedTranscript(count: 60)))
 
         // Overscroll far past the top; the next scroll up must report no movement.
         _ = model.scroll(deltaRows: -1000)
@@ -57,7 +57,7 @@ final class TerminalEndedSessionScrollbackModelTests: XCTestCase {
 
     func testScrollsBackToBottom() throws {
         let model = try XCTUnwrap(
-            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), transcript: numberedTranscript(count: 60)))
+            TerminalEndedSessionScrollbackModel(columns: 10, rows: 3, theme: theme(), appearance: .dark, transcript: numberedTranscript(count: 60)))
 
         XCTAssertNotNil(model.scroll(deltaRows: -30))
         // Scroll back down to the bottom; the last line is visible again and a further scroll clamps.
@@ -69,7 +69,7 @@ final class TerminalEndedSessionScrollbackModelTests: XCTestCase {
     }
 
     func testEmptyTranscriptBuildsWithoutContent() throws {
-        let model = try XCTUnwrap(TerminalEndedSessionScrollbackModel(columns: 8, rows: 4, theme: theme(), transcript: Data()))
+        let model = try XCTUnwrap(TerminalEndedSessionScrollbackModel(columns: 8, rows: 4, theme: theme(), appearance: .dark, transcript: Data()))
         XCTAssertNil(model.scroll(deltaRows: -5))
         XCTAssertEqual(plainText(model.currentSnapshot()).trimmingCharacters(in: .whitespacesAndNewlines), "")
     }
@@ -78,8 +78,8 @@ final class TerminalEndedSessionScrollbackModelTests: XCTestCase {
         let background = ThemeColor(1, 2, 3)
         let foreground = ThemeColor(4, 5, 6)
         let model = try XCTUnwrap(
-            TerminalEndedSessionScrollbackModel(columns: 8, rows: 4, theme: theme(background: background, foreground: foreground), transcript: Data())
-        )
+            TerminalEndedSessionScrollbackModel(
+                columns: 8, rows: 4, theme: theme(background: background, foreground: foreground), appearance: .dark, transcript: Data()))
 
         let snapshot = model.currentSnapshot()
         XCTAssertEqual(snapshot.defaultBackgroundRGB, background.packedRGB)

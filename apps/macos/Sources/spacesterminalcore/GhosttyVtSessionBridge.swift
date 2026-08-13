@@ -6,13 +6,15 @@ import ghosttyvtshim
 /// (`TerminalEndedSessionScrollbackModel`) render through this one converter and theme packer, so a
 /// replayed frame carries the exact same cell/theme shape the daemon would have produced.
 public enum GhosttyVtSessionBridge {
-    /// Packs a theme's terminal export into the C shim's theme struct (default fg/bg/cursor plus the 16
-    /// ANSI palette entries; the shim fills indices 16-255 with the standard xterm ramp).
-    public static func packTheme(_ export: GhosttyThemeExport) -> SpacesGhosttyVtTheme {
+    /// Packs a theme's terminal export and appearance into the C shim's theme struct (default
+    /// fg/bg/cursor plus the 16 ANSI palette entries; the shim fills indices 16-255 with the standard
+    /// xterm ramp). The appearance is also what a live headless session reports to CSI ? 996 n.
+    public static func packTheme(_ export: GhosttyThemeExport, appearance: ThemeAppearance) -> SpacesGhosttyVtTheme {
         var theme = SpacesGhosttyVtTheme()
         theme.foreground_rgb = export.foreground.packedRGB
         theme.background_rgb = export.background.packedRGB
         theme.cursor_rgb = export.cursorColor.packedRGB
+        theme.is_dark = appearance == .dark
         withUnsafeMutablePointer(to: &theme.palette_rgb) { tuplePointer in
             tuplePointer.withMemoryRebound(to: UInt32.self, capacity: 16) { buffer in
                 for index in 0..<16 { buffer[index] = index < export.palette.count ? export.palette[index].packedRGB : 0 }

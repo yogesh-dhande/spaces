@@ -172,6 +172,46 @@ import ghosttyvtshim
         #expect(drain(session).ptyResponse.isEmpty)
     }
 
+    /// A headless session deliberately advertises Ghostty's conservative VT220-compatible defaults:
+    /// ANSI color, no invented firmware version, and no per-installation unit identifier.
+    @Test func deviceAttributeQueriesReceiveDeclaredReplies() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, "\u{1B}[c\u{1B}[>c\u{1B}[=c")
+        #expect(drain(session).ptyResponse == "\u{1B}[?62;22c\u{1B}[>1;0;0c\u{1B}P!|00000000\u{1B}\\")
+    }
+
+    /// The daemon has no rendered pixel geometry, so one cell is one synthetic pixel. Character
+    /// dimensions remain exact, and pixel queries stay internally consistent with that convention.
+    @Test func sizeQueriesReceiveCellGranularHeadlessGeometry() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, "\u{1B}[14t\u{1B}[16t\u{1B}[18t")
+        #expect(drain(session).ptyResponse == "\u{1B}[4;24;80t\u{1B}[6;1;1t\u{1B}[8;24;80t")
+
+        #expect(spaces_ghostty_vt_session_resize(session, 100, 40))
+        write(session, "\u{1B}[14t\u{1B}[18t")
+        #expect(drain(session).ptyResponse == "\u{1B}[4;40;100t\u{1B}[8;40;100t")
+    }
+
+    /// A live session starts in the daemon's dark appearance, then reports the appearance carried by
+    /// the latest theme after an attaching client rethemes it.
+    @Test func colorSchemeQueryFollowsTheLiveAppearance() throws {
+        let session = try makeSession()
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        write(session, "\u{1B}[?996n")
+        #expect(drain(session).ptyResponse == "\u{1B}[?997;1n")
+
+        var lightTheme = SpacesGhosttyVtTheme()
+        lightTheme.is_dark = false
+        #expect(spaces_ghostty_vt_session_set_theme(session, &lightTheme))
+        write(session, "\u{1B}[?996n")
+        #expect(drain(session).ptyResponse == "\u{1B}[?997;2n")
+    }
+
     /// Events are opt-in because a session that replays a transcript must not re-raise the bells and
     /// clipboard writes the recorded output once carried.
     @Test func aSessionWithoutEventsEnabledAccumulatesNothing() throws {
