@@ -1462,12 +1462,11 @@ public final class WorkspaceOrchestrator {
         return session
     }
 
-    /// Resolves the workspace `spaces terminal command` should target: the explicit
-    /// `--workspace` id when given, else the deepest workspace whose directory
-    /// contains `cwd` (same containment rule as `workspaceForBuiltInTerminalSession`'s
-    /// fallback). Errors clearly when neither resolves, instead of falling back to a
-    /// workspace-less session.
-    public func resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: String?, cwd: String) throws -> String {
+    /// Resolves the explicit workspace id, or the deepest workspace whose directory contains `cwd`.
+    /// CLI terminal and local workspace-lifecycle commands share this daemon-owned rule so they use
+    /// the daemon's authoritative workspace set. Errors clearly instead of creating a workspace-less
+    /// terminal session or silently targeting another workspace.
+    public func resolveWorkspaceID(explicitWorkspaceID: String?, cwd: String) throws -> String {
         if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
             return explicitWorkspaceID
         }
@@ -1476,7 +1475,10 @@ public final class WorkspaceOrchestrator {
             let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
                 normalizePath($0.dir).count < normalizePath($1.dir).count
             })
-        else { throw WorkspaceError.invalidArgument(message: "Current directory is not inside a Spaces workspace.") }
+        else {
+            throw WorkspaceError.invalidArgument(
+                message: "Current directory \(cwd) is not inside a Spaces workspace. Run this command inside a workspace or pass --workspace <id>.")
+        }
         return matched.id
     }
 

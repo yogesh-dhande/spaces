@@ -49,7 +49,7 @@ require_binary() {
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
 }
 
-# Requests the owner-mode pane open until the owner summon lands. `spaces terminal command` only creates
+# Requests the owner-mode pane open until the owner summon lands. `spaces terminal create` only creates
 # the session; nothing opens its pane on its own, and `mode=owner` is emitted solely for the owner-mode
 # open IPC that `spaces terminal show` posts. The request repeats once a second because the app resolves a
 # just-created session through a cold overview fetch, so an early request can find nothing to open.
@@ -141,7 +141,7 @@ run_scenario() {
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
   local command_output session_id session_dir output_log
 
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command" --title "stress-${scenario}")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$command" --title "stress-${scenario}")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 
@@ -327,7 +327,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES
 APP_PID="$!"
 sleep 3
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+# terminal create is workspace-scoped; register a fixture project and use its default workspace.
 FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
 mkdir -p "$FIXTURE_PROJECT_DIR"
 FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"

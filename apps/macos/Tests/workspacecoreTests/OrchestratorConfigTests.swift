@@ -856,7 +856,7 @@ extension OrchestratorTests {
     }
 
     // Guards the P2 leak this was fixed for: before every terminal session was workspace-owned,
-    // a `spaces terminal command` session with no window/process/agent row and no stamped
+    // a `spaces terminal create` session with no window/process/agent row and no stamped
     // workspace resolved to no workspace at all, so `stopAdHocBuiltInTerminalSession(sessionID:)`
     // returned false without ever asking the daemon to stop the shell — the pane closed but the
     // process kept running. With every launch configuration always carrying a workspace id, the
@@ -891,7 +891,7 @@ extension OrchestratorTests {
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
     }
 
-    func testResolveWorkspaceIDForTerminalCommandPrefersExplicitID() throws {
+    func testResolveWorkspaceIDPrefersExplicitID() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -900,12 +900,12 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        let resolved = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: workspace.id, cwd: "/somewhere/else")
+        let resolved = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: workspace.id, cwd: "/somewhere/else")
 
         XCTAssertEqual(resolved, workspace.id)
     }
 
-    func testResolveWorkspaceIDForTerminalCommandMatchesDeepestContainingWorkspace() throws {
+    func testResolveWorkspaceIDMatchesDeepestContainingWorkspace() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -919,13 +919,12 @@ extension OrchestratorTests {
         try store.upsert(workspace: parentWorkspace)
         try store.upsert(workspace: childWorkspace)
 
-        let resolved = try orchestrator.resolveWorkspaceIDForTerminalCommand(
-            explicitWorkspaceID: nil, cwd: childDir.appendingPathComponent("src").path)
+        let resolved = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: nil, cwd: childDir.appendingPathComponent("src").path)
 
         XCTAssertEqual(resolved, childWorkspace.id)
     }
 
-    func testResolveWorkspaceIDForTerminalCommandThrowsOutsideAnyWorkspace() throws {
+    func testResolveWorkspaceIDThrowsWithCurrentDirectoryAndRemediationOutsideAnyWorkspace() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
@@ -933,9 +932,12 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         _ = try orchestrator.addProject(dir: projectDir.path)
 
-        XCTAssertThrowsError(
-            try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: nil, cwd: root.appendingPathComponent("outside").path)
-        ) { error in XCTAssertTrue(error.localizedDescription.contains("Spaces workspace")) }
+        let outside = root.appendingPathComponent("outside").path
+        XCTAssertThrowsError(try orchestrator.resolveWorkspaceID(explicitWorkspaceID: nil, cwd: outside)) { error in
+            XCTAssertTrue(error.localizedDescription.contains(outside))
+            XCTAssertTrue(error.localizedDescription.contains("Run this command inside a workspace"))
+            XCTAssertTrue(error.localizedDescription.contains("--workspace <id>"))
+        }
     }
 
     func testRenameAdHocBuiltInTerminalSessionPersistsUserTitleOverRuntimeTitleUpdates() throws {

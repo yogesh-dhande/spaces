@@ -16,7 +16,7 @@ public struct SpacesCommand: ParsableCommand {
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
-              - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
+              - Workspace start/restart default to the deepest workspace containing the current directory; pass --workspace to override (and always for --device). Agent signal defaults workspace/session IDs from Spaces terminal environment.
               - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It is convergent: it launches whichever configured processes are not already running (a never-started one launches fresh, an exited one restarts) and leaves already-running processes, ad hoc terminals, and coding-agent sessions untouched; a workspace whose configured processes are all already running succeeds as a no-op. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
@@ -135,19 +135,21 @@ struct WorkspaceCreateCommand: ParsableCommand {
 struct WorkspaceStartCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running on this or a paired device.")
 
-    @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()
         if let device {
+            let workspace = try requiredRemoteWorkspaceID(workspace)
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try SpacesDeviceClient.launchWorkspace(workspaceID: workspace, device: record, clientApp: cliDeviceClientApp())
             context.output.emit(response.message)
             return
         }
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace)))
-        context.output.emit("Workspace is running \(workspace)")
+        let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
+        let resolved = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(payload)))
+        context.output.emit("Workspace is running \(resolved.id)")
     }
 }
 
@@ -155,20 +157,30 @@ struct WorkspaceRestartCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "restart", abstract: "Force a full stop and relaunch for a workspace on this or a paired device.")
 
-    @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()
         if let device {
+            let workspace = try requiredRemoteWorkspaceID(workspace)
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let response = try SpacesDeviceClient.restartWorkspace(workspaceID: workspace, device: record, clientApp: cliDeviceClientApp())
             context.output.emit(response.message)
             return
         }
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace)))
-        context.output.emit("Workspace restarted \(workspace)")
+        let payload = TerminalServiceWorkspaceLifecyclePayload(cwd: context.currentDirectoryPath(), workspaceID: workspace)
+        let resolved = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(payload)))
+        context.output.emit("Workspace restarted \(resolved.id)")
     }
+}
+
+func requiredRemoteWorkspaceID(_ workspaceID: String?) throws -> String {
+    guard let workspaceID = normalizedNonEmpty(workspaceID) else {
+        throw ValidationError(
+            "--workspace is required with --device: a remote workspace cannot infer the workspace from the current directory. Pass --workspace <id>.")
+    }
+    return workspaceID
 }
 
 struct AgentCommand: ParsableCommand {
@@ -916,17 +928,13 @@ struct DevicePairCommand: ParsableCommand {
             let request = SpacesRemoteDevicePairingRequest(
                 sshHost: sshHost, sshUser: sshUser, sshPort: sshPort, clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
                 clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
-            do {
-                result = try SpacesDevicePairingClient.pairRemoteDevice(request)
-            } catch {
+            do { result = try SpacesDevicePairingClient.pairRemoteDevice(request) } catch {
                 // A Linux device without Spaces installed carries the pinned install one-liner: run the
                 // installer over SSH and pair in one go rather than printing a command to run by hand.
                 guard let installCommand = Self.automaticInstallCommand(forPairingFailure: error) else { throw error }
                 let destination = sshUser.map { "\($0)@\(sshHost)" } ?? sshHost
                 print("Spaces is not installed on \(destination). Installing it over SSH (up to 10 minutes)...")
-                do {
-                    result = try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request)
-                } catch {
+                do { result = try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(request) } catch {
                     guard Self.isRemoteInstallRunFailure(error) else { throw error }
                     throw RemoteDeviceInstallFailure(underlyingMessage: error.localizedDescription, installCommand: installCommand)
                 }
@@ -1028,7 +1036,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
         subcommands: [
-            TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self,
+            TerminalListCommand.self, TerminalCreateCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self,
         ])
 }
 
@@ -1078,8 +1086,8 @@ func availableTerminalSessionRows(fileManager: FileManager = .default) throws ->
     }
 }
 
-struct TerminalCommandCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start an ad hoc terminal session in a workspace.")
+struct TerminalCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create an ad hoc terminal session in a workspace.")
 
     @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
 

@@ -205,14 +205,25 @@ fi
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+# terminal create is workspace-scoped; register a fixture project and use its default workspace.
 FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
 mkdir -p "$FIXTURE_PROJECT_DIR"
 FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
 FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
+workspace_start_output="$(cd "$FIXTURE_PROJECT_DIR" && env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" workspace start)"
+[[ "$workspace_start_output" == "Workspace is running $FIXTURE_WORKSPACE_ID" ]] || {
+  echo "Local workspace start did not infer and print the fixture workspace ID: $workspace_start_output" >&2
+  exit 1
+}
+workspace_restart_output="$(cd "$FIXTURE_PROJECT_DIR" && env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" workspace restart)"
+[[ "$workspace_restart_output" == "Workspace restarted $FIXTURE_WORKSPACE_ID" ]] || {
+  echo "Local workspace restart did not infer and print the fixture workspace ID: $workspace_restart_output" >&2
+  exit 1
+}
+
 no_attach_payload="python3 -c 'import time; print(\"__cli_noattach_ready__\", flush=True); time.sleep(30)'"
-no_attach_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$no_attach_payload" --title cli-e2e-no-attach)"
+no_attach_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$no_attach_payload" --title cli-e2e-no-attach)"
 no_attach_session_id="$(extract_session_id "$no_attach_output")"
 [[ -n "$no_attach_session_id" ]] || { echo "Failed to parse unattached session ID from: $no_attach_output" >&2; exit 1; }
 sleep 2
@@ -228,7 +239,7 @@ APP_PID="$!"
 sleep 3
 
 command_payload="stty raw -echo; python3 -c 'import os,sys,select,time; data=bytearray(); deadline=time.time()+5; exec(\"while time.time() < deadline:\\n r,_,_=select.select([0],[],[],0.5)\\n if not r: continue\\n chunk=os.read(0,64)\\n data.extend(chunk)\\n if b\\\"\\\\r\\\" in data or b\\\"\\\\n\\\" in data: break\"); print(repr(bytes(data))); sys.stdout.flush(); time.sleep(120)'"
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title cli-e2e)"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title cli-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 

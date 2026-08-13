@@ -1730,7 +1730,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
-            activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
+            activeSessionCount: activeSessionCount, protocolVersion: SpacesWireProtocol.version, runningProcesses: impact.runningProcesses,
+            activeAgents: impact.activeAgents,
             waitingAgents: impact.waitingAgents, deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host))
     }
 
