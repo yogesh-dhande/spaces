@@ -21,9 +21,8 @@ struct SpacesMobileAutomationRunRow: Identifiable, Equatable, Sendable {
     var isRunning: Bool { run.status == "running" }
 }
 
-/// A derived alert entry for a failed or timed-out automation run. Automation runs are workspace-less
-/// (they run in their own terminal sessions, never inside a workspace), so they cannot join the
-/// per-workspace groups `SpacesMobileAttention` derives; this is their own flat list, mirroring the
+/// A derived alert entry for a failed or timed-out automation run. Automation failures keep their own
+/// flat list, separate from coding-agent attention grouped by workspace, mirroring the
 /// Mac's synthetic "Automations" alerts group (`AutomationsViewModel.alertEntries` /
 /// `AppKitController.alertsGroups`). Unlike the Mac, which polls every paired device at once and so
 /// names the device in the entry text, the iOS app shows one active device at a time (see

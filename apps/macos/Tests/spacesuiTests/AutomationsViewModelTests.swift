@@ -110,6 +110,14 @@ struct AutomationsViewModelTests {
         #expect(merged[1].runs.map(\.id) == ["offline"])
     }
 
+    @Test func retainedRunHistoryRefreshesAfterTheVisiblePaneCacheAgesOut() {
+        let loadedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+        #expect(!AutomationsViewModel.retainedRunHistoryNeedsRefresh(lastLoadedAt: loadedAt, now: loadedAt.addingTimeInterval(29)))
+        #expect(AutomationsViewModel.retainedRunHistoryNeedsRefresh(lastLoadedAt: loadedAt, now: loadedAt.addingTimeInterval(30)))
+        #expect(AutomationsViewModel.retainedRunHistoryNeedsRefresh(lastLoadedAt: nil, now: loadedAt))
+    }
+
     @Test func runningSidebarBadgeExcludesUnreachableDeviceSnapshots() {
         let inputs = [
             AutomationDeviceInput(

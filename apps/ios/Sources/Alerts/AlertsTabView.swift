@@ -34,8 +34,8 @@ struct AlertsTabView: View {
         }
     }
 
-    /// Failed/timed-out automation runs are workspace-less, so they get their own band rather than
-    /// joining a per-workspace section — mirrors the Mac's synthetic "Automations" alerts group.
+    /// Failed/timed-out automation runs get their own band rather than joining coding-agent attention
+    /// grouped by workspace — mirrors the Mac's synthetic "Automations" alerts group.
     @ViewBuilder private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
         HeaderBand {
             Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
@@ -53,8 +53,8 @@ struct AlertsTabView: View {
         }
     }
 
-    /// Status-level only: there is no terminal/replay to open for an automation run in this feature, so
-    /// unlike `eventRow` this row is never a button.
+    /// Status-level only: automation terminal and replay navigation lives in the Runs screens, so unlike
+    /// `eventRow` this alert row is never a button.
     private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
         BandRow(
             dotKind: .exited,

@@ -565,10 +565,12 @@ enum SpacesDaemonErrorClassification {
                     NSTimeZone.resetSystemTimeZone()
                     return TimeZone.current
                 },
-                // The same handoff flag the timer callback gates on, re-checked inside the service's own
-                // queue: a tick that passed the timer gate but was scheduled late no-ops instead of polling
-                // quiesced cores mid-handoff.
-                ticksSuspended: { [livenessState] in livenessState.snapshot().handoffInProgress },
+                // The teardown latches are re-checked inside the service queue: scheduler work that passed
+                // its outer gate but was scheduled late no-ops during handoff or final shutdown.
+                ticksSuspended: { [livenessState] in
+                    let snapshot = livenessState.snapshot()
+                    return snapshot.handoffInProgress || snapshot.shutdownInProgress
+                },
                 logError: { writeStandardError("spacesd automation_error \($0)\n") })
             WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
                 try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
@@ -820,7 +822,13 @@ enum SpacesDaemonErrorClassification {
     /// belongs there by default; only a teardown that genuinely must be awaited goes in phase 2, and by
     /// then everything is already latched.
     private func stopSharedServices() async {
+        // Capture before phase 1 clears both published references. This also includes startup
+        // reconciliation, for which `automationService` is set before the off-main box is published.
+        let automationServiceToDrain = automationService
         stopWorkProducers()
+        // Teardown is latched before this wait. A scheduler pass still queued on the service no-ops; one
+        // already executing finishes before session teardown takes its runtime snapshot.
+        if let automationServiceToDrain { await automationServiceToDrain.waitUntilIdle() }
         await releaseReconcileStores()
     }
 

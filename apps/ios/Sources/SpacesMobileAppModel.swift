@@ -985,10 +985,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             _ = try await bridgeClient.triggerAutomation(id: id, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
             await refresh()
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     /// Cancels a running (or queued) automation run.
@@ -996,10 +1001,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             _ = try await bridgeClient.cancelAutomationRun(runID: runID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
             await refresh()
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     /// Ends a finished run's still-live attributed coding agents. There is no optimistic local merge,
@@ -1009,10 +1019,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             _ = try await bridgeClient.endAutomationAgents(runID: runID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
             await refresh()
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     /// Fetches one automation's retained run history directly from the daemon for the per-automation "View
@@ -1021,7 +1036,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Returns nil on error, and the caller keeps whatever it was already showing. Not a mutation, so it
     /// does not touch `isMutating` or trigger an overview refresh.
     func fetchAutomationRuns(automationID: String) async -> [TerminalServiceAutomationRunSummary]? {
-        do { return try await bridgeClient.listAutomationRuns(automationID: automationID, commandChannel: commandChannel) } catch {
+        let identity = overviewIdentity
+        do {
+            let runs = try await bridgeClient.listAutomationRuns(automationID: automationID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return nil }
+            return runs
+        } catch {
+            guard identity == overviewIdentity else { return nil }
             handleBridgeError(error)
             return nil
         }

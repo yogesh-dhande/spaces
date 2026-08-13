@@ -37,7 +37,7 @@ import workspacecore
     /// Full retained run history is loaded only while Runs is selected. The overview intentionally carries
     /// a bounded activity slice, so it cannot be the data source for transcript history.
     private var retainedRunsByDeviceID: [String: [TerminalServiceAutomationRunSummary]] = [:]
-    private var retainedRunHistoryLoadedDeviceIDs: Set<String> = []
+    private var retainedRunHistoryLoadedAtByDeviceID: [String: Date] = [:]
     private var retainedRunHistoryLoadingDeviceIDs: Set<String> = []
     private var retainedRunHistoryGeneration = 0
 
@@ -136,10 +136,11 @@ import workspacecore
     /// Fetches every retained run through the dedicated list API without blocking AppKit. A pane render
     /// merges each successful result with that device's bounded overview slice; requests that fail keep
     /// the device's existing reachable/offline presentation and remain eligible for the next refresh.
-    private func loadRetainedRunHistoryIfNeeded(for inputs: [AutomationDeviceInput]) {
+    private func loadRetainedRunHistoryIfNeeded(for inputs: [AutomationDeviceInput], now: Date = Date()) {
         let requests: [(deviceID: String, device: SpacesPairedDeviceRecord)] = inputs.compactMap { input in
-            guard input.isReachable, !retainedRunHistoryLoadedDeviceIDs.contains(input.deviceID),
-                !retainedRunHistoryLoadingDeviceIDs.contains(input.deviceID),
+            guard input.isReachable, !retainedRunHistoryLoadingDeviceIDs.contains(input.deviceID),
+                AutomationsViewModel.retainedRunHistoryNeedsRefresh(
+                    lastLoadedAt: retainedRunHistoryLoadedAtByDeviceID[input.deviceID], now: now),
                 let device = host.automationDeviceRecord(deviceID: input.deviceID)
             else { return nil }
             return (input.deviceID, device)
@@ -160,7 +161,7 @@ import workspacecore
             for (deviceID, runs) in results {
                 guard let runs else { continue }
                 retainedRunsByDeviceID[deviceID] = runs
-                retainedRunHistoryLoadedDeviceIDs.insert(deviceID)
+                retainedRunHistoryLoadedAtByDeviceID[deviceID] = Date()
             }
             guard host.showingAutomations, selectedTab == .runs else { return }
             renderAutomationsDetail()
@@ -170,7 +171,7 @@ import workspacecore
     private func resetRetainedRunHistory() {
         retainedRunHistoryGeneration += 1
         retainedRunsByDeviceID = [:]
-        retainedRunHistoryLoadedDeviceIDs = []
+        retainedRunHistoryLoadedAtByDeviceID = [:]
         retainedRunHistoryLoadingDeviceIDs = []
     }
 
@@ -193,6 +194,7 @@ import workspacecore
                 }
                 let now = Date()
                 for refresher in relativeTimeLabelRefreshers { refresher(now) }
+                if selectedTab == .runs { loadRetainedRunHistoryIfNeeded(for: host.automationDeviceInputs(), now: now) }
             }
         }
     }

@@ -110,6 +110,8 @@ struct AutomationAlertEntry: Sendable, Equatable {
 /// pure function of its inputs so the cross-device merge, the device filter, the running-run extraction, and
 /// the alert derivation are directly unit-testable.
 enum AutomationsViewModel {
+    static let retainedRunHistoryRefreshInterval: TimeInterval = 30
+
     /// Reused for parsing the ISO8601 run timestamps the wire summaries carry. `ISO8601DateFormatter` is
     /// documented thread-safe, so one shared instance is safe from these nonisolated helpers.
     nonisolated(unsafe) private static let iso8601Formatter = ISO8601DateFormatter()
@@ -129,6 +131,13 @@ enum AutomationsViewModel {
                 offlineMessage: input.offlineMessage, automations: input.automations, runs: Array(runsByID.values),
                 timeZoneIdentifier: input.timeZoneIdentifier)
         }
+    }
+
+    /// Full history is cached only briefly while the Runs tab stays visible. Reloading removes entries
+    /// whose retention or automation deletion happened after the pane first loaded.
+    static func retainedRunHistoryNeedsRefresh(lastLoadedAt: Date?, now: Date) -> Bool {
+        guard let lastLoadedAt else { return true }
+        return now.timeIntervalSince(lastLoadedAt) >= retainedRunHistoryRefreshInterval
     }
 
     /// The merged automations table across every reachable device, sorted by automation name (locale-aware)

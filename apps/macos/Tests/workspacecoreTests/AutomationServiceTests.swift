@@ -123,6 +123,21 @@ import spacesterminalcore
 
     // MARK: - Missed-run catch-up
 
+    /// Startup reconciliation can already be queued when daemon shutdown begins. Once teardown latches,
+    /// that queued pass must leave the overdue occurrence untouched so the next daemon can catch it up.
+    func testMissedRunReconciliationIsANoOpWhileTicksAreSuspended() throws {
+        let harness = try Harness(self, ticksSuspended: { true })
+        let overdue = harness.now().addingTimeInterval(-3 * 24 * 60 * 60)
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", missedRunPolicy: .runOnce, nextFireTime: overdue)
+        let persistedOverdue = try harness.store.automation(id: automation.id)?.nextFireTime
+
+        harness.service.reconcileMissedRunsOnStart()
+
+        XCTAssertTrue(try harness.store.automationRuns(automationID: automation.id).isEmpty)
+        XCTAssertEqual(try harness.store.automation(id: automation.id)?.nextFireTime, persistedOverdue)
+    }
+
     func testMissedRunOnceFiresExactlyOnce() throws {
         let harness = try Harness(self)
         // A once-a-minute cron whose next fire time is days in the past: many occurrences were missed.

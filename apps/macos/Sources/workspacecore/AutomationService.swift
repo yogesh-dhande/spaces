@@ -50,11 +50,9 @@ public final class AutomationService: @unchecked Sendable {
     private let terminationGrace: TimeInterval
     /// Newest runs kept per automation; older terminal runs are pruned with their artifacts.
     private let retentionLimit: Int
-    /// Read at the top of every queue-confined tick, not just at the daemon's timer callback. The timer-side
-    /// handoff gate races: a tick that passed it can sit unscheduled while the handoff's `waitUntilIdle()`
-    /// drains an empty queue, then run against quiesced cores and misread preserved sessions as dead.
-    /// Re-checking INSIDE the confinement queue closes that window — any tick admitted after the handoff
-    /// flag is set no-ops. The daemon injects the same liveness flag its timer gate reads.
+    /// Read inside queue-confined scheduler entry points, not just at the daemon's timer callback. The
+    /// timer-side teardown gate races: work that passed it can sit unscheduled while teardown starts.
+    /// Re-checking inside confinement makes work admitted after a handoff or shutdown latch a no-op.
     private let ticksSuspended: @Sendable () -> Bool
     private let logError: (String) -> Void
 
@@ -173,7 +171,14 @@ public final class AutomationService: @unchecked Sendable {
     /// elapsed while the daemon was down, apply the missed-run policy exactly once (one catch-up run, or one
     /// skipped row), then recompute the next fire time from now. Automations with no elapsed anchor (freshly
     /// created, or whose next time is still in the future) are left untouched.
-    public func reconcileMissedRunsOnStart() { queue.sync { reconcileMissedRunsOnStartLocked() } }
+    public func reconcileMissedRunsOnStart() {
+        queue.sync {
+            // Startup reconciliation is queued off main. If daemon teardown latched before this block
+            // acquired the queue, leave overdue anchors untouched for the next daemon to reconcile.
+            guard !ticksSuspended() else { return }
+            reconcileMissedRunsOnStartLocked()
+        }
+    }
 
     private func reconcileMissedRunsOnStartLocked() {
         // Reconcile stale `running` run rows left by the previous daemon lifetime BEFORE firing any catch-up.

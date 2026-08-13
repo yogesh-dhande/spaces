@@ -11,6 +11,24 @@
         func snapshot() -> [SpacesDeviceAPIRequest] { requests }
     }
 
+    /// Holds one automation request until the test changes the model's connection identity, making a
+    /// response from the previous device deterministic.
+    private actor SpacesMobileAutomationsAsyncGate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            isOpen = true
+            for waiter in waiters { waiter.resume() }
+            waiters.removeAll()
+        }
+    }
+
     @MainActor final class SpacesMobileAutomationsTests: XCTestCase {
         // MARK: - SpacesMobileAutomations.rows / lastRunStatus
 
@@ -408,6 +426,80 @@
             XCTAssertEqual(payload.runID, "run-1")
             XCTAssertFalse(model.isMutating)
             XCTAssertNil(model.errorMessage)
+        }
+
+        func testTriggerAutomationDoesNotRefreshAfterConnectionChanges() async {
+            let gate = SpacesMobileAutomationsAsyncGate()
+            let staleOverview = makeOverview(
+                automations: [makeAutomation(id: "old-automation", name: "Old device")],
+                automationRuns: [makeRun(id: "old-run", automationID: "old-automation", status: "running")])
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "triggerAutomation" { await gate.wait() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
+            }
+            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+
+            let task = Task { await model.triggerAutomation(id: "old-automation") }
+            await Task.yield()
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+            await task.value
+
+            XCTAssertNil(model.overview)
+        }
+
+        func testCancelAutomationRunDoesNotRefreshAfterConnectionChanges() async {
+            let gate = SpacesMobileAutomationsAsyncGate()
+            let staleOverview = makeOverview(automationRuns: [makeRun(id: "old-run", automationID: "old-automation", status: "canceled")])
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "cancelAutomationRun" { await gate.wait() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
+            }
+            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+
+            let task = Task { await model.cancelAutomationRun(runID: "old-run") }
+            await Task.yield()
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+            await task.value
+
+            XCTAssertNil(model.overview)
+        }
+
+        func testEndAutomationAgentsDoesNotRefreshAfterConnectionChanges() async {
+            let gate = SpacesMobileAutomationsAsyncGate()
+            let staleOverview = makeOverview(automationRuns: [makeRun(id: "old-run", automationID: "old-automation", status: "succeeded")])
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "endAutomationAgents" { await gate.wait() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: request.commandName == "overview" ? .overview(staleOverview) : nil)
+            }
+            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+
+            let task = Task { await model.endAutomationAgents(runID: "old-run") }
+            await Task.yield()
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+            await task.value
+
+            XCTAssertNil(model.overview)
+        }
+
+        func testFetchAutomationRunsDiscardsResultAfterConnectionChanges() async {
+            let gate = SpacesMobileAutomationsAsyncGate()
+            let staleRuns = [makeRun(id: "old-run", automationID: "old-automation", status: "succeeded")]
+            let client = SpacesDeviceAPIClient(settings: SpacesMobileConnectionSettings()) { request in
+                if request.commandName == "listAutomationRuns" { await gate.wait() }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .automationRuns(.init(rows: staleRuns)))
+            }
+            let model = SpacesMobileAppModel(settings: SpacesMobileConnectionSettings(), bridgeClient: client)
+
+            let task = Task { await model.fetchAutomationRuns(automationID: "old-automation") }
+            await Task.yield()
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+
+            let result = await task.value
+            XCTAssertNil(result)
         }
 
         // MARK: - Fixtures
