@@ -100,6 +100,30 @@
             }
         }
 
+        /// Before the first hook signal, a spawned agent still appears as a workspace terminal row. Its
+        /// explicit Stop action uses the workspace-terminal request, which must preserve agent teardown
+        /// semantics instead of treating the agent-owned session as an ad-hoc shell.
+        func testStopWorkspaceTerminalRoutesPreSignalAgentToAgentKiller() throws {
+            try withTemporaryProfile { _ in
+                try seedPreSignalAgentTerminal(terminalSessionID: "automation-agent-session")
+                let killer = AgentSessionKillerRecorder(result: true)
+                let (server, client, clientApp, token) = try startServerAndClient(agentSessionKiller: { killer.record($0) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "automation-agent-session")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Stopped workspace terminal"), response.message)
+                XCTAssertEqual(killer.sessionIDs(), ["automation-agent-session"])
+            }
+        }
+
         /// A false return from the killer means the id names no agent session — the same loud
         /// invalidArgument the local `.agentKill` path raises.
         func testKillAgentSessionFailsLoudlyWhenKillerReportsNoSession() throws {
@@ -348,6 +372,29 @@
                     agentSessionID: agent.id, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: signalAt)
             }
             return agent
+        }
+
+        private func seedPreSignalAgentTerminal(terminalSessionID: String) throws {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
+                    processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+                    lastLaunchedAt: nil))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "window-1", workspaceID: "workspace-1", app: TerminalHost.spaces.appName, name: "Automation agent", detail: nil,
+                    targetURL: nil, terminalTrackingID: terminalSessionID, role: "terminal", orderIndex: 200, lastSeenAt: "2026-08-12T00:00:00Z"))
+            let paths = try TerminalSessionPaths.forSession(id: terminalSessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: terminalSessionID, title: "Automation agent", workingDirectory: dir + "/ws", shell: "/bin/zsh", command: "codex",
+                    createdAt: "2026-08-12T00:00:00Z", workspaceID: "workspace-1", kind: .agent, automationRunID: "run-1"), paths: paths)
         }
 
         private func startServerAndClient(agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil) throws -> (

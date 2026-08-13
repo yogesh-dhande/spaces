@@ -5,6 +5,16 @@ import systembridge
 extension WorkspaceOrchestrator {
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
 
+    /// Whether a workspace terminal row names a session launched through the coding-agent path. Before
+    /// the agent's first hook signal there is no agent row to render or address, so an explicit Stop still
+    /// arrives as a workspace-terminal request and must select teardown from the persisted launch kind.
+    public func workspaceTerminalSessionIsSpawnedAgent(workspaceID: String, sessionID: String) -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID),
+            let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+        else { return false }
+        return launchConfiguration.workspaceID == workspaceID && launchConfiguration.kind == .agent
+    }
+
     @discardableResult public func stopBuiltInTerminalSessionClosedByUser(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)

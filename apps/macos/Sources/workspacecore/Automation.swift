@@ -9,8 +9,7 @@ public enum AutomationTriggerKind: String, Codable, Sendable, CaseIterable {
 
 /// What a scheduled automation runs. A `script` automation runs `script` verbatim in its workspace-less
 /// session. An `agent` automation instead spawns a coding agent (`agentCommand`) seeded with `agentPrompt`
-/// in `workspaceID`'s workspace — commit 9 wires up its execution; until then `AutomationService` marks an
-/// `agent`-kind run failed immediately rather than attempting to launch it.
+/// in `workspaceID`'s workspace.
 public enum AutomationKind: String, Codable, Sendable, CaseIterable {
     case script
     case agent
@@ -33,8 +32,8 @@ public enum AutomationMissedRunPolicy: String, Codable, Sendable, CaseIterable {
     case skip
 }
 
-/// A daemon-owned scheduled automation that runs a shell script or spawns a coding agent in a
-/// workspace-less terminal session.
+/// A daemon-owned scheduled automation that runs a shell script in a workspace-less terminal session or
+/// spawns a coding agent into a workspace-owned terminal session.
 public struct Automation: Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String

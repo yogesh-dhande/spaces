@@ -2413,7 +2413,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
-        guard try context.orchestrator().stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
+        let orchestrator = try context.orchestrator()
+        if orchestrator.workspaceTerminalSessionIsSpawnedAgent(workspaceID: workspaceID, sessionID: sessionID) {
+            guard let agentSessionKiller else {
+                return SpacesDeviceAPIResponse(ok: false, message: "Agent stop is unavailable on this daemon.", errorCode: .internalError)
+            }
+            guard try agentSessionKiller(sessionID) else {
+                return try refreshedMutationResponse(context: context, message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
+            }
+            return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
+        }
+        guard try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
             return try refreshedMutationResponse(context: context, message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
         }
         return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
