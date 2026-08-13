@@ -5,6 +5,29 @@ import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
+/// Serializes mutations that target the same persisted record. Completed entries are removed only by the
+/// enqueue operation that owns them, so an older completion cannot erase a newer queued operation.
+@MainActor final class AutomationMutationQueue {
+    private struct Entry {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var entries: [String: Entry] = [:]
+
+    @discardableResult func enqueue(key: String, operation: @escaping @Sendable @MainActor () async -> Void) -> Task<Void, Never> {
+        let previous = entries[key]?.task
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            await operation()
+            guard let self, self.entries[key]?.id == id else { return }
+            self.entries.removeValue(forKey: key)
+        }
+        entries[key] = Entry(id: id, task: task)
+        return task
+    }
+}
+
 /// Owns the Automations detail pane's state and behavior. `AppKitController` holds a single instance and
 /// delegates automations interactions to it, reaching back into the host for shared window/model/device
 /// services via `host` (the unowned-host sub-controller pattern shared with `AlertsController`).
@@ -40,6 +63,9 @@ import workspacecore
     private var retainedRunHistoryLoadedAtByDeviceID: [String: Date] = [:]
     private var retainedRunHistoryLoadingDeviceIDs: Set<String> = []
     private var retainedRunHistoryGeneration = 0
+    /// Device mutations for the same automation are serialized so rapid switch changes reach the daemon in
+    /// selection order and the last user selection is the persisted state.
+    private let automationMutationQueue = AutomationMutationQueue()
 
     private let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
@@ -797,7 +823,7 @@ import workspacecore
         else { return }
         let enabled = sender.state == .on
         let fields = AppKitController.automationFields(from: automation, enabled: enabled)
-        performMutation(deviceID: deviceID) { device, clientApp in
+        performMutation(deviceID: deviceID, serializationKey: "\(deviceID)::\(automationID)") { device, clientApp in
             try SpacesDeviceClient.updateAutomation(id: automationID, fields: fields, device: device, clientApp: clientApp)
         }
     }
@@ -824,7 +850,9 @@ import workspacecore
     /// the daemon confirms, so on rejection or an offline remote we must re-render from the daemon's truth
     /// to clear the stale flip rather than leave the UI asserting a change that never landed. For an
     /// offline remote this renders whatever cached overview exists, which is acceptable.
-    private func performMutation(deviceID: String, _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void)
+    private func performMutation(
+        deviceID: String, serializationKey: String? = nil,
+        _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void)
     {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()
@@ -832,16 +860,21 @@ import workspacecore
         }
         resetRetainedRunHistory()
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
-        Task { @MainActor [weak self] in
+        let run: @MainActor @Sendable () async -> Void = { [weak self] in
+            guard let self else { return }
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in
                 do {
                     try operation(device, SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     return nil
                 } catch { return error }
             }.value
-            guard let self else { return }
-            if let error { host.showError(error) }
-            host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
+            if let error { self.host.showError(error) }
+            self.host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
+        }
+        if let serializationKey {
+            automationMutationQueue.enqueue(key: serializationKey, operation: run)
+        } else {
+            Task { await run() }
         }
     }
 

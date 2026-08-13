@@ -74,6 +74,9 @@ import workspacecore
     /// `present` — this controller instance is reused across opens, so a successful save (which closes the
     /// window without clearing the flag) must not leave the next editor session unsaveable.
     private var isSaving = false
+    /// Identifies the current form presentation. Async save completions must not touch a later form after
+    /// this controller's window was closed and reused.
+    private var presentationGeneration = 0
 
     // Rows whose visibility depends on the type toggle.
     private var workspaceRow: NSView?
@@ -111,6 +114,7 @@ import workspacecore
     }
 
     private func present(title: String, seed: TerminalServiceAutomationSummary?) {
+        presentationGeneration &+= 1
         isSaving = false
         // Preserve the edited automation's stored workspace even when it has since been hidden, so saving an
         // unrelated edit never retargets it to the first visible workspace. Preservation applies ONLY to a
@@ -693,6 +697,8 @@ import workspacecore
             return
         }
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
+        let saveGeneration = presentationGeneration
+        let presentedWindow = window
         // Set the flag synchronously before spawning the Task, so a second click or Return press arriving
         // before the first request completes is rejected at the guard above. Disabling the button gives
         // immediate visual feedback. The device popup is frozen too: changing the device rebuilds the form
@@ -715,6 +721,10 @@ import workspacecore
                 } catch { return error }
             }.value
             guard let self else { return }
+            guard Self.shouldApplySaveCompletion(
+                currentGeneration: self.presentationGeneration, expectedGeneration: saveGeneration,
+                currentWindowMatches: self.window === presentedWindow)
+            else { return }
             if let error {
                 self.isSaving = false
                 self.saveButton?.isEnabled = true
@@ -813,6 +823,11 @@ import workspacecore
 
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === window else { return }
+        presentationGeneration &+= 1
         window = nil
+    }
+
+    static func shouldApplySaveCompletion(currentGeneration: Int, expectedGeneration: Int, currentWindowMatches: Bool) -> Bool {
+        currentGeneration == expectedGeneration && currentWindowMatches
     }
 }
