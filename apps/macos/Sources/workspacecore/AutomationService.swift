@@ -791,9 +791,10 @@ public final class AutomationService: @unchecked Sendable {
         do {
             guard let sessionID = run.terminalSessionID else { return }
             let sessionLive = orchestrator.automationSessionIsLive(sessionID: sessionID)
+            let launchPending = orchestrator.automationSessionLaunchIsPending(sessionID: sessionID)
 
             if let timeoutSeconds = automation.timeoutSeconds, let startedAt = run.startedAt,
-                now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), sessionLive
+                now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), sessionLive || launchPending
             {
                 // An observed completion wins over the timeout: the timeout exists to reap hung agents, not
                 // to reclassify finished work. A done agent's session deliberately stays live, so an agent

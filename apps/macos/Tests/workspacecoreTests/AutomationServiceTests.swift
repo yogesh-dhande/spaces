@@ -755,6 +755,27 @@ import spacesterminalcore
         XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the hung agent's session is torn down")
     }
 
+    /// A pending agent launch has no runtime row yet, but its configured timeout still applies. The run must
+    /// tear down that pending session instead of waiting for the launch grace to expire and failing unowned.
+    func testAgentRunTimesOutDuringLaunchPendingGrace() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAgentAutomation(workspaceID: "workspace-1", timeoutSeconds: 5)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .agent, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: clock.now(), endedAt: nil, createdAt: clock.now())
+        try harness.store.insertAutomationRun(run)
+        try harness.writeLaunchConfigurationOnly(
+            workspaceID: automation.workspaceID, runID: run.id, sessionID: sessionID, kind: .agent, createdAt: Date())
+
+        clock.advance(by: 10)
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .timedOut)
+        XCTAssertTrue(harness.host.terminated.contains(sessionID), "the pending agent session is torn down on timeout")
+    }
+
     // MARK: - End attributed agents
 
     /// End-agents over a terminal run reaps its still-live attributed agent session through the agent-kill
