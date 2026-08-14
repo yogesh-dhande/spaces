@@ -87,10 +87,10 @@ final class WorkspaceVisibilityCheckbox: NSButton {
         return true
     }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
-        guard let item = item as? WorkspaceVisibilityOutlineItem, case .device = item.content else { return true }
-        return false
-    }
+    /// Nothing in the dialog may collapse. It is a recovery surface: a hidden row the user came here
+    /// to find must never end up behind a closed disclosure triangle, so device headers and project
+    /// rows alike stay open.
+    func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool { false }
 
     func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
         guard let item = item as? WorkspaceVisibilityOutlineItem, case .device = item.content else { return true }
