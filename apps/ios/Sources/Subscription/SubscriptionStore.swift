@@ -104,7 +104,7 @@ import UIKit
                 isEligibleForIntroOffer = false
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = Self.failureMessage(for: error, fallback: Self.loadFailureMessage)
             isEligibleForIntroOffer = false
         }
         await refreshEntitlement()
@@ -117,7 +117,7 @@ import UIKit
     /// no retry affordance. Pure so it is testable without constructing a `Product`.
     static func productLoadOutcome(products: [Product]) -> (product: Product?, errorMessage: String?) {
         guard let product = products.first else {
-            return (nil, "The subscription is currently unavailable. Please try again later.")
+            return (nil, loadFailureMessage)
         }
         return (product, nil)
     }
@@ -176,6 +176,7 @@ import UIKit
         await refreshEntitlement()
     }
 
+    static let loadFailureMessage = "The subscription is currently unavailable. Please try again later."
     static let purchaseFailureMessage = "The purchase could not be completed. Please try again in a moment."
     static let restoreFailureMessage = "Purchases could not be restored. Please try again in a moment."
     static let networkFailureMessage =
