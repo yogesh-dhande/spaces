@@ -1330,11 +1330,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return (project, entry.workspace)
     }
 
-    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isHidden }
-
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
-        let result = (host.workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
+        let project = host.projects.first(where: { $0.id == projectID })
+        let result = (host.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
+            lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
             return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
         }
@@ -1353,15 +1353,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
-        host.projects.filter { project in
-            guard project.deviceID == deviceID else { return false }
-            // A non-git project's row stands in for its single workspace. If that
-            // workspace is hidden it has no visible workspace, so drop the row entirely
-            // (it stays reachable from the Workspace Visibility dialog) rather than
-            // leaving a dead stand-in that selects nothing.
-            if !project.isGitRepo, visibleWorkspaces(projectID: project.id).isEmpty { return false }
-            return true
-        }
+        SidebarVisibility.deviceProjects(host.projects, deviceID: deviceID, workspacesByProject: host.workspacesByProject)
     }
 
     func navigateSidebarSelection(direction: Int) -> Bool {
@@ -2768,7 +2760,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let project = host.projects[index]
         host.projects[index] = ProjectSummary(
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-            isCollapsed: isCollapsed, deviceID: project.deviceID)
+            isHidden: project.isHidden, isCollapsed: isCollapsed, deviceID: project.deviceID)
     }
 
     /// Update the Alerts sidebar row badge with the current attention item count.

@@ -924,6 +924,28 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspaces(projectID: project.id).filter { $0.dir == workspace.dir }.count, 1)
     }
 
+    /// A hidden project stays hidden across a worktree rescan: discovery creates and retires workspaces,
+    /// and must not rewrite the project row's daemon-owned visibility flag along the way.
+    func testScanAndCreateWorkspacesFromWorktreesLeavesHiddenProjectHidden() throws {
+        let repo = try makeTempGitRepo(name: "hidden-project-survives-discovery")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+
+        let project = try orchestrator.addProject(dir: repo.path)
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: true)
+
+        let client = GitClient()
+        let discoveredWorktree = root.appendingPathComponent("feature-discovered", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: discoveredWorktree.path, branch: "feature-discovered")
+
+        let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+
+        XCTAssertFalse(created.isEmpty, "the new worktree is imported")
+        XCTAssertTrue(try XCTUnwrap(store.project(id: project.id)).isHidden, "discovery leaves the project's hidden flag alone")
+    }
+
     // Tests scan and create workspaces from worktrees skips missing worktree directories by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesSkipsMissingWorktreeDirectories() throws {
         let repo = try makeTempGitRepo(name: "test-repo")

@@ -210,6 +210,17 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     var id: String { "loose:\(workspaceID)" }
 }
 
+/// One hidden project, surfaced in the Spaces tab's "Hidden" recovery section as a single row instead of
+/// listing its workspaces individually — iOS has no UI to hide a project (that is Mac-only), only to
+/// recover one, so this exists purely to back that row and its unhide action.
+struct SpacesMobileHiddenProjectSummary: Identifiable, Equatable {
+    let projectID: String
+    let projectName: String
+    let workspaceCount: Int
+
+    var id: String { projectID }
+}
+
 enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
     case processes
     case codingAgents
@@ -765,14 +776,39 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.wallClock = wallClock
     }
 
-    /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
-    /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
-    /// from the Mac's Workspace Visibility dialog is hidden here too.
-    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isHidden } }
+    /// The workspaces this client lists: neither archived, hidden, nor under a hidden project, matching
+    /// the Mac sidebar's `isVisibleWorkspace` rule. See `SpacesDeviceOverviewPayload.isWorkspaceVisible`
+    /// for the shared rule every visible-surface filter (this, `terminalGroups`, the Agents tab, the
+    /// Alerts tab) applies.
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] {
+        guard let overview else { return [] }
+        return overview.workspaces.filter { overview.isWorkspaceVisible($0) }
+    }
 
-    /// Hidden workspaces, in the overview's own order — the same order `visibleWorkspaces` uses without
-    /// any further sort of its own. Backs the Spaces tab's "Hidden" recovery section.
-    var hiddenWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter(\.isHidden) }
+    /// Individually hidden workspaces whose project is *not* hidden, in the overview's own order — the
+    /// same order `visibleWorkspaces` uses without any further sort of its own. Backs the Spaces tab's
+    /// "Hidden" recovery section's per-workspace rows.
+    ///
+    /// A workspace under a hidden project is excluded here even though it is also invisible: it recovers
+    /// through its project's single entry in `hiddenProjects` instead of appearing a second time as its
+    /// own row, so the two lists never double-list one workspace.
+    var hiddenWorkspaces: [SpacesDeviceWorkspaceSummary] {
+        guard let overview else { return [] }
+        return overview.workspaces.filter { $0.isHidden && !overview.isProjectHidden(forProjectID: $0.projectID) }
+    }
+
+    /// Hidden projects, in the overview's own order, each carrying the count of workspaces the daemon
+    /// still lists under it. Backs the Spaces tab's "Hidden" recovery section's per-project rows — one
+    /// entry recovers every workspace under that project at once, rather than the section listing them
+    /// individually.
+    var hiddenProjects: [SpacesMobileHiddenProjectSummary] {
+        guard let overview else { return [] }
+        var workspaceCounts: [String: Int] = [:]
+        for workspace in overview.workspaces { workspaceCounts[workspace.projectID, default: 0] += 1 }
+        return overview.projects.filter(\.isHidden).map {
+            SpacesMobileHiddenProjectSummary(projectID: $0.id, projectName: $0.name, workspaceCount: workspaceCounts[$0.id] ?? 0)
+        }
+    }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
@@ -797,11 +833,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         // A loose group is a band belonging to a workspace this list is showing, so only that workspace's
-        // sessions can form one. That drops a hidden workspace's sessions (otherwise hiding a workspace
-        // would just move its terminals into a loose group instead of removing them from the list) and
-        // sessions whose workspace record the overview no longer carries at all — a deleted workspace's
-        // ended sessions linger for a refresh or two, and they must not raise a band named for a
-        // workspace that no longer exists beside the band being removed.
+        // sessions can form one. That drops a hidden workspace's sessions — hidden by its own flag or by
+        // its project's, `visibleWorkspaces` makes no distinction — (otherwise hiding it would just move
+        // its terminals into a loose group instead of removing them from the list) and sessions whose
+        // workspace record the overview no longer carries at all — a deleted workspace's ended sessions
+        // linger for a refresh or two, and they must not raise a band named for a workspace that no longer
+        // exists beside the band being removed.
         let sessions = (overview?.sessions ?? []).filter { session in
             workspaceByID[session.workspaceID] != nil && !representedSessionIDs.contains(session.id)
                 && terminalSessionMatchesFilters(session, query: query)
@@ -2108,6 +2145,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func unhideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
         await performWorkspaceMutation {
             try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: false, commandChannel: commandChannel)
+        }
+    }
+
+    /// Unhides the project, clearing only its own flag. iOS has no UI to hide a project (that is
+    /// Mac-only, from the sidebar), so this is the recovery half only — like `unhideWorkspace`, it never
+    /// stops or otherwise touches the workspaces underneath it; they simply stop being suppressed by it.
+    func unhideProject(_ project: SpacesMobileHiddenProjectSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.setProjectHidden(projectID: project.projectID, isHidden: false, commandChannel: commandChannel)
         }
     }
 

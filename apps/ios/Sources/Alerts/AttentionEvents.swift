@@ -103,10 +103,11 @@ enum SpacesMobileAttention {
     ///   - watchWindowsBySessionID: the user's recent watches of each recently watched session. Overview
     ///     polling is paused while a detail is open, so a bell rung during a watch is first seen after
     ///     that watch ended — a bell inside any of them is one the user saw ring.
-    ///   - includingHiddenWorkspaces: when true, hidden workspaces' events are derived too instead of
-    ///     being skipped. Defaults to false so the Alerts tab and its badge stay unaffected; the only
-    ///     caller that opts in is `retainedDismissedEventIDs`, which needs a hidden workspace's events
-    ///     to still be derivable so their dismissals survive hiding (see that function's doc comment).
+    ///   - includingHiddenWorkspaces: when true, a workspace's events are derived even while it (or its
+    ///     project) is hidden, instead of being skipped. Defaults to false so the Alerts tab and its badge
+    ///     stay unaffected; the only caller that opts in is `retainedDismissedEventIDs`, which needs a
+    ///     hidden workspace's events to still be derivable so their dismissals survive hiding (see that
+    ///     function's doc comment).
     static func events(
         in overview: SpacesDeviceOverviewPayload, focusedSessionID: String?, watchWindowsBySessionID: [String: [SpacesMobileTerminalWatchWindow]],
         includingHiddenWorkspaces: Bool = false
@@ -115,13 +116,14 @@ enum SpacesMobileAttention {
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
         // Every event is grouped under its workspace's band, so a session only produces one when this
-        // overview still describes a workspace to band it under: a hidden workspace's sessions are
-        // suppressed with it (unless `includingHiddenWorkspaces`), and a session whose workspace record is
-        // gone entirely — a deleted workspace's sessions linger for a refresh or two after its record —
-        // has no band to appear under at all.
-        let bandedWorkspaceIDs = Set(overview.workspaces.lazy.filter { includingHiddenWorkspaces || !$0.isHidden }.map(\.id))
+        // overview still describes a workspace to band it under: a workspace hidden by its own flag or by
+        // its project's (see `SpacesDeviceOverviewPayload.isWorkspaceVisible`) has its sessions suppressed
+        // with it (unless `includingHiddenWorkspaces`), and a session whose workspace record is gone
+        // entirely — a deleted workspace's sessions linger for a refresh or two after its record — has no
+        // band to appear under at all.
+        let bandedWorkspaceIDs = Set(overview.workspaces.lazy.filter { includingHiddenWorkspaces || overview.isWorkspaceVisible($0) }.map(\.id))
 
-        for workspace in overview.workspaces where includingHiddenWorkspaces || !workspace.isHidden {
+        for workspace in overview.workspaces where includingHiddenWorkspaces || overview.isWorkspaceVisible(workspace) {
             for agent in workspace.codingAgentRows {
                 if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
                 let kind: SpacesMobileAttentionEvent.Kind?
@@ -221,11 +223,11 @@ enum SpacesMobileAttention {
     ///
     /// Derivation here deliberately suppresses nothing — no focused session, no watch windows, and hidden
     /// workspaces included — because a temporarily suppressed event is still one this overview describes,
-    /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace
-    /// is exactly such a suppression: it is reversible from iOS, and unhiding it must not resurface alerts
-    /// the user already dismissed while it was hidden. A workspace the overview has stopped describing
-    /// altogether is not suppressed but deleted, so its dismissals do prune — there is nothing left to
-    /// resurface them.
+    /// and pruning its dismissal would make it alert again once the suppression lapsed. Hiding a workspace,
+    /// directly or via its project, is exactly such a suppression: both are reversible from iOS
+    /// (`unhideWorkspace`, `unhideProject`), and reversing either must not resurface alerts the user
+    /// already dismissed while it was hidden. A workspace the overview has stopped describing altogether
+    /// is not suppressed but deleted, so its dismissals do prune — there is nothing left to resurface them.
     static func retainedDismissedEventIDs(_ dismissed: Set<String>, in overview: SpacesDeviceOverviewPayload) -> Set<String> {
         dismissed.intersection(
             Set(events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:], includingHiddenWorkspaces: true).map(\.id)))

@@ -630,7 +630,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
-    func testProjectConfigAndHiddenWorkspaceMutationsReturnParityOverview() throws {
+    func testProjectConfigAndHiddenProjectAndWorkspaceMutationsReturnParityOverview() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
@@ -670,6 +670,29 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             XCTAssertTrue(hideResponse.ok, hideResponse.message)
             XCTAssertEqual(hideResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
+
+            // Hiding the project is a separate, independent flag: it must land on the project row of the
+            // parity overview without disturbing the project's configuration or its workspace's own flag.
+            let hideProjectResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .updateProjectMetadata(.init(projectID: projectID, isHidden: true, updatesHidden: true)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(hideProjectResponse.ok, hideProjectResponse.message)
+            let hiddenProject = try XCTUnwrap(hideProjectResponse.overview?.projects.first(where: { $0.id == projectID }))
+            XCTAssertTrue(hiddenProject.isHidden)
+            XCTAssertEqual(hiddenProject.config.setupScript, "echo setup")
+            XCTAssertEqual(hideProjectResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
+
+            let showProjectResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .updateProjectMetadata(.init(projectID: projectID, isHidden: false, updatesHidden: true)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(showProjectResponse.ok, showProjectResponse.message)
+            XCTAssertEqual(showProjectResponse.overview?.projects.first(where: { $0.id == projectID })?.isHidden, false)
         }
     }
 

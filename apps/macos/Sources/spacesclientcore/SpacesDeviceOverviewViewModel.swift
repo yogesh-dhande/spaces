@@ -17,15 +17,17 @@ public struct SpacesDeviceProjectRow: Equatable, Sendable {
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
+    public let isHidden: Bool
     public let isCollapsed: Bool
     public let actions: SpacesDeviceProjectActions
 
-    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false) {
+    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isHidden: Bool = false, isCollapsed: Bool = false) {
         self.id = id
         self.name = name
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
+        self.isHidden = isHidden
         self.isCollapsed = isCollapsed
         self.actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo)
     }
@@ -70,7 +72,8 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
 
     public init(overview: SpacesDeviceOverviewPayload) {
         projects = overview.projects.map {
-            SpacesDeviceProjectRow(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            SpacesDeviceProjectRow(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch,
+                isHidden: $0.isHidden)
         }
 
         workspacesByProject = Dictionary(grouping: overview.workspaces, by: \.projectID).mapValues { workspaces in

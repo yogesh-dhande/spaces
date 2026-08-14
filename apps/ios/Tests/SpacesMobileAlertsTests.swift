@@ -92,6 +92,28 @@
             XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
         }
 
+        /// A workspace whose own `isHidden` flag is false but whose project is hidden is just as invisible
+        /// as one hidden directly — the same rule the Spaces tab's browse list applies via
+        /// `SpacesDeviceOverviewPayload.isWorkspaceVisible`.
+        func testSkipsEventsAndLooseSessionsFromWorkspacesWithAHiddenProject() {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature", isHidden: false,
+                codingAgentRows: [makeAgentRow(id: "agent-hidden", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:01:00Z")],
+                processRows: [
+                    makeProcessRow(
+                        id: "process-hidden", name: "web", sessionID: "session-process", runState: .exited, exitedAt: "2026-01-01T00:02:00Z")
+                ], terminalRows: [makeTerminalRow(id: "terminal-hidden", title: "zsh", sessionID: "session-terminal", runState: .exited)])
+            let overview = makeOverview(
+                workspaces: [workspace], projectIsHidden: true,
+                sessions: [
+                    makeSession(id: "session-process", title: "web", state: .exited, updatedAt: "2026-01-01T00:02:00Z"),
+                    makeSession(id: "session-terminal", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:03:00Z"),
+                    makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
+                ])
+
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview, focusedSessionID: nil, watchWindowsBySessionID: [:]).isEmpty)
+        }
+
         /// A deleted workspace's sessions outlive its record by a refresh or two. An event grouped under a
         /// workspace the overview no longer describes would band under an id nothing else on screen carries,
         /// so those sessions raise no loose-session and no bell event.
@@ -268,6 +290,28 @@
                     id: "workspace-feature", branch: "feature", isHidden: true,
                     codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
             ])
+
+            let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
+
+            XCTAssertEqual(retained, [liveID])
+        }
+
+        /// The same guarantee when the suppression is project-level rather than the workspace's own flag:
+        /// hiding the project must not resurface an alert the user already dismissed once it is unhidden.
+        func testRetainedDismissalsSurviveWhenAnAgentsWorkspaceProjectIsHidden() {
+            let visibleOverview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
+            guard let liveID = SpacesMobileAttention.events(in: visibleOverview, focusedSessionID: nil, watchWindowsBySessionID: [:]).first?.id else {
+                XCTFail("Expected a derived event.")
+                return
+            }
+            let hiddenOverview = makeOverview(
+                workspaces: [
+                    makeWorkspace(
+                        id: "workspace-feature", branch: "feature",
+                        codingAgentRows: [makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")])
+                ], projectIsHidden: true)
 
             let retained = SpacesMobileAttention.retainedDismissedEventIDs([liveID], in: hiddenOverview)
 
@@ -904,11 +948,12 @@
         }
 
         private func makeOverview(
-            workspaces: [SpacesDeviceWorkspaceSummary]? = nil, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-            processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
-            sessions: [SpacesDeviceTerminalSessionSummary] = []
+            workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false,
+            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+            terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [], sessions: [SpacesDeviceTerminalSessionSummary] = []
         ) -> SpacesDeviceOverviewPayload {
-            let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+            let project = SpacesDeviceProjectSummary(
+                id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
             let resolvedWorkspaces =
                 workspaces ?? [
                     makeWorkspace(

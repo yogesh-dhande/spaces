@@ -1252,6 +1252,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload, context: context)
         case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
         case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload, context: context)
+        case .updateProjectMetadata(let payload): return try handleUpdateProjectMetadataRequest(payload, context: context)
         case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload, context: context)
         case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload, context: context)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
@@ -2103,7 +2104,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try context.store()
         let orchestrator = try context.orchestrator()
         let projects = try store.projects().map {
-            SpacesDeviceProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            SpacesDeviceProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let selectedProjectID = normalizedString(request.projectID) ?? projects.first?.id
         let branchOptions: [String]
@@ -2359,6 +2361,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
         }
         return try refreshedMutationResponse(context: context, message: "Updated project settings.", projectID: request.projectID)
+    }
+
+    private func handleUpdateProjectMetadataRequest(_ request: SpacesDeviceProjectMetadataUpdateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let orchestrator = try context.orchestrator()
+        if request.updatesHidden {
+            try context.store().withTransaction {
+                try orchestrator.updateProjectHidden(projectID: request.projectID, isHidden: request.isHidden == true)
+            }
+        }
+        return try refreshedMutationResponse(context: context, message: "Updated project metadata.", projectID: request.projectID)
     }
 
     private func handleUpdateWorkspaceConfigRequest(_ request: SpacesDeviceWorkspaceConfigUpdateRequest, context: RequestContext) throws

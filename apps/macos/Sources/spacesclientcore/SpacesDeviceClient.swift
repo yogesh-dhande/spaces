@@ -586,6 +586,15 @@ public enum SpacesDeviceClient {
             device: device, clientApp: clientApp, profile: profile)
     }
 
+    public static func updateProjectMetadata(
+        projectID: String, isHidden: Bool, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .updateProjectMetadata(.init(projectID: projectID, isHidden: isHidden, updatesHidden: true))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func updateWorkspaceConfig(
         workspaceID: String, config: SpacesDeviceWorkspaceConfig, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -1022,7 +1031,8 @@ public enum SpacesDeviceClient {
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .renameAgentSession, .state,
+            .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
+            .renameAgentSession, .state,
             .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
             .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
