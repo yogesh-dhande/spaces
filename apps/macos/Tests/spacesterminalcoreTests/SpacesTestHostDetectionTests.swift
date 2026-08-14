@@ -26,7 +26,7 @@ import Testing
     /// CLI classify itself as a test host — which would have profile resolution refuse the user's own live
     /// profile and fail a command that did nothing wrong.
     @Test func testBundleNamedInArgumentsIsNotTheExecutable() {
-        #expect(!SpacesTestHost.executableIsTestBundle(arguments: ["/usr/local/bin/spaces", "terminal", "command", "xcrun xctest ./Foo.xctest"]))
+        #expect(!SpacesTestHost.executableIsTestBundle(arguments: ["/usr/local/bin/spaces", "terminal", "create", "xcrun xctest ./Foo.xctest"]))
         #expect(!SpacesTestHost.executableIsTestBundle(arguments: ["/usr/local/bin/spaces", "terminal", "tail", "some/path/Foo.xctest"]))
     }
 

@@ -12,7 +12,8 @@ spaces workspace create --project <project-id> --branch debug
 
 Force a clean runtime restart:
 ```bash
-spaces workspace restart --workspace <workspace-id>
+cd <workspace-directory>
+spaces workspace restart
 ```
 
 ## Browser Sessions

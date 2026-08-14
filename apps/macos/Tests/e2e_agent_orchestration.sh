@@ -108,7 +108,7 @@ extract_session_id() {
 OPENED_SESSION_ID=""
 open_session() {
   local title="$1" command="$2" out session_id
-  out="$("$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command" --title "$title")"
+  out="$("$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$command" --title "$title")"
   session_id="$(extract_session_id "$out")"
   [[ -n "$session_id" ]] || fail "could not parse session id for $title from: $out"
   CREATED_SESSIONS+=("$session_id")

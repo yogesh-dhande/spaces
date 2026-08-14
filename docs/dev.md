@@ -163,7 +163,7 @@ When the app launches built-in Spaces terminals itself, `spacesd` owns the sessi
 - Run a coding-agent command in a workspace terminal so it registers as a coding-agent row.
 
 Close one of those owner windows and reopen it from the app. Quit and relaunch `SpacesApp`, then reopen the same session from the app. The shell or long-running process should stay attached to the same service-owned Ghostty session without restarting.
-CLI-created sessions such as `spaces terminal command` and CLI-managed `spaces workspace start --workspace <id>` use the same daemon-owned render-frame stream. The service publishes live Ghostty render frames to native client windows over the per-session subscription socket, while `output.log` remains the `spaces terminal tail` source.
+CLI-created sessions such as `spaces terminal create` and CLI-managed `spaces workspace start --workspace <id>` use the same daemon-owned render-frame stream. The service publishes live Ghostty render frames to native client windows over the per-session subscription socket, while `output.log` remains the `spaces terminal tail` source.
 For scripted real-system checks against the running app, `spacese2e` exposes `open-workspace-terminal`, `run-workspace-process`, and `start-workspace-terminal-session` so the manual harness can exercise the same app launch path without accessibility scripting.
 
 To verify the embedded Ghostty backend on an isolated database root:
@@ -178,7 +178,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
   register-project --project-dir "$TMPDIR/spaces-ghostty/workspace" >/dev/null
 spaces_cli="$(cd apps/macos/.build/debug && pwd)/spaces"
 (cd "$TMPDIR/spaces-ghostty/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" "$spaces_cli" \
-  terminal command --command cat --title verify-ghostty)
+  terminal create --command cat --title verify-ghostty)
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal send text <session-id> "hello from ghostty" --submit
@@ -362,7 +362,7 @@ For direct CLI verification of Spaces terminal commands:
 apps/macos/Tests/e2e.sh terminal --scenario cli
 ```
 
-That scenario exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
+That scenario exercises `spaces terminal create`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
 For the daemon's exec-in-place update handoff:
 
@@ -439,7 +439,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
 (cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
-  terminal command --command cat --title ios-demo)
+  terminal create --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
@@ -476,7 +476,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
 mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
 (cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
-  terminal command --command cat --title ios-demo)
+  terminal create --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 

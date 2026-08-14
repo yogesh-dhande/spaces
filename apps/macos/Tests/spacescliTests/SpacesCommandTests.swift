@@ -81,6 +81,26 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.workspace, "workspace-1")
     }
 
+    func testWorkspaceStartAndRestartParseWithoutWorkspaceID() throws {
+        XCTAssertNil(try WorkspaceStartCommand.parse([]).workspace)
+        XCTAssertNil(try WorkspaceRestartCommand.parse([]).workspace)
+    }
+
+    func testRemoteWorkspaceLifecycleRequiresExplicitWorkspaceBeforeDeviceLookup() throws {
+        XCTAssertThrowsError(try requiredRemoteWorkspaceID(nil)) { error in
+            XCTAssertTrue("\(error)".contains("--workspace is required with --device"))
+            XCTAssertTrue("\(error)".contains("Pass --workspace <id>"))
+        }
+        XCTAssertThrowsError(try requiredRemoteWorkspaceID("  "))
+        XCTAssertEqual(try requiredRemoteWorkspaceID("  workspace-1  "), "workspace-1")
+
+        let start = try WorkspaceStartCommand.parse(["--device", "missing-device"])
+        XCTAssertThrowsError(try start.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
+        let restart = try WorkspaceRestartCommand.parse(["--device", "missing-device"])
+        XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device"))
+        }
+    }
+
     func testAgentSignalParsesExplicitWorkspaceSessionAndEvent() throws {
         let command = try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "blocked"])
 
@@ -204,14 +224,16 @@ final class SpacesCommandTests: XCTestCase {
     /// unreachable Device API on the freshly installed daemon, a rejected pairing) is not fixable by
     /// re-running the installer, and dressing it up as one would also hide that the install completed.
     func testOnlyInstallerRunFailuresAreReportedAsAnInstallFailure() {
-        XCTAssertTrue(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallFailed("exit 1: no space left on device")))
+        XCTAssertTrue(
+            DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallFailed("exit 1: no space left on device")))
         XCTAssertTrue(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remoteInstallTimedOut("build-box")))
         // Everything the pairing phase raises after a successful install run.
         XCTAssertFalse(
             DevicePairCommand.isRemoteInstallRunFailure(
                 SpacesRemoteDevicePairingError.deviceAPIUnreachable(hosts: ["build-box"], port: 47_847, message: "Connection refused.")))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.pairingRejected("The pairing code expired.")))
-        XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remotePairCommandFailed("spaces: command not found")))
+        XCTAssertFalse(
+            DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.remotePairCommandFailed("spaces: command not found")))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(SpacesRemoteDevicePairingError.missingAuthToken))
         XCTAssertFalse(DevicePairCommand.isRemoteInstallRunFailure(CocoaError(.fileNoSuchFile)))
     }
@@ -295,16 +317,16 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertFalse(rows[0].contains("viewers="))
     }
 
-    func testTerminalCommandParsesOptions() throws {
-        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--workspace", "workspace-1"])
+    func testTerminalCreateParsesOptions() throws {
+        let command = try TerminalCreateCommand.parse(["--command", "cat", "--title", "session", "--workspace", "workspace-1"])
 
         XCTAssertEqual(command.command, "cat")
         XCTAssertEqual(command.title, "session")
         XCTAssertEqual(command.workspace, "workspace-1")
     }
 
-    func testTerminalCommandParsesWithoutExplicitWorkspace() throws {
-        let command = try TerminalCommandCommand.parse(["--command", "cat"])
+    func testTerminalCreateParsesWithoutExplicitWorkspace() throws {
+        let command = try TerminalCreateCommand.parse(["--command", "cat"])
 
         XCTAssertEqual(command.command, "cat")
         XCTAssertNil(command.workspace)
@@ -346,13 +368,15 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.sessionID, "session-1")
     }
 
-    func testTerminalCommandPublicSubcommands() {
+    func testTerminalPublicSubcommands() {
         let subcommands = TerminalCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands, ["TerminalListCommand", "TerminalCommandCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
+            subcommands, ["TerminalListCommand", "TerminalCreateCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
     }
 
     func testRemovedTerminalCommandsAndFormsAreUnavailable() {
+        XCTAssertThrowsError(try TerminalCommand.parse(["command", "--command", "cat"]))
+        XCTAssertThrowsError(try TerminalCommand.parse(["start", "--command", "cat"]))
         XCTAssertThrowsError(try TerminalCommand.parse(["key", "session-1", "ctrl+c"]))
         XCTAssertThrowsError(try TerminalCommand.parse(["takeover", "session-1", "client-1"]))
         XCTAssertThrowsError(try TerminalCommand.parse(["proxy", "session-1", "--auth-token", "SECRET"]))

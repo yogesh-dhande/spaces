@@ -180,8 +180,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let commands: [TerminalServiceProfileCommand] = [
             .projectList, .terminalList, .workspaceList(.init(projectID: "project-1")), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
-            .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
-            .workspaceRestart(workspaceID: "workspace-1"),
+            .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
+            .workspaceStart(.init(cwd: "/tmp")), .workspaceRestart(.init(cwd: "/tmp", workspaceID: "workspace-1")),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
@@ -256,16 +256,25 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"","agentSessionID":"agent-1"}}"#.utf8)))
     }
 
-    func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {
+    func testWorkspaceLifecyclePayloadDecodeValidatesAndNormalizesFields() throws {
         let decoder = JSONDecoder()
 
-        // Surrounding whitespace on a required field is trimmed at the wire boundary.
-        let padded = Data(#"{"workspaceStart":"  workspace-1  "}"#.utf8)
-        XCTAssertEqual(try decoder.decode(TerminalServiceProfileCommand.self, from: padded), .workspaceStart(workspaceID: "workspace-1"))
+        let explicit = Data(#"{"workspaceStart":{"cwd":"  /tmp/project  ","workspaceID":"  workspace-1  "}}"#.utf8)
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: explicit),
+            .workspaceStart(.init(cwd: "/tmp/project", workspaceID: "workspace-1")))
 
-        // An empty-after-trim required field is rejected during decode.
-        let empty = Data(#"{"workspaceStart":"   "}"#.utf8)
-        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: empty))
+        let inferred = Data(#"{"workspaceRestart":{"cwd":"/tmp/project"}}"#.utf8)
+        XCTAssertEqual(try decoder.decode(TerminalServiceProfileCommand.self, from: inferred), .workspaceRestart(.init(cwd: "/tmp/project")))
+
+        let blankWorkspace = Data(#"{"workspaceStart":{"cwd":"/tmp/project","workspaceID":"  "}}"#.utf8)
+        XCTAssertEqual(try decoder.decode(TerminalServiceProfileCommand.self, from: blankWorkspace), .workspaceStart(.init(cwd: "/tmp/project")))
+
+        let emptyCwd = Data(#"{"workspaceStart":{"cwd":"   "}}"#.utf8)
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: emptyCwd))
+
+        let missingCwd = Data(#"{"workspaceRestart":{}}"#.utf8)
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: missingCwd))
     }
 
     func testProfileCommandDecodeRejectsAmbiguousPayloads() {

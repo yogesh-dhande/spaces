@@ -21,8 +21,8 @@ import XCTest
             let offMain: [TerminalServiceProfileCommand] = [
                 .terminalSend(TerminalServiceTerminalSendPayload(sessionID: "s", input: .text("hi"))),
                 .terminalCommand(TerminalServiceTerminalCommandPayload(cwd: "/tmp")),
-                .agentSpawn(TerminalServiceAgentSpawnPayload(cwd: "/tmp", command: "claude")), .workspaceStart(workspaceID: "w"),
-                .workspaceRestart(workspaceID: "w"), .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
+                .agentSpawn(TerminalServiceAgentSpawnPayload(cwd: "/tmp", command: "claude")), .workspaceStart(.init(cwd: "/tmp", workspaceID: "w")),
+                .workspaceRestart(.init(cwd: "/tmp", workspaceID: "w")), .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
                 .agentSignal(TerminalServiceProfileAgentSignalPayload(workspaceID: "w", terminalSessionID: "s", event: "exit")),
             ]
             for command in offMain {

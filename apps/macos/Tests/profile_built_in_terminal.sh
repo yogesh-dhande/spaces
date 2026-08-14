@@ -302,7 +302,7 @@ while (( SECONDS < ipc_probe_deadline )); do
 done
 [[ "$ipc_probe_ready" == "1" ]] || { echo "Timed out waiting for SpacesApp terminal IPC observers." >&2; exit 1; }
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+# terminal create is workspace-scoped; register a fixture project and use its default workspace.
 FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
 mkdir -p "$FIXTURE_PROJECT_DIR"
 FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
@@ -317,7 +317,7 @@ PY
 )"
   command_output="$(
     env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-      "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --title "$title"
+      "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --title "$title"
   )"
   command_wall_ms="$(ms_since "$command_started_at")"
   session_id="$(extract_session_id "$command_output")"
