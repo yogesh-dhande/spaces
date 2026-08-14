@@ -10,9 +10,9 @@ import spacesterminalcore
 /// Behavior coverage for the scheduled-automation scheduler and executor: the concurrency policy matrix,
 /// missed-run catch-up on daemon start, the ended-only attributed-session sweep, run-history retention, and
 /// the executor's real exit-code/timeout/cancel handling. Session launches route through a process-wide
-/// fake terminal host so no real daemon or Ghostty PTY is needed; the exit-code, timeout, and cancel tests
-/// run real short shell commands through that host so the executor's command wrapping and signal escalation
-/// are exercised end to end.
+/// fake terminal host so no real daemon or Ghostty PTY is needed. Exit-code tests run short shell commands
+/// through that host; process-lifecycle tests use directly waitable process-group fixtures so their signal
+/// assertions do not depend on shell job control or process reparenting.
 @MainActor final class AutomationServiceTests: XCTestCase {
     // MARK: - Concurrency policy matrix
 
@@ -71,22 +71,20 @@ import spacesterminalcore
     }
 
     func testQueuePolicyWaitsForPendingTerminationBeforePromoting() throws {
-        let harness = try Harness(self, realCommands: true)
-        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-queued-survivor-\(UUID().uuidString).pid")
-        defer { try? FileManager.default.removeItem(at: pidFile) }
-        let script = """
-            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
-            sleep 60
-            """
-        let automation = try harness.insertAutomation(script: script, concurrency: .queue)
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let fixture = try AutomationProcessGroupFixture()
+        defer { fixture.terminateAndReap() }
+        let automation = try harness.insertAutomation(script: "sleep 60", concurrency: .queue)
         let first = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let queued = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+        let sessionID = try XCTUnwrap(first.terminalSessionID)
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: fixture.leaderPID)
 
         harness.service.cancelRun(runID: first.id)
         harness.service.tick()
 
-        XCTAssertTrue(harness.processIsRunning(survivorPID), "the predecessor is still alive during its termination grace")
+        XCTAssertTrue(harness.processIsRunning(fixture.survivorPID), "the predecessor is still alive during its termination grace")
         XCTAssertEqual(
             try harness.store.automationRun(id: queued.id)?.status, .queued,
             "queue concurrency includes a predecessor whose SIGKILL escalation is still pending")
@@ -505,8 +503,8 @@ import spacesterminalcore
         // must keep its original script kind.
         let agentDraft = AutomationDraft(
             name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "codex",
-            agentPrompt: "investigate", workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow,
-            missedRunPolicy: .runOnce)
+            agentPrompt: "investigate", workspaceID: automation.workspaceID, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce
+        )
         let updated = try harness.service.updateAutomation(id: automation.id, draft: agentDraft)
         XCTAssertEqual(updated.kind, .agent)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.kind, .script, "the retained run keeps the kind it ran with, not the new one")
@@ -781,7 +779,8 @@ import spacesterminalcore
         let harness = try Harness(self, now: clock.now)
         let (_, workspaceA) = try harness.makeProjectAndWorkspace()
         let (_, workspaceB) = try harness.makeProjectAndWorkspace()
-        let target = try harness.insertAutomation(triggerKind: .cron, cronExpression: "* * * * *", concurrency: .queue, nextFireTime: clock.now(), workspaceID: workspaceA.id)
+        let target = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", concurrency: .queue, nextFireTime: clock.now(), workspaceID: workspaceA.id)
         let unrelated = try harness.insertAutomation(concurrency: .allow, workspaceID: workspaceB.id)
         let started = expectation(description: "workspace stop operation started")
         let release = DispatchSemaphore(value: 0)
@@ -809,13 +808,15 @@ import spacesterminalcore
         wait(for: [finished], timeout: 2)
         harness.service.tick()
         XCTAssertEqual(try harness.store.automationRun(id: queued.id)?.status, .running, "target queued run promotes after stop completes")
-        XCTAssertNotNil(try harness.store.automationRuns(automationID: target.id).first { $0.status == .running }, "target fires after stop completes")
+        XCTAssertNotNil(
+            try harness.store.automationRuns(automationID: target.id).first { $0.status == .running }, "target fires after stop completes")
     }
 
     func testWorkspaceStopMarkerClearsWhenOperationThrows() throws {
         let harness = try Harness(self)
         let (_, workspace) = try harness.makeProjectAndWorkspace()
-        XCTAssertThrowsError(try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in throw NSError(domain: "test", code: 1) })
+        XCTAssertThrowsError(
+            try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in throw NSError(domain: "test", code: 1) })
         let automation = try harness.insertAutomation(concurrency: .allow, workspaceID: workspace.id)
         XCTAssertNotNil(harness.service.triggerManually(automationID: automation.id), "marker must clear after operation failure")
     }
@@ -836,9 +837,9 @@ import spacesterminalcore
             finished.fulfill()
         }
         wait(for: [began], timeout: 2)
-        XCTAssertThrowsError(try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in
-            throw WorkspaceError.dependencyMissing(message: "busy")
-        })
+        XCTAssertThrowsError(
+            try harness.service.cancelRunsForWorkspaceStop(workspaceID: workspace.id) { _ in throw WorkspaceError.dependencyMissing(message: "busy") }
+        )
         XCTAssertNil(harness.service.triggerManually(automationID: automation.id), "the first stop marker remains active")
         release.signal()
         wait(for: [finished], timeout: 2)
@@ -1082,16 +1083,19 @@ import spacesterminalcore
 
     func testTimeoutKillsCommandAndRecordsTimedOut() throws {
         let clock = MutableClock(start: Date())
-        let harness = try Harness(self, realCommands: true, now: clock.now)
+        let harness = try Harness(self, now: clock.now)
+        let fixture = try AutomationProcessGroupFixture()
+        defer { fixture.terminateAndReap() }
         let automation = try harness.insertAutomation(script: "sleep 30", concurrency: .allow, timeoutSeconds: 1)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        let childPID = try XCTUnwrap(harness.host.lastChildPID)
+        let sessionID = try XCTUnwrap(run.terminalSessionID)
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: fixture.leaderPID)
 
         clock.advance(by: 5)  // push past the 1s budget without waiting
         harness.service.tick()
 
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .timedOut)
-        try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
+        try harness.assertProcessDies(pid: fixture.leaderPID, drivingTicks: harness.service.tick)
     }
 
     /// A script that finishes right at its deadline wins over the timeout: its exit-code sentinel is written
@@ -1152,15 +1156,18 @@ import spacesterminalcore
     }
 
     func testCancelKillsCommandAndRecordsCanceled() throws {
-        let harness = try Harness(self, realCommands: true)
+        let harness = try Harness(self)
+        let fixture = try AutomationProcessGroupFixture()
+        defer { fixture.terminateAndReap() }
         let automation = try harness.insertAutomation(script: "sleep 30", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        let childPID = try XCTUnwrap(harness.host.lastChildPID)
+        let sessionID = try XCTUnwrap(run.terminalSessionID)
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: fixture.leaderPID)
 
         harness.service.cancelRun(runID: run.id)
 
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
-        try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
+        try harness.assertProcessDies(pid: fixture.leaderPID, drivingTicks: harness.service.tick)
     }
 
     func testCancelDelegatesTeardownWhenChildHasNoSafeProcessGroup() throws {
@@ -1206,59 +1213,46 @@ import spacesterminalcore
     }
 
     /// SIGKILL escalation tracks the whole process group, not just the leader: a canceled run whose command's
-    /// shell group leader exits on SIGTERM while a descendant ignores it must still escalate to SIGKILL and
-    /// kill the survivor. If escalation keyed only on the leader pid, the leader's death would drop the
-    /// pending kill and leave the descendant running forever.
+    /// group leader exits on SIGTERM while another group member ignores it must still escalate to SIGKILL and
+    /// kill the survivor. If escalation keyed only on the leader pid, the leader's death would drop the pending
+    /// kill and leave the survivor running forever. The fixture is made from directly spawned, waitable
+    /// processes rather than nested shells so the test does not depend on shell job-control or reparenting.
     func testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits() throws {
         let clock = MutableClock(start: Date())
-        let harness = try Harness(self, realCommands: true, now: clock.now)
-        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-survivor-\(UUID().uuidString).pid")
-        defer { try? FileManager.default.removeItem(at: pidFile) }
-        // The user script backgrounds a child shell that ignores SIGTERM (the ignore survives `exec sleep`)
-        // and records its own pid, then keeps the group leader alive with its own `sleep`. On cancel the
-        // group gets SIGTERM: the leader (and its foreground sleep) die, but the backgrounded child ignores
-        // it and lives on in the same process group.
-        // The temp pid-file path is a `/var/folders/...` path with no spaces or shell metacharacters, so
-        // double-quoting it inside the single-quoted `sh -c '…'` is enough to keep it one argument.
-        let script = """
-            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
-            sleep 60
-            """
-        let automation = try harness.insertAutomation(script: script, concurrency: .allow)
+        let harness = try Harness(self, now: clock.now)
+        let fixture = try AutomationProcessGroupFixture()
+        defer { fixture.terminateAndReap() }
+        let automation = try harness.insertAutomation(script: "sleep 60", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        let leaderPID = try XCTUnwrap(harness.host.lastChildPID)
-
-        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+        let sessionID = try XCTUnwrap(run.terminalSessionID)
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: fixture.leaderPID)
         harness.service.cancelRun(runID: run.id)
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
         // Establish the behavior this regression protects before allowing escalation: SIGTERM has reaped the
-        // group leader while the descendant that ignored it remains in that leader's captured process group.
-        try harness.waitForProcessReaped(pid: leaderPID)
-        XCTAssertTrue(harness.processIsRunning(survivorPID), "the TERM-ignoring child survives the initial SIGTERM")
+        // group leader while the member that ignored it remains in that leader's captured process group.
+        try fixture.waitForLeaderExit()
+        XCTAssertTrue(harness.processIsRunning(fixture.survivorPID), "the TERM-ignoring child survives the initial SIGTERM")
 
         clock.advance(by: 1)
-        try harness.assertProcessDies(pid: survivorPID, drivingTicks: harness.service.tick)
+        try harness.assertProcessDies(pid: fixture.survivorPID, drivingTicks: harness.service.tick)
     }
 
     /// An exec handoff preserves terminal children but replaces the AutomationService, so it must finish
     /// any pending SIGKILL escalation before the in-memory pending-kill table is discarded.
     func testHandoffDrainCompletesPendingSIGKILLEscalation() async throws {
-        let harness = try Harness(self, realCommands: true)
-        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-handoff-survivor-\(UUID().uuidString).pid")
-        defer { try? FileManager.default.removeItem(at: pidFile) }
-        let script = """
-            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
-            sleep 60
-            """
-        let automation = try harness.insertAutomation(script: script, concurrency: .allow)
+        let harness = try Harness(self)
+        let fixture = try AutomationProcessGroupFixture()
+        defer { fixture.terminateAndReap() }
+        let automation = try harness.insertAutomation(script: "sleep 60", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+        let sessionID = try XCTUnwrap(run.terminalSessionID)
+        try harness.setRuntimeChildPID(sessionID: sessionID, childPID: fixture.leaderPID)
 
         harness.service.cancelRun(runID: run.id)
-        XCTAssertTrue(harness.processIsRunning(survivorPID))
+        XCTAssertTrue(harness.processIsRunning(fixture.survivorPID))
         await harness.service.completePendingTerminationsForHandoff()
 
-        try harness.assertProcessDies(pid: survivorPID, drivingTicks: {})
+        try harness.assertProcessDies(pid: fixture.survivorPID, drivingTicks: {})
     }
 
     // MARK: - Delete terminates live attributed sessions
@@ -1906,43 +1900,13 @@ import spacesterminalcore
         return Int32(info.kp_proc.p_stat) == SZOMB ? .zombie : .running
     }
 
-    func processIsRunning(_ pid: Int32) -> Bool {
-        Self.processLifecycle(pid) == .running
-    }
+    func processIsRunning(_ pid: Int32) -> Bool { Self.processLifecycle(pid) == .running }
 
     private static func processDiagnostics(_ pid: Int32) -> String {
         let lifecycle = processLifecycle(pid).rawValue
         let processGroup = getpgid(pid)
         let processGroupDescription = processGroup >= 0 ? String(processGroup) : "unavailable (errno \(errno))"
         return "lifecycle=\(lifecycle), processGroup=\(processGroupDescription)"
-    }
-
-    /// Polls a pid file a spawned child writes its own pid into, returning the pid once present and the
-    /// process is confirmed genuinely running. Fails if it does not appear within the deadline.
-    func waitForRecordedPID(at url: URL, timeout: TimeInterval = 5) throws -> Int32 {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let text = try? String(contentsOf: url, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-                pid > 0, Self.processLifecycle(pid) == .running
-            {
-                return pid
-            }
-            usleep(30_000)
-        }
-        throw XCTSkip("child pid was not recorded at \(url.path) within \(timeout)s")
-    }
-
-    /// Waits for a child owned by the fake terminal host to be reaped, rather than merely becoming a zombie.
-    /// The leader-reaped ordering is part of the SIGKILL regression's setup: the descendant must survive after
-    /// its leader has completely left the process table.
-    func waitForProcessReaped(pid: Int32, timeout: TimeInterval = 3) throws {
-        let pollInterval: TimeInterval = 0.03
-        let attempts = max(1, Int(ceil(timeout / pollInterval)))
-        for _ in 0..<attempts {
-            if Self.processLifecycle(pid) == .reaped { return }
-            usleep(useconds_t(pollInterval * 1_000_000))
-        }
-        XCTFail("process \(pid) was not reaped after \(attempts) polls (\(Self.processDiagnostics(pid)))")
     }
 
     /// Asserts a process dies across a bounded polling budget, driving escalation ticks so a command that
@@ -1999,6 +1963,119 @@ private final class MutableClock: @unchecked Sendable {
     }
 }
 
+/// A small process group owned by the test itself. The leader uses the platform's default SIGTERM handling,
+/// while the survivor inherits SIGTERM ignored from the test process just for its `posix_spawn` call. Both are
+/// direct `/bin/sleep` children, and the test retains their pids so it can wait for each child instead of
+/// inferring descendant state through a shell pid file.
+private final class AutomationProcessGroupFixture {
+    let leaderPID: Int32
+    let survivorPID: Int32
+    private var leaderReaped = false
+    private var survivorReaped = false
+    private var cleaned = false
+
+    init() throws {
+        let leader = try Self.spawnSleep(processGroup: 0, ignoresSIGTERM: false)
+        do {
+            let survivor = try Self.spawnSleep(processGroup: leader, ignoresSIGTERM: true)
+            leaderPID = leader
+            survivorPID = survivor
+        } catch {
+            _ = kill(-leader, SIGKILL)
+            Self.reap(leader)
+            throw error
+        }
+    }
+
+    deinit { terminateAndReap() }
+
+    /// Waits until the group leader has both exited and been reaped. This is intentionally a waitpid-based
+    /// assertion: a zombie still makes `kill(pid, 0)` look alive and would make the setup scheduler-dependent.
+    func waitForLeaderExit(timeout: TimeInterval = 3) throws {
+        var status: Int32 = 0
+        let pollInterval: TimeInterval = 0.03
+        let attempts = max(1, Int(ceil(timeout / pollInterval)))
+        for _ in 0..<attempts {
+            let result = waitpid(leaderPID, &status, WNOHANG)
+            if result == leaderPID || (result == -1 && errno == ECHILD) {
+                leaderReaped = true
+                return
+            }
+            if result == -1, errno != EINTR { break }
+            usleep(useconds_t(pollInterval * 1_000_000))
+        }
+        throw NSError(
+            domain: "AutomationProcessGroupFixture", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "process group leader \(leaderPID) did not exit within \(timeout)s"])
+    }
+
+    /// Terminates the complete group and reaps both directly spawned children. It is safe after the service
+    /// already killed either member: waitpid then returns ECHILD for that member and cleanup continues.
+    func terminateAndReap() {
+        guard !cleaned else { return }
+        // Keep the group kill while the survivor may still hold the group open, but do not signal the
+        // leader by raw pid after waitForLeaderExit has already reaped it (the pid could be reused).
+        if !survivorReaped { _ = kill(-leaderPID, SIGKILL) }
+        if !leaderReaped {
+            _ = kill(leaderPID, SIGKILL)
+            Self.reap(leaderPID)
+            leaderReaped = true
+        }
+        if !survivorReaped {
+            _ = kill(survivorPID, SIGKILL)
+            Self.reap(survivorPID)
+            survivorReaped = true
+        }
+        cleaned = true
+    }
+
+    private static func spawnSleep(processGroup: Int32, ignoresSIGTERM: Bool) throws -> Int32 {
+        let previousHandler = ignoresSIGTERM ? signal(SIGTERM, SIG_IGN) : nil
+        defer { if let previousHandler { _ = signal(SIGTERM, previousHandler) } }
+
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { throw spawnError() }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { throw spawnError() }
+        defer { posix_spawnattr_destroy(&attributes) }
+        var flags = Int16(POSIX_SPAWN_SETPGROUP)
+        if !ignoresSIGTERM {
+            var defaultSignals = sigset_t()
+            sigemptyset(&defaultSignals)
+            sigaddset(&defaultSignals, SIGTERM)
+            guard posix_spawnattr_setsigdefault(&attributes, &defaultSignals) == 0 else { throw spawnError() }
+            flags |= Int16(POSIX_SPAWN_SETSIGDEF)
+        }
+        guard posix_spawnattr_setflags(&attributes, flags) == 0, posix_spawnattr_setpgroup(&attributes, pid_t(processGroup)) == 0 else {
+            throw spawnError()
+        }
+
+        let arguments: [UnsafeMutablePointer<CChar>?] = ["/bin/sleep", "60"].map { argument in argument.withCString { strdup($0) } }
+        let allocatedArguments = arguments
+        var cArguments = arguments + [nil]
+        defer { for argument in allocatedArguments { free(argument) } }
+        var pid: pid_t = 0
+        let result = cArguments.withUnsafeMutableBufferPointer { buffer in
+            "/bin/sleep".withCString { path in posix_spawn(&pid, path, &actions, &attributes, buffer.baseAddress, environ) }
+        }
+        guard result == 0 else { throw spawnError(result) }
+        return pid
+    }
+
+    private static func reap(_ pid: Int32) {
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) == -1, errno == EINTR {}
+    }
+
+    private static func spawnError(_ code: Int32 = errno) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain, code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: "posix_spawn failed: \(String(cString: strerror(code)))"])
+    }
+}
+
 /// Process-wide terminal-session launcher/terminator stand-in for the daemon's PTY session machinery. In
 /// `realCommands` mode it runs the exact wrapped command the executor built (`/bin/sh -c …`) in its own
 /// session via `posix_spawn` (so a timeout's process-group signal is safe and effective), redirecting
@@ -2008,7 +2085,6 @@ private final class MutableClock: @unchecked Sendable {
 private final class FakeAutomationTerminalHost: @unchecked Sendable {
     private let realCommands: Bool
     private let lock = NSLock()
-    private(set) var lastChildPID: Int32?
     var delivered: [(sessionID: String, line: String)] {
         lock.lock()
         defer { lock.unlock() }
@@ -2098,7 +2174,6 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
             let pid = Self.spawnDetachedSession(command: command, workingDirectory: configuration.workingDirectory, outputPath: paths.outputPath)
             childPID = pid
             lock.lock()
-            lastChildPID = pid
             trackedPIDs.append(pid)
             lock.unlock()
             writeRuntimeState(sessionID: configuration.sessionID, paths: paths, state: .running, childPID: pid)
