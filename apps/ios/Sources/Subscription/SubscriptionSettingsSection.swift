@@ -10,32 +10,23 @@ struct SubscriptionSettingsSection: View {
     var body: some View {
         VStack(spacing: 0) {
             HeaderBand {
-                Text("Subscription")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+                Text("Subscription").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text)
                 Spacer(minLength: 0)
             }
             VStack(spacing: 0) {
                 statusRow
                 manageRow
                 restoreRow
-            }
-            .padding(.top, 4)
-        }
-        .padding(.bottom, 14)
-        .manageSubscriptionsSheet(isPresented: $isShowingManageSubscriptions)
+            }.padding(.top, 4)
+        }.padding(.bottom, 14).manageSubscriptionsSheet(isPresented: $isShowingManageSubscriptions)
     }
 
     private var statusRow: some View {
         HStack(spacing: 10) {
             label("Status")
             Spacer(minLength: 0)
-            Text(statusText)
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.mutedSecondary)
-        }
-        .rowPadding()
-        .accessibilityIdentifier("settings.subscription.status")
+            Text(statusText).font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary)
+        }.rowPadding().accessibilityIdentifier("settings.subscription.status")
     }
 
     private var manageRow: some View {
@@ -46,12 +37,8 @@ struct SubscriptionSettingsSection: View {
                 label("Manage Subscription")
                 Spacer(minLength: 0)
                 RowChevron()
-            }
-            .rowPadding()
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("settings.subscription.manage")
+            }.rowPadding().contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityIdentifier("settings.subscription.manage")
     }
 
     private var restoreRow: some View {
@@ -61,16 +48,9 @@ struct SubscriptionSettingsSection: View {
             HStack(spacing: 10) {
                 label("Restore Purchases")
                 Spacer(minLength: 0)
-                if store.isPurchasing {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .rowPadding()
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(store.isPurchasing)
-        .accessibilityIdentifier("settings.subscription.restore")
+                if store.isPurchasing { ProgressView().controlSize(.small) }
+            }.rowPadding().contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(store.isPurchasing).accessibilityIdentifier("settings.subscription.restore")
     }
 
     private var statusText: String {
@@ -82,18 +62,9 @@ struct SubscriptionSettingsSection: View {
         }
     }
 
-    private func label(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(Theme.text)
-            .lineLimit(1)
-    }
+    private func label(_ text: String) -> some View { Text(text).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1) }
 }
 
 extension View {
-    fileprivate func rowPadding() -> some View {
-        padding(.vertical, 10)
-            .padding(.horizontal, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    fileprivate func rowPadding() -> some View { padding(.vertical, 10).padding(.horizontal, 20).frame(maxWidth: .infinity, alignment: .leading) }
 }

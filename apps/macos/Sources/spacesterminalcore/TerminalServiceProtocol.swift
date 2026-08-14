@@ -413,12 +413,19 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     /// counterpart to idle injection). Nil/omitted unless the piggyback path drained at least one row;
     /// carried only on the MCP piggyback path, so every other command leaves it nil.
     public let pendingAgentEvents: [String]?
+    /// Automations returned by `automationList` (and the single created/updated automation, as a
+    /// one-element list). Nil for commands that touch no automations.
+    public let automations: [TerminalServiceAutomationSummary]?
+    /// Automation runs returned by `automationRunsList` (and the single triggered/canceled run, as a
+    /// one-element list). Nil for commands that touch no runs.
+    public let automationRuns: [TerminalServiceAutomationRunSummary]?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
-        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil
+        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
+        automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -430,6 +437,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.agentSessions = agentSessions
         self.agentSpawn = agentSpawn
         self.pendingAgentEvents = pendingAgentEvents
+        self.automations = automations
+        self.automationRuns = automationRuns
     }
 
     /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
@@ -440,7 +449,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         return TerminalServiceProfileCommandResponse(
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
-            pendingAgentEvents: events)
+            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns)
     }
 }
 
@@ -662,6 +671,12 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// Daemon host OS: `"macOS"` or `"Linux"`. Lets clients tailor restart guidance — e.g. a remote
     /// Linux daemon must be updated from the Mac app.
     public let operatingSystem: String
+    /// The daemon device's current time-zone identifier (e.g. `"America/New_York"`), read fresh when the
+    /// status is built. Cron schedules are evaluated in the daemon's zone, so a client authoring an
+    /// automation for a remote device previews next-run times in this zone rather than its own. Optional
+    /// and `decodeIfPresent` so a peer that predates the field still decodes (frozen-core contract); `nil`
+    /// when unreported, in which case a client falls back to its own zone.
+    public let timeZoneIdentifier: String?
     /// The addresses this daemon is currently reachable at, ordered exactly like a pairing link's
     /// `hosts` (LAN first, then Tailscale) — derived from the same
     /// `SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost:)` call so the two can never
@@ -685,7 +700,8 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public init(
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
-        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, deviceAPIAddresses: [String] = []
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, timeZoneIdentifier: String? = nil,
+        deviceAPIAddresses: [String] = []
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -696,6 +712,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.activeAgents = activeAgents
         self.waitingAgents = waitingAgents
         self.operatingSystem = operatingSystem
+        self.timeZoneIdentifier = timeZoneIdentifier
         self.deviceAPIAddresses = deviceAPIAddresses
     }
 
@@ -709,6 +726,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case activeAgents
         case waitingAgents
         case operatingSystem
+        case timeZoneIdentifier
         case deviceAPIAddresses
     }
 
@@ -729,6 +747,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         activeAgents = try container.decodeIfPresent(Int.self, forKey: .activeAgents) ?? 0
         waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
         operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
+        timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
         deviceAPIAddresses = try container.decodeIfPresent([String].self, forKey: .deviceAPIAddresses) ?? []
     }
 
@@ -739,6 +758,14 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         #else
             "macOS"
         #endif
+    }
+
+    /// The daemon device's current time-zone identifier, read fresh. Foundation caches the system zone, so
+    /// the cache is reset first (mirroring the automation scheduler's zone provider) — this lets a status
+    /// built after the device changed zones report the new zone rather than a stale cached one.
+    public static var currentTimeZoneIdentifier: String {
+        NSTimeZone.resetSystemTimeZone()
+        return TimeZone.current.identifier
     }
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }

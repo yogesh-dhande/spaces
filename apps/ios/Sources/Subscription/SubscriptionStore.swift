@@ -79,11 +79,7 @@ import StoreKit
     func start() {
         guard !isBypassed, !hasStarted else { return }
         hasStarted = true
-        transactionListener = Task { [weak self] in
-            for await update in Transaction.updates {
-                await self?.handle(verificationResult: update)
-            }
-        }
+        transactionListener = Task { [weak self] in for await update in Transaction.updates { await self?.handle(verificationResult: update) } }
         Task { await load() }
     }
 
@@ -114,9 +110,7 @@ import StoreKit
     /// stays nil, `errorMessage` is cleared, and the paywall shows "Loading subscription…" forever with
     /// no retry affordance. Pure so it is testable without constructing a `Product`.
     static func productLoadOutcome(products: [Product]) -> (product: Product?, errorMessage: String?) {
-        guard let product = products.first else {
-            return (nil, "The subscription is currently unavailable. Please try again later.")
-        }
+        guard let product = products.first else { return (nil, "The subscription is currently unavailable. Please try again later.") }
         return (product, nil)
     }
 
@@ -132,16 +126,11 @@ import StoreKit
         do {
             let result = try await product.purchase()
             switch result {
-            case .success(let verification):
-                await handle(verificationResult: verification)
-            case .userCancelled, .pending:
-                break
-            @unknown default:
-                break
+            case .success(let verification): await handle(verificationResult: verification)
+            case .userCancelled, .pending: break
+            @unknown default: break
             }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     /// Restores purchases by syncing with the App Store, then re-reads the entitlement. Used by both the
@@ -152,9 +141,7 @@ import StoreKit
         do {
             try await AppStore.sync()
             errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
         await refreshEntitlement()
     }
 
@@ -185,9 +172,7 @@ import StoreKit
     /// inspection is only available without deprecation on iOS 17.2+, so on 17.0–17.1 an active trial
     /// reports as `active` rather than `trial` — a cosmetic Settings-label difference only.
     private static func entitlementDetail(for transaction: Transaction) -> EntitlementDetail {
-        if #available(iOS 17.2, *) {
-            return transaction.offer?.type == .introductory ? .trial : .active
-        }
+        if #available(iOS 17.2, *) { return transaction.offer?.type == .introductory ? .trial : .active }
         return .active
     }
 }

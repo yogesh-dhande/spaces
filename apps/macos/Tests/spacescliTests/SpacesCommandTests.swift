@@ -97,8 +97,7 @@ final class SpacesCommandTests: XCTestCase {
         let start = try WorkspaceStartCommand.parse(["--device", "missing-device"])
         XCTAssertThrowsError(try start.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
         let restart = try WorkspaceRestartCommand.parse(["--device", "missing-device"])
-        XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device"))
-        }
+        XCTAssertThrowsError(try restart.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required with --device")) }
     }
 
     func testAgentSignalParsesExplicitWorkspaceSessionAndEvent() throws {
@@ -518,6 +517,7 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(sendSchema["required"] as? [String], ["session"])
         let sendProperties = try XCTUnwrap(sendSchema["properties"] as? [String: Any])
         XCTAssertNotNil(sendProperties["bytes"])
+        XCTAssertNotNil(sendProperties["submit"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
     }
 

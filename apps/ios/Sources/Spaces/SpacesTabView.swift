@@ -52,9 +52,8 @@ struct SpacesTabView: View {
                 workspace.isRunning
                     ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
                     : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
-        }.confirmationDialog(
-            pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop
-        ) { stop in
+        }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
+            stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
             Button("Cancel", role: .cancel) {}
         } message: { stop in
@@ -70,9 +69,7 @@ struct SpacesTabView: View {
         Binding(get: { pendingHideWorkspace != nil }, set: { if !$0 { pendingHideWorkspace = nil } })
     }
 
-    private var pendingStopDialogBinding: Binding<Bool> {
-        Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } })
-    }
+    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } }) }
 
     private func performPendingStop(_ stop: PendingStop) async {
         switch stop {
@@ -391,8 +388,7 @@ struct SpacesTabView: View {
                 // this workspace's own delete dims it via `isDeleting`.
                 workspace: group.workspace, isBusy: model.isMutating || isDeleting,
                 onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                onStop: { pendingStop = .workspace(group.workspace) },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } }, onStop: { pendingStop = .workspace(group.workspace) },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
                 onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
             ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))

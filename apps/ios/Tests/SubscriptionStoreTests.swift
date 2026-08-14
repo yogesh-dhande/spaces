@@ -3,8 +3,7 @@
 
     @testable import SpacesMobile
 
-    @MainActor
-    final class SubscriptionStoreTests: XCTestCase {
+    @MainActor final class SubscriptionStoreTests: XCTestCase {
         // MARK: - DEBUG bypass flag
 
         func testBypassEnabledOnlyWhenFlagSetToOne() {
@@ -52,18 +51,10 @@
         // MARK: - Trial eligibility gating
 
         func testShowsTrialOnlyWhenConfiguredAndEligible() {
-            XCTAssertTrue(
-                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: true)
-            )
-            XCTAssertFalse(
-                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: false)
-            )
-            XCTAssertFalse(
-                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: true)
-            )
-            XCTAssertFalse(
-                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: false)
-            )
+            XCTAssertTrue(SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: true))
+            XCTAssertFalse(SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: false))
+            XCTAssertFalse(SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: true))
+            XCTAssertFalse(SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: false))
         }
     }
 #endif

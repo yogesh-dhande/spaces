@@ -5,6 +5,16 @@ import systembridge
 extension WorkspaceOrchestrator {
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
 
+    /// Whether a workspace terminal row names a session launched through the coding-agent path. Before
+    /// the agent's first hook signal there is no agent row to render or address, so an explicit Stop still
+    /// arrives as a workspace-terminal request and must select teardown from the persisted launch kind.
+    public func workspaceTerminalSessionIsSpawnedAgent(workspaceID: String, sessionID: String) -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID),
+            let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+        else { return false }
+        return launchConfiguration.workspaceID == workspaceID && launchConfiguration.kind == .agent
+    }
+
     @discardableResult public func stopBuiltInTerminalSessionClosedByUser(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
@@ -52,6 +62,17 @@ extension WorkspaceOrchestrator {
             try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
             return true
         }
+    }
+
+    /// Destroys an automation-attributed terminal while its workspace lifecycle gate is already held by
+    /// workspace/project teardown. This deliberately performs the same terminal-window, agent-row, and
+    /// subscriber cleanup as the public stop paths without trying to claim the gate a second time.
+    /// Automation deletion supplies only sessions stamped with its run id; callers must therefore never
+    /// use this as a general terminal-stop shortcut.
+    func terminateAutomationTerminalSessionDuringWorkspaceTeardown(sessionID: String) throws {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
+        terminateBuiltInTerminalSession(sessionID)
+        try removeAutomationTerminalSessionRuntimeTargetDuringWorkspaceTeardown(sessionID: sessionID)
     }
 
     @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
@@ -464,7 +485,8 @@ extension WorkspaceOrchestrator {
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
         switch terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind {
         case .agent: return true
-        case .shell, .process: return false
+        // An automation session is never a workspace's configured coding agent.
+        case .shell, .process, .automation: return false
         case nil: return ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
         }
     }
@@ -652,7 +674,8 @@ extension WorkspaceOrchestrator {
         if ownership.process != nil { return true }
         switch ownership.launchKind {
         case .process, .agent: return true
-        case .shell: return false
+        // An automation session is never a workspace's configured owner.
+        case .shell, .automation: return false
         case nil: return false
         }
     }

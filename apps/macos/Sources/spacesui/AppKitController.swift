@@ -98,6 +98,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let countsTowardBadge: Bool
         let eventDate: Date?
         let focusRequest: WindowFocusRequest?
+        /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab rather than
+        /// focusing the workspace runtime target, which may already be detached, so `focusRequest` stays nil.
+        let automationRunTarget: AutomationRunAlertTarget?
+
+        init(
+            attentionID: String, icon: String, iconTint: AlertsIconTint, label: String, detail: String?, shortcut: String,
+            processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil, countsTowardBadge: Bool, eventDate: Date?,
+            focusRequest: WindowFocusRequest? = nil, automationRunTarget: AutomationRunAlertTarget? = nil
+        ) {
+            self.attentionID = attentionID
+            self.icon = icon
+            self.iconTint = iconTint
+            self.label = label
+            self.detail = detail
+            self.shortcut = shortcut
+            self.processStatus = processStatus
+            self.agentStatus = agentStatus
+            self.countsTowardBadge = countsTowardBadge
+            self.eventDate = eventDate
+            self.focusRequest = focusRequest
+            self.automationRunTarget = automationRunTarget
+        }
+    }
+
+    /// Names the automation run an alert card deep-links to (its device and run id).
+    struct AutomationRunAlertTarget: Sendable, Equatable {
+        let deviceID: String
+        let runID: String
     }
 
     struct AlertsGroup: Sendable {
@@ -123,6 +151,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
+        case automations
         case workspace(String)
     }
 
@@ -234,6 +263,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
+    var showingAutomations: Bool { detailPane.isAutomations }
     /// The `BlockRemedy` the visible compatibility block was last rendered with, so
     /// `reconcileCompatibilityBlock` can tell "still showing the current guidance" apart from "the
     /// device's wire status moved on and this block is now stale" without re-deriving what was already on
@@ -297,6 +327,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview, so an offline remote's windows return when the device does.
     var pendingPanelWindowRestores: [SpacesClientDatabase.PanelWindowRecord]?
     lazy var alerts = AlertsController(host: self)
+    lazy var automations = AutomationsController(host: self)
+    lazy var automationEditor = AutomationEditorController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
     lazy var settings = SettingsController(host: self)
@@ -2010,8 +2042,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// (surfacing the error) when the session's paths or state model cannot be built.
     /// - Parameter focusIntent: The intent of the open needing this content, so a construction failure is
     ///   reported the same way a preparation failure is: modally only for an open the user is waiting on.
-    func makeTerminalPaneContent(request: DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) -> TerminalPaneContentController?
-    {
+    func makeTerminalPaneContent(request: DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) -> TerminalPaneContentController? {
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2342,6 +2373,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // client through the overview, so the window only acknowledges delivery to
         // release the owning terminal service's signal queue.
         events.map(\.id)
+    }
+
+    /// Resolves a session's kind from the loaded device overview (not the daemon
+    /// database). Used to decide whether an ad hoc session stops once it has no live
+    /// attachments. See `terminalSessionKind(sessionID:overviews:)` for the resolution
+    /// rules.
+    private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
+        Self.terminalSessionKind(sessionID: sessionID, overviews: deviceSections.compactMap { $0.overview })
+    }
+
+    /// Pure kind resolution over the loaded device overviews: top-level sessions carry
+    /// their row kind, and process/agent rows identify configured workspace sessions.
+    /// Automation runs are also consulted before falling back to `.shell`: a run's own
+    /// command session resolves to `.automation` and any coding agent it spawned resolves
+    /// to `.agent`. This keeps retained sessions correctly typed after their live workspace
+    /// runtime target leaves the overview.
+    nonisolated static func terminalSessionKind(sessionID: String, overviews: [SpacesDeviceOverviewPayload]) -> TerminalSessionKind {
+        for overview in overviews {
+            if let session = overview.sessions.first(where: { $0.id == sessionID }) { return terminalSessionKind(rowKind: session.rowKind) }
+            for workspace in overview.workspaces {
+                if workspace.processRows.contains(where: { $0.sessionID == sessionID }) { return .process }
+                if workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID }) { return .agent }
+            }
+            for run in overview.automationRuns {
+                if run.terminalSessionID == sessionID { return .automation }
+                if run.attributedAgents.contains(where: { $0.terminalSessionID == sessionID }) { return .agent }
+            }
+        }
+        return .shell
     }
 
     /// Closes a session's pane for the close IPC and daemon-driven session
@@ -3100,7 +3160,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// intentionally absent: desktop windows are client-local and not part of the daemon overview,
     /// so an exited process shows as a process alert and clicking it focuses the process. Recency
     /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
-    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
+    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String, deviceName: String = "")
+        -> [AlertsGroup]
+    {
         let iso8601Formatter = staticISO8601Formatter
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces {
@@ -3133,8 +3195,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             AgentWindowRecord(
                                 id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
                                 terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) },
-                                status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
-                                updatedAt: agent.updatedAt ?? ""))))
+                                status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
             }
             // Every session with a bell gets an entry, including one the user is looking at right now:
             // suppressing the focused session's bell is a consumption, not a filter (see
@@ -3166,6 +3227,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 AlertsGroup(
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
                     workspaceBranch: workspace.branch, items: items))
+        }
+        // Failed/timed-out automation runs form their own synthetic group ("Automations / <device>") whose
+        // cards deep-link to the Runs tab instead of focusing a live workspace target that may be detached.
+        let automationEntries = AutomationsViewModel.alertEntries(deviceID: deviceID, deviceName: deviceName, runs: overview.automationRuns)
+        if !automationEntries.isEmpty {
+            let items = automationEntries.map { entry in
+                AlertsAttentionEntry(
+                    attentionID: entry.attentionID, icon: entry.status == "timed_out" ? "clock.badge.exclamationmark.fill" : "xmark.octagon.fill",
+                    iconTint: .warning, label: entry.text, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: entry.eventDate,
+                    automationRunTarget: AutomationRunAlertTarget(deviceID: entry.deviceID, runID: entry.runID))
+            }
+            groups.append(
+                AlertsGroup(
+                    projectName: "Automations", workspaceID: "automations:\(deviceID)",
+                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, items: items))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -3253,7 +3329,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
                     details: "device=\(localDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id)
+                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id, deviceName: localDevice.name)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_alerts_ready",
                     details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
@@ -4049,6 +4125,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceID: fallbackWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell)
     }
 
+    /// Builds the terminal-open request for an automation run, dispatching on the run's persisted kind.
+    ///
+    /// Dispatches on the RUN's own kind, not the automation's current kind: an automation's kind can be edited
+    /// once its runs are terminal, but a retained historical run keeps the session shape it actually ran with,
+    /// so a script run whose automation later became Agent must still open as a script pane (and vice versa).
+    ///
+    /// Automation sessions are workspace-bound. A live one resolves its complete persisted metadata from the
+    /// overview; an ended replay uses the selected workspace and stored command metadata.
+    nonisolated static func automationRunTerminalOpenRequest(
+        deviceID: String, sessionID: String, run: TerminalServiceAutomationRunSummary, automation: TerminalServiceAutomationSummary?,
+        overview: SpacesDeviceOverviewPayload?, loginShell: String
+    ) -> DeviceTerminalOpenRequest? {
+        let initialState: TerminalSessionState = AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited
+        // A retained run reopens in the workspace its terminal session was launched from. The automation
+        // can later be edited to target another workspace, which must not move historical replay.
+        guard let workspaceID = run.workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !workspaceID.isEmpty else { return nil }
+        guard let resolved = deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview) else {
+            return DeviceTerminalOpenRequest(
+                workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation", workingDirectory: "",
+                kind: run.kind == AutomationKind.agent.rawValue ? .agent : .automation, shell: loginShell,
+                command: run.kind == AutomationKind.agent.rawValue ? automation?.agentCommand : automation?.script, initialState: initialState)
+        }
+        return DeviceTerminalOpenRequest(
+            workspaceID: resolved.workspaceID, deviceID: deviceID, sessionID: sessionID, title: resolved.title,
+            workingDirectory: resolved.workingDirectory, kind: resolved.kind, shell: resolved.shell, command: resolved.command,
+            initialState: resolved.initialState ?? initialState, servicePID: resolved.servicePID, childPID: resolved.childPID,
+            createdAt: resolved.createdAt, updatedAt: resolved.updatedAt)
+    }
+
     nonisolated private static func terminalSessionKind(rowKind: SpacesDeviceTerminalSessionRowKind) -> TerminalSessionKind {
         switch rowKind {
         case .process: .process
@@ -4087,7 +4192,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch status {
             case .running: return 2
             case .exited: return 1
-            case .idle, .waiting: return 0
+            // `.waiting` and `.ready` never reach here — `statusKind(for:)` above never produces them —
+            // so they rank with the other not-running states rather than inventing a process meaning.
+            case .idle, .waiting, .ready: return 0
             }
         }
 
@@ -4283,6 +4390,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let alertsRow = sidebar.makeAlertsSidebarRow()
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let automationsRow = sidebar.makeAutomationsSidebarRow()
+        automationsRow.translatesAutoresizingMaskIntoConstraints = false
+
         // The app identity row (logo, name, devices/settings/reload) is the sidebar's
         // footer; the Alerts row leads the content, which starts just below the
         // titlebar strip.
@@ -4291,6 +4401,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         footerSeparator.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(alertsRow)
+        container.addSubview(automationsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
         container.addSubview(footerSeparator)
@@ -4301,9 +4412,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             alertsRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
 
+            automationsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            automationsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            automationsRow.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 2),
+
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: automationsRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -4340,6 +4455,148 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
     func consumeFocusedSessionBellAlerts() { alerts.consumeFocusedSessionBellAlerts() }
     func showAlertsDetail(presentation: DetailPanePresentation = .backgroundRefresh) { alerts.showAlertsDetail(presentation: presentation) }
+
+    // MARK: - Automations
+
+    @objc func automationsRowClicked() { automations.showAutomationsDetail() }
+    func showAutomationsDetail() { automations.showAutomationsDetail() }
+    func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
+
+    /// The per-device automation slices for the pane and sidebar row: every device section mapped to its
+    /// overview's automations/runs, with unreachable sections marked (never dropped) so the pane can surface
+    /// them. Local daemon and paired devices are treated identically.
+    func automationDeviceInputs() -> [AutomationDeviceInput] {
+        deviceSections.map { section in
+            let isReachable = section.loadState == .loaded
+            let offlineMessage: String? = if case .offline(let message) = section.loadState { message } else { nil }
+            return AutomationDeviceInput(
+                deviceID: section.deviceID, deviceName: section.displayName, isLocal: section.isLocal, isReachable: isReachable,
+                offlineMessage: offlineMessage, automations: section.overview?.automations ?? [], runs: section.overview?.automationRuns ?? [],
+                timeZoneIdentifier: section.overview?.daemonStatus.timeZoneIdentifier)
+        }
+    }
+
+    /// The paired-device record to send an automation Device API command to. Mirrors `deviceForMutation`:
+    /// the local id resolves to the local record, any other to its loaded section record.
+    func automationDeviceRecord(deviceID: String) -> SpacesPairedDeviceRecord? {
+        deviceID == localDeviceID ? localPairedDevice : deviceRecord(forDeviceID: deviceID)
+    }
+
+    func isRemoteAutomationDevice(deviceID: String) -> Bool { deviceID != localDeviceID }
+
+    /// The summary for one automation on one device, read from that device's loaded overview.
+    func automationSummary(deviceID: String, automationID: String) -> TerminalServiceAutomationSummary? {
+        deviceSection(id: deviceID)?.overview?.automations.first { $0.id == automationID }
+    }
+
+    /// Builds wire fields from a summary, optionally overriding `enabled` (used by the enable toggle).
+    static func automationFields(from summary: TerminalServiceAutomationSummary, enabled: Bool? = nil) -> TerminalServiceAutomationFields {
+        TerminalServiceAutomationFields(
+            name: summary.name, enabled: enabled ?? summary.enabled, triggerKind: summary.triggerKind, cronExpression: summary.cronExpression,
+            kind: summary.kind, script: summary.script, agentCommand: summary.agentCommand, agentPrompt: summary.agentPrompt,
+            workspaceID: summary.workspaceID, timeoutSeconds: summary.timeoutSeconds, concurrencyPolicy: summary.concurrencyPolicy,
+            missedRunPolicy: summary.missedRunPolicy)
+    }
+
+    /// Opens or focuses an automation run's workspace pane: a live pane for a running run, or the read-only
+    /// transcript replay for an ended one. Live metadata resolves from the overview; replay uses the run
+    /// summary's persisted original workspace so retargeting an automation never moves its history.
+    func openAutomationRunTerminal(deviceID: String, run: TerminalServiceAutomationRunSummary) {
+        guard let sessionID = run.terminalSessionID else {
+            showError(Self.terminalSessionNotFoundError())
+            return
+        }
+        let automation = automationSummary(deviceID: deviceID, automationID: run.automationID)
+        let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        guard
+            let request = Self.automationRunTerminalOpenRequest(
+                deviceID: deviceID, sessionID: sessionID, run: run, automation: automation, overview: deviceSection(id: deviceID)?.overview,
+                loginShell: loginShell)
+        else {
+            showError(Self.terminalSessionNotFoundError())
+            return
+        }
+        _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+    }
+
+    /// Opens an automation run's attributed coding-agent terminal session, device-qualified so a remote run's
+    /// agent resolves on its own device. The agent runs in a workspace, so the request is resolved from that
+    /// device's overview when the session is present (for the real shell/command/state) and synthesized
+    /// otherwise. It opens or focuses a normal pane in the persisted workspace, matching the run's own
+    /// terminal behavior.
+    func openAutomationAgentSession(deviceID: String, agent: TerminalServiceAutomationAgentSummary) {
+        let workspaceID = agent.workspaceID ?? ""
+        let overview = deviceSection(id: deviceID)?.overview
+        let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let resolved = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: agent.terminalSessionID, overview: overview)
+        let request = DeviceTerminalOpenRequest(
+            workspaceID: resolved?.workspaceID ?? workspaceID, deviceID: deviceID, sessionID: agent.terminalSessionID,
+            title: resolved?.title ?? agent.title ?? "Agent", workingDirectory: resolved?.workingDirectory ?? "", kind: resolved?.kind ?? .agent,
+            shell: resolved?.shell ?? loginShell, command: resolved?.command,
+            initialState: resolved?.initialState ?? (agent.live ? .running : .exited), servicePID: resolved?.servicePID, childPID: resolved?.childPID,
+            createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
+        _ = panelCoordinator.openOrFocusTerminalPane(request, openIntent: .focused)
+    }
+
+    /// One workspace the editor's Agent form can target, sourced from the sidebar's loaded overview model.
+    struct AutomationWorkspaceChoice: Sendable, Equatable {
+        let workspaceID: String
+        /// "<project> / <workspace>" so the same branch name across projects stays distinguishable.
+        let label: String
+    }
+
+    /// The workspaces available to an `agent`-kind automation on a device, read from the sidebar's already
+    /// loaded project/workspace model (the same source the sidebar renders), so the editor adds no new fetch
+    /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only.
+    /// `preservingWorkspaceID` keeps an automation's stored target in the list even when that workspace has
+    /// since been hidden, so editing an unrelated field never silently retargets it (see
+    /// `AutomationsViewModel.workspaceChoices`); the hidden target's real name is resolved through
+    /// `findWorkspace`, which includes hidden workspaces.
+    func automationWorkspaceChoices(deviceID: String, preservingWorkspaceID: String? = nil) -> [AutomationWorkspaceChoice] {
+        let visible = deviceProjects(deviceID: deviceID).flatMap { project in
+            visibleWorkspaces(projectID: project.id).map { workspace in
+                AutomationsViewModel.WorkspaceChoice(workspaceID: workspace.id, label: "\(project.name) / \(workspace.displayName)")
+            }
+        }
+        let merged = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: preservingWorkspaceID) { workspaceID in
+            guard let (project, workspace) = findWorkspace(id: workspaceID) else { return nil }
+            return "\(project.name) / \(workspace.displayName)"
+        }
+        return merged.map { AutomationWorkspaceChoice(workspaceID: $0.workspaceID, label: $0.label) }
+    }
+
+    /// The status glyph name and tint for a settled (non-spinning) agent status. Single source of truth shared
+    /// by `windowRow`'s indicator and the automations run agent chips so agent state reads identically.
+    static func agentStatusSymbolAndColor(_ status: AgentWindowStatus) -> (symbol: String, color: NSColor) {
+        switch status {
+        case .waiting: ("exclamationmark.triangle.fill", .systemOrange)
+        case .done: ("circle.fill", .systemGreen)
+        // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
+        case .exited: ("circle", .tertiaryLabelColor)
+        case .spinning, .idle: ("circle.fill", .tertiaryLabelColor)
+        }
+    }
+
+    /// A compact agent status indicator — a spinner for a working agent, a tinted dot otherwise — matching the
+    /// agent state shown in window rows. Reused by the automations runs tab's attributed-agent chips.
+    static func agentStatusIndicator(_ status: AgentWindowStatus) -> NSView {
+        if status == .spinning {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .mini
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10)])
+            spinner.startAnimation(nil)
+            return spinner
+        }
+        let (symbol, color) = agentStatusSymbolAndColor(status)
+        let imageView = NSImageView()
+        imageView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue)
+        imageView.contentTintColor = color
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([imageView.widthAnchor.constraint(equalToConstant: 10), imageView.heightAnchor.constraint(equalToConstant: 10)])
+        return imageView
+    }
 
     private func makeRightPane() -> NSView {
         let container = NSView()
@@ -4413,7 +4670,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Rebuilds the whole outline for a change the row diff does not model; see the sidebar's own method.
     func fullReloadSidebarOutline() { sidebar.fullReloadSidebarOutline() }
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
-    func updateAlertsRowAppearance() { sidebar.updateAlertsRowAppearance() }
+    func updateAlertsRowAppearance() {
+        sidebar.updateAlertsRowAppearance()
+        // The Alerts and Automations rows share a mutually-exclusive selection highlight, so refresh both
+        // whenever the detail pane changes.
+        sidebar.updateAutomationsRowAppearance()
+    }
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
     {
         sidebar.refreshSidebarSelectionRows(
@@ -4993,7 +5255,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
             deviceSections[index].overview = overview
             if deviceSections[index].isLocal {
-                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
+                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(
+                    from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName)
             }
         }
         // This is an authoritative overview for `deviceID`: close any open pane whose session it no
@@ -5018,6 +5281,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if !shouldPreserveDetailPane { refreshSelection() }
         updateAlertsSidebarBadge()
         if showingAlerts { showAlertsDetail() }
+        if showingAutomations { showAutomationsDetail() }
     }
 
     func applyDeviceMutationResponse(
@@ -5065,6 +5329,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func refreshSelection() {
         if showingAlerts {
             showAlertsDetail()
+            return
+        }
+        if showingAutomations {
+            showAutomationsDetail()
             return
         }
         if let selectedWorkspaceID {
@@ -5484,9 +5752,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The watchdog's whole decision, pure so both halves of it are directly testable.
     nonisolated static func stagedApplyWatchdogResolution(status: TerminalServiceDaemonStatus?, stagedVersion: String)
         -> StagedApplyWatchdogResolution
-    {
-        stagedApplyIsStillPending(status: status, stagedVersion: stagedVersion) ? .reportDidNotLand : .rearmAutomaticRequest
-    }
+    { stagedApplyIsStillPending(status: status, stagedVersion: stagedVersion) ? .reportDidNotLand : .rearmAutomaticRequest }
 
     /// Pure eligibility for the compatibility block's "Check for Updates…" action, factored out so it's
     /// testable without AppKit or a Sparkle instance. It is offered only for this Mac's own daemon — a
@@ -5869,13 +6135,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let nameLabel = NSTextField(labelWithString: name)
         nameLabel.font = Typography.rowLabel
 
-        let hintLabel = NSTextField(labelWithString: hint)
-        hintLabel.font = Typography.metadata
-        hintLabel.textColor = .secondaryLabelColor
-        hintLabel.lineBreakMode = .byWordWrapping
-        hintLabel.maximumNumberOfLines = 2
-        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
         control.translatesAutoresizingMaskIntoConstraints = false
         control.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -5884,7 +6143,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.alignment = .leading
         stack.spacing = 6
         stack.addArrangedSubview(nameLabel)
-        stack.addArrangedSubview(hintLabel)
+        if !hint.isEmpty {
+            let hintLabel = NSTextField(labelWithString: hint)
+            hintLabel.font = Typography.metadata
+            hintLabel.textColor = .secondaryLabelColor
+            hintLabel.lineBreakMode = .byWordWrapping
+            hintLabel.maximumNumberOfLines = 2
+            hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            stack.addArrangedSubview(hintLabel)
+        }
         stack.addArrangedSubview(control)
         control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
@@ -6062,9 +6329,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self?.presentProjectBrowserSessionRemoveConfirmation(session: session, confirm: confirm)
         }
 
-        for section in [
-            setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, stopScriptSection.view,
-        ] {
+        for section in [setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, stopScriptSection.view] {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
         }
@@ -6594,6 +6859,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor), body.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             body.topAnchor.constraint(equalTo: headerDivider.bottomAnchor), body.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            // The window's resize floor, expressed on `body` (edge-pinned, autolayout) so it reaches the
+            // window through constraints. `minSize` alone does not hold: with an autolayout content view,
+            // AppKit derives the window's limits from the content constraints, and every form row is
+            // deliberately compressible (wrapping hints, truncating fields), so without these the user can
+            // squeeze the window far below `minSize` — and the squeezed frame then persists, because the
+            // window is reused across presents. Required constraints also push an already-squeezed reused
+            // window back out to the floor on the next present.
+            body.widthAnchor.constraint(greaterThanOrEqualToConstant: 520), body.heightAnchor.constraint(greaterThanOrEqualToConstant: 400),
         ])
         showScrollableDetailStack(stack, in: body)
 
@@ -6677,6 +6951,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func closeWorkspaceVisibilityWindow() { workspaceVisibility.closeWorkspaceVisibilityWindow() }
 
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
+
+    /// Header close buttons built by `buildFormWindowHeader` bind their target to the host (see
+    /// `iconButton`), so the automation editor's close routes through this forwarder.
+    @objc func closeAutomationEditorWindow() { automationEditor.closeWindow() }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
         // The new-workspace form is git-only: non-git projects own a single workspace
@@ -7759,23 +8037,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     spinner.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
                 ])
             } else {
-                let statusIconName: String
-                let statusColor: NSColor
-                switch agentStatus {
-                case .waiting:
-                    statusIconName = "exclamationmark.triangle.fill"
-                    statusColor = .systemOrange
-                case .done:
-                    statusIconName = "circle.fill"
-                    statusColor = .systemGreen
-                case .exited:
-                    // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
-                    statusIconName = "circle"
-                    statusColor = .tertiaryLabelColor
-                default:
-                    statusIconName = "circle.fill"
-                    statusColor = .tertiaryLabelColor
-                }
+                let (statusIconName, statusColor) = Self.agentStatusSymbolAndColor(agentStatus)
                 let statusDot = NSImageView()
                 if let automationID { statusDot.setAccessibilityIdentifier("\(automationID)-status-\(agentStatus.rawValue)") }
                 statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)
@@ -10468,17 +10730,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
-        selectedWorkspaceID: String?, showingAlerts: Bool, direction: Int
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
-        if showingAlerts {
-            guard direction > 0, let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
+        // Top-level row order is Alerts ↔ Automations ↔ first workspace; the Automations row is always present.
+        if showingAlerts { return direction > 0 ? .automations : nil }
+        if showingAutomations {
+            guard direction > 0 else { return .alerts }
+            guard let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
             return .workspace(firstWorkspaceID)
         }
         if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
             let targetIndex = currentIndex + direction
-            if targetIndex < 0 { return .alerts }
+            if targetIndex < 0 { return .automations }
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
@@ -10488,7 +10753,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
             for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
-            return .alerts
+            return .automations
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
             if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
@@ -11601,6 +11866,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch detailPane {
         case .none: return
         case .alerts: showAlertsDetail()
+        case .automations: showAutomationsDetail()
         case .workspace(let workspaceID, _):
             guard let (project, workspace) = findWorkspace(id: workspaceID) else { return }
             showWorkspaceDetail(project: project, workspace: workspace)
@@ -11843,10 +12109,9 @@ struct CommandPaletteItem: Sendable {
         return CommandPaletteFuzzySearch.Candidate(
             id: id,
             fields: [
-                .init(text: projectTitle, weight: 0.92), .init(text: workspaceTitle, weight: 0.92),
-                .init(text: workspaceBranch ?? "", weight: 0.9), .init(text: label, weight: 1.0), .init(text: detail ?? "", weight: 0.78),
-                .init(text: secondaryText, weight: 0.84), .init(text: combinedText, weight: 0.88),
-                .init(text: Self.searchInitials(for: combinedText), weight: 0.94),
+                .init(text: projectTitle, weight: 0.92), .init(text: workspaceTitle, weight: 0.92), .init(text: workspaceBranch ?? "", weight: 0.9),
+                .init(text: label, weight: 1.0), .init(text: detail ?? "", weight: 0.78), .init(text: secondaryText, weight: 0.84),
+                .init(text: combinedText, weight: 0.88), .init(text: Self.searchInitials(for: combinedText), weight: 0.94),
             ])
     }
 

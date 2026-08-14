@@ -232,8 +232,7 @@ extension OrchestratorTests {
     /// survives an uninspectable foreground, so the session is kept.
     func testConditionalCloseKeepsSessionWithUninspectableForegroundHoldingChildren() throws {
         let fixture = try makeAdHocCloseFixture(
-            sessionID: "ad-hoc-uninspectable-with-children", foreground: nil, readingWithUninspectableForeground: true,
-            shellHasChildProcesses: true)
+            sessionID: "ad-hoc-uninspectable-with-children", foreground: nil, readingWithUninspectableForeground: true, shellHasChildProcesses: true)
 
         try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
             XCTAssertFalse(
@@ -249,8 +248,7 @@ extension OrchestratorTests {
     /// close still stops it.
     func testConditionalCloseStopsSessionWithUninspectableForegroundAndNoChildren() throws {
         let fixture = try makeAdHocCloseFixture(
-            sessionID: "ad-hoc-uninspectable-no-children", foreground: nil, readingWithUninspectableForeground: true,
-            shellHasChildProcesses: false)
+            sessionID: "ad-hoc-uninspectable-no-children", foreground: nil, readingWithUninspectableForeground: true, shellHasChildProcesses: false)
 
         try withEnv(name: "SPACES_DB_PATH", value: fixture.databasePath) {
             XCTAssertTrue(

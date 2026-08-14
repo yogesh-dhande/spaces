@@ -553,8 +553,7 @@ extension WorkspaceOrchestrator {
 
     @discardableResult public func registerAgentWindow(
         workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, sessionKey: String? = nil,
-        status: AgentWindowStatus = .idle, eventType: String = "register", eventSource: String = "orchestrator",
-        environmentKeys: [String]? = nil
+        status: AgentWindowStatus = .idle, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)

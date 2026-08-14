@@ -249,9 +249,9 @@ import spacesterminalcore
     /// Answers what it did, not merely that it worked, because the caller has to tell a real claim from a
     /// fallback install: an open that installed a fresh pane leaves any hold on its named predecessor
     /// untouched and still owing a release. Nil means the open failed.
-    @discardableResult func openOrFocusTerminalPane(
-        _ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent
-    ) -> AppKitController.TerminalPaneOpenAction? {
+    @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent)
+        -> AppKitController.TerminalPaneOpenAction?
+    {
         let focusIntent = openIntent.focus
         // Adopt the workspace's persisted layout first: on a fresh launch a session
         // opened before its panel was ever shown (command palette, focus IPC) is not

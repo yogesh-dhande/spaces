@@ -42,6 +42,9 @@ struct RootTabView: View {
                     Label("Spaces", systemImage: "rectangle.stack")
                 }
                 AgentsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
+                AutomationsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.automations).tabItem {
+                    Label("Automations", systemImage: "clock.arrow.circlepath")
+                }.badge(model.automationRunningRunCount)
                 SettingsTabView(model: model).tag(SpacesMobileTab.settings).tabItem { Label("Settings", systemImage: "gearshape") }
             }
         }.tint(Theme.accent).alert("Connection Error", isPresented: errorAlertBinding) {

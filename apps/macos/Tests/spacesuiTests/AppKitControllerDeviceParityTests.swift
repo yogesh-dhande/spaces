@@ -544,8 +544,7 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-1",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z",
-                            canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z", canStop: true)
                     ])
             ], sessions: [])
 
@@ -587,6 +586,133 @@ import workspacecore
                     workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
                     kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
                     createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
+    }
+
+    private func automationSummary(
+        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String = "workspace-1"
+    ) -> TerminalServiceAutomationSummary {
+        TerminalServiceAutomationSummary(
+            id: id, name: name, enabled: true, triggerKind: "manual", cronExpression: nil, kind: kind.rawValue, script: script,
+            agentCommand: kind == .agent ? "codex" : nil, agentPrompt: kind == .agent ? "do it" : nil, workspaceID: workspaceID, timeoutSeconds: nil,
+            concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:00Z")
+    }
+
+    private func automationRunSummary(
+        automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?, workspaceID: String? = "workspace-1"
+    ) -> TerminalServiceAutomationRunSummary {
+        TerminalServiceAutomationRunSummary(
+            id: "run-1", automationID: automationID, automationName: nil, kind: kind.rawValue, status: status, trigger: "manual", skipReason: nil,
+            exitCode: nil, terminalSessionID: terminalSessionID, workspaceID: workspaceID, startedAt: nil, endedAt: nil,
+            createdAt: "2026-06-22T12:00:00Z")
+    }
+
+    // A script-kind run's terminal opens in its persisted workspace.
+    @Test func automationRunTerminalRequestSynthesizesScriptKindPane() {
+        let automation = automationSummary(name: "Nightly", kind: .script, script: "echo hi")
+        let run = automationRunSummary(kind: .script, status: "running", terminalSessionID: "auto-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .running))
+    }
+
+    // A live agent session resolves from the overview.
+    @Test func automationRunTerminalRequestResolvesAgentKindFromOverview() {
+        let session = SpacesDeviceTerminalSessionSummary(
+            id: "agent-session", title: "Codex", workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: "codex", state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: 654, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .agent)
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
+        let run = automationRunSummary(kind: .agent, status: "running", terminalSessionID: "agent-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "agent-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "agent-session", title: "Codex",
+                    workingDirectory: "/device/project-feature", kind: .agent, shell: "/bin/zsh", command: "codex", initialState: .running,
+                    servicePID: 321, childPID: 654, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
+    }
+
+    // An ended agent session replays in the workspace persisted on its run.
+    @Test func automationRunTerminalRequestFallsBackForEndedAgentSession() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: "codex", initialState: .exited))
+    }
+
+    // A run without a persisted session workspace has no pane destination.
+    @Test func automationRunTerminalRequestFallsBackForEndedAgentSessionWithNoAutomation() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Automation", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
+    }
+
+    @Test func automationRunTerminalRequestRequiresPersistedSessionWorkspace() {
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "gone-session", workspaceID: nil)
+
+        #expect(
+            AppKitController.automationRunTerminalOpenRequest(
+                deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: nil, loginShell: "/bin/zsh") == nil)
+    }
+
+    // Dispatch keys off the run's kind, not the automation's current kind.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameAgent() {
+        let automation = automationSummary(name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "edited-workspace")
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "auto-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .exited))
+    }
+
+    // The reverse uses the run's agent shape with its persisted workspace.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameScript() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let automation = automationSummary(name: "Reviewer", kind: .script, script: "echo hi")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
     @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {
@@ -1054,7 +1180,7 @@ import workspacecore
     private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp",
             outputByteCount: nil)
     }
 

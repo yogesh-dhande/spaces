@@ -937,8 +937,8 @@
             activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String?
         ) -> SpacesDeviceWorkspaceCodingAgentRow {
             SpacesDeviceWorkspaceCodingAgentRow(
-                id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)",
-                runState: runState, activityState: activityState, updatedAt: updatedAt, canStop: true)
+                id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)", runState: runState,
+                activityState: activityState, updatedAt: updatedAt, canStop: true)
         }
 
         private func makeProcessRow(id: String, name: String, sessionID: String? = nil, runState: SpacesDeviceRunState, exitedAt: String?)

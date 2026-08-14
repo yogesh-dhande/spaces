@@ -7,6 +7,62 @@ import systembridge
 
 extension OrchestratorTests {
 
+    func testArchiveDefaultWorkspacePreservesTargetingAutomation() throws {
+        let repo = try makeTempGitRepo(name: "archive-default-keeps-automation")
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let automation = Automation(
+            id: "default-automation", name: "Default", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let service = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown {
+            try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: $0)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
+
+        XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: workspace.id))
+        XCTAssertNotNil(try store.workspace(id: workspace.id))
+        XCTAssertNotNil(try store.automation(id: automation.id), "a rejected default-workspace archive keeps its automation")
+    }
+
+    func testArchiveBusyWorkspacePreservesTargetingAutomation() throws {
+        let repo = try makeTempGitRepo(name: "archive-busy-keeps-automation")
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let holder = makeTestOrchestrator(store: store, workspacesRootDirectory: root.appendingPathComponent("workspaces"))
+        let contender = makeTestOrchestrator(store: store, workspacesRootDirectory: root.appendingPathComponent("workspaces"))
+        let project = try holder.addProject(dir: repo.path)
+        let workspace = try holder.createWorkspace(projectID: project.id, branch: "feature-busy")
+        let automation = Automation(
+            id: "busy-automation", name: "Busy", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let service = AutomationService(store: store, orchestrator: contender, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown {
+            try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: $0)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
+        let lockHeld = expectation(description: "workspace lifecycle lock held")
+        let releaseLock = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? holder.withWorkspaceLifecycleLock(workspaceID: workspace.id) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 5)
+        defer { releaseLock.signal() }
+
+        XCTAssertThrowsError(try contender.archiveWorkspace(workspaceID: workspace.id))
+        XCTAssertNotNil(try store.workspace(id: workspace.id))
+        XCTAssertNotNil(try store.automation(id: automation.id), "a lifecycle-gate rejection keeps its automation")
+    }
+
     func testRollbackFailedImportedProjectCreationRemovesManagedRepoAndWorktreeDirectories() throws {
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
@@ -93,6 +149,175 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertEqual(Set(closed.sessionIDs), ["session-process", "session-agent", "session-shell"])
         XCTAssertEqual(Set(terminated.sessionIDs), ["session-process", "session-agent", "session-shell"])
+    }
+
+    func testStopWorkspaceCancelsRunningAutomationInItsPersistedTerminalWorkspaceAfterRetarget() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: root.path)
+        let originalWorkspace = WorkspaceRecord(
+            id: "workspace-stop-automation-original", projectID: project.id, dir: root.appendingPathComponent("original").path, dirname: nil,
+            branch: nil, isDefault: true, isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
+        let retargetedWorkspace = WorkspaceRecord(
+            id: "workspace-stop-automation-retargeted", projectID: project.id, dir: root.appendingPathComponent("retargeted").path, dirname: nil,
+            branch: "retargeted", isDefault: false, isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
+        try FileManager.default.createDirectory(atPath: originalWorkspace.dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: retargetedWorkspace.dir, withIntermediateDirectories: true)
+        try store.upsert(project: project)
+        try store.upsert(workspace: originalWorkspace)
+        try store.upsert(workspace: retargetedWorkspace)
+        let automation = Automation(
+            id: "automation-stop", name: "Nightly", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "sleep 60",
+            workspaceID: originalWorkspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-stop", automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: "run-stop-session", startedAt: Date(), endedAt: nil, createdAt: Date())
+        try store.insertAutomationRun(run)
+        let paths = try TerminalSessionPaths.forSession(id: "run-stop-session")
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "run-stop-session", title: "Nightly", workingDirectory: originalWorkspace.dir, shell: "/bin/zsh", command: "sleep 60",
+                createdAt: "2026-07-01T00:00:00Z", workspaceID: originalWorkspace.id, kind: .automation, automationRunID: run.id), paths: paths)
+        try store.upsert(
+            window: WindowRecord(
+                id: "automation-session-window", workspaceID: originalWorkspace.id, app: TerminalHost.spaces.appName, name: "Nightly",
+                terminalTrackingID: "run-stop-session", role: .terminal, orderIndex: 0, lastSeenAt: "2026-07-01T00:00:00Z"))
+        let retargetedAutomation = Automation(
+            id: automation.id, name: automation.name, enabled: automation.enabled, triggerKind: automation.triggerKind,
+            cronExpression: automation.cronExpression, kind: automation.kind, script: automation.script, agentCommand: automation.agentCommand,
+            agentPrompt: automation.agentPrompt, workspaceID: retargetedWorkspace.id, timeoutSeconds: automation.timeoutSeconds,
+            concurrencyPolicy: automation.concurrencyPolicy, missedRunPolicy: automation.missedRunPolicy, nextFireTime: automation.nextFireTime,
+            createdAt: automation.createdAt, updatedAt: Date())
+        try store.upsertAutomation(retargetedAutomation)
+
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+        let automationService = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try automationService.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
+        try orchestrator.stopWorkspace(workspaceID: retargetedWorkspace.id)
+
+        XCTAssertEqual(try store.automationRun(id: run.id)?.status, .running, "retargeting does not move a live terminal run")
+
+        try orchestrator.stopWorkspace(workspaceID: originalWorkspace.id)
+
+        XCTAssertEqual(try store.automationRun(id: run.id)?.status, .canceled)
+        XCTAssertEqual(terminated.sessionIDs, ["run-stop-session"], "the held workspace stop terminates the canceled automation session")
+        XCTAssertTrue(try store.windows(workspaceID: originalWorkspace.id).isEmpty, "stopping detaches the live workspace runtime target")
+        XCTAssertEqual(
+            try store.terminalSessionIDs(automationRunID: run.id), ["run-stop-session"], "the terminal session remains attributed for Runs-tab replay"
+        )
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).automationRunID, run.id, "Stop retains the persisted replay session")
+    }
+
+    func testBusyStopAndRestartPreserveActiveAutomationRun() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: root.path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-busy-cancel", projectID: project.id, dir: root.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+            lastLaunchedAt: "2026-07-01T00:00:00Z")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let automation = Automation(
+            id: "automation-busy-cancel", name: "Busy", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "sleep 60",
+            workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-busy-cancel", automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: nil, startedAt: Date(), endedAt: nil, createdAt: Date())
+        try store.insertAutomationRun(run)
+
+        let holder = makeTestOrchestrator(store: store)
+        let contender = makeTestOrchestrator(store: store)
+        let service = AutomationService(store: store, orchestrator: contender, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
+
+        let lockHeld = expectation(description: "workspace lifecycle lock held")
+        let releaseLock = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            try? holder.withWorkspaceLifecycleLock(workspaceID: workspace.id) {
+                lockHeld.fulfill()
+                releaseLock.wait()
+            }
+        }
+        wait(for: [lockHeld], timeout: 5)
+        defer { releaseLock.signal() }
+
+        XCTAssertThrowsError(try contender.stopWorkspace(workspaceID: workspace.id))
+        XCTAssertEqual(try store.automationRun(id: run.id)?.status, .running, "a busy Stop must not cancel before lifecycle admission")
+        XCTAssertThrowsError(try contender.restartWorkspace(workspaceID: workspace.id))
+        XCTAssertEqual(try store.automationRun(id: run.id)?.status, .running, "a busy Restart must not cancel before lifecycle admission")
+    }
+
+    func testHandoffStopPreservesActiveAutomationRunBeforeCancellation() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: root.path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-handoff-cancel", projectID: project.id, dir: root.path, dirname: nil, branch: nil, isDefault: true, isRunning: true,
+            lastLaunchedAt: "2026-07-01T00:00:00Z")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let automation = Automation(
+            id: "automation-handoff-cancel", name: "Handoff", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "sleep 60", workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce,
+            nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-handoff-cancel", automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: nil, startedAt: Date(), endedAt: nil, createdAt: Date())
+        try store.insertAutomationRun(run)
+
+        let orchestrator = makeTestOrchestrator(store: store, daemonHandoffInProgress: { true })
+        let service = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+            try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil) }
+
+        XCTAssertThrowsError(try orchestrator.stopWorkspace(workspaceID: workspace.id))
+        XCTAssertEqual(try store.automationRun(id: run.id)?.status, .running, "handoff rejection occurs before automation cancellation")
+    }
+
+    func testArchiveGitWorktreeRemovalFailurePreservesTargetingAutomationAndRuns() throws {
+        let repo = try makeTempGitRepo(name: "archive-git-remove-failure-keeps-automation")
+        let root = try makeTempDirectory()
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let creator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try creator.addProject(dir: repo.path)
+        let workspace = try creator.createWorkspace(projectID: project.id, branch: "feature-remove-failure")
+        let automation = Automation(
+            id: "automation-git-remove-failure", name: "Archive guard", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "true", workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let run = AutomationRun(
+            id: "run-git-remove-failure", automationID: automation.id, kind: .script, status: .succeeded, skipReason: nil, trigger: .manual,
+            exitCode: 0, terminalSessionID: nil, startedAt: Date(), endedAt: Date(), createdAt: Date())
+        try store.insertAutomationRun(run)
+        let archive = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot, git: try makeWorktreeRemoveFailingGitClient())
+        let service = AutomationService(store: store, orchestrator: archive, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown {
+            try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: $0)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
+
+        XCTAssertThrowsError(try archive.archiveWorkspace(workspaceID: workspace.id))
+        XCTAssertNotNil(try store.workspace(id: workspace.id))
+        XCTAssertNotNil(try store.automation(id: automation.id), "a failed worktree removal keeps the automation")
+        XCTAssertNotNil(try store.automationRun(id: run.id), "a failed worktree removal keeps Runs history")
     }
 
     // Tests create workspace rejects directory name override for non git project by arranging representative inputs and asserting the expected result.
@@ -252,6 +477,16 @@ extension OrchestratorTests {
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-teardown")
+        let automation = Automation(
+            id: "automation-archive", name: "Archive me", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "true",
+            workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let automationService = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
+            try automationService.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
         try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: "notes")
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .waiting)
@@ -260,6 +495,7 @@ extension OrchestratorTests {
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
         XCTAssertNil(try store.workspace(id: workspace.id), "archiving removes the workspace record")
+        XCTAssertNil(try store.automation(id: automation.id), "archive uses AutomationService deletion before removing the workspace")
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty, "the watcher's edge is dropped, not left dangling")
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])

@@ -104,8 +104,7 @@ import spacesterminalcore
     @Test func aFailedReadKeepsTheChordAlreadyInEffect() throws {
         let inEffect = try #require(
             AppKitController.resolvedShortcutSpec(
-                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil,
-                leaderModifiers: Self.leader))
+                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
 
         let afterFailedRead = AppKitController.resolvedShortcutSpec(
             failingResolver(), setting: .guiAlertsShortcut, current: inEffect, leaderModifiers: Self.leader)

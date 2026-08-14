@@ -1404,6 +1404,60 @@
             XCTAssertFalse(model.isMutating)
         }
 
+        func testStopCodingAgentRowSendsWorkspaceTerminalStopMutation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "stopped")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(
+                    SpacesDeviceWorkspaceCodingAgentRow(
+                        id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
+                        sessionID: "session-agent", runState: .running, activityState: .spinning, canStop: true)))
+
+            await model.stop(row: row)
+
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.commandName, "stopWorkspaceTerminal")
+            guard case .stopWorkspaceTerminal(let payload)? = request?.command else {
+                XCTFail("Expected stopWorkspaceTerminal request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-docs")
+            XCTAssertEqual(payload.sessionID, "session-agent")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        func testStopCodingAgentRowWithoutSessionFallsBackToAgentStopMutation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "stopped")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(
+                    SpacesDeviceWorkspaceCodingAgentRow(
+                        id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
+                        sessionID: nil, runState: .running, activityState: .spinning, canStop: true)))
+
+            await model.stop(row: row)
+
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.commandName, "stopCodingAgent")
+            guard case .stopCodingAgent(let payload)? = request?.command else {
+                XCTFail("Expected stopCodingAgent request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-docs")
+            XCTAssertEqual(payload.agentID, "agent-automation")
+            XCTAssertFalse(model.isMutating)
+        }
+
         /// A shell row is named by the session and described by what its program reported — nothing until
         /// it reports something. A configured row says what it runs instead.
         func testRuntimeRowSecondaryTextIsTheShellsLiveTitle() {

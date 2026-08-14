@@ -69,12 +69,10 @@ final class TerminalRemoteSessionStateNotificationRoutingTests: XCTestCase {
     func testIsOutputShapedStaysConsistentWithNotificationsForReason() {
         let declaredReasons = [
             TerminalRemoteSessionStateReason.initial, TerminalRemoteSessionStateReason.attachmentState,
-            TerminalRemoteSessionStateReason.sessionMetadata, TerminalRemoteSessionStateReason.input,
-            TerminalRemoteSessionStateReason.inputOutput, TerminalRemoteSessionStateReason.output,
-            TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll,
-            TerminalRemoteSessionStateReason.clearScreen, TerminalRemoteSessionStateReason.runtimeState,
-            TerminalRemoteSessionStateReason.resize, TerminalRemoteSessionStateReason.terminated,
-            TerminalRemoteSessionStateReason.clipboardWrite,
+            TerminalRemoteSessionStateReason.sessionMetadata, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
+            TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll,
+            TerminalRemoteSessionStateReason.clearScreen, TerminalRemoteSessionStateReason.runtimeState, TerminalRemoteSessionStateReason.resize,
+            TerminalRemoteSessionStateReason.terminated, TerminalRemoteSessionStateReason.clipboardWrite,
         ]
         for reason in declaredReasons + ["not_a_reason", ""] {
             let expected = TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason) == [.spacesTerminalOutputDidChange]

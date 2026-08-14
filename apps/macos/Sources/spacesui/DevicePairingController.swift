@@ -657,9 +657,7 @@ import workspacecore
         setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.pairRemoteDevice(request)
-                }.value
+                let result = try await Task.detached(priority: .userInitiated) { try SpacesDevicePairingClient.pairRemoteDevice(request) }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
@@ -668,8 +666,7 @@ import workspacecore
                 // A Linux device without Spaces installed carries the pinned install one-liner, so connecting
                 // continues straight into installing it over SSH and pairing. The recovery block is surfaced
                 // first so a failed install still leaves the command copyable and the button there to retry.
-                if case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error,
-                    let command = linuxInstallCommand
+                if case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(_, let linuxInstallCommand) = error, let command = linuxInstallCommand
                 {
                     self.remoteDeviceLinuxInstallCommand = command
                     self.remoteDeviceInstallCommandField?.stringValue = command

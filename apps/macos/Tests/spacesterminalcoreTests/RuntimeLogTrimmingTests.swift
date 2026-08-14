@@ -1,12 +1,12 @@
 import XCTest
 
+@testable import spacesterminalcore
+
 #if canImport(Darwin)
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
 #endif
-
-@testable import spacesterminalcore
 
 final class RuntimeLogTrimmingTests: XCTestCase {
     func testUnderCapFileIsUntouched() throws {

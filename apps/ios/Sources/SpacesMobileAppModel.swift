@@ -188,6 +188,7 @@ enum SpacesMobileTab: String, Hashable, Sendable {
     case alerts
     case spaces
     case agents
+    case automations
     case settings
 }
 
@@ -876,8 +877,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Failed/timed-out automation-run alert entries for the Alerts tab, with cleared entries filtered
+    /// out. Automation runs are workspace-less, so these are derived and rendered separately from
+    /// `attentionGroups` — see `SpacesMobileAutomationAlerts`.
+    var automationAlerts: [SpacesMobileAutomationAlertEntry] {
+        guard let overview else { return [] }
+        return SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).filter { !dismissedAlertIDs.contains($0.id) }
+    }
+
     /// Undismissed attention-event count, shown as the Alerts tab badge.
-    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } }
+    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } + automationAlerts.count }
 
     /// Marks every currently derived attention event dismissed.
     func clearAlerts() {
@@ -886,6 +895,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             SpacesMobileAttention.events(
                 in: overview, focusedSessionID: watchedTerminalSessionID, watchWindowsBySessionID: terminalWatchWindowsBySessionID
             ).map(\.id))
+        dismissedAlertIDs.formUnion(SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).map(\.id))
         saveDismissedAlertIDs()
     }
 
@@ -895,10 +905,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
         saveDismissedAlertIDs()
     }
 
+    /// Dismisses one failed/timed-out automation run, leaving the rest of the Automations band in place.
+    func dismissAutomationAlert(_ entry: SpacesMobileAutomationAlertEntry) {
+        dismissedAlertIDs.insert(entry.id)
+        saveDismissedAlertIDs()
+    }
+
     /// Drops stored dismissals whose event this overview no longer produces, so the persisted set stays
     /// bounded by what the device currently reports rather than growing for the life of the install.
     private func pruneDismissedAlertIDs(against overview: SpacesDeviceOverviewPayload) {
-        let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview)
+        // Automation-run alerts share the dismissal set but derive from `automationRuns`, not attention
+        // events, so retain their dismissals separately or a prune would resurface dismissed run alerts.
+        let retained = SpacesMobileAttention.retainedDismissedEventIDs(dismissedAlertIDs, in: overview).union(
+            dismissedAlertIDs.intersection(Set(SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).map(\.id))))
         guard retained != dismissedAlertIDs else { return }
         dismissedAlertIDs = retained
         saveDismissedAlertIDs()
@@ -942,6 +961,91 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var agentGroups: [SpacesMobileAgentGroup] {
         guard let overview else { return [] }
         return SpacesMobileAgentGrouping.groups(in: overview)
+    }
+
+    /// Automation rows for the Automations tab, derived from the active device's overview.
+    var automationRows: [SpacesMobileAutomationRow] {
+        guard let overview else { return [] }
+        return SpacesMobileAutomations.rows(automations: overview.automations, runs: overview.automationRuns)
+    }
+
+    /// Currently-running automation-run count on the active device — the Automations tab's badge.
+    /// Failed/timed-out runs already badge Alerts (see `automationAlerts`), so this counts only
+    /// in-flight runs, giving the tab a live "something is executing right now" pulse.
+    var automationRunningRunCount: Int {
+        guard let overview else { return 0 }
+        return SpacesMobileAutomations.runningCount(overview.automationRuns)
+    }
+
+    /// Manually fires an automation, respecting the daemon's concurrency gate. There is no separate
+    /// confirmation or toast for the started/queued/skipped outcome: the automation row's status dot
+    /// reflects it once the refreshed overview lands, mirroring how the Mac's Automations pane surfaces
+    /// this (a reload, not an optimistic local merge — automation mutation responses carry no overview).
+    func triggerAutomation(id: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        do {
+            _ = try await bridgeClient.triggerAutomation(id: id, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
+            await refresh()
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
+    }
+
+    /// Cancels a running (or queued) automation run.
+    func cancelAutomationRun(runID: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        do {
+            _ = try await bridgeClient.cancelAutomationRun(runID: runID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
+            await refresh()
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
+    }
+
+    /// Ends a finished run's still-live attributed coding agents. There is no optimistic local merge,
+    /// mirroring `cancelAutomationRun`: the run row's agent chips reflect the outcome once the refreshed
+    /// overview lands.
+    func endAutomationAgents(runID: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let identity = overviewIdentity
+        do {
+            _ = try await bridgeClient.endAutomationAgents(runID: runID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
+            await refresh()
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
+    }
+
+    /// Fetches one automation's retained run history directly from the daemon for the per-automation "View
+    /// Runs" screen, so it reads the daemon's kept-per-automation rows instead of the overview's global
+    /// recent-runs window (which a chatty automation can fill, leaving a quiet automation's history empty).
+    /// Returns nil on error, and the caller keeps whatever it was already showing. Not a mutation, so it
+    /// does not touch `isMutating` or trigger an overview refresh.
+    func fetchAutomationRuns(automationID: String) async -> [TerminalServiceAutomationRunSummary]? {
+        let identity = overviewIdentity
+        do {
+            let runs = try await bridgeClient.listAutomationRuns(automationID: automationID, commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return nil }
+            return runs
+        } catch {
+            guard identity == overviewIdentity else { return nil }
+            handleBridgeError(error)
+            return nil
+        }
     }
 
     /// Whether this workspace's delete is in flight. The Spaces tab dims its band and rows, puts a spinner
@@ -1925,8 +2029,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 response = try await bridgeClient.stopWorkspaceProcess(
                     workspaceID: process.workspaceID, processID: processID, processKey: process.name, commandChannel: commandChannel)
             case .codingAgent(let agent):
-                guard let agentID = agent.agentID else { return }
-                response = try await bridgeClient.stopCodingAgent(workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
+                // Automation agents share the workspace terminal stop route: the daemon first cancels an
+                // active automation run, then stops the registered or pre-signal session. The server still
+                // recognizes ordinary configured-process agent rows on this route.
+                if let sessionID = agent.sessionID {
+                    response = try await bridgeClient.stopWorkspaceTerminal(
+                        workspaceID: agent.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+                } else if let agentID = agent.agentID {
+                    response = try await bridgeClient.stopCodingAgent(
+                        workspaceID: agent.workspaceID, agentID: agentID, commandChannel: commandChannel)
+                } else {
+                    return
+                }
             case .terminal(let terminal):
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(

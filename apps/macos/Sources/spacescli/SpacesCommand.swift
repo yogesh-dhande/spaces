@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
-              - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
+              - `agent spawn --command <cmd>` starts a supported coding agent (\(CodingAgent.commandListText)) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID). Keystrokes go to a child through `terminal send`; agent status comes only from the agent's own signals, so sending input never moves it.
               - `agent spawn`/`list`/`status`/`annotate`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
@@ -401,17 +401,18 @@ struct AgentSpawnResult: Codable, Equatable {
 
 /// Spawns a coding agent on this machine and blocks until the daemon's foreground classifier identifies
 /// it in the new terminal (readiness = detection, NOT a hook signal). It delivers no prompt: spawn
-/// returns at detection, and the orchestrator sends the prompt with `terminal send` and confirms work
-/// with `terminal tail`/`agent status`. A child that ends before it is identified fails the spawn at that
-/// moment, reporting its exit and last output. Auto-subscribes the spawning terminal when the child
-/// already has an agent row. Shared by `agent spawn` and the `spaces_agent_spawn` MCP tool so both block
-/// identically.
+/// returns at detection, and the orchestrator sends the prompt with `terminal send text --submit` and
+/// confirms work with `terminal tail`/`agent status`. A child that ends before it is identified fails
+/// the spawn at that moment, reporting its exit and last output. Auto-subscribes the spawning terminal
+/// when the child already has an agent row. Shared by `agent spawn` and the `spaces_agent_spawn` MCP
+/// tool so both block identically.
 func performAgentSpawn(
     cwd: String, workspace: String?, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
-    pollInterval: TimeInterval = 0.5
+    automationRunID: String? = nil, pollInterval: TimeInterval = 0.5
 ) throws -> AgentSpawnResult {
     let spawnResponse = try TerminalService.sendProfileCommand(
-        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title)), timeout: TerminalService.createSessionRequestTimeout())
+        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title, automationRunID: automationRunID)),
+        timeout: TerminalService.createSessionRequestTimeout())
     guard let session = spawnResponse.terminalSession else {
         throw WorkspaceError.invalidArgument(message: "spacesd did not return an agent session.")
     }
@@ -538,6 +539,11 @@ private func resolvedAgentRowIDIfPresent(forChildTerminalSessionID childSessionI
 /// only once the child has an agent row on the device (cross-device subscribe validates against the
 /// remote agent listing, which is empty until the first hook signal) — no row → skip cleanly, matching
 /// local. Returns the spawn result carrying the device id so the `open` deep link is device-qualified.
+///
+/// Automation-run attribution is deliberately NOT forwarded here: an `SPACES_AUTOMATION_RUN_ID` names a run
+/// row that exists only in the local daemon's database, so stamping it on a session the remote daemon owns
+/// would leave a dangling reference the remote's sweep/prune/end-agents can never match. Only local spawns
+/// carry the run id (see `performAgentSpawn`).
 func performRemoteAgentSpawn(
     device: SpacesPairedDeviceRecord, workspace: String, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
     pollInterval: TimeInterval = 0.5
@@ -618,6 +624,18 @@ func resolvedSubscriberSessionID(_ subscriber: String?, environment: [String: St
     throw ValidationError("--subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
 }
 
+/// Resolves the automation run id to stamp onto a local `agent spawn` request, read from
+/// `SPACES_AUTOMATION_RUN_ID` (trimmed; empty treated as absent). Set by an automation orchestrator on
+/// its own terminal so the daemon can attribute the spawned child session to the run that created it. nil
+/// when unset, which keeps ordinary interactive spawns unchanged. Called by both the `agent spawn` CLI
+/// command and the `spaces_agent_spawn` MCP tool's local-spawn branch, since an MCP-capable orchestrator
+/// launched by a script automation inherits the same environment variable and must forward it identically.
+func resolvedAutomationRunID(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+    guard let envValue = environment[WorkspaceOrchestrator.automationRunIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !envValue.isEmpty
+    else { return nil }
+    return envValue
+}
+
 struct AgentSpawnCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spawn", abstract: "Start a coding agent in a new Spaces terminal and block until it is detected running.",
@@ -626,13 +644,14 @@ struct AgentSpawnCommand: ParsableCommand {
             identifies the coding agent in the new terminal — not when it emits a hook signal (a
             promptless Codex never does). Hooks are not required to spawn; they enrich live status when
             present. Spawn delivers no prompt — to give the agent work, the orchestrator sends input
-            with `spaces terminal send <id>` and confirms progress with `spaces terminal tail <id>` /
-            `spaces agent status`; the orchestrator can also see and answer any first-run trust,
-            onboarding, or auth dialog that spawn's detection cannot. The command runs through an
-            interactive login shell, so it resolves the same binaries a Spaces terminal does. If the
-            command ends without ever being detected spawn fails at that moment and reports the child's
-            exit and last output; if it keeps running but is never detected, spawn errors at the timeout
-            and leaves the session running for inspection with `spaces terminal tail <id>`.
+            with `spaces terminal send text <id> <prompt> --submit` (`--submit` is the provider-neutral
+            prompt submit across the supported agent TUIs) and confirms progress with
+            `spaces terminal tail <id>` / `spaces agent status`; the orchestrator can also see and answer
+            any first-run trust, onboarding, or auth dialog that spawn's detection cannot. The command
+            runs through an interactive login shell, so it resolves the same binaries a Spaces terminal
+            does. If the command ends without ever being detected spawn fails at that moment and reports
+            the child's exit and last output; if it keeps running but is never detected, spawn errors at
+            the timeout and leaves the session running for inspection with `spaces terminal tail <id>`.
             --device spawns on a paired device, detected the same way over the Device API.
             """)
 
@@ -650,6 +669,7 @@ struct AgentSpawnCommand: ParsableCommand {
         let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
             in: .whitespacesAndNewlines)
         let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
+        let automationRunID = resolvedAutomationRunID()
         let result: AgentSpawnResult
         if let device {
             // Validate the required workspace before resolving the device so `--device` without
@@ -658,13 +678,15 @@ struct AgentSpawnCommand: ParsableCommand {
                 throw ValidationError("--workspace is required with --device: a remote spawn cannot infer the workspace from the current directory.")
             }
             let record = try SpacesPairedDeviceSelection.resolve(device)
+            // Automation-run attribution is intentionally not forwarded to a remote daemon: the run id names
+            // a row in the local daemon's database only. `automationRunID` still stamps the local spawn below.
             result = try performRemoteAgentSpawn(
                 device: record, workspace: workspace, command: command, title: title, timeoutSeconds: timeout,
                 subscriberSessionID: subscriberSessionID)
         } else {
             result = try performAgentSpawn(
                 cwd: context.currentDirectoryPath(), workspace: workspace, command: command, title: title, timeoutSeconds: timeout,
-                subscriberSessionID: subscriberSessionID)
+                subscriberSessionID: subscriberSessionID, automationRunID: automationRunID)
         }
         if json {
             try context.output.emitJSON(result)

@@ -136,6 +136,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private var alertsRowStack: NSStackView?
     private var alertsRowRail: NSView?
     private var alertsRowBadge: NSTextField?
+
+    // Automations sidebar row
+    private var automationsRowContainer: NSView?
+    private var automationsHeaderStack: NSStackView?
+    private var automationsRowRail: NSView?
+    private var automationsRowBadge: NSTextField?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -1049,7 +1055,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
+            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
+                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
@@ -1105,13 +1112,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.reopenPersistedPanelWindowsIfPossible()
         // The Alerts pane's cards and `alertsFocusRequestMap` were built from the pre-rebuild groups, so
         // when it is visible it must be rebuilt to pick up this device's new state — its alerts stay
-        // listed, marked stale. The selection itself is deliberately left alone: an unreachable device's
-        // rows stay in the merged data, so a selection under it is still valid and its detail pane still
-        // renders from the retained overview. Only the pane's controls have to be rebuilt, and only when
-        // this device crossed into or out of being actionable — every earlier branch of the switch
-        // returned for a report that changed nothing.
+        // listed, marked stale. The Automations pane is rebuilt for the same reason: its tables and run
+        // cards were rendered from the pre-rebuild sections. The selection itself is deliberately left
+        // alone: an unreachable device's rows stay in the merged data, so a selection under it is still
+        // valid and its detail pane still renders from the retained overview. Only the pane's controls
+        // have to be rebuilt, and only when this device crossed into or out of being actionable — every
+        // earlier branch of the switch returned for a report that changed nothing.
         if host.showingAlerts {
             host.showAlertsDetail()
+        } else if host.showingAutomations {
+            host.showAutomationsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceSections[index].loadState)
@@ -1360,10 +1370,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
                 }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
-                showingAlerts: host.showingAlerts, direction: direction)
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
         else { return false }
         switch target {
         case .alerts: host.showAlertsDetail(presentation: .userNavigation)
+        case .automations: host.showAutomationsDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -1848,9 +1859,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
         // its way out and says nothing the user can act on, so the row reports the delete instead.
         let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
-        statusIndicator.translatesAutoresizingMaskIntoConstraints = false
-        statusIndicator.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = Typography.controlLabel
@@ -1919,11 +1927,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
     private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        let statusIcon = NSImageView()
-        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
-        return statusIcon
+        return RowPrimitives.compactStatusDot(
+            filled: isLifecycleRunning, tint: isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor(),
+            tooltip: isLifecycleRunning ? "Running" : "Stopped")
     }
 
     /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
@@ -1934,6 +1940,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         spinner.controlSize = .mini
         spinner.toolTip = "Deleting…"
         spinner.setAccessibilityIdentifier("sidebar-workspace-deleting-\(workspaceID)")
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10)])
         spinner.startAnimation(nil)
         return spinner
     }
@@ -2768,6 +2776,93 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         NSApp.dockTile.badgeLabel = totalCount == 0 ? nil : "\(totalCount)"
         NSApp.dockTile.display()
+        // The automations row's running-run count and children track the same overview changes as the alerts
+        // badge, so refresh them here to cover every sidebar-refresh path in one place.
+        updateAutomationsSidebarRow()
+    }
+
+    func makeAutomationsSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-automations")
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Automations")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Automations")
+        titleLabel.font = Typography.controlLabel
+        titleLabel.textColor = .labelColor
+
+        let badge = NSTextField(labelWithString: "")
+        badge.font = Typography.monoBadgeStrong
+        badge.textColor = sidebarRunningIndicatorColor()
+        badge.alignment = .right
+        badge.isBordered = false
+        badge.isEditable = false
+        badge.drawsBackground = false
+        badge.isHidden = true
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        automationsRowBadge = badge
+
+        let header = NSStackView(views: [icon, titleLabel, NSView(), badge, makeSidebarBadgeTrailingSlot()])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        automationsHeaderStack = header
+        // The whole row opens Automations.
+        let click = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
+        header.addGestureRecognizer(click)
+
+        container.addSubview(header)
+        // Selection rail: same squared teal bar as the Alerts row, on the container's leading edge and
+        // spanning only the header — the expanded running-run children are navigation shortcuts, not part
+        // of the selected surface.
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        automationsRowRail = rail
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor), header.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        automationsRowContainer = container
+
+        updateAutomationsSidebarRow()
+        return container
+    }
+
+    /// Refreshes the automations row's running-run count badge across reachable devices.
+    func updateAutomationsSidebarRow() {
+        guard automationsRowContainer != nil else { return }
+        let runningCount = AutomationsViewModel.runningRunCount(from: host.automationDeviceInputs())
+        if let badge = automationsRowBadge {
+            badge.stringValue = "\(runningCount)"
+            badge.isHidden = runningCount == 0
+        }
+        updateAutomationsRowAppearance()
+    }
+
+    func updateAutomationsRowAppearance() {
+        guard let header = automationsHeaderStack else { return }
+        // Selection reads from the leading teal rail alone, matching the Alerts row — no fill/border.
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        automationsRowRail?.isHidden = !host.showingAutomations
+        if let rail = automationsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
+        }
     }
 
     func makeSidebarTopBarRow() -> NSView {
@@ -2877,6 +2972,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
+        stack.addArrangedSubview(makeSidebarBadgeTrailingSlot())
         alertsRowStack = stack
 
         row.addSubview(stack)
@@ -2901,6 +2997,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.addGestureRecognizer(click)
         alertsRowView = row
         return row
+    }
+
+    /// Keeps top-level navigation counts in one trailing column, inset from the row edge where
+    /// project and workspace rows carry their accessories.
+    private func makeSidebarBadgeTrailingSlot() -> NSView {
+        let slot = NSView()
+        slot.translatesAutoresizingMaskIntoConstraints = false
+        slot.setContentHuggingPriority(.required, for: .horizontal)
+        slot.setContentCompressionResistancePriority(.required, for: .horizontal)
+        slot.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        return slot
     }
 
     func updateAlertsRowAppearance() {

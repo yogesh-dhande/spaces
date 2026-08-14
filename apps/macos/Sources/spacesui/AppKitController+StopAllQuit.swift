@@ -132,6 +132,13 @@ extension AppKitController {
             remainingSessionIDs: remainingSessionIDs, preparationError: nil)
     }
 
+    /// Stop All runs in the app process, while active automation cancellation is serialized by the daemon's
+    /// AutomationService. Route workspace stop through the profile socket so it enters that coordinator;
+    /// constructing an app-local orchestrator would have no daemon-installed cancellation callback.
+    nonisolated static func stopWorkspaceForStopAllQuit(
+        workspaceID: String, sendProfileCommand: (TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse
+    ) throws { _ = try sendProfileCommand(.workspaceStop(workspaceID: workspaceID)) }
+
     nonisolated static func forceStopAllQuitAfterCleanupFailure(
         result: StopAllQuitCleanupResult, terminateSession: (String) throws -> Void, closeBrowserSessions: (String, [String]) -> Void
     ) -> Bool {
@@ -207,8 +214,10 @@ extension AppKitController {
                 workspaceForLiveSession: { sessionID in
                     guard let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return nil }
                     return try store.workspace(id: workspaceID)
-                }, stopWorkspace: { workspaceID in _ = try orchestrator.stopWorkspace(workspaceID: workspaceID) },
-                terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
+                },
+                stopWorkspace: { workspaceID in
+                    try Self.stopWorkspaceForStopAllQuit(workspaceID: workspaceID) { command in try TerminalService.sendProfileCommand(command) }
+                }, terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
                 listLiveSessions: TerminalService.listSessions,
                 browserSessionTargetURLs: { workspaceID in
                     try Self.configuredBrowserSessionTargetURLsForStopAllQuit(workspaceID: workspaceID, orchestrator: orchestrator)

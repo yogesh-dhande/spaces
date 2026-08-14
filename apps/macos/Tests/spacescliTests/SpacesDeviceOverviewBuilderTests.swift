@@ -344,9 +344,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
-            workspaces: [
-                .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [liveAgent, deadTerminalAgent])
-            ], sessions: [codexSession])
+            workspaces: [.init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [liveAgent, deadTerminalAgent])],
+            sessions: [codexSession])
 
         let rows = overview.workspaces.first?.codingAgentRows ?? []
         XCTAssertEqual(rows.map(\.name).sorted(), ["codex", "reviewer"])
@@ -376,9 +375,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
                 runtimeTitle: runtimeTitle)
             let overview = SpacesDeviceOverviewBuilder.build(
                 projects: [project],
-                workspaces: [
-                    .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [agent])
-                ], sessions: [session])
+                workspaces: [.init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [agent])], sessions: [session]
+            )
             return overview.workspaces.first?.codingAgentRows ?? []
         }
 
@@ -406,9 +404,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
-            workspaces: [
-                .init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [renamedAgent])
-            ], sessions: [codexSession])
+            workspaces: [.init(project: project, workspace: workspace, settings: WorkspaceSettings(), agentWindows: [renamedAgent])],
+            sessions: [codexSession])
 
         let row = overview.workspaces.first?.codingAgentRows.first
         XCTAssertEqual(row?.name, "Codex")
@@ -711,6 +708,17 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         // covered by `testEndedSessionHeldOnlyByATerminalWindowRowStaysOpenable`, which builds the rows
         // the daemon derives from this same record instead of passing none.
         XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
+    }
+
+    /// An automation run's ended terminal has no workspace, no process/agent row, and no window row (a
+    /// script run's session never had one, and an ended agent run's row is finalized away), so the run
+    /// attribution is the only thing that can keep it retained. Without it the client would close the Runs
+    /// tab's replay pane on the next overview.
+    func testRetainedIncludesAutomationAttributedSessionWithNoOtherRecord() {
+        let overview = SpacesDeviceOverviewBuilder.build(
+            workspaces: [], workspaceRows: [], liveSessions: [], automationAttributedSessionIDs: ["session-automation-run"])
+
+        XCTAssertEqual(overview.retainedTerminalSessionIDs, ["session-automation-run"])
     }
 
     /// A session whose only product record is its terminal window keeps its `sessions` entry after it

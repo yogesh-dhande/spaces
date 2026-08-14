@@ -43,9 +43,33 @@ struct SpacesDeviceOverviewBuilder {
         let hasFinalRender: Bool
     }
 
+    /// The number of newest terminal automation runs the overview carries, in addition to every currently
+    /// active (queued/running) run. Keeps the snapshot bounded while still covering enough recent history
+    /// for a client to render run lists and derive alert entries from recent failed/timed-out runs.
+    static let recentAutomationRunLimit = 50
+
+    /// Selects the automation runs the overview carries, from three inputs, de-duplicated and returned
+    /// newest first:
+    /// - `recentTerminal`: the newest terminal runs globally (already limited to `recentAutomationRunLimit`
+    ///   by the caller's query) — the recent-history window.
+    /// - `latestPerAutomation`: each automation's single newest terminal run, so a chatty automation
+    ///   filling the global recent window can never evict quieter automations' last-run status (a client
+    ///   would otherwise read them as "never run" with empty history).
+    /// - `active`: every currently-active (queued/running) run, so a live run is never dropped by the cap.
+    /// Pure and static so the selection contract is unit-testable without a store or a running server.
+    static func selectOverviewRuns(recentTerminal: [AutomationRun], latestPerAutomation: [AutomationRun], active: [AutomationRun]) -> [AutomationRun]
+    {
+        var seen = Set<String>()
+        var merged: [AutomationRun] = []
+        for run in recentTerminal + latestPerAutomation + active where seen.insert(run.id).inserted { merged.append(run) }
+        return merged.sorted { $0.createdAt > $1.createdAt }
+    }
+
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus
+        liveSessions: [TerminalSessionCatalogEntry], workspaceIDsWithTeardownInFlight: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
+        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = [],
+        automationAttributedSessionIDs: [String] = []
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -91,15 +115,14 @@ struct SpacesDeviceOverviewBuilder {
                 return lhs.workspace.workspace.displayName.localizedStandardCompare(rhs.workspace.workspace.displayName) == .orderedAscending
             }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }.map { row in
-            // A summary describes its session exactly as the row claiming it does, since the surfaces that
-            // list sessions rather than rows (a bell's Alerts row, the iOS session list) read the pairing
-            // off the summary: an ad hoc shell and a coding agent both carry the title their program
-            // reports, and a configured process carries none, because the command its configured entry
-            // names already says what it is doing.
-            summary(
-                for: row.entry, matchedWorkspace: row.workspace, title: row.title, liveTitle: row.rowKind == .agent ? row.entry.liveTitle : nil,
-                rowKind: row.rowKind, rowSourceID: row.rowSourceID, hasFinalRender: row.hasFinalRender)
+        }.compactMap { row -> SpacesDeviceTerminalSessionSummary? in
+            // Workspace rows always carry a workspace; a nil id would be a workspace-less session that has
+            // no place in a workspace-scoped listing, so it is dropped rather than surfaced.
+            guard let workspaceID = row.entry.workspaceID else { return nil }
+            return summary(
+                for: row.entry, workspaceID: workspaceID, matchedWorkspace: row.workspace, title: row.title,
+                liveTitle: row.rowKind == .agent ? row.entry.liveTitle : nil, rowKind: row.rowKind, rowSourceID: row.rowSourceID,
+                hasFinalRender: row.hasFinalRender)
         }
 
         let adHocSessionSummaries = adHocLiveSessions.sorted { lhs, rhs in
@@ -107,17 +130,22 @@ struct SpacesDeviceOverviewBuilder {
                 return lhs.effectiveWorkingDirectory.localizedStandardCompare(rhs.effectiveWorkingDirectory) == .orderedAscending
             }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }.map { session in
+        }.compactMap { session -> SpacesDeviceTerminalSessionSummary? in
+            // Workspace-less sessions are not workspace-owned and stay invisible
+            // in the workspace-scoped overview; only sessions with a workspace id produce a summary.
+            guard let workspaceID = session.workspaceID else { return nil }
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
             return summary(
-                for: session, matchedWorkspace: matchedWorkspace, title: session.name, liveTitle: session.liveTitle, rowKind: .liveSession,
-                rowSourceID: nil, hasFinalRender: false)
+                for: session, workspaceID: workspaceID, matchedWorkspace: matchedWorkspace, title: session.name, liveTitle: session.liveTitle,
+                rowKind: .liveSession, rowSourceID: nil, hasFinalRender: false)
         }
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
-            retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces),
-            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus)
+            retainedTerminalSessionIDs: retainedTerminalSessionIDs(
+                liveSessions: liveSessions, workspaces: workspaces, automationAttributedSessionIDs: automationAttributedSessionIDs),
+            workspaceIDsWithTeardownInFlight: workspaceIDsWithTeardownInFlight, daemonStatus: daemonStatus, automations: automations,
+            automationRuns: automationRuns)
     }
 
     /// The keep-set the daemon publishes on `SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`:
@@ -126,13 +154,22 @@ struct SpacesDeviceOverviewBuilder {
     /// This is the daemon's authoritative retention rule, mirroring the session garbage collector's
     /// `SQLiteStore.terminalSessionIsReferencedByProduct` plus a live core: a session is retained while
     /// it has a live interactive service (`liveSessions`, the same catalog that feeds `sessions`) or while
-    /// a `running_processes`, `agent_sessions`, or `runtime_targets` row references it. It reads the raw
-    /// product records' tracking ids directly, BEFORE `sessions`' live-map stripping drops an ended
-    /// session's id — so a bare ad hoc shell that has exited but is still held by its `runtime_targets`
+    /// a `running_processes`, `agent_sessions`, `runtime_targets`, or automation-run row references it. It
+    /// reads the raw product records' tracking ids directly, BEFORE `sessions`' live-map stripping drops an
+    /// ended session's id — so a bare ad hoc shell that has exited but is still held by its `runtime_targets`
     /// (terminal window) row remains in the keep-set, and its client-side ended pane stays open for
     /// scrollback until that row is removed. Ids are whitespace-trimmed, empties dropped, and sorted so
     /// the payload is stable tick-to-tick (the client dedupes overviews by equality).
-    private static func retainedTerminalSessionIDs(liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor]) -> [String] {
+    ///
+    /// `automationAttributedSessionIDs` covers the automation-run arm of that rule, which no workspace
+    /// descriptor can supply: an automation run's terminals are replayable from the Runs tab until the run is
+    /// pruned. An exited automation terminal has already shed its live runtime target, so it would not
+    /// otherwise appear here and the client would close the replay pane on the next overview. This is read
+    /// from the store rather than derived from `automationRuns` so the keep-set
+    /// covers every retained run, not just the ones inside the overview's bounded run window.
+    private static func retainedTerminalSessionIDs(
+        liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor], automationAttributedSessionIDs: [String]
+    ) -> [String] {
         var retained = Set<String>()
         func insert(_ trackingID: String?) {
             guard let normalized = trackingID?.trimmingCharacters(in: .whitespacesAndNewlines), !normalized.isEmpty else { return }
@@ -144,6 +181,7 @@ struct SpacesDeviceOverviewBuilder {
             for agent in descriptor.agentWindows { insert(agent.terminalTrackingID) }
             for window in descriptor.windows { insert(window.terminalTrackingID) }
         }
+        for sessionID in automationAttributedSessionIDs { insert(sessionID) }
         return retained.sorted()
     }
 
@@ -152,15 +190,15 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func summary(
-        for session: TerminalSessionCatalogEntry, matchedWorkspace: WorkspaceDescriptor?, title: String, liveTitle: String? = nil,
-        rowKind: SpacesDeviceTerminalSessionRowKind, rowSourceID: String?, hasFinalRender: Bool
+        for session: TerminalSessionCatalogEntry, workspaceID: String, matchedWorkspace: WorkspaceDescriptor?, title: String,
+        liveTitle: String? = nil, rowKind: SpacesDeviceTerminalSessionRowKind, rowSourceID: String?, hasFinalRender: Bool
     ) -> SpacesDeviceTerminalSessionSummary {
         let isInteractive = session.runtimeState.state.isInteractive
         return SpacesDeviceTerminalSessionSummary(
             id: session.sessionID, title: title, liveTitle: liveTitle, workingDirectory: session.effectiveWorkingDirectory,
             shell: session.launchConfiguration.shell, command: session.launchConfiguration.command, state: session.runtimeState.state,
             backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
-            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: session.workspaceID,
+            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: workspaceID,
             workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
             projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,
@@ -284,8 +322,9 @@ struct SpacesDeviceOverviewBuilder {
         // launch it. A row excluded here still gets its own row from the fallback loop below, keyed by its
         // own (stale) templateID, so it stays visible and reported as running rather than disappearing.
         let runningByKey = Dictionary(
-            descriptor.runningProcesses.filter { ($0.templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty }
-                .map { (normalizedRunRowName($0.templateName), $0) }, uniquingKeysWith: { existing, _ in existing })
+            descriptor.runningProcesses.filter { ($0.templateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty }.map {
+                (normalizedRunRowName($0.templateName), $0)
+            }, uniquingKeysWith: { existing, _ in existing })
         for template in descriptor.settings?.processes ?? [] {
             let key = normalizedRunRowName(template.name ?? "")
             guard !key.isEmpty else { continue }
@@ -340,15 +379,14 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func codingAgentRow(
-        id: String, workspaceID: String, name: String, command: String, agent: AgentWindowRecord,
-        sessionsByID: [String: TerminalSessionCatalogEntry]
+        id: String, workspaceID: String, name: String, command: String, agent: AgentWindowRecord, sessionsByID: [String: TerminalSessionCatalogEntry]
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
         let session = rawSessionID.flatMap { sessionsByID[$0] }
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, agentID: agent.id, sessionID: session?.sessionID,
-            runState: agentRunState(session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt,
-            canStop: true, liveTitle: session?.liveTitle)
+            runState: agentRunState(session: session), activityState: activityState(for: agent), updatedAt: agent.updatedAt, canStop: true,
+            liveTitle: session?.liveTitle)
     }
 
     private static func workspaceTerminalRows(

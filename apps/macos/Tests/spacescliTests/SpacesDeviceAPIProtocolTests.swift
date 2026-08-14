@@ -130,6 +130,47 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceOverviewStreamCodec.decodeLine(line.dropLast()), payload)
     }
 
+    /// A daemon that predates the automations feature (or, for `projects`, predates whatever shipped
+    /// that field) never emits `automations`/`automationRuns`/`projects` keys at all. The synthesized
+    /// `Decodable` initializer requires every key regardless of the memberwise-init defaults, so a
+    /// missing key would previously fail decoding of the *entire* overview -- workspaces and sessions
+    /// included, not just the new field. Verify the custom `init(from:)` tolerates all three being absent.
+    func testOverviewPayloadDecodesWhenAutomationsAndProjectsKeysAreMissing() throws {
+        let session = SpacesDeviceTerminalSessionSummary(
+            id: "session-1", title: "API", workingDirectory: "/repo", shell: "/bin/zsh", command: "npm run dev", state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+        let overview = SpacesDeviceOverviewPayload(
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
+                    isHidden: false, isDefault: false, sessionCount: 1)
+            ], sessions: [session],
+            daemonStatus: TerminalServiceDaemonStatus(version: "1.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 1))
+
+        let encoded = try JSONEncoder().encode(overview)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNotNil(json["automations"])
+        XCTAssertNotNil(json["automationRuns"])
+        XCTAssertNotNil(json["projects"])
+        json.removeValue(forKey: "automations")
+        json.removeValue(forKey: "automationRuns")
+        json.removeValue(forKey: "projects")
+        let strippedData = try JSONSerialization.data(withJSONObject: json)
+
+        let decoded = try JSONDecoder().decode(SpacesDeviceOverviewPayload.self, from: strippedData)
+
+        XCTAssertEqual(decoded.automations, [])
+        XCTAssertEqual(decoded.automationRuns, [])
+        XCTAssertEqual(decoded.projects, [])
+        XCTAssertEqual(decoded.workspaces.count, 1)
+        XCTAssertEqual(decoded.workspaces.first?.id, "workspace-1")
+        XCTAssertEqual(decoded.sessions.first?.id, "session-1")
+        XCTAssertEqual(decoded.sessions.first?.shell, "/bin/zsh")
+    }
+
     func testTerminalControlRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(.init(action: .send, sessionID: "session-1", clientID: "client-1", text: "a")), authToken: "SECRET")
@@ -292,8 +333,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                 command: .restartWorkspaceProcess(
                     .init(workspaceID: "workspace-1", processID: "process-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),
-            SpacesDeviceAPIRequest(
-                command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1")), authToken: "SECRET"),
         ]
 
         for request in requests { XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request) }

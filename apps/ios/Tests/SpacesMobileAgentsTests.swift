@@ -167,8 +167,8 @@
             -> SpacesDeviceWorkspaceCodingAgentRow
         {
             SpacesDeviceWorkspaceCodingAgentRow(
-                id: id, workspaceID: "workspace-feature", name: "claude", command: "claude", agentID: "runtime-\(id)",
-                sessionID: "session-\(id)", runState: runState, activityState: activityState, canStop: true)
+                id: id, workspaceID: "workspace-feature", name: "claude", command: "claude", agentID: "runtime-\(id)", sessionID: "session-\(id)",
+                runState: runState, activityState: activityState, canStop: true)
         }
     }
 #endif

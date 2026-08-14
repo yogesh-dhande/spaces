@@ -427,6 +427,27 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         return (project, workspace)
     }
 
+    /// The `terminal_sessions` table as it stood at every schema version before v8 (workspace_id NOT NULL,
+    /// no automation_run_id). No pre-v8 migration step touched terminal_sessions, so a real database always
+    /// carries this shape by the time it reaches v7; the minimal fixtures include it so the full chain can
+    /// run the v7→v8 rebuild that copies terminal_sessions forward.
+    private let preV8TerminalSessionsTableSQL = """
+        CREATE TABLE terminal_sessions (
+          session_id TEXT PRIMARY KEY,
+          root_directory TEXT NOT NULL UNIQUE,
+          backend TEXT NOT NULL,
+          lifetime_policy TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'shell',
+          title TEXT NOT NULL,
+          user_title TEXT,
+          working_directory TEXT NOT NULL,
+          shell TEXT NOT NULL,
+          command TEXT,
+          created_at TEXT NOT NULL
+        );
+        """
+
     /// Writes a minimal schema-v1 database: the `migration_state` marker at version 1 and the
     /// pre-note `agent_sessions` table (plus the `runtime_targets` table the agent read joins), with one
     /// agent row. Only the tables this migration test reads through are created; the migrator upgrades
@@ -461,6 +482,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             );
             INSERT INTO agent_sessions(id, workspace_id, provider, label, status, terminal_session_id, created_at, updated_at)
             VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'Claude Code CLI', 'spinning', '\(terminalSessionID)', 'now', 'now');
+            \(preV8TerminalSessionsTableSQL)
             """
         var errorMessage: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
@@ -509,6 +531,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'X', 'spinning', '\(terminalSessionID)', 'carried', 'now', 'now');
             INSERT INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, message, created_at)
             VALUES ('pending-1', 'sub', '\(agentID)', '[spaces] X (spaces) is blocked — project: Project — workspace: workspace-1 — session: \(terminalSessionID) — spaces://terminal/\(terminalSessionID)', 't0');
+            \(preV8TerminalSessionsTableSQL)
             """
         var errorMessage: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {

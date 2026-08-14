@@ -219,9 +219,7 @@ extension OrchestratorTests {
         XCTAssertTrue(try store.projects().isEmpty)
         XCTAssertTrue(try store.workspaces(projectID: prepared.project.id).isEmpty)
 
-        let project = try orchestrator.addPreparedGitProject(prepared) { config in
-            config.stopScript = "echo edited-prepared-stop"
-        }
+        let project = try orchestrator.addPreparedGitProject(prepared) { config in config.stopScript = "echo edited-prepared-stop" }
         didCommit = true
 
         XCTAssertEqual(project.stopScript, "echo edited-prepared-stop")

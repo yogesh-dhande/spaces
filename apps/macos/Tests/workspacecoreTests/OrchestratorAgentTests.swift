@@ -1258,8 +1258,7 @@ extension OrchestratorTests {
     /// a process the same name is refused rather than producing two rows a user cannot tell apart.
     func testUpdateWorkspaceSettingsRejectsProcessNameTakenByALiveCodingAgent() throws {
         let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "agent-session")
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "agent-session")
 
         XCTAssertThrowsError(
             try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
@@ -2183,8 +2182,8 @@ extension OrchestratorTests {
 
     private func makeRenameFixtureAgent(id: String, workspaceID: String, label: String, session: String) -> AgentWindowRecord {
         AgentWindowRecord(
-            id: id, workspaceID: workspaceID, provider: .spaces, label: label,
-            terminalTarget: TerminalTargetRecord(trackingID: session), status: .idle, createdAt: "now", updatedAt: "now")
+            id: id, workspaceID: workspaceID, provider: .spaces, label: label, terminalTarget: TerminalTargetRecord(trackingID: session),
+            status: .idle, createdAt: "now", updatedAt: "now")
     }
 
     private func agentSessionEventCount(store: SQLiteStore, agentSessionID: String) throws -> Int {

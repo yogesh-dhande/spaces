@@ -257,6 +257,38 @@ extension OrchestratorTests {
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
     }
 
+    func testCreateWorkspaceAgentSessionStampsAutomationRunIDOntoLaunchConfiguration() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: "Nightly", automationRunID: "run-99")
+
+        let launchConfiguration = try XCTUnwrap(launchCapture.snapshot().first)
+        XCTAssertEqual(launchConfiguration.kind, .agent)
+        XCTAssertEqual(launchConfiguration.automationRunID, "run-99")
+        XCTAssertTrue(launchConfiguration.command?.contains("export SPACES_AUTOMATION_RUN_ID=run-99") == true)
+        // An ordinary spawn (no automation) leaves the attribution stamp nil.
+        _ = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "codex", title: "Interactive")
+        let interactiveConfiguration = try XCTUnwrap(launchCapture.snapshot().last)
+        XCTAssertNil(interactiveConfiguration.automationRunID)
+        XCTAssertFalse(interactiveConfiguration.command?.contains("SPACES_AUTOMATION_RUN_ID") == true)
+    }
+
     /// With no command the session IS the user's shell — a bare interactive login shell on the PTY — so
     /// it is launched directly instead of being wrapped in another `-i -c` shell.
     func testCreateWorkspaceTerminalSessionWithoutCommandLaunchesABareLoginShell() throws {

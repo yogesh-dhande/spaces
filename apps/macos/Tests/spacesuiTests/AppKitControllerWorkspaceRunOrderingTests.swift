@@ -510,8 +510,8 @@ import workspacecore
             AppKitController.deviceWindowShortcutResolution(index: 4, selectedWorkspaceID: "workspace", overview: overview)
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
-                        workspaceID: "workspace", sessionID: "session-agent", title: "claude", workingDirectory: "/tmp/project-feature",
-                        kind: .agent)))
+                        workspaceID: "workspace", sessionID: "session-agent", title: "claude", workingDirectory: "/tmp/project-feature", kind: .agent)
+                ))
     }
 
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
@@ -551,8 +551,8 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1",
-                    sessionID: "session-agent", runState: .running, activityState: .idle, canStop: true)
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "session-agent",
+                    runState: .running, activityState: .idle, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

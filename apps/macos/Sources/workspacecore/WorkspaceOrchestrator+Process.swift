@@ -193,8 +193,7 @@ extension WorkspaceOrchestrator {
         // mutable set, not a one-time snapshot: restarting one exited row below can itself add to it, which
         // matters when two stale rows independently resolve by name to the same template (see below).
         var liveTemplateIDs = Set(
-            processes.filter { $0.status == .running }
-                .compactMap { matchingConfiguredTemplateForMissingCheck(for: $0, settings: settings)?.id })
+            processes.filter { $0.status == .running }.compactMap { matchingConfiguredTemplateForMissingCheck(for: $0, settings: settings)?.id })
         for process in processes where process.status == .exited {
             // Bulk convergence (Start) restarts only a row that still resolves to a currently configured
             // template. Removing a process from workspace settings while it is running deliberately keeps

@@ -83,8 +83,7 @@ public enum TerminalRemoteSessionStateNotificationRouting {
             TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
             TerminalRemoteSessionStateReason.resize:
             return true
-        default:
-            return false
+        default: return false
         }
     }
 }
