@@ -264,6 +264,14 @@ import workspacecore
                     }
                 }
             }
+            // The stops above and this flag write are separate requests, so a launch from another
+            // client can in principle land between them and leave a hidden workspace running. That is
+            // accepted rather than closed with a compound daemon-side stop-and-hide operation:
+            // hidden-and-running is already a legal state (automations keep and run hidden targets,
+            // and nothing stops another client from starting any workspace regardless of its flags),
+            // the prompt above exists so the user never hides active work unknowingly - not to
+            // guarantee nothing hidden ever runs - and the dialog lists every hidden row, so such a
+            // workspace stays one unhide away. The single-workspace hide has the same shape.
             let result = await AppKitController.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.updateProjectMetadata(projectID: projectID, isHidden: isHidden, device: device, clientApp: clientApp)
             }
