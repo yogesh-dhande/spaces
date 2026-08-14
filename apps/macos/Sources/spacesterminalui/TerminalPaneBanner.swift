@@ -41,8 +41,8 @@ import spacesterminalghostty
 /// can never overlap in the same corner, and precedence is decided here instead of by z-order.
 ///
 /// The material and neutral text come from system-dynamic values, and the stopped-state accent from
-/// the active theme's `statusFailed` token — the same one the sidebar tints an exited runtime target
-/// with — so the pane and the sidebar can never disagree about the state they both report.
+/// the active theme's `statusFailed` token. The operational sidebar uses the stronger `red` token
+/// for an exited process so it wins the workspace attention rollup unambiguously.
 /// The banner's chrome view. Owns its own border color because a `CALayer`'s `borderColor` is a
 /// `CGColor`, which snapshots whichever appearance resolved it — a dynamic `NSColor` assigned once
 /// would leave a light-mode border sitting on a dark pane forever. `spacesui`'s

@@ -118,6 +118,20 @@ enum PanelLayoutEngine {
         return layout
     }
 
+    /// Moves a tab to an insertion index measured against the pre-move tab array. Drag destinations use
+    /// those gaps directly (0 is before the first tab, `tabs.count` is after the last), so moving a tab
+    /// forward subtracts the slot vacated by the source before inserting. Selection and pane focus name
+    /// stable ids and therefore remain untouched.
+    static func moveTab(tabID: String, toInsertionIndex insertionIndex: Int, in layout: PanelLayout) -> PanelLayout {
+        guard let sourceIndex = layout.tabs.firstIndex(where: { $0.id == tabID }) else { return layout }
+        var layout = layout
+        let boundedInsertionIndex = min(max(insertionIndex, 0), layout.tabs.count)
+        let tab = layout.tabs.remove(at: sourceIndex)
+        let adjustedInsertionIndex = boundedInsertionIndex > sourceIndex ? boundedInsertionIndex - 1 : boundedInsertionIndex
+        layout.tabs.insert(tab, at: min(adjustedInsertionIndex, layout.tabs.count))
+        return layout
+    }
+
     /// Splits `paneID` in the given direction, placing `newPane` after it. When the
     /// pane's parent split already has the target orientation the new pane joins as a
     /// sibling (sharing the split pane's weight); otherwise the leaf is wrapped in a new

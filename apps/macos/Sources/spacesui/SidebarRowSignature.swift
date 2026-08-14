@@ -52,6 +52,7 @@ struct SidebarProjectRowSignature: Hashable, Sendable {
     let project: ProjectSummary
     let standInWorkspace: WorkspaceSummary?
     let standInRuntimeStatus: WorkspaceRuntimeStatus?
+    let standInAttentionStatus: SidebarAttentionStatus?
     let standInIsPendingDeletion: Bool
     let isExpandable: Bool
 }
@@ -67,6 +68,7 @@ struct SidebarWorkspaceRowSignature: Hashable, Sendable {
     let device: SidebarRowDeviceTreatment
     let workspace: WorkspaceSummary
     let runtimeStatus: WorkspaceRuntimeStatus?
+    let attentionStatus: SidebarAttentionStatus
     let isPendingDeletion: Bool
     let isExpanded: Bool
     let hasRuntimeTargets: Bool

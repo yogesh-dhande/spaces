@@ -10,6 +10,7 @@ import spacesterminalcore
 
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
+    var onMoveTab: ((_ tabID: String, _ insertionIndex: Int) -> Void)?
     var onNewTab: (() -> Void)?
     var onRenameTab: ((_ tabID: String, _ title: String?) -> Void)?
     var onSplitPane: ((_ paneID: String, _ direction: PaneSplitDirection) -> Void)?
@@ -61,6 +62,7 @@ import spacesterminalcore
     private func wire(_ bar: PanelTabBarView) {
         bar.onSelectTab = { [weak self] tabID in self?.onSelectTab?(tabID) }
         bar.onCloseTab = { [weak self] tabID in self?.onCloseTab?(tabID) }
+        bar.onMoveTab = { [weak self] tabID, insertionIndex in self?.onMoveTab?(tabID, insertionIndex) }
         bar.onNewTab = { [weak self] in self?.onNewTab?() }
         bar.onRenameTab = { [weak self] tabID, title in self?.onRenameTab?(tabID, title) }
         bar.onSplitFocusedPane = { [weak self] direction in

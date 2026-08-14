@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import spacesclientcore
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 @testable import spacesui
@@ -52,6 +53,14 @@ import workspacecore
     {
         AppKitController.SessionPickerWorkspaceContext(
             workspaceID: workspace.id, overview: SpacesDeviceOverviewPayload(workspaces: [workspace], sessions: sessions))
+    }
+
+    private func terminalSessionSummary(id: String, title: String, foregroundCommand: String) -> SpacesDeviceTerminalSessionSummary {
+        SpacesDeviceTerminalSessionSummary(
+            id: id, title: title, workingDirectory: "/tmp/workspace-1", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature", projectID: "project",
+            projectName: "Project", createdAt: "2026-08-14T12:00:00Z", updatedAt: "2026-08-14T12:00:01Z", isControlAvailable: true,
+            isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundCommand: foregroundCommand)
     }
 
     @Test func listsSidebarTargetsInOrderExcludingBrowsers() {
@@ -169,6 +178,32 @@ import workspacecore
 
         #expect(try #require(presentation.items.first { $0.label == "shell-1" }).detail == nil)
         #expect(try #require(presentation.items.first { $0.label == "shell-2" }).detail == "vim main.swift")
+    }
+
+    @Test func agentRowsPreferTheirOverviewLiveTitleThenSessionForegroundCommand() throws {
+        let workspace = SpacesDeviceWorkspaceSummary(
+            id: "workspace-1", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/workspace-1",
+            isRunning: true, isHidden: false, isDefault: false, sessionCount: 2,
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy", sessionID: "session-busy",
+                    runState: .running, activityState: .spinning, canStop: true, liveTitle: "reviewing PR 493"),
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
+                    sessionID: "session-quiet", runState: .running, activityState: .idle, canStop: true),
+            ])
+        let sessions = [
+            terminalSessionSummary(id: "session-busy", title: "Codex busy", foregroundCommand: "ignored foreground"),
+            terminalSessionSummary(id: "session-quiet", title: "Codex quiet", foregroundCommand: "codex --model gpt-5.6-sol"),
+        ]
+        let workspaceContext = context(for: workspace, sessions: sessions)
+
+        let presentation = AppKitController.sessionPickerPresentation(
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: workspaceContext.overview, scopedWorkspaces: [workspaceContext],
+            openSessionIDs: [])
+
+        #expect(try #require(presentation.items.first { $0.label == "Codex busy" }).detail == "reviewing PR 493")
+        #expect(try #require(presentation.items.first { $0.label == "Codex quiet" }).detail == "codex --model gpt-5.6-sol")
     }
 
     @Test func globalScopeListsEveryWorkspaceInOrderAndExcludesOpenSessionsFromEither() {

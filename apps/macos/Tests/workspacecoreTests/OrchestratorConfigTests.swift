@@ -257,6 +257,83 @@ extension OrchestratorTests {
         XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
     }
 
+    func testCreateWorkspaceTerminalSessionRejectsExplicitTitleUsedByAnyWorkspaceTargetWithoutLaunching() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "Résumé", command: "echo process")]
+            settings.browserSessions = [BrowserSession(name: "Browser", url: "http://localhost:3000")]
+        }
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-row", workspaceID: workspace.id, provider: .spaces, label: "Agent Console", terminalTrackingID: "agent-session",
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+        try store.upsert(
+            window: WindowRecord(
+                id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "logs", detail: nil, targetURL: nil,
+                terminalTrackingID: "terminal-session", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+        let initialWindowIdentities = try store.windows(workspaceID: workspace.id).map { ($0.id, $0.name) }
+
+        for occupiedName in ["  LOGS  ", "resume", "browser", "agent console"] {
+            XCTAssertThrowsError(try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: occupiedName, command: nil)) {
+                error in XCTAssertTrue(error.localizedDescription.contains("already used"), "Unexpected error: \(error.localizedDescription)")
+            }
+        }
+
+        XCTAssertTrue(launchCapture.snapshot().isEmpty)
+        let currentWindowIdentities = try store.windows(workspaceID: workspace.id).map { ($0.id, $0.name) }
+        XCTAssertEqual(currentWindowIdentities.map(\.0), initialWindowIdentities.map(\.0))
+        XCTAssertEqual(currentWindowIdentities.map(\.1), initialWindowIdentities.map(\.1))
+    }
+
+    func testCreateWorkspaceTerminalSessionAllowsExplicitTitleUsedInAnotherWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let orchestrator = makeTestOrchestrator(
+            store: store,
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let firstWorkspace = try orchestrator.createWorkspace(projectID: project.id)
+        let secondWorkspace = makeWorkspaceRecord(projectID: project.id, dir: root.appendingPathComponent("other", isDirectory: true).path)
+        try store.upsert(workspace: secondWorkspace)
+        try store.upsert(
+            window: WindowRecord(
+                id: "first-terminal", workspaceID: firstWorkspace.id, app: TerminalHost.spaces.appName, name: "dashboard", detail: nil,
+                targetURL: nil, terminalTrackingID: "first-session", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: secondWorkspace.id, title: "dashboard", command: nil)
+
+        XCTAssertEqual(session.title, "dashboard")
+        XCTAssertEqual(launchCapture.snapshot().map(\.title), ["dashboard"])
+        XCTAssertEqual(try store.windows(workspaceID: firstWorkspace.id).map(\.name), ["dashboard"])
+        XCTAssertEqual(try store.windows(workspaceID: secondWorkspace.id).map(\.name), ["dashboard"])
+    }
+
     func testCreateWorkspaceAgentSessionStampsAutomationRunIDOntoLaunchConfiguration() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1020,6 +1097,90 @@ extension OrchestratorTests {
         }
     }
 
+    func testRenameAdHocBuiltInTerminalSessionRejectsAnotherTerminalNameWithoutChangingEitherSession() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "Résumé", command: "echo process")]
+            settings.browserSessions = [BrowserSession(name: "Browser", url: "http://localhost:3000")]
+        }
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-row", workspaceID: workspace.id, provider: .spaces, label: "Agent Console", terminalTrackingID: "agent-session",
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            for (index, sessionID, title) in [(1, "terminal-one", "logs"), (2, "terminal-two", "server")] {
+                try store.upsert(
+                    window: WindowRecord(
+                        id: "terminal-window-\(index)", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: title, detail: nil,
+                        targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200 + index, lastSeenAt: "now"))
+                try TerminalSessionPersistence.writeLaunchConfiguration(
+                    TerminalSessionLaunchConfiguration(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workspace.dir,
+                        shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell),
+                    paths: TerminalSessionPaths.forSession(id: sessionID))
+            }
+
+            for occupiedName in ["  LOGS  ", "resume", "browser", "agent console"] {
+                XCTAssertThrowsError(
+                    try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: "terminal-two", title: occupiedName)
+                ) { error in XCTAssertTrue(error.localizedDescription.contains("already used"), "Unexpected error: \(error.localizedDescription)") }
+            }
+
+            let windows = try store.windows(workspaceID: workspace.id)
+            XCTAssertEqual(windows.first { $0.id == "terminal-window-1" }?.name, "logs")
+            XCTAssertEqual(windows.first { $0.id == "terminal-window-2" }?.name, "server")
+            XCTAssertNil(try TerminalSessionPersistence.readLaunchConfiguration(paths: TerminalSessionPaths.forSession(id: "terminal-two")).userTitle)
+        }
+    }
+
+    func testRenameAdHocBuiltInTerminalSessionAllowsSameNameInAnotherWorkspaceAndSelfRename() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let firstWorkspace = try orchestrator.createWorkspace(projectID: project.id)
+        let secondWorkspace = makeWorkspaceRecord(projectID: project.id, dir: root.appendingPathComponent("other", isDirectory: true).path)
+        try store.upsert(workspace: secondWorkspace)
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            for (windowID, workspace, sessionID, title) in [
+                ("first-window", firstWorkspace, "first-session", "dashboard"), ("second-window", secondWorkspace, "second-session", "shell-1"),
+            ] {
+                try store.upsert(
+                    window: WindowRecord(
+                        id: windowID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: title, detail: nil, targetURL: nil,
+                        terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                try TerminalSessionPersistence.writeLaunchConfiguration(
+                    TerminalSessionLaunchConfiguration(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workspace.dir,
+                        shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell),
+                    paths: TerminalSessionPaths.forSession(id: sessionID))
+            }
+
+            XCTAssertTrue(
+                try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: secondWorkspace.id, sessionID: "second-session", title: "dashboard"))
+            XCTAssertTrue(
+                try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: secondWorkspace.id, sessionID: "second-session", title: "dashboard"))
+
+            XCTAssertEqual(try store.windows(workspaceID: firstWorkspace.id).first?.name, "dashboard")
+            XCTAssertEqual(try store.windows(workspaceID: secondWorkspace.id).first?.name, "dashboard")
+            XCTAssertEqual(
+                try TerminalSessionPersistence.readLaunchConfiguration(paths: TerminalSessionPaths.forSession(id: "second-session")).userTitle,
+                "dashboard")
+        }
+    }
+
     /// Clearing the name restores the generated one the session was launched under, on the session and
     /// on the window record — which names the row only once the session is gone.
     func testClearingAnAdHocBuiltInTerminalSessionRenameRestoresItsGeneratedName() throws {
@@ -1058,6 +1219,67 @@ extension OrchestratorTests {
             let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == "terminal-window" })
             XCTAssertEqual(window.name, "shell-1")
         }
+    }
+
+    func testRenamedAdHocTerminalKeepsItsLaunchNameReservedForCreationAndClearing() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        let firstSession = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil)
+        XCTAssertEqual(firstSession.title, "shell-1")
+        XCTAssertTrue(
+            try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: firstSession.id, title: "build watcher"))
+        XCTAssertThrowsError(try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: "shell-1", command: nil)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("already used"), "Unexpected error: \(error.localizedDescription)")
+        }
+
+        let secondSession = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil)
+
+        XCTAssertEqual(secondSession.title, "shell-2")
+        XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: firstSession.id, title: ""))
+        let namesBySessionID: [String: String] = Dictionary(
+            uniqueKeysWithValues: try store.windows(workspaceID: workspace.id).compactMap { window in
+                guard let sessionID = window.terminalTrackingID, let name = window.name else { return nil }
+                return (sessionID, name)
+            })
+        XCTAssertEqual(namesBySessionID[firstSession.id], "shell-1")
+        XCTAssertEqual(namesBySessionID[secondSession.id], "shell-2")
+    }
+
+    func testWorkspaceSettingsCannotClaimAnAdHocTerminalVisibleOrReservedLaunchName() throws {
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: nil)
+
+        // The visible and launch names are both shell-1 here. A legitimate unrelated edit must not
+        // double-count that one terminal as a collision with itself.
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
+        }
+        XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: session.id, title: "build watcher"))
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.processes.append(ProcessTemplate(name: "SHELL-1", command: "echo duplicate"))
+            }
+        ) { error in XCTAssertTrue(error.localizedDescription.lowercased().contains("shell-1"), "Unexpected error: \(error.localizedDescription)") }
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.browserSessions = [BrowserSession(name: "shell-1", url: "http://localhost:3000")]
+            }
+        ) { error in XCTAssertTrue(error.localizedDescription.lowercased().contains("shell-1"), "Unexpected error: \(error.localizedDescription)") }
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.browserSessions = [BrowserSession(name: "build watcher", url: "http://localhost:3000")]
+            }
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("build watcher"), "Unexpected error: \(error.localizedDescription)") }
+
+        let unchanged = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
+        XCTAssertEqual(unchanged.processes.map(\.name), ["api"])
+        XCTAssertTrue(unchanged.browserSessions.isEmpty)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes[0].command = "npm run api -- --watch"
+            settings.browserSessions = [BrowserSession(name: "Docs", url: "http://localhost:3001")]
+        }
+        XCTAssertTrue(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: session.id, title: ""))
     }
 
     func testRenameAdHocBuiltInTerminalSessionRefusesConfiguredProcessSessions() throws {

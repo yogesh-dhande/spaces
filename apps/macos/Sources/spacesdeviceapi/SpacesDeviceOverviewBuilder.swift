@@ -204,7 +204,10 @@ struct SpacesDeviceOverviewBuilder {
             isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender,
-            foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue, bellAt: session.runtimeState.bellAt)
+            foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue,
+            foregroundCommand: TerminalForegroundProcessInspector.displayCommand(
+                executableName: session.runtimeState.foregroundExecutableName, argv: session.runtimeState.foregroundArgv),
+            bellAt: session.runtimeState.bellAt)
     }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {

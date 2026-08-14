@@ -6,9 +6,10 @@ import systembridge
 /// selected tab) on the left, and the pane actions — split right, split down, new tab —
 /// on the right. Splits act on the selected tab's focused pane, so panes carry no
 /// header of their own until a tab actually holds more than one. Custom chrome instead
-/// of NSTabView so tabs stay compact and the strip can later host drag-out.
-@MainActor final class PanelTabBarView: NSView {
+/// of NSTabView so tabs stay compact and support in-strip drag reordering.
+@MainActor final class PanelTabBarView: NSView, NSDraggingSource {
     static let preferredHeight: CGFloat = 28
+    private static let tabPasteboardType = NSPasteboard.PasteboardType("com.spaces.panel-tab")
 
     /// When this strip is shared chrome (the main window's titlebar accessory), the
     /// workspace panel currently driving it; background panels leave it alone.
@@ -16,6 +17,8 @@ import systembridge
 
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
+    /// Move within this strip. The destination is an insertion index in the pre-move tab array.
+    var onMoveTab: ((_ tabID: String, _ insertionIndex: Int) -> Void)?
     var onNewTab: (() -> Void)?
     /// Rename commit from the tab's inline editor; nil title clears the custom
     /// name back to the derived one.
@@ -37,12 +40,24 @@ import systembridge
     private var renamingTabID: String?
     /// A rebuild requested while the rename editor was open, replayed when it ends.
     private var rebuildDeferredForRename = false
+    private var draggingTabID: String?
+    private var proposedInsertionIndex: Int?
+    private var dragAutoScrollTimer: Timer?
+    private var dragPointerX: CGFloat?
+    private let insertionIndicator = NSView()
 
     init() {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
+        registerForDraggedTypes([Self.tabPasteboardType])
+
+        insertionIndicator.wantsLayer = true
+        insertionIndicator.layer?.cornerRadius = 1
+        bindAppearanceReactiveLayer(insertionIndicator) { view in view.layer?.backgroundColor = Theme.accentStrong.cgColor }
+        insertionIndicator.setAccessibilityIdentifier("tab-insertion-indicator")
+        insertionIndicator.isHidden = true
 
         tabsStack.orientation = .horizontal
         tabsStack.alignment = .centerY
@@ -73,6 +88,7 @@ import systembridge
         row.edgeInsets = NSEdgeInsets(top: 3, left: 0, bottom: 3, right: 10)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
+        addSubview(insertionIndicator)
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -115,6 +131,23 @@ import systembridge
             return
         }
         window?.performDrag(with: event)
+    }
+
+    nonisolated static func insertionIndex(tabMidpoints: [CGFloat], pointerX: CGFloat) -> Int {
+        tabMidpoints.firstIndex(where: { pointerX < $0 }) ?? tabMidpoints.count
+    }
+
+    nonisolated static func dragAutoScrollTargetOffset(
+        currentOffset: CGFloat, contentWidth: CGFloat, viewportWidth: CGFloat, pointerX: CGFloat, viewportMinX: CGFloat, edgeWidth: CGFloat = 28,
+        step: CGFloat = 24
+    ) -> CGFloat {
+        let maxOffset = max(0, contentWidth - viewportWidth)
+        let clampedOffset = min(max(currentOffset, 0), maxOffset)
+        guard maxOffset > 0, viewportWidth > 0, edgeWidth > 0, step > 0 else { return clampedOffset }
+        let edgeZoneWidth = min(edgeWidth, viewportWidth / 2)
+        if pointerX <= viewportMinX + edgeZoneWidth { return max(0, clampedOffset - step) }
+        if pointerX >= viewportMinX + viewportWidth - edgeZoneWidth { return min(maxOffset, clampedOffset + step) }
+        return clampedOffset
     }
 
     private func actionButton(symbol: String, tooltip: String, identifier: String, action: Selector) -> NSButton {
@@ -178,6 +211,7 @@ import systembridge
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
                     onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
+                    onBeginDrag: { [weak self] id, event in self?.beginDragging(tabID: id, event: event) },
                     onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
                     onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
@@ -220,6 +254,145 @@ import systembridge
     @objc private func splitRightClicked() { onSplitFocusedPane?(.right) }
 
     @objc private func splitDownClicked() { onSplitFocusedPane?(.down) }
+
+    private func beginDragging(tabID: String, event: NSEvent) {
+        guard renamingTabID == nil, draggingTabID == nil, let tabIndex = tabIDs.firstIndex(of: tabID) else { return }
+        // Selecting an unselected tab rebuilds the strip during mouseDown. Resolve the replacement
+        // item by id instead of snapshotting the detached view that received the original event.
+        let tabItems = tabsStack.arrangedSubviews.compactMap { $0 as? PanelTabItemView }
+        guard tabItems.indices.contains(tabIndex) else { return }
+        let sourceView = tabItems[tabIndex]
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(tabID, forType: Self.tabPasteboardType)
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        let image = NSImage(size: sourceView.bounds.size)
+        if let representation = sourceView.bitmapImageRepForCachingDisplay(in: sourceView.bounds) {
+            sourceView.cacheDisplay(in: sourceView.bounds, to: representation)
+            image.addRepresentation(representation)
+        }
+        draggingItem.setDraggingFrame(sourceView.convert(sourceView.bounds, to: self), contents: image)
+        draggingTabID = tabID
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation { updateDragDestination(sender) }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { updateDragDestination(sender) }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) { hideInsertionIndicator() }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard updateDragDestination(sender) == .move, let tabID = draggingTabID, let proposedInsertionIndex else { return false }
+        hideInsertionIndicator()
+        onMoveTab?(tabID, proposedInsertionIndex)
+        return true
+    }
+
+    private func updateDragDestination(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let draggingTabID, sender.draggingPasteboard.string(forType: Self.tabPasteboardType) == draggingTabID, tabIDs.contains(draggingTabID)
+        else {
+            hideInsertionIndicator()
+            return []
+        }
+        let pointer = convert(sender.draggingLocation, from: nil)
+        guard scrollView.frame.contains(pointer) else {
+            hideInsertionIndicator()
+            return []
+        }
+        let pointerX = pointer.x
+        dragPointerX = pointerX
+        _ = autoScrollDuringDrag(pointerX: pointerX)
+        updateDragAutoScrollTimer()
+        updateInsertionIndicator(pointerX: pointerX)
+        return .move
+    }
+
+    private func updateInsertionIndicator(pointerX: CGFloat) {
+        let items = tabsStack.arrangedSubviews.compactMap { $0 as? PanelTabItemView }
+        let midpoints = items.map { $0.convert($0.bounds, to: self).midX }
+        let insertionIndex = Self.insertionIndex(tabMidpoints: midpoints, pointerX: pointerX)
+        proposedInsertionIndex = insertionIndex
+        let boundaryX: CGFloat
+        if insertionIndex < items.count {
+            boundaryX = items[insertionIndex].convert(items[insertionIndex].bounds, to: self).minX
+        } else if let last = items.last {
+            boundaryX = last.convert(last.bounds, to: self).maxX
+        } else {
+            boundaryX = scrollView.frame.minX
+        }
+        insertionIndicator.frame = NSRect(x: boundaryX - 1, y: scrollView.frame.minY + 2, width: 2, height: max(0, scrollView.frame.height - 4))
+        insertionIndicator.isHidden = false
+    }
+
+    /// Repeated drag updates at either visible edge advance the clip view, making every
+    /// insertion boundary reachable without accepting a drag from another strip.
+    @discardableResult private func autoScrollDuringDrag(pointerX: CGFloat) -> Bool {
+        let clipView = scrollView.contentView
+        let targetOffset = Self.dragAutoScrollTargetOffset(
+            currentOffset: clipView.bounds.origin.x, contentWidth: scrollView.documentView?.bounds.width ?? 0, viewportWidth: clipView.bounds.width,
+            pointerX: pointerX, viewportMinX: scrollView.frame.minX)
+        guard targetOffset != clipView.bounds.origin.x else { return false }
+        clipView.scroll(to: NSPoint(x: targetOffset, y: clipView.bounds.origin.y))
+        scrollView.reflectScrolledClipView(clipView)
+        return true
+    }
+
+    /// A drag can remain stationary at an edge, so event-tracking updates alone are not enough.
+    /// Continue advancing while the private in-strip drag stays in a scrollable edge zone.
+    private func updateDragAutoScrollTimer() {
+        guard let pointerX = dragPointerX else {
+            stopDragAutoScrollTimer()
+            return
+        }
+        let clipView = scrollView.contentView
+        let nextOffset = Self.dragAutoScrollTargetOffset(
+            currentOffset: clipView.bounds.origin.x, contentWidth: scrollView.documentView?.bounds.width ?? 0, viewportWidth: clipView.bounds.width,
+            pointerX: pointerX, viewportMinX: scrollView.frame.minX)
+        guard nextOffset != clipView.bounds.origin.x else {
+            stopDragAutoScrollTimer()
+            return
+        }
+        guard dragAutoScrollTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.draggingTabID != nil, let pointerX = self.dragPointerX else {
+                    self?.stopDragAutoScrollTimer()
+                    return
+                }
+                guard self.autoScrollDuringDrag(pointerX: pointerX) else {
+                    self.stopDragAutoScrollTimer()
+                    return
+                }
+                self.updateInsertionIndicator(pointerX: pointerX)
+            }
+        }
+        dragAutoScrollTimer = timer
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopDragAutoScrollTimer() {
+        dragAutoScrollTimer?.invalidate()
+        dragAutoScrollTimer = nil
+    }
+
+    private func hideInsertionIndicator() {
+        dragPointerX = nil
+        stopDragAutoScrollTimer()
+        proposedInsertionIndex = nil
+        insertionIndicator.isHidden = true
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        draggingTabID = nil
+        hideInsertionIndicator()
+    }
 }
 
 /// A single flat tab: title plus a trailing close glyph; the selected tab reads from full-color
@@ -229,6 +402,7 @@ import systembridge
     private let tabID: String
     private let onSelect: (String) -> Void
     private let onClose: (String) -> Void
+    private let onBeginDrag: (String, NSEvent) -> Void
     private let onRenameRequest: (String) -> Void
     private let onRenameCommit: (String, String) -> Void
     private let onRenameCancel: (String) -> Void
@@ -245,11 +419,13 @@ import systembridge
 
     init(
         tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
-        onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
+        onBeginDrag: @escaping (String, NSEvent) -> Void, onRenameRequest: @escaping (String) -> Void,
+        onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
     ) {
         self.tabID = tabID
         self.onSelect = onSelect
         self.onClose = onClose
+        self.onBeginDrag = onBeginDrag
         self.onRenameRequest = onRenameRequest
         self.onRenameCommit = onRenameCommit
         self.onRenameCancel = onRenameCancel
@@ -389,6 +565,8 @@ import systembridge
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) { onSelect(tabID) }
+
+    override func mouseDragged(with event: NSEvent) { onBeginDrag(tabID, event) }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()

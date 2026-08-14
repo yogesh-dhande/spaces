@@ -47,6 +47,7 @@ enum Theme {
     static let green = dynamic(\.green)
     static let red = dynamic(\.red)
     static let orange = dynamic(\.orange)
+    static let blue = dynamic(\.blue)
     /// The one tint for a stopped runtime target, matching the Mac sidebar's exited rows. Distinct
     /// from `red`, which stays for attention marks that are not a stopped target.
     static let statusFailed = dynamic(\.statusFailed)

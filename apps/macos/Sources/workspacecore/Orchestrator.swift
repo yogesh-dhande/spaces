@@ -1497,6 +1497,10 @@ public final class WorkspaceOrchestrator {
         // shell in a removed worktree. `resolveWorkspace` throws once the record is gone.
         return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             let (project, workspace) = try resolveWorkspace(id: workspaceID)
+            let explicitTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let explicitTitle, !explicitTitle.isEmpty {
+                try validateAvailableWorkspaceFocusName(workspaceID: workspace.id, name: explicitTitle, excludingWindowIDs: [])
+            }
             let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
             // With no command the session IS the user's shell (`exec <shell> -l` on a PTY, interactive by
             // virtue of the terminal); with one, the command runs through that same interactive login shell
@@ -1504,7 +1508,7 @@ public final class WorkspaceOrchestrator {
             let shellCommand =
                 (trimmedCommand?.isEmpty == false) ? interactiveLoginShellCommand(trimmedCommand!) : interactiveShellCommand(cwd: workspace.dir)
             return try launchWorkspaceCommandSession(
-                project: project, workspace: workspace, title: title, shellCommand: shellCommand, kind: .shell,
+                project: project, workspace: workspace, title: explicitTitle, shellCommand: shellCommand, kind: .shell,
                 defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
         }
     }
@@ -1908,6 +1912,7 @@ public final class WorkspaceOrchestrator {
         let processEntries = try workspaceProcesses.map { process in
             (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process")
         }
+        let terminalEntries = try adHocTerminalFocusNames(workspaceID: workspaceID).map { (name: $0, kind: "terminal") }
         let entries =
             processEntries
             + (try resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID, browserSessions: workspaceBrowserSessions).map {
@@ -1918,8 +1923,32 @@ public final class WorkspaceOrchestrator {
                 // name.
                 guard let name = sanitizedFocusName(record.effectiveLabel) else { return nil }
                 return (name, "terminal")
-            }
+            } + terminalEntries
+        // Ambiguous persisted names violate the focus-identity invariant. Full validation deliberately
+        // rejects them instead of grandfathering, migrating, or guessing which target should own the
+        // name; the user resolves the state by renaming the duplicate terminal.
         try validateUniqueFocusNameEntries(entries)
+    }
+
+    /// Validates one proposed runtime-row name without making legacy duplicates elsewhere in the
+    /// workspace block an unrelated rename. Runtime targets represent the visible rows (and therefore
+    /// suppress the terminal window claimed by a process or coding agent); configured targets are added
+    /// separately so a stopped process or unopened browser session still reserves its name.
+    func validateAvailableWorkspaceFocusName(workspaceID: String, name: String, excludingWindowIDs: Set<String>) throws {
+        let name = try requiredConfiguredFocusName(name, kind: "Terminal")
+        let normalizedName = normalizedFocusName(name)
+        let runtimeNames = try workspaceNavigationTargets(workspaceID: workspaceID).compactMap { target -> String? in
+            if case .window(let window) = target, excludingWindowIDs.contains(window.id) { return nil }
+            return focusName(for: target)
+        }
+        let configuredNames =
+            try store.workspaceProcesses(workspaceID: workspaceID).compactMap { sanitizedFocusName($0.name ?? $0.command) }
+            + resolvedBrowserSessionsForFocusNames(workspaceID: workspaceID).map(\.name)
+        let reservedLaunchNames = try reservedAdHocTerminalLaunchNames(workspaceID: workspaceID, excludingWindowIDs: excludingWindowIDs)
+        guard !(runtimeNames + configuredNames + reservedLaunchNames).contains(where: { normalizedFocusName($0) == normalizedName }) else {
+            throw WorkspaceError.invalidArgument(
+                message: "Name '\(name)' is already used by another terminal, browser session, process, or coding agent in this workspace.")
+        }
     }
 
     private func validateUniqueFocusNameEntries(_ entries: [(name: String, kind: String)]) throws {
@@ -1936,7 +1965,9 @@ public final class WorkspaceOrchestrator {
         }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         guard !duplicates.isEmpty else { return }
         throw WorkspaceError.invalidArgument(
-            message: "Names must be unique across browser sessions, processes, and coding agents. Duplicates: \(duplicates.joined(separator: ", "))")
+            message:
+                "Names must be unique across terminals, browser sessions, processes, and coding agents. Duplicates: \(duplicates.joined(separator: ", "))"
+        )
     }
 
     func commandPrefixedWithShellEnvironment(_ command: String, env: [String: String]) -> String {

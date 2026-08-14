@@ -53,6 +53,7 @@ enum Theme {
     static let green = dynamic(\.green)
     static let red = dynamic(\.red)
     static let orange = dynamic(\.orange)
+    static let blue = dynamic(\.blue)
 
     // MARK: Row states
 

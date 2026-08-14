@@ -34,6 +34,83 @@ struct SidebarRuntimeTargetItem: Hashable, Sendable {
     let processTemplateID: String?
     let agentID: String?
     let browserTargetURL: String?
+
+    /// Coding-agent activity is richer than the process-like run state: a running session may be
+    /// actively working, blocked on input, or finished. Non-agent rows leave this nil.
+    let agentActivityState: SpacesDeviceCodingAgentActivityState?
+
+    init(
+        key: String, title: String, detail: String?, kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
+        shortcutIndex: Int?, sessionID: String?, canRun: Bool, canStop: Bool, canRestart: Bool, processID: String?, processKey: String?,
+        processTemplateID: String?, agentID: String?, browserTargetURL: String?, agentActivityState: SpacesDeviceCodingAgentActivityState? = nil
+    ) {
+        self.key = key
+        self.title = title
+        self.detail = detail
+        self.kind = kind
+        self.runState = runState
+        self.shortcutIndex = shortcutIndex
+        self.sessionID = sessionID
+        self.canRun = canRun
+        self.canStop = canStop
+        self.canRestart = canRestart
+        self.processID = processID
+        self.processKey = processKey
+        self.processTemplateID = processTemplateID
+        self.agentID = agentID
+        self.browserTargetURL = browserTargetURL
+        self.agentActivityState = agentActivityState
+    }
+}
+
+/// Semantic attention carried by sidebar runtime rows and rolled up to their workspace header. Raw
+/// ordering is the product priority: red failure, blocked, done, working, then inactive.
+enum SidebarAttentionStatus: Int, Hashable, Sendable, Comparable {
+    case inactive
+    case working
+    case done
+    case blocked
+    case failed
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    static func resolve(
+        kind: AppKitController.WorkspaceRunShortcutTarget.Kind, runState: SpacesDeviceRunState?,
+        agentActivityState: SpacesDeviceCodingAgentActivityState?
+    ) -> Self? {
+        if kind == .agent {
+            switch agentActivityState {
+            case .spinning: return .working
+            case .waiting: return .blocked
+            case .done: return .done
+            case .idle, .exited, nil: return .inactive
+            }
+        }
+        switch kind {
+        case .process, .missingConfiguredProcess:
+            switch runState {
+            case .running: return .working
+            case .exited: return .failed
+            case .notStarted, nil: return .inactive
+            }
+        // Ad hoc terminals and browser sessions are not managed process/agent rows, so their
+        // lifecycle does not contribute an operational color or workspace attention state.
+        case .browser, .window: return nil
+        case .agent: return .inactive
+        }
+    }
+
+    static func highest<S: Sequence>(_ statuses: S) -> Self where S.Element == Self { statuses.max() ?? .inactive }
+
+    /// Filled marks mean active or completed work. Failure and inactivity use hollow marks everywhere,
+    /// including the compact workspace rollup and the larger palette indicator.
+    var usesFilledIndicator: Bool { self != .failed && self != .inactive }
+}
+
+extension SidebarRuntimeTargetItem {
+    var attentionStatus: SidebarAttentionStatus? {
+        SidebarAttentionStatus.resolve(kind: kind, runState: runState, agentActivityState: agentActivityState)
+    }
 }
 
 /// Where a sidebar row's rename is stored: on the row's own session, in the workspace config entry that
@@ -93,7 +170,7 @@ extension AppKitController {
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, detail: row.liveTitle, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex,
                 sessionID: row.sessionID, canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil,
-                processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil)
+                processTemplateID: nil, agentID: agentWindow.id, browserTargetURL: nil, agentActivityState: row.activityState)
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return nil }
             let templateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
