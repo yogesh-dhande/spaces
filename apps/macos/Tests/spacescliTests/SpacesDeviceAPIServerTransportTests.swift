@@ -696,6 +696,58 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    /// A workspace created under a hidden project would be invisible everywhere the moment it exists,
+    /// so the create-options picker never offers one — and a request pre-selecting a hidden project
+    /// (a stale client) falls back to a visible default rather than pre-selecting an unlisted row.
+    func testWorkspaceCreateOptionsExcludeHiddenProjects() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-CREATE-OPTIONS-HIDDEN", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            var projectIDs: [String] = []
+            for name in ["alpha-project", "beta-project"] {
+                let projectDir = root.appendingPathComponent(name, isDirectory: true)
+                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+                let createResponse = try sendTLSRequest(
+                    SpacesDeviceAPIRequest(
+                        command: .createProject(.init(projectDir: projectDir.path, gitURL: nil)), authToken: pairingStore.authToken,
+                        clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                XCTAssertTrue(createResponse.ok, createResponse.message)
+                projectIDs.append(try XCTUnwrap(createResponse.projectID))
+            }
+            let (hiddenProjectID, visibleProjectID) = (projectIDs[0], projectIDs[1])
+
+            let hideResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .updateProjectMetadata(.init(projectID: hiddenProjectID, isHidden: true, updatesHidden: true)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(hideResponse.ok, hideResponse.message)
+
+            let optionsResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .workspaceCreateOptions(.init()), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(optionsResponse.ok, optionsResponse.message)
+            let options = try XCTUnwrap(optionsResponse.workspaceCreateOptions)
+            XCTAssertEqual(options.projects.map(\.id), [visibleProjectID])
+            XCTAssertEqual(options.selectedProjectID, visibleProjectID)
+
+            let staleSelectionResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .workspaceCreateOptions(.init(projectID: hiddenProjectID)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(staleSelectionResponse.ok, staleSelectionResponse.message)
+            let staleSelectionOptions = try XCTUnwrap(staleSelectionResponse.workspaceCreateOptions)
+            XCTAssertEqual(staleSelectionOptions.projects.map(\.id), [visibleProjectID])
+            XCTAssertEqual(staleSelectionOptions.selectedProjectID, visibleProjectID)
+        }
+    }
+
     func testWorkspaceMetadataBranchRenameSurvivesLaterNotesFailure() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()

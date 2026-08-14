@@ -75,6 +75,7 @@ A workspace has:
 Workspaces can be visible or hidden in the sidebar, and can be running or stopped independently of that sidebar state.
 A project can be hidden too, which suppresses the project and everything under it without changing its workspaces' own visibility, so unhiding the project brings back exactly the workspaces that were shown before.
 Hidden rows are recovered from the Mac's Workspaces dialog, which lists everything, and from the iOS Spaces tab's collapsed `Hidden` section.
+A hidden project is not offered when creating a workspace — a workspace created under it would be invisible the moment it exists — and becomes available again once unhidden.
 Running and stopped should be easy to explain:
 - `Running` means Spaces explicitly launched the workspace or another explicit workspace action marked it running.
 - `Stopped` means the workspace is idle. This covers two cases that behave the same: a workspace Spaces has never launched, and one Spaces explicitly stopped after a run. In both, nothing is running and the workspace is directly launchable.

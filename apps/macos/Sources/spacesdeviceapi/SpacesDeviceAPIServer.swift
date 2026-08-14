@@ -2103,11 +2103,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         let store = try context.store()
         let orchestrator = try context.orchestrator()
-        let projects = try store.projects().map {
+        // Hidden projects are not offered for workspace creation: a workspace created under one would
+        // be invisible on every browsing surface the moment it exists. The Workspaces dialog is where
+        // a hidden project comes back; creation under it becomes available again once it is unhidden.
+        let projects = try store.projects().filter { !$0.isHidden }.map {
             SpacesDeviceProjectSummary(
                 id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        let selectedProjectID = normalizedString(request.projectID) ?? projects.first?.id
+        // Resolve the requested selection against the offered list, so a stale client request naming a
+        // hidden (or deleted) project falls back to a visible default instead of pre-selecting a
+        // project the picker does not show.
+        let requestedProjectID = normalizedString(request.projectID)
+        let selectedProjectID = requestedProjectID.flatMap { id in projects.contains(where: { $0.id == id }) ? id : nil } ?? projects.first?.id
         let branchOptions: [String]
         if let selectedProjectID, let project = try store.project(id: selectedProjectID), project.isGitRepo {
             branchOptions = try orchestrator.gitBranchOptions(projectID: selectedProjectID)

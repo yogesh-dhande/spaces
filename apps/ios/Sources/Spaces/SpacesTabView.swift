@@ -860,7 +860,11 @@ struct WorkspaceCreateSheet: View {
     @State private var selectedProjectID: String?
     @State private var branch = ""
 
-    private var projects: [SpacesDeviceProjectSummary] { model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? [] }
+    // The daemon's create options already exclude hidden projects; the overview fallback carries them
+    // (the Hidden section is built from it), so it filters here to offer the same set.
+    private var projects: [SpacesDeviceProjectSummary] {
+        model.workspaceCreateOptions?.projects ?? model.overview?.projects.filter { !$0.isHidden } ?? []
+    }
 
     private var project: SpacesDeviceProjectSummary? { projects.first(where: { $0.id == selectedProjectID }) }
 
