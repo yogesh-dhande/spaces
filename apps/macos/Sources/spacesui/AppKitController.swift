@@ -3356,7 +3356,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let model = SpacesDeviceOverviewViewModel(overview: overview)
         let projects = model.projects.map {
             ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch,
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden,
                 isCollapsed: projectCollapseStates[$0.id] ?? false, deviceID: deviceID)
         }
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
@@ -4553,7 +4553,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// loaded project/workspace model (the same source the sidebar renders), so the editor adds no new fetch
     /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only.
     /// `preservingWorkspaceID` keeps an automation's stored target in the list even when that workspace has
-    /// since been hidden, so editing an unrelated field never silently retargets it (see
+    /// since been hidden (by its own flag or by its project's), so editing an unrelated field never silently
+    /// retargets it (see
     /// `AutomationsViewModel.workspaceChoices`); the hidden target's real name is resolved through
     /// `findWorkspace`, which includes hidden workspaces.
     func automationWorkspaceChoices(deviceID: String, preservingWorkspaceID: String? = nil) -> [AutomationWorkspaceChoice] {
@@ -4894,6 +4895,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return deviceForMutation(deviceID: deviceID)
     }
 
+    /// The device that owns a specific project, for the same reason as the workspace variant above:
+    /// a project-scoped action carries its project id and must route by that, not by the selection.
+    func deviceForProjectMutation(projectID: String) -> SpacesPairedDeviceRecord? {
+        guard let deviceID = deviceID(forProjectID: projectID) else { return nil }
+        return deviceForMutation(deviceID: deviceID)
+    }
+
     /// Whether a device can service an action that needs its daemon, given the load state of the
     /// sidebar section that claims it — `nil` when no section claims it at all.
     ///
@@ -5203,6 +5211,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showError(deviceUnavailableError(deviceID: deviceID(forWorkspaceID: workspaceID)))
     }
 
+    /// Surfaces why a per-project daemon action could not resolve its device.
+    func showProjectDeviceUnavailableError(projectID: String) {
+        showError(deviceUnavailableError(deviceID: deviceID(forProjectID: projectID)))
+    }
+
     /// Surfaces why a pane could not be opened for a terminal target, naming the device the request
     /// pinned rather than re-deriving it from a workspace the sidebar may not list.
     func showTerminalOpenRequestDeviceUnavailableError(_ request: DeviceTerminalOpenRequest, focusIntent: TerminalOpenFocusIntent) {
@@ -5340,7 +5353,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         if let selectedWorkspaceID {
-            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
+            // A selection that resolves but is no longer effectively visible — its own flag or its
+            // project's was set by another client and arrived through an overview refresh — falls
+            // through to the drop logic below, the same as one that no longer resolves: the sidebar has
+            // no row for it, so re-showing its detail would resurrect a pane with nothing behind it.
+            // Outage retention is unaffected: an offline device's retained rows keep their last live
+            // flags, so nothing reads as hidden merely because its device stopped answering.
+            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID),
+                SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
+            {
                 showWorkspaceDetail(project: project, workspace: workspace)
                 return
             }

@@ -199,10 +199,11 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
+    public let isHidden: Bool
     public let config: SpacesDeviceProjectConfig
 
     public init(
-        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?,
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isHidden: Bool = false,
         config: SpacesDeviceProjectConfig = SpacesDeviceProjectConfig()
     ) {
         self.id = id
@@ -210,6 +211,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
+        self.isHidden = isHidden
         self.config = config
     }
 
@@ -219,6 +221,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         case dir
         case isGitRepo
         case defaultBranch
+        case isHidden
         case config
     }
 
@@ -229,6 +232,7 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         dir = try container.decode(String.self, forKey: .dir)
         isGitRepo = try container.decode(Bool.self, forKey: .isGitRepo)
         defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
+        isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
         config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config) ?? SpacesDeviceProjectConfig()
     }
 }
@@ -973,6 +977,34 @@ public struct SpacesDeviceWorkspaceConfigUpdateRequest: Codable, Sendable, Equat
     }
 }
 
+/// Daemon-owned project state that is not part of the project's configuration surface. Carries the
+/// same `updates*` gate as the workspace metadata request so a client can move one field without
+/// having to restate the others.
+public struct SpacesDeviceProjectMetadataUpdateRequest: Codable, Sendable, Equatable {
+    public let projectID: String
+    public let isHidden: Bool?
+    public let updatesHidden: Bool
+
+    public init(projectID: String, isHidden: Bool? = nil, updatesHidden: Bool = false) {
+        self.projectID = projectID
+        self.isHidden = isHidden
+        self.updatesHidden = updatesHidden
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case projectID
+        case isHidden
+        case updatesHidden
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projectID = try container.decode(String.self, forKey: .projectID)
+        isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden)
+        updatesHidden = try container.decodeIfPresent(Bool.self, forKey: .updatesHidden) ?? false
+    }
+}
+
 public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let branch: String?
@@ -1510,6 +1542,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case archiveWorkspace(SpacesDeviceWorkspaceArchiveRequest)
     case runWorkspaceSetup(SpacesDeviceWorkspaceReference)
     case updateProjectConfig(SpacesDeviceProjectConfigUpdateRequest)
+    case updateProjectMetadata(SpacesDeviceProjectMetadataUpdateRequest)
     case updateWorkspaceConfig(SpacesDeviceWorkspaceConfigUpdateRequest)
     case updateWorkspaceMetadata(SpacesDeviceWorkspaceMetadataUpdateRequest)
     case openWorkspaceTerminal(SpacesDeviceWorkspaceReference)
@@ -1594,6 +1627,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .archiveWorkspace: "archiveWorkspace"
         case .runWorkspaceSetup: "runWorkspaceSetup"
         case .updateProjectConfig: "updateProjectConfig"
+        case .updateProjectMetadata: "updateProjectMetadata"
         case .updateWorkspaceConfig: "updateWorkspaceConfig"
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
@@ -1723,6 +1757,7 @@ extension SpacesDeviceAPICommand: Codable {
         case archiveWorkspace
         case runWorkspaceSetup
         case updateProjectConfig
+        case updateProjectMetadata
         case updateWorkspaceConfig
         case updateWorkspaceMetadata
         case openWorkspaceTerminal
@@ -1797,6 +1832,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .archiveWorkspace: self = .archiveWorkspace(try container.decode(SpacesDeviceWorkspaceArchiveRequest.self, forKey: key))
         case .runWorkspaceSetup: self = .runWorkspaceSetup(try container.decode(SpacesDeviceWorkspaceReference.self, forKey: key))
         case .updateProjectConfig: self = .updateProjectConfig(try container.decode(SpacesDeviceProjectConfigUpdateRequest.self, forKey: key))
+        case .updateProjectMetadata: self = .updateProjectMetadata(try container.decode(SpacesDeviceProjectMetadataUpdateRequest.self, forKey: key))
         case .updateWorkspaceConfig: self = .updateWorkspaceConfig(try container.decode(SpacesDeviceWorkspaceConfigUpdateRequest.self, forKey: key))
         case .updateWorkspaceMetadata:
             self = .updateWorkspaceMetadata(try container.decode(SpacesDeviceWorkspaceMetadataUpdateRequest.self, forKey: key))
@@ -1868,6 +1904,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .archiveWorkspace(let payload): try container.encode(payload, forKey: .archiveWorkspace)
         case .runWorkspaceSetup(let payload): try container.encode(payload, forKey: .runWorkspaceSetup)
         case .updateProjectConfig(let payload): try container.encode(payload, forKey: .updateProjectConfig)
+        case .updateProjectMetadata(let payload): try container.encode(payload, forKey: .updateProjectMetadata)
         case .updateWorkspaceConfig(let payload): try container.encode(payload, forKey: .updateWorkspaceConfig)
         case .updateWorkspaceMetadata(let payload): try container.encode(payload, forKey: .updateWorkspaceMetadata)
         case .openWorkspaceTerminal(let payload): try container.encode(payload, forKey: .openWorkspaceTerminal)

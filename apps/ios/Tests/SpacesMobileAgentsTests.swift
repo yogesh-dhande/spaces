@@ -95,6 +95,18 @@
             XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
         }
 
+        /// A workspace whose own `isHidden` flag is false but whose project is hidden must drop out of the
+        /// Agents tab exactly as an individually hidden workspace does — see
+        /// `SpacesDeviceOverviewPayload.isWorkspaceVisible`, the rule `SpacesMobileAgentGrouping` applies.
+        func testSkipsWorkspacesWithAHiddenProject() {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature", isHidden: false,
+                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning)])
+            let overview = makeOverview(workspaces: [workspace], projectIsHidden: true)
+
+            XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
+        }
+
         func testDetailShowsProjectAndBranchOrSingleSharedName() {
             let gitEntry = SpacesMobileAgentEntry(
                 row: makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning), workspaceDisplayName: "ios-redesign",
@@ -143,10 +155,14 @@
 
         // MARK: - Fixtures
 
-        private func makeOverview(workspaces: [SpacesDeviceWorkspaceSummary]? = nil, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [])
+        private func makeOverview(
+            workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false,
+            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
+        )
             -> SpacesDeviceOverviewPayload
         {
-            let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+            let project = SpacesDeviceProjectSummary(
+                id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
             let resolvedWorkspaces = workspaces ?? [makeWorkspace(id: "workspace-feature", branch: "feature", codingAgentRows: codingAgentRows)]
             return SpacesDeviceOverviewPayload(
                 projects: [project], workspaces: resolvedWorkspaces, sessions: [],

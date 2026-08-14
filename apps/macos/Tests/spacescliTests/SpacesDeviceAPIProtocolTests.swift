@@ -173,6 +173,24 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.sessions.first?.shell, "/bin/zsh")
     }
 
+    // A project summary sent by a peer that predates project-level hiding decodes as visible rather than
+    // failing the whole overview.
+    func testProjectSummaryDecodesWithoutHiddenFlag() throws {
+        let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: true)
+
+        let encoded = try JSONEncoder().encode(project)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(json["isHidden"] as? Bool, true)
+        json.removeValue(forKey: "isHidden")
+        let strippedData = try JSONSerialization.data(withJSONObject: json)
+
+        let decoded = try JSONDecoder().decode(SpacesDeviceProjectSummary.self, from: strippedData)
+
+        XCTAssertFalse(decoded.isHidden)
+        XCTAssertEqual(decoded.id, "project-1")
+        XCTAssertEqual(decoded.defaultBranch, "main")
+    }
+
     func testTerminalControlRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(.init(action: .send, sessionID: "session-1", clientID: "client-1", text: "a")), authToken: "SECRET")
@@ -328,6 +346,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                 ), authToken: "SECRET"), SpacesDeviceAPIRequest(command: .runWorkspaceSetup(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .updateWorkspaceMetadata(.init(workspaceID: "workspace-1", isHidden: true, updatesHidden: true)), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .updateProjectMetadata(.init(projectID: "project-1", isHidden: true, updatesHidden: true)), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .runWorkspaceProcess(.init(workspaceID: "workspace-1", processKey: "api", processTemplateID: "template-1")),
                 authToken: "SECRET"),

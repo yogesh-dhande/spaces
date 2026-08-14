@@ -11,10 +11,10 @@ import spacesterminalui
 import systembridge
 import workspacecore
 
-/// Owns the Workspaces visibility dialog: a filterable table for showing/hiding
-/// workspaces in the sidebar. `AppKitController` holds a single instance and
-/// delegates the dialog to it. The controller reaches back into the host for
-/// project/device model state and shared device-mutation services via `host`.
+/// Owns the Workspaces visibility dialog: a searchable device -> project -> workspace outline for
+/// showing/hiding rows in the sidebar. `AppKitController` holds a single instance and delegates the
+/// dialog to it. The controller reaches back into the host for project/device model state and shared
+/// device-mutation services via `host`.
 @MainActor final class WorkspaceVisibilityController: NSObject {
     unowned let host: AppKitController
 
@@ -24,18 +24,16 @@ import workspacecore
     }
 
     private var workspaceVisibilityWindow: NSWindow?
-    private let workspaceVisibilityTable = WorkspaceVisibilityTableController()
-    private weak var workspaceVisibilityTableView: NSTableView?
+    private let workspaceVisibilityOutline = WorkspaceVisibilityOutlineController()
+    private weak var workspaceVisibilityOutlineView: NSOutlineView?
     private var workspaceVisibilityQuery = ""
-    private var workspaceVisibilityDeviceFilter: String?
 
     func showWorkspaceVisibilityDialog() {
         host.clearActiveAddFormStateAndCloseWindows()
         workspaceVisibilityQuery = ""
-        workspaceVisibilityDeviceFilter = nil
 
         let searchField = NSSearchField()
-        searchField.placeholderString = "Search workspaces"
+        searchField.placeholderString = "Search projects and workspaces"
         searchField.target = self
         searchField.action = #selector(workspaceVisibilitySearchChanged(_:))
         searchField.sendsWholeSearchString = false
@@ -43,36 +41,32 @@ import workspacecore
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         searchField.setAccessibilityIdentifier("workspace-visibility-search")
 
-        let devicePopUp = NSPopUpButton()
-        devicePopUp.target = self
-        devicePopUp.action = #selector(workspaceVisibilityDeviceFilterChanged(_:))
-        devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
-        populateWorkspaceVisibilityDevicePopUp(devicePopUp)
-
-        let filterRow = NSStackView(views: [searchField, devicePopUp])
+        let filterRow = NSStackView(views: [searchField])
         filterRow.orientation = .horizontal
         filterRow.spacing = 8
         filterRow.distribution = .fill
 
-        let tableView = NSTableView()
-        tableView.dataSource = workspaceVisibilityTable
-        tableView.delegate = workspaceVisibilityTable
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.rowHeight = 24
-        tableView.allowsColumnSelection = false
-        tableView.headerView = NSTableHeaderView()
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.visibleColumn, title: "Show", width: 44, fixed: true)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.titleColumn, title: "Workspace", width: 180)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.projectColumn, title: "Project", width: 150)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.deviceColumn, title: "Device", width: 130)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.branchColumn, title: "Branch", width: 130)
-        workspaceVisibilityTableView = tableView
-        workspaceVisibilityTable.onToggleVisible = { [weak self] workspaceID, visible in
+        let outlineView = NSOutlineView()
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("visibility"))
+        column.resizingMask = .autoresizingMask
+        outlineView.addTableColumn(column)
+        outlineView.outlineTableColumn = column
+        outlineView.headerView = nil
+        outlineView.indentationPerLevel = 14
+        outlineView.selectionHighlightStyle = .none
+        outlineView.floatsGroupRows = false
+        outlineView.dataSource = workspaceVisibilityOutline
+        outlineView.delegate = workspaceVisibilityOutline
+        workspaceVisibilityOutlineView = outlineView
+        workspaceVisibilityOutline.onToggleWorkspaceVisible = { [weak self] workspaceID, visible in
             self?.setWorkspaceHidden(workspaceID: workspaceID, isHidden: !visible) { [weak self] _ in self?.reloadWorkspaceVisibilityRows() }
+        }
+        workspaceVisibilityOutline.onToggleProjectVisible = { [weak self] projectID, visible in
+            self?.setProjectHidden(projectID: projectID, isHidden: !visible) { [weak self] _ in self?.reloadWorkspaceVisibilityRows() }
         }
 
         let scroll = NSScrollView()
-        scroll.documentView = tableView
+        scroll.documentView = outlineView
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -81,70 +75,18 @@ import workspacecore
         presentWorkspaceVisibilityWindow(filterRow: filterRow, tableScroll: scroll)
     }
 
-    private func addWorkspaceVisibilityColumn(
-        _ tableView: NSTableView, id: NSUserInterfaceItemIdentifier, title: String, width: CGFloat, fixed: Bool = false
-    ) {
-        let column = NSTableColumn(identifier: id)
-        column.title = title
-        column.width = width
-        column.minWidth = fixed ? width : 60
-        if fixed { column.maxWidth = width }
-        tableView.addTableColumn(column)
-    }
-
-    private func populateWorkspaceVisibilityDevicePopUp(_ popup: NSPopUpButton) {
-        popup.removeAllItems()
-        popup.addItem(withTitle: "All devices")
-        for section in host.deviceSections {
-            popup.addItem(withTitle: section.deviceName)
-            popup.lastItem?.representedObject = section.deviceID
-        }
-        if let filter = workspaceVisibilityDeviceFilter, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == filter }) {
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-    }
-
     @objc private func workspaceVisibilitySearchChanged(_ sender: NSSearchField) {
         workspaceVisibilityQuery = sender.stringValue
         reloadWorkspaceVisibilityRows()
     }
 
-    @objc private func workspaceVisibilityDeviceFilterChanged(_ sender: NSPopUpButton) {
-        workspaceVisibilityDeviceFilter = sender.selectedItem?.representedObject as? String
-        reloadWorkspaceVisibilityRows()
-    }
-
-    private func buildWorkspaceVisibilityRows() -> [WorkspaceVisibilityRow] {
-        var rows: [WorkspaceVisibilityRow] = []
-        for project in host.projects {
-            let deviceName = host.deviceSection(id: project.deviceID)?.deviceName ?? project.deviceID
-            for workspace in host.workspacesByProject[project.id] ?? [] {
-                rows.append(
-                    WorkspaceVisibilityRow(
-                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.displayName, projectName: project.name,
-                        deviceName: deviceName, branch: workspace.branch ?? "", isHidden: workspace.isHidden))
-            }
-        }
-        return rows
-    }
-
     private func reloadWorkspaceVisibilityRows() {
-        let deviceFiltered =
-            workspaceVisibilityDeviceFilter.map { id in buildWorkspaceVisibilityRows().filter { $0.deviceID == id } }
-            ?? buildWorkspaceVisibilityRows()
-        let candidates = deviceFiltered.enumerated().map { offset, row in
-            CommandPaletteFuzzySearch.Candidate(
-                id: offset,
-                fields: [
-                    .init(text: row.title, weight: 1.0), .init(text: row.projectName, weight: 0.6), .init(text: row.deviceName, weight: 0.4),
-                    .init(text: row.branch, weight: 0.5),
-                ])
-        }
-        let ranked = CommandPaletteFuzzySearch.rank(query: workspaceVisibilityQuery, candidates: candidates)
-        workspaceVisibilityTable.rows = ranked.map { deviceFiltered[$0.id] }
-        workspaceVisibilityTableView?.reloadData()
+        workspaceVisibilityOutline.devices = WorkspaceVisibilityTree.build(
+            devices: host.deviceSections.map { .init(deviceID: $0.deviceID, name: $0.displayName) }, projects: host.projects,
+            workspacesByProject: host.workspacesByProject, query: workspaceVisibilityQuery)
+        guard let outlineView = workspaceVisibilityOutlineView else { return }
+        outlineView.reloadData()
+        workspaceVisibilityOutline.expandAll(outlineView)
     }
 
     private func presentWorkspaceVisibilityWindow(filterRow: NSView, tableScroll: NSView) {
@@ -260,6 +202,89 @@ import workspacecore
                 if isHidden, host.selectedWorkspaceID == workspaceID { host.selectedWorkspaceID = nil }
                 host.applyDeviceMutationResponse(
                     response, deviceID: device.id, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
+                completion(true)
+            case .failure(let error):
+                host.showError(error)
+                completion(false)
+            }
+        }
+    }
+
+    /// Sets a project's sidebar visibility (persisted as the project's own `isHidden`), routing to the
+    /// device that owns the project and stopping its running workspaces first.
+    ///
+    /// The project flag is independent of each workspace's, so this never writes a child's flag:
+    /// unhiding the project brings back exactly the workspaces that were shown before it was hidden.
+    private func setProjectHidden(projectID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
+        guard host.projects.contains(where: { $0.id == projectID }) else { return completion(false) }
+        Task { @MainActor [weak self] in
+            guard let self else { return completion(false) }
+            // Same routing and gating rule as a workspace hide: the owning project's device, resolved
+            // through the mutation chokepoint so an unreachable device refuses up front rather than
+            // stopping workspaces against a daemon that is not there.
+            guard let device = host.deviceForProjectMutation(projectID: projectID) else {
+                host.showProjectDeviceUnavailableError(projectID: projectID)
+                return completion(false)
+            }
+            let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+            if isHidden {
+                // Decide the prompt and the stops from fresh daemon state rather than a possibly-stale
+                // cached snapshot, for the same reason as `setWorkspaceHidden`.
+                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
+                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
+                }.value
+                let running: [SpacesDeviceWorkspaceSummary]
+                switch overviewResult {
+                case .success(let overview): running = overview.overview.workspaces.filter { $0.projectID == projectID && $0.isRunning }
+                case .failure(let error):
+                    host.showError(error)
+                    return completion(false)
+                }
+                if !running.isEmpty {
+                    // One prompt for the whole project, naming every workspace the hide will stop, so the
+                    // user confirms the full cost once instead of once per workspace.
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Hide project?"
+                    alert.informativeText =
+                        "Hiding this project stops its running workspaces first: \(running.map(\.displayName).joined(separator: ", "))."
+                    alert.addButton(withTitle: "Stop and Hide")
+                    alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
+                    for workspace in running {
+                        let stopResult = await AppKitController.deviceMutation(device: device) { device in
+                            try SpacesDeviceClient.stopWorkspace(workspaceID: workspace.id, device: device, clientApp: clientApp)
+                        }
+                        // A workspace that would not stop is left running and visible: hiding the project
+                        // now would strand it out of view still running.
+                        if case .failure(let error) = stopResult {
+                            host.showError(error)
+                            return completion(false)
+                        }
+                    }
+                }
+            }
+            // The stops above and this flag write are separate requests, so a launch from another
+            // client can in principle land between them and leave a hidden workspace running. That is
+            // accepted rather than closed with a compound daemon-side stop-and-hide operation:
+            // hidden-and-running is already a legal state (automations keep and run hidden targets,
+            // and nothing stops another client from starting any workspace regardless of its flags),
+            // the prompt above exists so the user never hides active work unknowingly - not to
+            // guarantee nothing hidden ever runs - and the dialog lists every hidden row, so such a
+            // workspace stays one unhide away. The single-workspace hide has the same shape.
+            let result = await AppKitController.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.updateProjectMetadata(projectID: projectID, isHidden: isHidden, device: device, clientApp: clientApp)
+            }
+            switch result {
+            case .success(let response):
+                // A hidden project leaves the sidebar with every row under it, so a selection inside it
+                // is dropped before the rebuild — `findWorkspace` still resolves hidden rows, so leaving
+                // it set would keep a detail pane open for a workspace that has no row.
+                if isHidden, let selectedWorkspaceID = host.selectedWorkspaceID, host.findWorkspace(id: selectedWorkspaceID)?.0.id == projectID {
+                    host.selectedWorkspaceID = nil
+                }
+                if isHidden, host.selectedProjectID == projectID { host.selectedProjectID = nil }
+                host.applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: isHidden ? nil : projectID)
                 completion(true)
             case .failure(let error):
                 host.showError(error)

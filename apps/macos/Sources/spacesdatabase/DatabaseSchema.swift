@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 15
+    public static let currentVersion = 16
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -523,6 +523,31 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 14, toVersion: 15, description: "Persist automation cron anchor time zones", requiresBackup: true) {
             handle in try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN anchor_time_zone_identifier TEXT;")
         },
+        // Records whether the user has hidden a project, independent of the per-workspace hidden flag.
+        // Existing rows carry 0: nothing could hide a project before this version.
+        //
+        // The frozen pre-v16 shape is created first for the same reason the v9→v10 step creates
+        // `agent_sessions`: no migration step has ever created `projects` — it is defined only in the
+        // fresh-schema SQL, which runs only on a database with no tables at all — so an upgrade chain that
+        // reaches here without it has nothing to alter. Creating it, rather than making the ALTER
+        // conditional, is what guarantees a v16 database always HAS `projects`; on every database that
+        // already has the table the CREATE is a no-op and every existing row is preserved.
+        DatabaseMigrationStep(fromVersion: 15, toVersion: 16, description: "Persist project hidden state", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS projects (
+                      id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      dir TEXT NOT NULL UNIQUE,
+                      is_git INTEGER NOT NULL,
+                      default_branch TEXT,
+                      setup_script TEXT,
+                      stop_script TEXT
+                    );
+                    ALTER TABLE projects ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -660,7 +685,8 @@ public enum DatabaseSchema {
               is_git INTEGER NOT NULL,
               default_branch TEXT,
               setup_script TEXT,
-              stop_script TEXT
+              stop_script TEXT,
+              is_hidden INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS project_services (

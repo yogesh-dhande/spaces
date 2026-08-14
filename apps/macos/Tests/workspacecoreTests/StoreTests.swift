@@ -80,6 +80,7 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
+        XCTAssertTrue(projectColumns.contains("is_hidden"))
         XCTAssertFalse(workspaceColumns.contains("host_id"))
         XCTAssertFalse(workspaceColumns.contains("compute_host_override_id"))
         XCTAssertFalse(projectColumns.contains("is_collapsed"))
@@ -468,6 +469,76 @@ final class StoreTests: XCTestCase {
             let renamed = try XCTUnwrap(agents.first { $0.id == "agent-renamed" })
             XCTAssertEqual(renamed.effectiveLabel, "Reviewer")
             XCTAssertEqual(renamed.label, "Claude Code CLI")
+        }
+    }
+
+    /// A v15 profile predates project-level hiding, so every project it carries has to come forward
+    /// visible with its configuration intact, and hiding must work on it immediately afterwards.
+    func testUpgradeFromV15CarriesProjectsForwardVisible() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let projectDir = root.appendingPathComponent("project", isDirectory: true).path
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (15);
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  dir TEXT NOT NULL UNIQUE,
+                  is_git INTEGER NOT NULL,
+                  default_branch TEXT,
+                  setup_script TEXT,
+                  stop_script TEXT
+                );
+                CREATE TABLE project_services (
+                  id TEXT NOT NULL,
+                  project_id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index),
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE project_processes (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  command TEXT NOT NULL,
+                  on_exit TEXT NOT NULL DEFAULT 'none',
+                  order_index INTEGER NOT NULL,
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE project_browser_sessions (
+                  project_id TEXT NOT NULL,
+                  name TEXT,
+                  url TEXT,
+                  order_index INTEGER NOT NULL,
+                  PRIMARY KEY (project_id, order_index),
+                  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                  VALUES ('project', 'Project', '\(projectDir)', 1, 'main', 'echo setup', 'echo stop');
+                INSERT INTO project_services(id, project_id, name, order_index) VALUES ('port-api', 'project', 'api', 0);
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            let store = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            let migrated = try XCTUnwrap(store.project(id: "project"), "an existing project must survive the upgrade")
+            XCTAssertFalse(migrated.isHidden, "a project that predates the flag comes forward visible")
+            XCTAssertEqual(migrated.name, "Project")
+            XCTAssertEqual(migrated.defaultBranch, "main")
+            XCTAssertEqual(migrated.setupScript, "echo setup")
+            XCTAssertEqual(migrated.stopScript, "echo stop")
+            XCTAssertEqual(migrated.ports.map(\.name), ["api"])
+
+            try store.updateProjectHidden(id: "project", isHidden: true)
+            XCTAssertEqual(try store.project(id: "project")?.isHidden, true)
         }
     }
 
@@ -1528,6 +1599,43 @@ final class StoreTests: XCTestCase {
 
         try store.updateWorkspaceHidden(id: workspace.id, isHidden: false)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
+    }
+
+    // Tests that a project's isHidden flag round-trips through updateProjectHidden in both directions, and
+    // that it is independent of its workspaces' own hidden flags.
+    func testUpdateProjectHiddenRoundTrips() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, false)
+
+        try store.updateProjectHidden(id: project.id, isHidden: true)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, true)
+        XCTAssertEqual(try store.project(dir: project.dir)?.isHidden, true)
+        XCTAssertEqual(try store.projects().first(where: { $0.id == project.id })?.isHidden, true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false, "hiding a project leaves its workspaces' own flag alone")
+
+        try store.updateProjectHidden(id: project.id, isHidden: false)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, false)
+    }
+
+    // A hidden project survives a re-upsert of the same record, which is what every project settings save
+    // performs: the flag is daemon-owned state, not part of the configuration the upsert rewrites.
+    func testUpsertPreservesProjectHiddenState() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        try store.updateProjectHidden(id: project.id, isHidden: true)
+
+        var reloaded = try XCTUnwrap(store.project(id: project.id))
+        reloaded.setupScript = "echo setup"
+        try store.upsert(project: reloaded)
+
+        let updated = try XCTUnwrap(store.project(id: project.id))
+        XCTAssertTrue(updated.isHidden)
+        XCTAssertEqual(updated.setupScript, "echo setup")
     }
 
     // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.

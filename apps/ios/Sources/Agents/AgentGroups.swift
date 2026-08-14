@@ -52,7 +52,9 @@ struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
 enum SpacesMobileAgentGrouping {
     static func groups(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAgentGroup] {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
-        for workspace in overview.workspaces where !workspace.isHidden {
+        // Excludes a workspace hidden by its own flag or by its project's — see
+        // `SpacesDeviceOverviewPayload.isWorkspaceVisible`, the same rule the Spaces tab's browse list uses.
+        for workspace in overview.workspaces where overview.isWorkspaceVisible(workspace) {
             for agent in workspace.codingAgentRows {
                 let entry = SpacesMobileAgentEntry(row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
                 entriesByKind[kind(for: agent), default: []].append(entry)

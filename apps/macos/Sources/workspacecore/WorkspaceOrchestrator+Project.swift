@@ -5,7 +5,7 @@ import systembridge
 extension WorkspaceOrchestrator {
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
+            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
         }
     }
 
@@ -174,6 +174,16 @@ extension WorkspaceOrchestrator {
         _ = try updateProjectConfig(projectID: projectID, updateAllWorkspaces: false, update: update)
     }
 
+    /// Moves the project's hidden flag. Takes the project key for the same reason `updateProjectConfig`
+    /// does: the read that resolves the record and the write that follows must not straddle a delete.
+    public func updateProjectHidden(projectID: String, isHidden: Bool) throws {
+        try withProjectLifecycleLock(projectID: projectID) {
+            guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+            guard project.isHidden != isHidden else { return }
+            try store.updateProjectHidden(id: project.id, isHidden: isHidden)
+        }
+    }
+
     /// Under the project gate, resolving the record inside it. This is a read-modify-write of the project
     /// row: a delete landing between an unprotected read and the `upsert` would put the deleted project
     /// straight back, and `ensureDefaultWorkspace` would then recreate a default workspace pointing at
@@ -286,10 +296,12 @@ extension WorkspaceOrchestrator {
         update(&record)
         let previousPorts = baseRecord.ports
         let previousProcesses = baseRecord.processes
+        // Identity and daemon-owned state (including `isHidden`) always come from the base record: a
+        // configuration update must not be able to un-hide a project as a side effect of saving settings.
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
-            setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
-            browserSessions: record.browserSessions)
+            isHidden: baseRecord.isHidden, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
+            processes: record.processes, browserSessions: record.browserSessions)
         record.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
         record.ports = try normalizedServiceDefinitions(record.ports)

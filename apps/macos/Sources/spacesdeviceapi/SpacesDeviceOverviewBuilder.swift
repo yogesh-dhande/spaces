@@ -217,7 +217,7 @@ struct SpacesDeviceOverviewBuilder {
             seen.insert(project.id)
             return SpacesDeviceProjectSummary(
                 id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-                config: projectConfig(from: project))
+                isHidden: project.isHidden, config: projectConfig(from: project))
         }
     }
 
