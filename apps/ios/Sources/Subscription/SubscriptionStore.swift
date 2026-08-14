@@ -1,5 +1,6 @@
 import Foundation
 import StoreKit
+import UIKit
 
 /// Owns the app's single auto-renewable subscription: it loads the yearly product, resolves the
 /// entitlement from `Transaction.currentEntitlements`, listens to `Transaction.updates` for the app's
@@ -121,16 +122,24 @@ import StoreKit
     }
 
     /// Purchases the yearly subscription. A verified success finishes the transaction and unlocks the
-    /// app; user cancellation and pending (e.g. Ask to Buy) states leave the paywall in place.
+    /// app; user cancellation and pending (e.g. Ask to Buy) states leave the paywall in place. The
+    /// confirmation sheet is anchored to the app's window scene: the sceneless `purchase()` is
+    /// deprecated on iOS 18.2+, and the scene overload is always available at our iOS 17 deployment
+    /// target.
     func purchase() async {
         guard let product else {
             await load()
             return
         }
+        guard let scene = Self.purchaseConfirmationScene() else {
+            errorMessage = Self.purchaseFailureMessage
+            return
+        }
         isPurchasing = true
+        errorMessage = nil
         defer { isPurchasing = false }
         do {
-            let result = try await product.purchase()
+            let result = try await product.purchase(confirmIn: scene)
             switch result {
             case .success(let verification):
                 await handle(verificationResult: verification)
@@ -140,22 +149,53 @@ import StoreKit
                 break
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = Self.failureMessage(for: error, fallback: Self.purchaseFailureMessage)
         }
+    }
+
+    /// The window scene the purchase confirmation sheet is anchored to. Prefers the foreground-active
+    /// scene; during a brief activation transition none may report `.foregroundActive` yet, so any
+    /// connected window scene still anchors correctly in this single-scene app.
+    private static func purchaseConfirmationScene() -> UIWindowScene? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
 
     /// Restores purchases by syncing with the App Store, then re-reads the entitlement. Used by both the
     /// paywall and the Settings section.
     func restore() async {
         isPurchasing = true
+        errorMessage = nil
         defer { isPurchasing = false }
         do {
             try await AppStore.sync()
-            errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = Self.failureMessage(for: error, fallback: Self.restoreFailureMessage)
         }
         await refreshEntitlement()
+    }
+
+    static let purchaseFailureMessage = "The purchase could not be completed. Please try again in a moment."
+    static let restoreFailureMessage = "Purchases could not be restored. Please try again in a moment."
+    static let networkFailureMessage =
+        "The App Store could not be reached. Check your internet connection and try again."
+
+    /// Maps a thrown StoreKit error to the message the paywall shows, or nil when nothing should be
+    /// surfaced. Cancellation arrives both as a `.userCancelled` purchase result and as a thrown
+    /// `StoreKitError.userCancelled` (e.g. dismissing the App Store sign-in sheet); either is the
+    /// user's own choice, not a failure. Everything else gets a retryable message in the app's voice —
+    /// raw system strings like "Unable to Complete Request" read as a broken purchase flow, which is
+    /// what App Review rejected. Pure so the mapping is testable without StoreKit.
+    static func failureMessage(for error: any Error, fallback: String) -> String? {
+        guard let storeKitError = error as? StoreKitError else { return fallback }
+        switch storeKitError {
+        case .userCancelled:
+            return nil
+        case .networkError:
+            return networkFailureMessage
+        default:
+            return fallback
+        }
     }
 
     /// Resolves the entitlement from the current verified transactions. `currentEntitlements` already

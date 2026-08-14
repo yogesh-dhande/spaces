@@ -1,5 +1,6 @@
 #if canImport(UIKit)
     import XCTest
+    import StoreKit
 
     @testable import SpacesMobile
 
@@ -47,6 +48,46 @@
             let outcome = SubscriptionStore.productLoadOutcome(products: [])
             XCTAssertNil(outcome.product)
             XCTAssertNotNil(outcome.errorMessage)
+        }
+
+        // MARK: - Failure messaging
+
+        func testFailureMessageIsSilentOnUserCancellation() {
+            XCTAssertNil(
+                SubscriptionStore.failureMessage(
+                    for: StoreKitError.userCancelled, fallback: SubscriptionStore.purchaseFailureMessage
+                )
+            )
+            XCTAssertNil(
+                SubscriptionStore.failureMessage(
+                    for: StoreKitError.userCancelled, fallback: SubscriptionStore.restoreFailureMessage
+                )
+            )
+        }
+
+        func testFailureMessageNamesTheNetworkOnNetworkErrors() {
+            XCTAssertEqual(
+                SubscriptionStore.failureMessage(
+                    for: StoreKitError.networkError(URLError(.notConnectedToInternet)),
+                    fallback: SubscriptionStore.purchaseFailureMessage
+                ),
+                SubscriptionStore.networkFailureMessage
+            )
+        }
+
+        func testFailureMessageFallsBackToActionSpecificRetryText() {
+            XCTAssertEqual(
+                SubscriptionStore.failureMessage(
+                    for: StoreKitError.unknown, fallback: SubscriptionStore.purchaseFailureMessage
+                ),
+                SubscriptionStore.purchaseFailureMessage
+            )
+            XCTAssertEqual(
+                SubscriptionStore.failureMessage(
+                    for: URLError(.timedOut), fallback: SubscriptionStore.restoreFailureMessage
+                ),
+                SubscriptionStore.restoreFailureMessage
+            )
         }
 
         // MARK: - Trial eligibility gating
