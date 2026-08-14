@@ -92,6 +92,7 @@ import UIKit
     /// is unreachable, or the product fetch succeeds but returns nothing, the product stays `nil` and
     /// the paywall stays up with a retry affordance rather than falling through to the app.
     func load() async {
+        errorMessage = nil
         do {
             let products = try await Product.products(for: [Self.yearlyProductID])
             let outcome = Self.productLoadOutcome(products: products)
@@ -218,6 +219,9 @@ import UIKit
             return
         }
         await transaction.finish()
+        // A verified transaction can arrive via `Transaction.updates` (e.g. an Ask to Buy approval)
+        // after a failed attempt left a message behind; a success must not leave stale failure text.
+        errorMessage = nil
         await refreshEntitlement()
     }
 

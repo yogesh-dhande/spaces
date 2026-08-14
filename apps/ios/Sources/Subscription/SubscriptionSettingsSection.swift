@@ -19,6 +19,9 @@ struct SubscriptionSettingsSection: View {
                 statusRow
                 manageRow
                 restoreRow
+                if let errorMessage = store.errorMessage {
+                    errorRow(errorMessage)
+                }
             }
             .padding(.top, 4)
         }
@@ -71,6 +74,16 @@ struct SubscriptionSettingsSection: View {
         .buttonStyle(.plain)
         .disabled(store.isPurchasing)
         .accessibilityIdentifier("settings.subscription.restore")
+    }
+
+    /// Restore failures land in `store.errorMessage`; without this row a failed Restore Purchases tap
+    /// from Settings would give no feedback at all (the paywall renders the same property itself).
+    private func errorRow(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.red)
+            .rowPadding()
+            .accessibilityIdentifier("settings.subscription.error")
     }
 
     private var statusText: String {
