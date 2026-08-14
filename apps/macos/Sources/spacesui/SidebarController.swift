@@ -243,8 +243,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if host.projectSettingsProjectID != nil { return true }
         if host.workspaceSettingsWorkspaceID != nil { return true }
         if host.showingAlerts || host.showingSettings { return true }
-        if let selectedWorkspaceID = host.selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
-        if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID }) }
+        // Effective visibility, not mere existence: `findWorkspace` resolves hidden rows on purpose, but
+        // a selection whose workspace or project was hidden by another client (arriving through an
+        // overview refresh, never through the local hide path, which clears the selection itself) has no
+        // sidebar row left, so preserving it would keep a detail pane open with nothing behind it.
+        if let selectedWorkspaceID = host.selectedWorkspaceID {
+            guard let (project, workspace) = findWorkspace(id: selectedWorkspaceID) else { return false }
+            return SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
+        }
+        if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden }) }
         if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
             return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
         }

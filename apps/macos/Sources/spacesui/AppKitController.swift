@@ -5353,7 +5353,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         if let selectedWorkspaceID {
-            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
+            // A selection that resolves but is no longer effectively visible — its own flag or its
+            // project's was set by another client and arrived through an overview refresh — falls
+            // through to the drop logic below, the same as one that no longer resolves: the sidebar has
+            // no row for it, so re-showing its detail would resurrect a pane with nothing behind it.
+            // Outage retention is unaffected: an offline device's retained rows keep their last live
+            // flags, so nothing reads as hidden merely because its device stopped answering.
+            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID),
+                SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
+            {
                 showWorkspaceDetail(project: project, workspace: workspace)
                 return
             }
