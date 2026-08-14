@@ -115,9 +115,9 @@ enum AutomationsViewModel {
     /// Augments the bounded overview run slice with the full retained history loaded for each reachable
     /// device. The overview wins for duplicate ids because it keeps live status current between history
     /// loads. Offline inputs keep their last overview snapshot so a failed request never looks authoritative.
-    static func mergingRetainedRuns(
-        in inputs: [AutomationDeviceInput], with retainedRunsByDeviceID: [String: [TerminalServiceAutomationRunSummary]]
-    ) -> [AutomationDeviceInput] {
+    static func mergingRetainedRuns(in inputs: [AutomationDeviceInput], with retainedRunsByDeviceID: [String: [TerminalServiceAutomationRunSummary]])
+        -> [AutomationDeviceInput]
+    {
         inputs.map { input in
             guard input.isReachable, let retainedRuns = retainedRunsByDeviceID[input.deviceID] else { return input }
             var runsByID = Dictionary(uniqueKeysWithValues: retainedRuns.map { ($0.id, $0) })
@@ -291,7 +291,9 @@ enum AutomationsViewModel {
     /// The next-run column: a countdown while the fire is near, a short absolute time beyond that, and a
     /// placeholder for an automation that has no scheduled fire (manual, disabled, or never scheduled).
     static func nextRunDescription(for automation: TerminalServiceAutomationSummary, now: Date, timeZone: TimeZone = .current) -> String {
-        guard automation.enabled, let iso = automation.nextFireTime, let date = TerminalSessionTimestamp.date(from: iso) else { return placeholderText }
+        guard automation.enabled, let iso = automation.nextFireTime, let date = TerminalSessionTimestamp.date(from: iso) else {
+            return placeholderText
+        }
         let interval = date.timeIntervalSince(now)
         // A fire time already in the past means the daemon has not caught up to it yet; say so rather than
         // counting up from it, which would read like the run had been going for that long.

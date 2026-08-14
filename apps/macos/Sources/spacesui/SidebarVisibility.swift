@@ -33,9 +33,8 @@ enum SidebarVisibility {
     /// A non-git project's row stands in for its single workspace. If that workspace is hidden the
     /// project has no visible workspace, so the row is dropped rather than left as a dead stand-in
     /// that selects nothing.
-    static func deviceProjects(
-        _ projects: [ProjectSummary], deviceID: String, workspacesByProject: [String: [WorkspaceSummary]]
-    ) -> [ProjectSummary] {
+    static func deviceProjects(_ projects: [ProjectSummary], deviceID: String, workspacesByProject: [String: [WorkspaceSummary]]) -> [ProjectSummary]
+    {
         projects.filter { project in
             guard project.deviceID == deviceID, !project.isHidden else { return false }
             guard !project.isGitRepo else { return true }

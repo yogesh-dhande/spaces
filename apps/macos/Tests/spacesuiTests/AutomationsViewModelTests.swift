@@ -87,19 +87,15 @@ struct AutomationsViewModelTests {
 
     @Test func retainedRunHistoryAugmentsTheBoundedOverviewSliceForReachableDevices() {
         let overviewRun = run(
-            id: "overview", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-02T08:00:00Z",
-            createdAt: "2026-01-02T08:00:00Z")
+            id: "overview", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-02T08:00:00Z", createdAt: "2026-01-02T08:00:00Z")
         let retainedRun = run(
-            id: "retained", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z",
-            createdAt: "2026-01-01T08:00:00Z")
+            id: "retained", automationID: "a", name: "A", status: "succeeded", startedAt: "2026-01-01T08:00:00Z", createdAt: "2026-01-01T08:00:00Z")
         let offlineRun = run(
-            id: "offline", automationID: "b", name: "B", status: "running", startedAt: "2026-01-02T09:00:00Z",
-            createdAt: "2026-01-02T09:00:00Z")
+            id: "offline", automationID: "b", name: "B", status: "running", startedAt: "2026-01-02T09:00:00Z", createdAt: "2026-01-02T09:00:00Z")
         let inputs = [
             AutomationDeviceInput(deviceID: "mac", deviceName: "This Mac", isLocal: true, isReachable: true, runs: [overviewRun]),
             AutomationDeviceInput(
-                deviceID: "offline", deviceName: "Server", isLocal: false, isReachable: false, offlineMessage: "unreachable",
-                runs: [offlineRun]),
+                deviceID: "offline", deviceName: "Server", isLocal: false, isReachable: false, offlineMessage: "unreachable", runs: [offlineRun]),
         ]
 
         let merged = AutomationsViewModel.mergingRetainedRuns(in: inputs, with: ["mac": [retainedRun], "offline": []])
@@ -476,8 +472,8 @@ struct AutomationsViewModelTests {
 
     @Test func nextRunAcceptsFractionalWireTimestamp() {
         let description = AutomationsViewModel.nextRunDescription(
-            for: automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", nextFireTime: "2026-08-05T14:04:00.875Z"),
-            now: now, timeZone: Self.utc)
+            for: automation(id: "a", name: "A", triggerKind: "cron", cron: "0 2 * * *", nextFireTime: "2026-08-05T14:04:00.875Z"), now: now,
+            timeZone: Self.utc)
         #expect(description == "in 4 m")
     }
 

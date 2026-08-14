@@ -17,6 +17,7 @@ struct SubscriptionSettingsSection: View {
                 statusRow
                 manageRow
                 restoreRow
+                if let errorMessage = store.errorMessage { errorRow(errorMessage) }
             }.padding(.top, 4)
         }.padding(.bottom, 14).manageSubscriptionsSheet(isPresented: $isShowingManageSubscriptions)
     }
@@ -51,6 +52,15 @@ struct SubscriptionSettingsSection: View {
                 if store.isPurchasing { ProgressView().controlSize(.small) }
             }.rowPadding().contentShape(Rectangle())
         }.buttonStyle(.plain).disabled(store.isPurchasing).accessibilityIdentifier("settings.subscription.restore")
+    }
+
+    /// Restore failures land in `store.errorMessage`; without this row a failed Restore Purchases tap
+    /// from Settings would give no feedback at all (the paywall renders the same property itself).
+    /// The channel is shared with product loading, so a rare launch-time load failure can also show
+    /// here before any restore tap. Accepted: the message is still accurate about the App Store being
+    /// unreachable, and a second error channel is not worth the extra state.
+    private func errorRow(_ message: String) -> some View {
+        Text(message).font(.system(size: 12)).foregroundStyle(Theme.red).rowPadding().accessibilityIdentifier("settings.subscription.error")
     }
 
     private var statusText: String {

@@ -158,9 +158,7 @@
         private func makeOverview(
             workspaces: [SpacesDeviceWorkspaceSummary]? = nil, projectIsHidden: Bool = false,
             codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
-        )
-            -> SpacesDeviceOverviewPayload
-        {
+        ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(
                 id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
             let resolvedWorkspaces = workspaces ?? [makeWorkspace(id: "workspace-feature", branch: "feature", codingAgentRows: codingAgentRows)]

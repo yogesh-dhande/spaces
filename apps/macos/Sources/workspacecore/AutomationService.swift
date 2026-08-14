@@ -317,9 +317,7 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     private func validateWorkspaceTarget(_ workspaceID: String) throws {
-        guard try store.workspace(id: workspaceID) != nil else {
-            throw AutomationValidationError("Workspace not found: \(workspaceID).")
-        }
+        guard try store.workspace(id: workspaceID) != nil else { throw AutomationValidationError("Workspace not found: \(workspaceID).") }
     }
 
     public func listAutomations() throws -> [Automation] { try queue.sync { try store.automations() } }
@@ -415,13 +413,9 @@ public final class AutomationService: @unchecked Sendable {
     /// workspace stop/restart. The caller has already admitted and claimed that workspace's lifecycle gate.
     /// A workspace marker blocks only launches and promotions targeting that workspace while the operation
     /// runs; the service queue remains available for unrelated workspaces.
-    public func cancelRunsForWorkspaceStop(
-        workspaceID: String, orchestration: @escaping (@escaping () throws -> Void) throws -> Void
-    ) throws {
+    public func cancelRunsForWorkspaceStop(workspaceID: String, orchestration: @escaping (@escaping () throws -> Void) throws -> Void) throws {
         var installedMarker = false
-        defer {
-            if installedMarker { queue.sync { _ = workspaceCancellationsInProgress.remove(workspaceID) } }
-        }
+        defer { if installedMarker { queue.sync { _ = workspaceCancellationsInProgress.remove(workspaceID) } } }
         try orchestration {
             try self.queue.sync {
                 self.workspaceCancellationsInProgress.insert(workspaceID)

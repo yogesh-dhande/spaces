@@ -11,7 +11,10 @@ final class AutomationTickCoalescer: @unchecked Sendable {
 
     func submit() {
         let shouldStart = stateQueue.sync { () -> Bool in
-            if tickInFlight { tickPending = true; return false }
+            if tickInFlight {
+                tickPending = true
+                return false
+            }
             tickInFlight = true
             return true
         }
@@ -24,7 +27,10 @@ final class AutomationTickCoalescer: @unchecked Sendable {
             self?.tick()
             guard let self else { return }
             let shouldRunAgain = self.stateQueue.sync { () -> Bool in
-                if self.tickPending { self.tickPending = false; return true }
+                if self.tickPending {
+                    self.tickPending = false
+                    return true
+                }
                 self.tickInFlight = false
                 return false
             }

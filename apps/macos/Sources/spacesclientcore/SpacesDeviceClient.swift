@@ -1032,9 +1032,9 @@ public enum SpacesDeviceClient {
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
-            .renameAgentSession, .state,
-            .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .listAutomations, .listAutomationRuns:
+            .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
+            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession,
+            .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
         }
     }

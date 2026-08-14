@@ -72,8 +72,8 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
 
     public init(overview: SpacesDeviceOverviewPayload) {
         projects = overview.projects.map {
-            SpacesDeviceProjectRow(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch,
-                isHidden: $0.isHidden)
+            SpacesDeviceProjectRow(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isHidden: $0.isHidden)
         }
 
         workspacesByProject = Dictionary(grouping: overview.workspaces, by: \.projectID).mapValues { workspaces in

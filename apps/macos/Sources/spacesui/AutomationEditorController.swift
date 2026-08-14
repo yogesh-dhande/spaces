@@ -721,9 +721,10 @@ import workspacecore
                 } catch { return error }
             }.value
             guard let self else { return }
-            guard Self.shouldApplySaveCompletion(
-                currentGeneration: self.presentationGeneration, expectedGeneration: saveGeneration,
-                currentWindowMatches: self.window === presentedWindow)
+            guard
+                Self.shouldApplySaveCompletion(
+                    currentGeneration: self.presentationGeneration, expectedGeneration: saveGeneration,
+                    currentWindowMatches: self.window === presentedWindow)
             else { return }
             if let error {
                 self.isSaving = false

@@ -42,21 +42,13 @@ public struct AutomationCronSchedule: Equatable, Sendable {
     private static let searchLimit: TimeInterval = 5 * 365 * 24 * 60 * 60
 
     private static let monthNames: [String: Int] = [
-        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
     ]
 
-    private static let dayOfWeekNames: [String: Int] = [
-        "sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
-    ]
+    private static let dayOfWeekNames: [String: Int] = ["sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6]
 
     private init(
-        minutes: Set<Int>,
-        hours: Set<Int>,
-        daysOfMonth: Set<Int>,
-        months: Set<Int>,
-        daysOfWeek: Set<Int>,
-        dayOfMonthRestricted: Bool,
+        minutes: Set<Int>, hours: Set<Int>, daysOfMonth: Set<Int>, months: Set<Int>, daysOfWeek: Set<Int>, dayOfMonthRestricted: Bool,
         dayOfWeekRestricted: Bool
     ) {
         self.minutes = minutes
@@ -78,8 +70,7 @@ public struct AutomationCronSchedule: Equatable, Sendable {
         let fields = expression.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard fields.count == 5 else {
             throw AutomationCronScheduleError(
-                "Cron expression must have 5 fields (minute hour day-of-month month day-of-week), found \(fields.count)"
-            )
+                "Cron expression must have 5 fields (minute hour day-of-month month day-of-week), found \(fields.count)")
         }
 
         let minutes = try parseField(fields[0], name: "minute", range: 0...59, names: nil)
@@ -89,44 +80,27 @@ public struct AutomationCronSchedule: Equatable, Sendable {
         var daysOfWeek = try parseField(fields[4], name: "day-of-week", range: 0...7, names: dayOfWeekNames)
         // 7 is an alias for Sunday (0) in the dow field; normalize so downstream matching
         // only ever deals with 0-6.
-        if daysOfWeek.remove(7) != nil {
-            daysOfWeek.insert(0)
-        }
+        if daysOfWeek.remove(7) != nil { daysOfWeek.insert(0) }
 
         return AutomationCronSchedule(
-            minutes: minutes,
-            hours: hours,
-            daysOfMonth: daysOfMonth,
-            months: months,
-            daysOfWeek: daysOfWeek,
+            minutes: minutes, hours: hours, daysOfMonth: daysOfMonth, months: months, daysOfWeek: daysOfWeek,
             // Standard (Vixie) cron treats a day field that STARTS with `*` — bare `*` or a step like
             // `*/2` — as unrestricted for the day-of-month/day-of-week interaction: the fire-on-EITHER
             // rule applies only when both fields are written as explicit values or ranges. Marking `*/n`
             // restricted would make `0 0 */2 * MON` fire on every second day PLUS every Monday instead of
             // only Mondays that fall on a matching day.
-            dayOfMonthRestricted: !fields[2].hasPrefix("*"),
-            dayOfWeekRestricted: !fields[4].hasPrefix("*")
-        )
+            dayOfMonthRestricted: !fields[2].hasPrefix("*"), dayOfWeekRestricted: !fields[4].hasPrefix("*"))
     }
 
     /// Parses one cron field (e.g. `"1,15"`, `"mon-fri"`, `"*/15"`) into the set of concrete
     /// integer values it matches, validating every value against `range` and every step/range
     /// against cron's syntax rules.
-    private static func parseField(
-        _ field: String,
-        name: String,
-        range: ClosedRange<Int>,
-        names: [String: Int]?
-    ) throws -> Set<Int> {
-        guard !field.isEmpty else {
-            throw AutomationCronScheduleError("Cron \(name) field cannot be empty")
-        }
+    private static func parseField(_ field: String, name: String, range: ClosedRange<Int>, names: [String: Int]?) throws -> Set<Int> {
+        guard !field.isEmpty else { throw AutomationCronScheduleError("Cron \(name) field cannot be empty") }
 
         var values = Set<Int>()
         for part in field.split(separator: ",", omittingEmptySubsequences: false) {
-            guard !part.isEmpty else {
-                throw AutomationCronScheduleError("Cron \(name) field has an empty list item in \"\(field)\"")
-            }
+            guard !part.isEmpty else { throw AutomationCronScheduleError("Cron \(name) field has an empty list item in \"\(field)\"") }
             values.formUnion(try parsePart(String(part), name: name, range: range, names: names))
         }
         return values
@@ -134,12 +108,7 @@ public struct AutomationCronSchedule: Equatable, Sendable {
 
     /// Parses a single comma-separated part of a field: a step expression (`*/n`, `a-b/n`), a
     /// range (`a-b`), or a bare value/name.
-    private static func parsePart(
-        _ part: String,
-        name: String,
-        range: ClosedRange<Int>,
-        names: [String: Int]?
-    ) throws -> Set<Int> {
+    private static func parsePart(_ part: String, name: String, range: ClosedRange<Int>, names: [String: Int]?) throws -> Set<Int> {
         let base: String
         let step: Int
         if let slashIndex = part.firstIndex(of: "/") {
@@ -162,14 +131,10 @@ public struct AutomationCronSchedule: Equatable, Sendable {
             let upperText = String(base[base.index(after: dashIndex)...])
             let lower = try parseValue(lowerText, name: name, range: range, names: names)
             let upper = try parseValue(upperText, name: name, range: range, names: names)
-            guard lower <= upper else {
-                throw AutomationCronScheduleError("Cron \(name) field has an inverted range in \"\(part)\"")
-            }
+            guard lower <= upper else { throw AutomationCronScheduleError("Cron \(name) field has an inverted range in \"\(part)\"") }
             bounds = lower...upper
         } else {
-            guard step == 1 else {
-                throw AutomationCronScheduleError("Cron \(name) field has a step without a range or \"*\" in \"\(part)\"")
-            }
+            guard step == 1 else { throw AutomationCronScheduleError("Cron \(name) field has a step without a range or \"*\" in \"\(part)\"") }
             let value = try parseValue(base, name: name, range: range, names: names)
             return [value]
         }
@@ -191,15 +156,8 @@ public struct AutomationCronSchedule: Equatable, Sendable {
 
     /// Parses one bare token in a field to an integer, accepting either a numeric value or (for
     /// month/day-of-week) a case-insensitive 3-letter name, and validates it against `range`.
-    private static func parseValue(
-        _ text: String,
-        name: String,
-        range: ClosedRange<Int>,
-        names: [String: Int]?
-    ) throws -> Int {
-        guard !text.isEmpty else {
-            throw AutomationCronScheduleError("Cron \(name) field has a missing value")
-        }
+    private static func parseValue(_ text: String, name: String, range: ClosedRange<Int>, names: [String: Int]?) throws -> Int {
+        guard !text.isEmpty else { throw AutomationCronScheduleError("Cron \(name) field has a missing value") }
         let value: Int
         if let numeric = Int(text) {
             value = numeric
@@ -209,9 +167,7 @@ public struct AutomationCronSchedule: Equatable, Sendable {
             throw AutomationCronScheduleError("Cron \(name) field has an unrecognized value \"\(text)\"")
         }
         guard range.contains(value) else {
-            throw AutomationCronScheduleError(
-                "Cron \(name) field value \(value) is out of range \(range.lowerBound)-\(range.upperBound)"
-            )
+            throw AutomationCronScheduleError("Cron \(name) field value \(value) is out of range \(range.lowerBound)-\(range.upperBound)")
         }
         return value
     }
@@ -221,14 +177,10 @@ public struct AutomationCronSchedule: Equatable, Sendable {
     /// match check and to skip an entire non-matching day in one step, applying the standard
     /// cron OR rule when both day-of-month and day-of-week are restricted (neither is `*`).
     private func dayMatches(dayOfMonth: Int, month: Int, weekday0Sunday: Int) -> Bool {
-        guard months.contains(month) else {
-            return false
-        }
+        guard months.contains(month) else { return false }
         let domMatches = daysOfMonth.contains(dayOfMonth)
         let dowMatches = daysOfWeek.contains(weekday0Sunday)
-        if dayOfMonthRestricted && dayOfWeekRestricted {
-            return domMatches || dowMatches
-        }
+        if dayOfMonthRestricted && dayOfWeekRestricted { return domMatches || dowMatches }
         return domMatches && dowMatches
     }
 
@@ -272,40 +224,28 @@ public struct AutomationCronSchedule: Equatable, Sendable {
         let nanosecondsIntoSecond = calendar.component(.nanosecond, from: date)
         let secondsToTrim = Double(secondsIntoMinute) + Double(nanosecondsIntoSecond) / 1_000_000_000
         let startOfCurrentMinute = date.addingTimeInterval(-secondsToTrim)
-        guard var candidate = calendar.date(byAdding: .minute, value: 1, to: startOfCurrentMinute) else {
-            return nil
-        }
+        guard var candidate = calendar.date(byAdding: .minute, value: 1, to: startOfCurrentMinute) else { return nil }
 
         let deadline = date.addingTimeInterval(Self.searchLimit)
         while candidate <= deadline {
             let dayComponents = calendar.dateComponents([.day, .month, .weekday], from: candidate)
-            guard let day = dayComponents.day, let month = dayComponents.month, let weekday = dayComponents.weekday else {
-                return nil
-            }
+            guard let day = dayComponents.day, let month = dayComponents.month, let weekday = dayComponents.weekday else { return nil }
             // Foundation's Calendar.weekday is 1-based with Sunday = 1; this schedule stores
             // day-of-week as 0-based with Sunday = 0.
             let weekday0Sunday = weekday - 1
 
             guard dayMatches(dayOfMonth: day, month: month, weekday0Sunday: weekday0Sunday) else {
                 let startOfDay = calendar.startOfDay(for: candidate)
-                guard let nextDayStart = calendar.date(byAdding: .day, value: 1, to: startOfDay) else {
-                    return nil
-                }
+                guard let nextDayStart = calendar.date(byAdding: .day, value: 1, to: startOfDay) else { return nil }
                 candidate = nextDayStart
                 continue
             }
 
             let timeComponents = calendar.dateComponents([.hour, .minute], from: candidate)
-            guard let hour = timeComponents.hour, let minute = timeComponents.minute else {
-                return nil
-            }
-            if hours.contains(hour) && minutes.contains(minute) {
-                return candidate
-            }
+            guard let hour = timeComponents.hour, let minute = timeComponents.minute else { return nil }
+            if hours.contains(hour) && minutes.contains(minute) { return candidate }
 
-            guard let next = calendar.date(byAdding: .minute, value: 1, to: candidate) else {
-                return nil
-            }
+            guard let next = calendar.date(byAdding: .minute, value: 1, to: candidate) else { return nil }
             candidate = next
         }
         return nil

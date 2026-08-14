@@ -10,11 +10,9 @@ import workspacecore
     private static let mac = WorkspaceVisibilityTree.Device(deviceID: "device-mac", name: "Local")
     private static let linux = WorkspaceVisibilityTree.Device(deviceID: "device-linux", name: "keptune")
 
-    private static func project(
-        _ id: String, name: String, isGitRepo: Bool = true, isHidden: Bool = false, deviceID: String = "device-mac"
-    ) -> ProjectSummary {
-        ProjectSummary(id: id, name: name, dir: "/repos/\(name)", isGitRepo: isGitRepo, defaultBranch: "main", isHidden: isHidden, deviceID: deviceID)
-    }
+    private static func project(_ id: String, name: String, isGitRepo: Bool = true, isHidden: Bool = false, deviceID: String = "device-mac")
+        -> ProjectSummary
+    { ProjectSummary(id: id, name: name, dir: "/repos/\(name)", isGitRepo: isGitRepo, defaultBranch: "main", isHidden: isHidden, deviceID: deviceID) }
 
     private static func workspace(_ id: String, branch: String, isHidden: Bool = false, isDefault: Bool = false) -> WorkspaceSummary {
         WorkspaceSummary(id: id, branch: branch, dir: "/repos/\(branch)", isRunning: false, isHidden: isHidden, isDefault: isDefault)
@@ -46,8 +44,9 @@ import workspacecore
     @Test func listsHiddenWorkspacesAndHiddenProjects() {
         let tree = WorkspaceVisibilityTree.build(
             devices: [Self.mac], projects: [Self.project("p1", name: "harbor", isHidden: true)],
-            workspacesByProject: ["p1": [Self.workspace("w1", branch: "main", isDefault: true), Self.workspace("w2", branch: "old", isHidden: true)]],
-            query: "")
+            workspacesByProject: [
+                "p1": [Self.workspace("w1", branch: "main", isDefault: true), Self.workspace("w2", branch: "old", isHidden: true)]
+            ], query: "")
 
         let project = tree[0].projects[0]
         #expect(project.workspaces.map(\.workspaceID) == ["w1", "w2"])

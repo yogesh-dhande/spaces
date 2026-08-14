@@ -5212,9 +5212,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Surfaces why a per-project daemon action could not resolve its device.
-    func showProjectDeviceUnavailableError(projectID: String) {
-        showError(deviceUnavailableError(deviceID: deviceID(forProjectID: projectID)))
-    }
+    func showProjectDeviceUnavailableError(projectID: String) { showError(deviceUnavailableError(deviceID: deviceID(forProjectID: projectID))) }
 
     /// Surfaces why a pane could not be opened for a terminal target, naming the device the request
     /// pinned rather than re-deriving it from a workspace the sidebar may not list.
@@ -5359,8 +5357,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // no row for it, so re-showing its detail would resurrect a pane with nothing behind it.
             // Outage retention is unaffected: an offline device's retained rows keep their last live
             // flags, so nothing reads as hidden merely because its device stopped answering.
-            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID),
-                SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
+            if let (project, workspace) = findWorkspace(id: selectedWorkspaceID), SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
             {
                 showWorkspaceDetail(project: project, workspace: workspace)
                 return

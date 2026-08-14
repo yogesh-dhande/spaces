@@ -609,10 +609,9 @@ struct SpacesTabView: View {
         BandRow(
             dotKind: nil, tile: TypeIconTile(systemName: "folder"), title: project.projectName,
             detail: project.workspaceCount == 1 ? "1 workspace" : "\(project.workspaceCount) workspaces", detailIsMonospaced: false
-        ) { EmptyView() }.bandListRow().accessibilityIdentifier("project.hidden.\(project.projectID)").contextMenu {
-            unhideProjectButton(project)
-        }.swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideProjectButton(project) }.id(
-            SpacesListRowID.hiddenProject(project.projectID))
+        ) { EmptyView() }.bandListRow().accessibilityIdentifier("project.hidden.\(project.projectID)").contextMenu { unhideProjectButton(project) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideProjectButton(project) }.id(
+                SpacesListRowID.hiddenProject(project.projectID))
     }
 
     private func hiddenWorkspaceRow(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {

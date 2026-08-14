@@ -143,8 +143,7 @@ final class WorkspaceVisibilityCheckbox: NSButton {
                 case .project: .project(projectID: project.projectID)
                 case .workspace(let workspaceID, _): .workspace(workspaceID: workspaceID)
                 }
-            }(),
-            accessibilityIdentifier: "project-visibility-checkbox")
+            }(), accessibilityIdentifier: "project-visibility-checkbox")
         checkbox.toolTip = project.isChecked ? "Shown in sidebar" : "Hidden from sidebar"
 
         let glyph = NSImageView()
@@ -202,9 +201,7 @@ final class WorkspaceVisibilityCheckbox: NSButton {
         return cell
     }
 
-    private func checkbox(isChecked: Bool, flag: WorkspaceVisibilityCheckbox.Flag, accessibilityIdentifier: String)
-        -> WorkspaceVisibilityCheckbox
-    {
+    private func checkbox(isChecked: Bool, flag: WorkspaceVisibilityCheckbox.Flag, accessibilityIdentifier: String) -> WorkspaceVisibilityCheckbox {
         let checkbox = WorkspaceVisibilityCheckbox(checkboxWithTitle: "", target: self, action: #selector(toggle(_:)))
         checkbox.state = isChecked ? .on : .off
         checkbox.flag = flag
@@ -219,8 +216,7 @@ final class WorkspaceVisibilityCheckbox: NSButton {
         cell.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: leadingInset),
-            content.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            content.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            content.trailingAnchor.constraint(equalTo: cell.trailingAnchor), content.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
     }

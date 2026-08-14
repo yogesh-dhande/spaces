@@ -121,11 +121,10 @@ import workspacecore
         }
 
         let overviewInputs = host.automationDeviceInputs()
-        let inputs = if selectedTab == .runs {
-            AutomationsViewModel.mergingRetainedRuns(in: overviewInputs, with: retainedRunsByDeviceID)
-        } else {
-            overviewInputs
-        }
+        let inputs =
+            if selectedTab == .runs { AutomationsViewModel.mergingRetainedRuns(in: overviewInputs, with: retainedRunsByDeviceID) } else {
+                overviewInputs
+            }
         // A dropped device would otherwise vanish from the filter; keep "All devices" selected instead.
         if let filter = deviceFilterID, !inputs.contains(where: { $0.deviceID == filter }) { deviceFilterID = nil }
 
@@ -164,8 +163,7 @@ import workspacecore
     private func loadRetainedRunHistoryIfNeeded(for inputs: [AutomationDeviceInput], now: Date = Date()) {
         let requests: [(deviceID: String, device: SpacesPairedDeviceRecord)] = inputs.compactMap { input in
             guard input.isReachable, !retainedRunHistoryLoadingDeviceIDs.contains(input.deviceID),
-                AutomationsViewModel.retainedRunHistoryNeedsRefresh(
-                    lastLoadedAt: retainedRunHistoryLoadedAtByDeviceID[input.deviceID], now: now),
+                AutomationsViewModel.retainedRunHistoryNeedsRefresh(lastLoadedAt: retainedRunHistoryLoadedAtByDeviceID[input.deviceID], now: now),
                 let device = host.automationDeviceRecord(deviceID: input.deviceID)
             else { return nil }
             return (input.deviceID, device)
@@ -177,8 +175,9 @@ import workspacecore
         Task { @MainActor [weak self] in
             let results = await Task.detached(priority: .userInitiated) {
                 requests.map { request -> (String, [TerminalServiceAutomationRunSummary]?) in
-                    do { return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(device: request.device, clientApp: clientApp)) }
-                    catch { return (request.deviceID, nil) }
+                    do { return (request.deviceID, try SpacesDeviceClient.listAutomationRuns(device: request.device, clientApp: clientApp)) } catch {
+                        return (request.deviceID, nil)
+                    }
                 }
             }.value
             guard let self, retainedRunHistoryGeneration == generation else { return }
@@ -851,8 +850,8 @@ import workspacecore
     /// offline remote this renders whatever cached overview exists, which is acceptable.
     private func performMutation(
         deviceID: String, serializationKey: String? = nil,
-        _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void)
-    {
+        _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void
+    ) {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()
             return
@@ -870,11 +869,7 @@ import workspacecore
             if let error { self.host.showError(error) }
             self.host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
         }
-        if let serializationKey {
-            automationMutationQueue.enqueue(key: serializationKey, operation: run)
-        } else {
-            Task { await run() }
-        }
+        if let serializationKey { automationMutationQueue.enqueue(key: serializationKey, operation: run) } else { Task { await run() } }
     }
 
     /// Splits a `"deviceID::rowID"` control identifier back into its parts.

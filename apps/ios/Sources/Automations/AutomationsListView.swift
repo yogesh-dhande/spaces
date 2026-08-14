@@ -70,9 +70,7 @@ struct AutomationsListView: View {
                 title: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(automation.name).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
-                        if !excerpt.isEmpty {
-                            Text(excerpt).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1)
-                        }
+                        if !excerpt.isEmpty { Text(excerpt).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1) }
                     }
                 }, detail: detail, detailIsMonospaced: false
             ) {
@@ -119,21 +117,27 @@ struct AutomationRunsView: View {
     }
 
     var body: some View {
-        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: nil)
-            .task { await loadRuns() }
-            .confirmationDialog("Cancel this run?", isPresented: cancelDialogBinding, titleVisibility: .visible) {
-                Button("Cancel Run", role: .destructive) {
-                    guard let pendingCancelRunID else { return }
-                    Task { await model.cancelAutomationRun(runID: pendingCancelRunID); await loadRuns() }
+        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: nil).task {
+            await loadRuns()
+        }.confirmationDialog("Cancel this run?", isPresented: cancelDialogBinding, titleVisibility: .visible) {
+            Button("Cancel Run", role: .destructive) {
+                guard let pendingCancelRunID else { return }
+                Task {
+                    await model.cancelAutomationRun(runID: pendingCancelRunID)
+                    await loadRuns()
                 }
-                Button("Keep Running", role: .cancel) {}
-            }.confirmationDialog("End this run's agents?", isPresented: endAgentsDialogBinding, titleVisibility: .visible) {
-                Button("End Agents", role: .destructive) {
-                    guard let pendingEndAgentsRunID else { return }
-                    Task { await model.endAutomationAgents(runID: pendingEndAgentsRunID); await loadRuns() }
-                }
-                Button("Keep Agents Running", role: .cancel) {}
             }
+            Button("Keep Running", role: .cancel) {}
+        }.confirmationDialog("End this run's agents?", isPresented: endAgentsDialogBinding, titleVisibility: .visible) {
+            Button("End Agents", role: .destructive) {
+                guard let pendingEndAgentsRunID else { return }
+                Task {
+                    await model.endAutomationAgents(runID: pendingEndAgentsRunID)
+                    await loadRuns()
+                }
+            }
+            Button("Keep Agents Running", role: .cancel) {}
+        }
     }
 
     /// Fetches the per-automation run history through the daemon's retained-runs endpoint. A no-op for the
@@ -158,7 +162,10 @@ struct AutomationRunsView: View {
             }.background(Theme.bg.ignoresSafeArea())
         } else {
             ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in runRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(.hidden)
-                .background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh(); await loadRuns() }
+                .background(Theme.bg.ignoresSafeArea()).refreshable {
+                    await model.refresh()
+                    await loadRuns()
+                }
         }
     }
 

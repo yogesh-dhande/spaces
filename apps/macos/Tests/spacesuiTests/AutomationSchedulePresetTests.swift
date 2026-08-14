@@ -114,15 +114,13 @@ struct AutomationSchedulePresetTests {
     }
 
     @Test func nextRunsComputesThreeDailyFires() throws {
-        let runs = try AutomationSchedulePreview.nextRuns(
-            cronExpression: "0 9 * * *", after: date("2026-01-01T00:00:00Z"), timeZone: utc(), count: 3)
+        let runs = try AutomationSchedulePreview.nextRuns(cronExpression: "0 9 * * *", after: date("2026-01-01T00:00:00Z"), timeZone: utc(), count: 3)
         #expect(runs == [date("2026-01-01T09:00:00Z"), date("2026-01-02T09:00:00Z"), date("2026-01-03T09:00:00Z")])
     }
 
     @Test func nextRunsSkipsAPassedFireTimeToday() throws {
         // Already past 09:00 today, so the first fire is tomorrow.
-        let runs = try AutomationSchedulePreview.nextRuns(
-            cronExpression: "0 9 * * *", after: date("2026-01-01T10:00:00Z"), timeZone: utc(), count: 2)
+        let runs = try AutomationSchedulePreview.nextRuns(cronExpression: "0 9 * * *", after: date("2026-01-01T10:00:00Z"), timeZone: utc(), count: 2)
         #expect(runs == [date("2026-01-02T09:00:00Z"), date("2026-01-03T09:00:00Z")])
     }
 

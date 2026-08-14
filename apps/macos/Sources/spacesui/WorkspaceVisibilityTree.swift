@@ -80,20 +80,22 @@ enum WorkspaceVisibilityTree {
         }
     }
 
-    static func build(
-        devices: [Device], projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], query: String
-    ) -> [WorkspaceVisibilityDeviceNode] {
+    static func build(devices: [Device], projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], query: String)
+        -> [WorkspaceVisibilityDeviceNode]
+    {
         let full = devices.map { device in
             WorkspaceVisibilityDeviceNode(
                 deviceID: device.deviceID, name: device.name,
-                projects: projects.filter { $0.deviceID == device.deviceID }.map { projectNode($0, device: device, workspacesByProject: workspacesByProject) })
+                projects: projects.filter { $0.deviceID == device.deviceID }.map {
+                    projectNode($0, device: device, workspacesByProject: workspacesByProject)
+                })
         }
         return filtered(full, query: query)
     }
 
-    private static func projectNode(
-        _ project: ProjectSummary, device: Device, workspacesByProject: [String: [WorkspaceSummary]]
-    ) -> WorkspaceVisibilityProjectNode {
+    private static func projectNode(_ project: ProjectSummary, device: Device, workspacesByProject: [String: [WorkspaceSummary]])
+        -> WorkspaceVisibilityProjectNode
+    {
         // Sorted the way the sidebar sorts a project's workspaces (default first, then by name) so a
         // row sits in the same place in both surfaces. Hidden workspaces are kept, so the order does
         // not shift as the user toggles them.
@@ -117,8 +119,7 @@ enum WorkspaceVisibilityTree {
             projectID: project.id, deviceID: device.deviceID, name: project.name, isGitRepo: true, toggle: .project(isHidden: project.isHidden),
             workspaces: workspaces.map {
                 WorkspaceVisibilityWorkspaceNode(workspaceID: $0.id, name: $0.displayName, isHidden: $0.isHidden, isDimmed: project.isHidden)
-            },
-            trailingText: project.isHidden ? "project hidden" : "\(shownCount) of \(workspaces.count) shown", isDimmed: project.isHidden)
+            }, trailingText: project.isHidden ? "project hidden" : "\(shownCount) of \(workspaces.count) shown", isDimmed: project.isHidden)
     }
 
     /// Applies the search query, preserving tree order rather than reordering by score: an outline the

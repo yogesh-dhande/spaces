@@ -9,14 +9,7 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     /// Builds a `Date` for an exact wall-clock instant in `timeZone` (defaults to UTC), so
     /// tests can express fixtures as readable calendar dates instead of raw epoch offsets.
-    private func date(
-        _ year: Int,
-        _ month: Int,
-        _ day: Int,
-        _ hour: Int,
-        _ minute: Int,
-        timeZone: TimeZone? = nil
-    ) -> Date {
+    private func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int, timeZone: TimeZone? = nil) -> Date {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone ?? utc
         var components = DateComponents()
@@ -178,10 +171,7 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(zero, seven)
 
         let start = date(2024, 1, 1, 0, 0)
-        XCTAssertEqual(
-            zero.nextFireDate(after: start, timeZone: utc),
-            seven.nextFireDate(after: start, timeZone: utc)
-        )
+        XCTAssertEqual(zero.nextFireDate(after: start, timeZone: utc), seven.nextFireDate(after: start, timeZone: utc))
     }
 
     // MARK: - Strict "after" semantics
@@ -319,9 +309,7 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // Tests parse rejects an expression without exactly 5 fields.
     func testParseRejectsWrongFieldCount() {
-        XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * *")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("5 fields"))
-        }
+        XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("5 fields")) }
         XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * * * *")) { error in
             XCTAssertTrue(error.localizedDescription.contains("5 fields"))
         }
@@ -329,16 +317,12 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // Tests parse rejects an out-of-range minute value.
     func testParseRejectsOutOfRangeMinute() {
-        XCTAssertThrowsError(try AutomationCronSchedule.parse("60 * * * *")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("minute"))
-        }
+        XCTAssertThrowsError(try AutomationCronSchedule.parse("60 * * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("minute")) }
     }
 
     // Tests parse rejects an out-of-range hour value.
     func testParseRejectsOutOfRangeHour() {
-        XCTAssertThrowsError(try AutomationCronSchedule.parse("* 24 * * *")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("hour"))
-        }
+        XCTAssertThrowsError(try AutomationCronSchedule.parse("* 24 * * *")) { error in XCTAssertTrue(error.localizedDescription.contains("hour")) }
     }
 
     // Tests parse rejects an out-of-range day-of-month value.
@@ -353,9 +337,7 @@ final class AutomationCronScheduleTests: XCTestCase {
 
     // Tests parse rejects an out-of-range month value.
     func testParseRejectsOutOfRangeMonth() {
-        XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * 13 *")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("month"))
-        }
+        XCTAssertThrowsError(try AutomationCronSchedule.parse("* * * 13 *")) { error in XCTAssertTrue(error.localizedDescription.contains("month")) }
     }
 
     // Tests parse rejects an out-of-range day-of-week value.

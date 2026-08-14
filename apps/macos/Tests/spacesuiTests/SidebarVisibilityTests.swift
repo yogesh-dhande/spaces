@@ -6,9 +6,7 @@ import workspacecore
 /// What the sidebar shows. Every surface that renders the sidebar's model reads through these rules,
 /// so a hidden project has to disappear from all of them exactly the way a hidden workspace does.
 @Suite struct SidebarVisibilityTests {
-    private static func project(
-        _ id: String, isGitRepo: Bool = true, isHidden: Bool = false, deviceID: String = "device-mac"
-    ) -> ProjectSummary {
+    private static func project(_ id: String, isGitRepo: Bool = true, isHidden: Bool = false, deviceID: String = "device-mac") -> ProjectSummary {
         ProjectSummary(id: id, name: id, dir: "/repos/\(id)", isGitRepo: isGitRepo, defaultBranch: "main", isHidden: isHidden, deviceID: deviceID)
     }
 

@@ -14,17 +14,17 @@ import spacesterminalcore
         SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: .testStatus, automationRuns: runs)
     }
 
-    private func run(
-        terminalSessionID: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []
-    ) -> TerminalServiceAutomationRunSummary {
+    private func run(terminalSessionID: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = [])
+        -> TerminalServiceAutomationRunSummary
+    {
         TerminalServiceAutomationRunSummary(
-            id: "run-1", automationID: "auto-1", automationName: "nightly", kind: "script", status: "running", trigger: "schedule",
-            skipReason: nil, exitCode: nil, terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "now",
-            attributedAgents: attributedAgents)
+            id: "run-1", automationID: "auto-1", automationName: "nightly", kind: "script", status: "running", trigger: "schedule", skipReason: nil,
+            exitCode: nil, terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "now", attributedAgents: attributedAgents)
     }
 
     @Test func runCommandSessionResolvesToAutomation() {
-        let kind = AppKitController.terminalSessionKind(sessionID: "cmd-session", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
+        let kind = AppKitController.terminalSessionKind(
+            sessionID: "cmd-session", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
         #expect(kind == .automation)
     }
 
@@ -37,7 +37,8 @@ import spacesterminalcore
     }
 
     @Test func unknownSessionFallsBackToShell() {
-        let kind = AppKitController.terminalSessionKind(sessionID: "stray-shell", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
+        let kind = AppKitController.terminalSessionKind(
+            sessionID: "stray-shell", overviews: [overview(runs: [run(terminalSessionID: "cmd-session")])])
         #expect(kind == .shell)
     }
 }

@@ -176,7 +176,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     // A project summary sent by a peer that predates project-level hiding decodes as visible rather than
     // failing the whole overview.
     func testProjectSummaryDecodesWithoutHiddenFlag() throws {
-        let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: true)
+        let project = SpacesDeviceProjectSummary(
+            id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: true)
 
         let encoded = try JSONEncoder().encode(project)
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
