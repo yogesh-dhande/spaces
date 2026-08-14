@@ -196,7 +196,7 @@ SERVICE_PID=$!
 wait_for_daemon_socket 15
 wait_for_terminal_list_success 15
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+# terminal create is workspace-scoped; register a fixture project and use its default workspace.
 # register-project talks to the DB directly through spacese2e's in-process orchestrator, so it does
 # not start or touch spacesd.
 FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
@@ -208,7 +208,7 @@ FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'impo
 # `terminate()` (invoked from `shutdown()`) enqueues an exited-runtime-state write per core, and
 # that write landing (rather than the row staying `running`) is what this script discriminates on.
 command_payload="python3 -c 'import time; print(\"__signal_shutdown_ready__\", flush=True); time.sleep(120)'"
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title signal-shutdown-e2e)"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title signal-shutdown-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 wait_for_tail_contains "$session_id" "__signal_shutdown_ready__" 20

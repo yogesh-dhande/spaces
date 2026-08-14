@@ -217,7 +217,7 @@ Non-obvious constraints. Each names a trap and what breaks without the guard.
 The terminal slice is healthy when these flows work:
 
 - App-launched workspace terminals, process windows, and coding-agent windows attach to daemon-owned sessions and reopen across `SpacesApp` quit and relaunch without restarting the session
-- Session creation through `spaces terminal command`; `list`, `send`, `key`, `tail`, `show`, and `takeover`
+- Session creation through `spaces terminal create`; `list`, `send`, `key`, `tail`, `show`, and `takeover`
 - Owner-scoped image paste writes a daemon-local `/tmp/spaces-paste-*` file and injects that path, leaving non-image `Ctrl+V` as ordinary input
 - Owner and viewer attachment persistence, and lease expiry
 - CLI `tail` transcript rendering from `output.log` with persisted geometry

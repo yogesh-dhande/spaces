@@ -209,9 +209,7 @@ public final class WorkspaceOrchestrator {
             guard try !hasActiveAutomationRunTargetingWorkspace(workspaceID) else {
                 throw WorkspaceError.dependencyMissing(message: "Automation cancellation is unavailable.")
             }
-            try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-                try operation()
-            }
+            try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try operation() }
             return
         }
         try cancellation(workspaceID) { beginCancellation in
@@ -926,7 +924,9 @@ public final class WorkspaceOrchestrator {
         // Reject a quiescing daemon before recording any automation cancellation. The inner stop repeats
         // this guard at its destructive-row boundary to cover a handoff that begins during teardown.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
-        try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in try restartWorkspaceUnlocked(workspaceID: workspaceID) }
+        try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
+            try restartWorkspaceUnlocked(workspaceID: workspaceID)
+        }
     }
 
     /// Stop-then-launch, holding each configured process's pane across the gap so its replacement lands
@@ -1081,7 +1081,7 @@ public final class WorkspaceOrchestrator {
         // is changed, so a handoff or busy rejection preserves both automation execution and history.
         guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
         try coordinateAutomationCancellationDuringWorkspaceStop(workspaceID: workspaceID) { [self] in
-                outcome.set(try stopWorkspaceUnlocked(workspaceID: workspaceID))
+            outcome.set(try stopWorkspaceUnlocked(workspaceID: workspaceID))
         }
         guard let resolvedOutcome = outcome.get() else {
             throw WorkspaceError.dependencyMissing(message: "Automation cancellation did not perform the workspace stop.")
@@ -1596,12 +1596,11 @@ public final class WorkspaceOrchestrator {
         return session
     }
 
-    /// Resolves the workspace `spaces terminal command` should target: the explicit
-    /// `--workspace` id when given, else the deepest workspace whose directory
-    /// contains `cwd` (same containment rule as `workspaceForBuiltInTerminalSession`'s
-    /// fallback). Errors clearly when neither resolves, instead of falling back to a
-    /// workspace-less session.
-    public func resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: String?, cwd: String) throws -> String {
+    /// Resolves the explicit workspace id, or the deepest workspace whose directory contains `cwd`.
+    /// CLI terminal and local workspace-lifecycle commands share this daemon-owned rule so they use
+    /// the daemon's authoritative workspace set. Errors clearly instead of creating a workspace-less
+    /// terminal session or silently targeting another workspace.
+    public func resolveWorkspaceID(explicitWorkspaceID: String?, cwd: String) throws -> String {
         if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
             return explicitWorkspaceID
         }
@@ -1610,7 +1609,10 @@ public final class WorkspaceOrchestrator {
             let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
                 normalizePath($0.dir).count < normalizePath($1.dir).count
             })
-        else { throw WorkspaceError.invalidArgument(message: "Current directory is not inside a Spaces workspace.") }
+        else {
+            throw WorkspaceError.invalidArgument(
+                message: "Current directory \(cwd) is not inside a Spaces workspace. Run this command inside a workspace or pass --workspace <id>.")
+        }
         return matched.id
     }
 

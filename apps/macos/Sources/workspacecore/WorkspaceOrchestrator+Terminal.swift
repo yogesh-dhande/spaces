@@ -296,7 +296,7 @@ extension WorkspaceOrchestrator {
 
     /// Runs `command` through an interactive login shell (`-l -i -c`), the single shell form every
     /// command Spaces launches into a terminal goes through — workspace processes, ad-hoc
-    /// `terminal command` sessions, and spawned coding agents.
+    /// `terminal create` sessions, and spawned coding agents.
     ///
     /// `-l` alone sources only the profile files (`~/.zshenv`, `~/.zprofile`). The PATH entries and
     /// version-manager shims that put a user's tools on PATH — `~/.local/bin`, nvm/fnm/asdf/volta —
@@ -616,7 +616,7 @@ extension WorkspaceOrchestrator {
     /// Resolves the workspace owning a built-in terminal session: the workspace behind its
     /// running-process/agent/terminal-window row if it has one, else the workspace stamped
     /// on its own launch configuration — which every session now carries, since
-    /// `spaces terminal command` always resolves a workspace before launching. Returns nil
+    /// `spaces terminal create` always resolves a workspace before launching. Returns nil
     /// only when the session's launch configuration itself can't be read (deleted/pruned).
     func workspaceForBuiltInTerminalSession(sessionID: String, ownership existingOwnership: BuiltInTerminalSessionOwnership? = nil) throws
         -> WorkspaceRecord?

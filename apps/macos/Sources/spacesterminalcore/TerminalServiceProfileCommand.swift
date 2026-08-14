@@ -94,6 +94,24 @@ public struct TerminalServiceWorkspaceCreatePayload: Codable, Sendable, Equatabl
     }
 }
 
+public struct TerminalServiceWorkspaceLifecyclePayload: Codable, Sendable, Equatable {
+    public let cwd: String
+    public let workspaceID: String?
+
+    public init(cwd: String, workspaceID: String? = nil) {
+        self.cwd = cwd
+        self.workspaceID = workspaceID
+    }
+
+    private enum CodingKeys: String, CodingKey { case cwd, workspaceID }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cwd = try container.decodeRequiredNonEmpty(forKey: .cwd)
+        workspaceID = normalizedNonEmpty(try container.decodeIfPresent(String.self, forKey: .workspaceID))
+    }
+}
+
 public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let terminalSessionID: String
@@ -454,9 +472,9 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case terminalList
     case workspaceList(TerminalServiceWorkspaceListPayload)
     case workspaceCreate(TerminalServiceWorkspaceCreatePayload)
-    case workspaceStart(workspaceID: String)
+    case workspaceStart(TerminalServiceWorkspaceLifecyclePayload)
     case workspaceStop(workspaceID: String)
-    case workspaceRestart(workspaceID: String)
+    case workspaceRestart(TerminalServiceWorkspaceLifecyclePayload)
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
     case agentList(TerminalServiceAgentListPayload)
     case agentAnnotate(TerminalServiceAgentAnnotatePayload)
@@ -527,9 +545,9 @@ extension TerminalServiceProfileCommand: Codable {
             self = .terminalList
         case .workspaceList: self = .workspaceList(try container.decode(TerminalServiceWorkspaceListPayload.self, forKey: key))
         case .workspaceCreate: self = .workspaceCreate(try container.decode(TerminalServiceWorkspaceCreatePayload.self, forKey: key))
-        case .workspaceStart: self = .workspaceStart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .workspaceStart: self = .workspaceStart(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
         case .workspaceStop: self = .workspaceStop(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
-        case .workspaceRestart: self = .workspaceRestart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .workspaceRestart: self = .workspaceRestart(try container.decode(TerminalServiceWorkspaceLifecyclePayload.self, forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
         case .agentAnnotate: self = .agentAnnotate(try container.decode(TerminalServiceAgentAnnotatePayload.self, forKey: key))
@@ -562,9 +580,9 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalList: try container.encode(TerminalServiceEmptyPayload(), forKey: .terminalList)
         case .workspaceList(let payload): try container.encode(payload, forKey: .workspaceList)
         case .workspaceCreate(let payload): try container.encode(payload, forKey: .workspaceCreate)
-        case .workspaceStart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStart)
+        case .workspaceStart(let payload): try container.encode(payload, forKey: .workspaceStart)
         case .workspaceStop(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStop)
-        case .workspaceRestart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceRestart)
+        case .workspaceRestart(let payload): try container.encode(payload, forKey: .workspaceRestart)
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
         case .agentAnnotate(let payload): try container.encode(payload, forKey: .agentAnnotate)

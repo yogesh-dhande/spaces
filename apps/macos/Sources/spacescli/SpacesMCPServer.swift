@@ -167,7 +167,9 @@ final class SpacesMCPStdioServer {
                     let response = try SpacesDeviceClient.launchWorkspace(workspaceID: workspace, device: device, clientApp: cliDeviceClientApp())
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
-                return .profile(try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace)))
+                return .profile(
+                    try TerminalService.sendProfileCommand(
+                        .workspaceStart(.init(cwd: FileManager.default.currentDirectoryPath, workspaceID: workspace))))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace on this or a paired device.",
@@ -180,7 +182,9 @@ final class SpacesMCPStdioServer {
                     let response = try SpacesDeviceClient.restartWorkspace(workspaceID: workspace, device: device, clientApp: cliDeviceClientApp())
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
-                return .profile(try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace)))
+                return .profile(
+                    try TerminalService.sendProfileCommand(
+                        .workspaceRestart(.init(cwd: FileManager.default.currentDirectoryPath, workspaceID: workspace))))
             },
             MCPToolDescriptor(
                 name: "spaces_terminal_list", description: "List available Spaces terminal sessions.",

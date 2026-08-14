@@ -50,14 +50,14 @@ if [[ ! -S "$service_socket" ]]; then
   exit 1
 fi
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace. This
+# terminal create is workspace-scoped; register a fixture project and use its default workspace. This
 # throwaway profile has no workspace of its own, and without an explicit id the command resolves the
 # workspace from the current directory and fails outright.
 fixture_project_dir="$temp_root/device-api-fixture-project"
 mkdir -p "$fixture_project_dir"
 fixture_workspace_id="$("$spacese2e" register-project --project-dir "$fixture_project_dir" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
-session_output="$("$spaces_cli" terminal command --workspace "$fixture_workspace_id" --command 'echo ready; cat' --title 'device-api-profile')"
+session_output="$("$spaces_cli" terminal create --workspace "$fixture_workspace_id" --command 'echo ready; cat' --title 'device-api-profile')"
 session_id="$(awk '/Started terminal session/ { print $4 }' <<<"$session_output")"
 if [[ -z "$session_id" ]]; then
   echo "Failed to parse session id from: $session_output" >&2

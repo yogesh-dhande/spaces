@@ -106,7 +106,7 @@ Every conclusion below depends on it, and it fails **silently**: each hook comma
 `spaces agent spawn --command` runs without the login shell's environment, so a version-manager-installed agent (`codex` behind fnm) is not found, and wrapping in `sh -c` is rejected by the command validator. Exercise **both** routes and record both:
 
 - `spaces agent spawn --command <agent> --json` where the binary resolves at a stable path (claude), including the failure shape: a command that is not a supported agent must fail loudly, and a never-detected agent must exit non-zero, name what it waited for, and leave the session running.
-- The user's route: `terminal command` → `terminal show` → `terminal send text <sid> '<cmd>' --submit`.
+- The user's route: `terminal create` → `terminal show` → `terminal send text <sid> '<cmd>' --submit`.
 
 Per provider, confirm that `--submit` actually **ran** the line rather than leaving it in the composer, and note whether a first-run state (trust review, onboarding, auth) swallowed the prompt. Repeat one submit with the pane never opened, to confirm delivery does not depend on a live surface.
 

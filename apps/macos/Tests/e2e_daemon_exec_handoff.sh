@@ -269,7 +269,7 @@ SERVICE_PID=$!
 wait_for_daemon_socket 15
 wait_for_terminal_list_success 15
 
-# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+# terminal create is workspace-scoped; register a fixture project and use its default workspace.
 # register-project talks to the DB directly through spacese2e's in-process orchestrator, so it does
 # not start or touch spacesd.
 FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
@@ -280,7 +280,7 @@ FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'impo
 # A long-lived shell loop: prints the pre-handoff marker once, then keeps producing output so live
 # I/O through the PTY can be observed both before and after each handoff.
 command_payload='printf "%s\n" "'"$MARKER"'"; i=0; while true; do i=$((i+1)); printf "tick %s\n" "$i"; sleep 1; done'
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title exec-handoff-e2e)"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create --workspace "$FIXTURE_WORKSPACE_ID" --command "$command_payload" --title exec-handoff-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 

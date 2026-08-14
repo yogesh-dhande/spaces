@@ -32,7 +32,7 @@ export default function CliReferencePage() {
         <CodeBlock>{`spaces --version
 spaces project list
 spaces workspace list
-spaces workspace start --workspace <id>
+spaces workspace start
 spaces agent signal blocked`}</CodeBlock>
       </article>
 
@@ -59,14 +59,16 @@ spaces agent signal blocked`}</CodeBlock>
         </p>
         <CodeBlock>{`spaces workspace list [--project <project-id>] [--device <name-or-id>]
 spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
-spaces workspace start --workspace <workspace-id> [--device <name-or-id>]
-spaces workspace restart --workspace <workspace-id> [--device <name-or-id>]`}</CodeBlock>
+spaces workspace start [--workspace <workspace-id>]
+spaces workspace restart [--workspace <workspace-id>]
+spaces workspace start --device <name-or-id> --workspace <workspace-id>
+spaces workspace restart --device <name-or-id> --workspace <workspace-id>`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
           <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />
-          <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
+          <Flag name="--workspace <id>" description="Workspace ID for start and restart. Local commands infer the deepest workspace containing the current directory when omitted; paired-device commands require it." />
           <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, and restart. Defaults to this machine." />
         </ul>
       </article>
@@ -77,7 +79,7 @@ spaces workspace restart --workspace <workspace-id> [--device <name-or-id>]`}</C
           Terminal commands inspect and drive Spaces-owned terminal sessions on the same-machine daemon. Sessions survive app quit, so commands started here stay discoverable through <Cmd>spaces terminal list</Cmd>.
         </p>
         <CodeBlock>{`spaces terminal list [--device <name-or-id>]
-spaces terminal command [--workspace <workspace-id>] [--command <cmd>] [--title <title>]
+spaces terminal create [--workspace <workspace-id>] [--command <cmd>] [--title <title>]
 spaces terminal send text <session-id> <text> [--submit] [--device <name-or-id>]
 spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
 spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
@@ -87,7 +89,7 @@ spaces terminal show <session-id>`}</CodeBlock>
         </p>
         <ul className="mt-3 space-y-1">
           <Flag name="--device <name-or-id>" description="Paired device selector for list, send, and tail. Defaults to this machine's local sessions." />
-          <Flag name="--workspace <id>" description="Workspace ID for terminal command; omit inside a workspace." />
+          <Flag name="--workspace <id>" description="Workspace ID for terminal create; omit inside a workspace." />
           <Flag name="--command <cmd>" description="Shell command. Defaults to a login shell." />
           <Flag name="--title <title>" description="Session title. Defaults to shell." />
           <Flag name="--submit" description="Sends the text as a paste followed by a separate Enter keystroke so every supported agent TUI (Claude Code, Codex, OpenCode) submits the line instead of leaving it as an unsubmitted paste." />
@@ -156,7 +158,8 @@ spaces device remove <name-or-id>`}</CodeBlock>
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
         <CodeBlock>{`spaces project list
 spaces workspace create --project <project-id> --branch bugfix/login-timeout
-spaces workspace start --workspace <workspace-id>
+cd <workspace-directory>
+spaces workspace start
 spaces agent signal init
 spaces agent signal working
 # ... later ...

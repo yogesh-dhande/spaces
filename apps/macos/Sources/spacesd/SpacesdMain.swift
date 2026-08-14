@@ -156,8 +156,8 @@ final class DaemonLivenessState: @unchecked Sendable {
         let snapshot = snapshot()
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
-            activeSessionCount: snapshot.sessionCount, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
-            deviceAPIAddresses: currentDeviceAPIAddresses())
+            activeSessionCount: snapshot.sessionCount, protocolVersion: SpacesWireProtocol.version,
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: currentDeviceAPIAddresses())
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -570,8 +570,7 @@ enum SpacesDaemonErrorClassification {
                 ticksSuspended: { [livenessState] in
                     let snapshot = livenessState.snapshot()
                     return snapshot.handoffInProgress || snapshot.shutdownInProgress
-                },
-                logError: { writeStandardError("spacesd automation_error \($0)\n") })
+                }, logError: { writeStandardError("spacesd automation_error \($0)\n") })
             WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
                 try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
             }
@@ -925,16 +924,16 @@ enum SpacesDaemonErrorClassification {
         // main-blocked context would deadlock (see the one-way rule).
         case .profileCommand(.terminalCommand(let payload)): return terminalCommandOffMain(payload)
         case .profileCommand(.agentSpawn(let payload)): return agentSpawnOffMain(payload)
-        // Workspace start/restart and agent kill/signal are peeled off main for the SAME reason as the
+        // Workspace start/stop/restart and agent kill/signal are peeled off main for the SAME reason as the
         // three cases above: their orchestrator call graph reaches the built-in terminal launcher (start/
         // restart) or terminator (agent kill's stop chokepoint, and an agent-signal `exit` whose
         // `handleAgentExit` tears down an already-dead backing terminal), and both closures enter the
         // terminal engine actor via `TerminalEngineActor.runSynchronously` — which traps when called from
         // the main actor (the one-way rule). `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`
         // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
-        case .profileCommand(.workspaceStart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: false)
+        case .profileCommand(.workspaceStart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: false)
         case .profileCommand(.workspaceStop(let workspaceID)): return workspaceStopOffMain(workspaceID: workspaceID)
-        case .profileCommand(.workspaceRestart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: true)
+        case .profileCommand(.workspaceRestart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: true)
         case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
         case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
         // The whole automation command family is peeled off main: trigger/cancel/end-agents/delete reach the
@@ -1029,7 +1028,8 @@ enum SpacesDaemonErrorClassification {
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
             // Reads the off-actor liveness mirror rather than the now engine-isolated `sessionCores`
             // directly, so this main-actor status read never needs to hop onto the engine actor.
-            activeSessionCount: livenessState.snapshot().sessionCount, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
+            activeSessionCount: livenessState.snapshot().sessionCount, protocolVersion: SpacesWireProtocol.version,
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
             // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
             // addresses without duplicating the bound-host cache.
             deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
@@ -1877,7 +1877,7 @@ enum SpacesDaemonErrorClassification {
         if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
-            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+            let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspaceID, title: payload.title, command: payload.command)
             let profile = TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
@@ -1900,10 +1900,13 @@ enum SpacesDaemonErrorClassification {
     /// closures, which hop the engine actor via `TerminalEngineActor.runSynchronously`; that traps if
     /// driven from the main actor (the one-way rule), so this runs on the transport thread where the
     /// synchronous engine hop is safe. Mirrors the `handleProfileCommand` success/failure envelope.
-    private nonisolated func workspaceStartOffMain(workspaceID: String, restartIfRunning: Bool) -> TerminalServiceResponse {
+    private nonisolated func workspaceStartOffMain(payload: TerminalServiceWorkspaceLifecyclePayload, restartIfRunning: Bool)
+        -> TerminalServiceResponse
+    {
         if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
+            let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(
@@ -2346,7 +2349,7 @@ enum SpacesDaemonErrorClassification {
         do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command) } catch let error as AgentSpawnCommandGate.GateError {
             throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
         }
-        let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+        let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
         let session = try orchestrator.createWorkspaceAgentSession(
             workspaceID: workspaceID, command: payload.command, title: payload.title, automationRunID: payload.automationRunID)
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
