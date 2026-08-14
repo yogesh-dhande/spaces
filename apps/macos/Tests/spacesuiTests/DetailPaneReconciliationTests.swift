@@ -104,8 +104,7 @@ import spacesterminalcore
     @Test func aFailedReadKeepsTheChordAlreadyInEffect() throws {
         let inEffect = try #require(
             AppKitController.resolvedShortcutSpec(
-                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil,
-                leaderModifiers: Self.leader))
+                storedResolver([ClientSettingsKey.guiAlertsShortcut: "a"]), setting: .guiAlertsShortcut, current: nil, leaderModifiers: Self.leader))
 
         let afterFailedRead = AppKitController.resolvedShortcutSpec(
             failingResolver(), setting: .guiAlertsShortcut, current: inEffect, leaderModifiers: Self.leader)
@@ -183,16 +182,18 @@ extension ProcessProfileEnvironmentSuites {
         }
 
         /// One local device holding a single git project and workspace.
-        private func populatedSection(deviceID: String) -> AppKitController.DeviceSection {
+        private func populatedSection(deviceID: String, projectHidden: Bool = false, workspaceHidden: Bool = false) -> AppKitController.DeviceSection
+        {
             let overview = SpacesDeviceOverviewPayload(
                 projects: [
-                    SpacesDeviceProjectSummary(id: Self.projectID, name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")
+                    SpacesDeviceProjectSummary(
+                        id: Self.projectID, name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main", isHidden: projectHidden)
                 ],
                 workspaces: [
                     SpacesDeviceWorkspaceSummary(
                         id: Self.workspaceID, projectID: Self.projectID, projectName: "Project", branch: "feature", baseBranch: "main",
-                        dir: "/tmp/project-feature", isRunning: true, isHidden: false, isDefault: false, sessionCount: 1, codingAgentRows: [],
-                        terminalRows: [])
+                        dir: "/tmp/project-feature", isRunning: true, isHidden: workspaceHidden, isDefault: false, sessionCount: 1,
+                        codingAgentRows: [], terminalRows: [])
                 ], sessions: [])
             let mapped = AppKitController.deviceSidebarData(from: overview, deviceID: deviceID)
             return AppKitController.DeviceSection(
@@ -247,6 +248,30 @@ extension ProcessProfileEnvironmentSuites {
 
             #expect(controller.detailPane == DetailPane.none)
             #expect(controller.selectedWorkspaceID == nil, "a selection nothing lists would re-enter this branch on every later reload")
+        }
+
+        /// A project hidden from another client still resolves through `findWorkspace` (hidden rows stay
+        /// in the model on purpose — the Workspaces dialog lists them), but it has no sidebar row left,
+        /// so the reconcile takes the pane down instead of preserving detail for a row nothing shows.
+        @Test func aProjectHiddenElsewhereResolvesToThePlaceholder() {
+            let controller = makeController()
+            showWorkspacePane(controller)
+
+            applyReload(controller, section: populatedSection(deviceID: controller.localDeviceID, projectHidden: true))
+
+            #expect(controller.detailPane == DetailPane.none)
+            #expect(controller.selectedWorkspaceID == nil)
+        }
+
+        /// Same for the workspace's own flag set from another client.
+        @Test func aWorkspaceHiddenElsewhereResolvesToThePlaceholder() {
+            let controller = makeController()
+            showWorkspacePane(controller)
+
+            applyReload(controller, section: populatedSection(deviceID: controller.localDeviceID, workspaceHidden: true))
+
+            #expect(controller.detailPane == DetailPane.none)
+            #expect(controller.selectedWorkspaceID == nil)
         }
 
         /// The plain case behind the report: a reload arriving while nothing is selected. It used to end

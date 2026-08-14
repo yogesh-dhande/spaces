@@ -586,6 +586,15 @@ public enum SpacesDeviceClient {
             device: device, clientApp: clientApp, profile: profile)
     }
 
+    public static func updateProjectMetadata(
+        projectID: String, isHidden: Bool, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .updateProjectMetadata(.init(projectID: projectID, isHidden: isHidden, updatesHidden: true))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func updateWorkspaceConfig(
         workspaceID: String, config: SpacesDeviceWorkspaceConfig, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -687,12 +696,12 @@ public enum SpacesDeviceClient {
     }
 
     public static func stopCodingAgent(
-        workspaceID: String, agentID: String, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, agentID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), device: device,
-            clientApp: clientApp, profile: profile)
+            .init(command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID))), device: device, clientApp: clientApp,
+            profile: profile)
     }
 
     /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send text/bytes --device`).
@@ -722,12 +731,12 @@ public enum SpacesDeviceClient {
     /// session id (via the mutation result) so the caller polls readiness with `listAgentSessions`; the
     /// daemon runs the same supported-agent hook gate as the local spawn before creating the session.
     @discardableResult public static func spawnAgentSession(
-        workspaceID: String, command: String, title: String? = nil, device: SpacesPairedDeviceRecord,
+        workspaceID: String, command: String, title: String? = nil, automationRunID: String? = nil, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title))), device: device, clientApp: clientApp,
-            profile: profile)
+            .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title, automationRunID: automationRunID))),
+            device: device, clientApp: clientApp, profile: profile)
     }
 
     /// Coding-agent sessions on a paired device (`spaces agent list/status --device`), also used for
@@ -761,6 +770,75 @@ public enum SpacesDeviceClient {
         sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(.init(command: .killAgentSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+    }
+
+    // MARK: - Automations
+
+    /// Creates an automation on a paired device. The daemon validates the draft (non-empty fields, a
+    /// parseable cron for a cron trigger) and returns the created automation as a one-element list.
+    @discardableResult public static func createAutomation(
+        _ fields: TerminalServiceAutomationFields, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationSummary] {
+        try request(.init(command: .createAutomation(fields)), device: device, clientApp: clientApp, profile: profile).automations ?? []
+    }
+
+    /// Applies a full-field update (including enable/disable) to an automation on a paired device. Returns
+    /// the updated automation as a one-element list.
+    @discardableResult public static func updateAutomation(
+        id: String, fields: TerminalServiceAutomationFields, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationSummary] {
+        try request(.init(command: .updateAutomation(.init(id: id, fields: fields))), device: device, clientApp: clientApp, profile: profile)
+            .automations ?? []
+    }
+
+    /// Deletes an automation on a paired device (cancelling any running run and cleaning up its artifacts).
+    @discardableResult public static func deleteAutomation(
+        id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .deleteAutomation(.init(id: id))), device: device, clientApp: clientApp, profile: profile)
+    }
+
+    /// Lists the automations configured on a paired device.
+    public static func listAutomations(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationSummary] {
+        try request(.init(command: .listAutomations), device: device, clientApp: clientApp, profile: profile).automations ?? []
+    }
+
+    /// Lists automation runs on a paired device, newest first; `automationID` narrows to one automation.
+    public static func listAutomationRuns(
+        automationID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationRunSummary] {
+        try request(.init(command: .listAutomationRuns(.init(automationID: automationID))), device: device, clientApp: clientApp, profile: profile)
+            .automationRuns ?? []
+    }
+
+    /// Manually triggers an automation on a paired device, returning the started run as a one-element list.
+    @discardableResult public static func triggerAutomation(
+        id: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationRunSummary] {
+        try request(.init(command: .triggerAutomation(.init(id: id))), device: device, clientApp: clientApp, profile: profile).automationRuns ?? []
+    }
+
+    /// Cancels an automation run on a paired device, returning the canceled run as a one-element list.
+    @discardableResult public static func cancelAutomationRun(
+        runID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationRunSummary] {
+        try request(.init(command: .cancelAutomationRun(.init(runID: runID))), device: device, clientApp: clientApp, profile: profile).automationRuns
+            ?? []
+    }
+
+    /// Ends the still-live coding-agent sessions attributed to a terminal automation run on a paired device,
+    /// returning the run (its status unchanged) as a one-element list. Used to reap an `agent`-kind run's
+    /// session that was left open after the agent signalled done.
+    @discardableResult public static func endAutomationAgents(
+        runID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationRunSummary] {
+        try request(.init(command: .endAutomationAgents(.init(runID: runID))), device: device, clientApp: clientApp, profile: profile).automationRuns
+            ?? []
     }
 
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
@@ -947,14 +1025,16 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
             .stopWorkspaceTerminalIfBareShell, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .stopCodingAgent,
-            .installAgentHooks, .spawnAgentSession, .killAgentSession:
+            .installAgentHooks, .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation,
+            .cancelAutomationRun, .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .renameAgentSession, .state,
-            .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
+            .updateProjectConfig, .updateProjectMetadata, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession,
+            .renameAgentSession, .state, .terminalControl, .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink,
+            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession,
+            .listAutomations, .listAutomationRuns:
             defaultRequestTimeoutSeconds
         }
     }

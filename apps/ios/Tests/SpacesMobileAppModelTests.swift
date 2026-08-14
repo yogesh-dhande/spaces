@@ -279,6 +279,55 @@
             XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
         }
 
+        /// A hidden project's workspaces disappear from every visible surface — the browse list and its
+        /// loose-session bands — exactly as an individually hidden workspace's do, even though neither
+        /// workspace carries its own `isHidden` flag.
+        func testProjectHiddenWorkspacesAreExcludedFromWorkspaceGroupsAndTerminalGroups() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-loose")], projectIsHidden: true)
+
+            XCTAssertTrue(model.workspaceGroups.isEmpty)
+            XCTAssertTrue(model.terminalGroups.isEmpty)
+        }
+
+        /// A project-hidden workspace must not also appear as its own row in `hiddenWorkspaces` — it
+        /// recovers through the single project entry in `hiddenProjects` instead, so the two lists never
+        /// double-list one workspace.
+        func testProjectHiddenWorkspacesAreExcludedFromHiddenWorkspacesIndividually() {
+            let model = makeModel()
+            model.overview = makeOverview(projectIsHidden: true)
+
+            XCTAssertTrue(model.hiddenWorkspaces.isEmpty)
+        }
+
+        /// A workspace hidden by its own flag while its project stays visible keeps its individual row in
+        /// `hiddenWorkspaces` — only project-level hiding collapses workspaces into the project entry.
+        func testWorkspaceHiddenIndependentlyOfItsProjectKeepsItsIndividualHiddenRow() {
+            let model = makeModel()
+            model.overview = makeOverview(featureIsHidden: true, projectIsHidden: false)
+
+            XCTAssertEqual(model.hiddenWorkspaces.map(\.id), ["workspace-feature"])
+            XCTAssertTrue(model.hiddenProjects.isEmpty)
+        }
+
+        /// A hidden project surfaces once in `hiddenProjects`, carrying the count of workspaces the
+        /// overview still lists under it (both fixture workspaces share `project-1`).
+        func testHiddenProjectsSurfacesWithWorkspaceCount() {
+            let model = makeModel()
+            model.overview = makeOverview(projectIsHidden: true)
+
+            XCTAssertEqual(model.hiddenProjects.map(\.projectID), ["project-1"])
+            XCTAssertEqual(model.hiddenProjects.first?.workspaceCount, 2)
+        }
+
+        /// With no hidden projects, the recovery list is empty regardless of what else the overview has.
+        func testHiddenProjectsIsEmptyWhenNoneAreHidden() {
+            let model = makeModel()
+            model.overview = makeOverview()
+
+            XCTAssertTrue(model.hiddenProjects.isEmpty)
+        }
+
         /// Unhiding sends `setWorkspaceHidden(isHidden: false)` and, unlike `hideWorkspace`, never checks
         /// or stops anything first — there is nothing running to stop on a workspace that is already hidden.
         func testUnhideWorkspaceSendsSetWorkspaceHiddenFalseAndPublishesRefreshedOverview() async {
@@ -304,6 +353,39 @@
             }
             XCTAssertEqual(payload.workspaceID, "workspace-feature")
             XCTAssertEqual(payload.isHidden, false)
+            XCTAssertEqual(model.overview, refreshedOverview)
+        }
+
+        /// Unhiding a project sends `updateProjectMetadata(isHidden: false)` — the recovery action clears
+        /// only the project flag, mirroring `unhideWorkspace`'s single-field mutation.
+        func testUnhideProjectSendsUpdateProjectMetadataFalseAndPublishesRefreshedOverview() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let refreshedOverview = makeOverview(projectIsHidden: false)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview(projectIsHidden: true)
+            guard let hiddenProject = model.hiddenProjects.first else {
+                XCTFail("Expected a hidden project.")
+                return
+            }
+
+            await model.unhideProject(hiddenProject)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["updateProjectMetadata"])
+            guard case .updateProjectMetadata(let payload)? = requests.first?.command else {
+                XCTFail("Expected an updateProjectMetadata command.")
+                return
+            }
+            XCTAssertEqual(payload.projectID, "project-1")
+            XCTAssertEqual(payload.isHidden, false)
+            XCTAssertEqual(payload.updatesHidden, true)
             XCTAssertEqual(model.overview, refreshedOverview)
         }
 
@@ -1401,6 +1483,60 @@
             }
             XCTAssertEqual(payload.workspaceID, "workspace-docs")
             XCTAssertEqual(payload.sessionID, "session-shell")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        func testStopCodingAgentRowSendsWorkspaceTerminalStopMutation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "stopped")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(
+                    SpacesDeviceWorkspaceCodingAgentRow(
+                        id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
+                        sessionID: "session-agent", runState: .running, activityState: .spinning, canStop: true)))
+
+            await model.stop(row: row)
+
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.commandName, "stopWorkspaceTerminal")
+            guard case .stopWorkspaceTerminal(let payload)? = request?.command else {
+                XCTFail("Expected stopWorkspaceTerminal request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-docs")
+            XCTAssertEqual(payload.sessionID, "session-agent")
+            XCTAssertFalse(model.isMutating)
+        }
+
+        func testStopCodingAgentRowWithoutSessionFallsBackToAgentStopMutation() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "stopped")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let row = SpacesMobileWorkspaceRuntimeRow(
+                source: .codingAgent(
+                    SpacesDeviceWorkspaceCodingAgentRow(
+                        id: "agent-automation", workspaceID: "workspace-docs", name: "Nightly review", command: "codex", agentID: "agent-automation",
+                        sessionID: nil, runState: .running, activityState: .spinning, canStop: true)))
+
+            await model.stop(row: row)
+
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.commandName, "stopCodingAgent")
+            guard case .stopCodingAgent(let payload)? = request?.command else {
+                XCTFail("Expected stopCodingAgent request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-docs")
+            XCTAssertEqual(payload.agentID, "agent-automation")
             XCTAssertFalse(model.isMutating)
         }
 
@@ -3172,12 +3308,13 @@
             sessions: [SpacesDeviceTerminalSessionSummary] = [], featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil, featureTerminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
             featureIsRunning: Bool = true, featureIsHidden: Bool = false, featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
-            featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
+            featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), projectIsHidden: Bool = false,
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
                 version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
                 protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
-            let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+            let project = SpacesDeviceProjectSummary(
+                id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isHidden: projectIsHidden)
             let processRows =
                 featureProcessRows ?? [
                     SpacesDeviceWorkspaceProcessRow(

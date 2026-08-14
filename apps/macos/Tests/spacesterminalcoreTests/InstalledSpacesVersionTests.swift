@@ -97,8 +97,7 @@ final class InstalledSpacesVersionTests: XCTestCase {
         /// executable inside it; `current: true` also points `daemon/current` at the release.
         private func makeRelease(version: String, current: Bool = false) throws -> URL {
             let release = root.appendingPathComponent("daemon/releases/\(version)", isDirectory: true)
-            try FileManager.default.createDirectory(
-                at: release.appendingPathComponent("bin", isDirectory: true), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: release.appendingPathComponent("bin", isDirectory: true), withIntermediateDirectories: true)
             let manifest = try JSONSerialization.data(withJSONObject: ["app_version": version])
             try manifest.write(to: release.appendingPathComponent("manifest.json", isDirectory: false))
             let daemon = release.appendingPathComponent("bin/spacesd-bin", isDirectory: false)

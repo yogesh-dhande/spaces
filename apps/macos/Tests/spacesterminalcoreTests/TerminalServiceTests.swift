@@ -296,8 +296,7 @@ import XCTest
         func testDaemonWireIncompatibleWhenDaemonIsOlderWithStagedUpdateRecommendsApplyUpdate() throws {
             let response = TerminalServiceResponse(
                 ok: true, message: "pong",
-                daemonStatus: makeDaemonStatus(
-                    protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2, installedVersion: "9.9.9"))
+                daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2, installedVersion: "9.9.9"))
             let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertTrue(message.contains("older connection protocol"))
             XCTAssertTrue(message.contains("spaces daemon apply-update"))
@@ -334,7 +333,9 @@ import XCTest
             XCTAssertNotNil(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
         }
 
-        private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0, installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
+        private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0, installedVersion: String? = nil)
+            -> TerminalServiceDaemonStatus
+        {
             TerminalServiceDaemonStatus(
                 version: "0.1.0", installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
                 protocolVersion: protocolVersion)

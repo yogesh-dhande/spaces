@@ -10,23 +10,17 @@ struct SubscriptionGateView<Content: View>: View {
     var body: some View {
         Group {
             switch store.state {
-            case .checking:
-                checkingState
-            case .entitled:
-                content()
-            case .notEntitled:
-                PaywallView(store: store)
+            case .checking: checkingState
+            case .entitled: content()
+            case .notEntitled: PaywallView(store: store)
             }
-        }
-        .task { store.start() }
+        }.task { store.start() }
     }
 
     private var checkingState: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            ProgressView()
-                .tint(Theme.accent)
-        }
-        .accessibilityIdentifier("subscription.checking")
+            ProgressView().tint(Theme.accent)
+        }.accessibilityIdentifier("subscription.checking")
     }
 }

@@ -186,9 +186,20 @@ final class CommandPalettePanel: NSPanel {
 
     func matchesCommandPaletteDismissShortcut(event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let selectedItemIsAlert =
+            commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex)
+            && commandPaletteFilteredItems[commandPaletteSelectedIndex].alertsAttentionID != nil
         return AppKitController.commandPaletteDismissShortcutMatches(
             charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: host.shortcutModifiers(from: flags),
-            leaderModifiers: host.shortcutLeaderModifiers)
+            selectedItemIsAlert: selectedItemIsAlert, searchEditorCanCutSelectedText: commandPaletteSearchEditorCanCutSelectedText())
+    }
+
+    /// The palette monitor runs before the app's ordinary text-editing shortcuts. Let a focused
+    /// field editor keep Command-X when it has an editable selection; an alert dismissal only owns
+    /// the otherwise-unused chord.
+    private func commandPaletteSearchEditorCanCutSelectedText() -> Bool {
+        guard let editor = commandPaletteSearchField?.currentEditor() as? NSTextView, editor.isEditable else { return false }
+        return editor.selectedRange().length > 0
     }
 
     func executeCommandPaletteShortcut(index: Int) {
@@ -308,8 +319,7 @@ final class CommandPalettePanel: NSPanel {
         // key while focus is in flight dismisses the panel without racing either outcome.
         if pendingSelectionExecution == nil {
             restoreCommandPaletteReturnFocus(
-                terminalSessionID: commandPaletteReturnTerminalSessionID,
-                applicationProcessID: commandPaletteReturnApplicationProcessID)
+                terminalSessionID: commandPaletteReturnTerminalSessionID, applicationProcessID: commandPaletteReturnApplicationProcessID)
         }
         isDismissingCommandPalette = false
         host.logHotkeyDebug("dismiss_palette end \(host.hotkeyWindowStateSummary())")
@@ -323,13 +333,10 @@ final class CommandPalettePanel: NSPanel {
     }
 
     private func restoreCommandPaletteReturnFocus(terminalSessionID: String?, applicationProcessID: pid_t?) {
-        if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: terminalSessionID),
-            let terminalSessionID
-        {
+        if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: terminalSessionID), let terminalSessionID {
             host.panelCoordinator.focusPane(forSessionID: terminalSessionID)
         } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
-            returnTerminalSessionID: terminalSessionID, returnApplicationProcessID: applicationProcessID),
-            let applicationProcessID
+            returnTerminalSessionID: terminalSessionID, returnApplicationProcessID: applicationProcessID), let applicationProcessID
         {
             host.activateReturnApplication(processIdentifier: applicationProcessID)
         } else if host.rawMainWindowVisibility(), let window = host.window {
@@ -716,8 +723,7 @@ final class CommandPalettePanel: NSPanel {
         // failed execution can still restore it, while the dismissal callback cannot race
         // a successful target focus.
         let execution = PendingSelectionExecution(
-            returnTerminalSessionID: commandPaletteReturnTerminalSessionID,
-            returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
+            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID)
         pendingSelectionExecution = execution
         commandPaletteReturnTerminalSessionID = nil
         commandPaletteReturnApplicationProcessID = nil
@@ -732,8 +738,7 @@ final class CommandPalettePanel: NSPanel {
                     self.commandPaletteReturnApplicationProcessID = execution.returnApplicationProcessID
                 } else {
                     self.restoreCommandPaletteReturnFocus(
-                        terminalSessionID: execution.returnTerminalSessionID,
-                        applicationProcessID: execution.returnApplicationProcessID)
+                        terminalSessionID: execution.returnTerminalSessionID, applicationProcessID: execution.returnApplicationProcessID)
                 }
                 return
             }

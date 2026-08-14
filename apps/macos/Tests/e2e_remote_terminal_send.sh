@@ -8,7 +8,7 @@
 # Every terminal session is workspace-owned, so the session cannot be a standalone shell: the script
 # first creates a git project + default workspace on the remote daemon through the Device API
 # (`spacese2e mobile-request createProject`, the only project-creation surface — the shipped `spaces`
-# CLI has no project-add command), then starts the session with `spaces terminal command --workspace`
+# CLI has no project-add command), then creates the session with `spaces terminal create --workspace`
 # inside that workspace. The Device-API setup pairing (mobile-request) and the CLI link pairing are
 # two separate device registrations against the same daemon; send/tail is token-authorized without
 # owner gating, so the CLI-paired device drives the session the setup device created.
@@ -267,10 +267,10 @@ DEVICE_ID="$(printf '%s' "$PAIR_OUTPUT" | tr '\t' '\n' | sed -n 's/^id=//p' | he
 "$SPACES_BIN" device list
 
 echo "== creating a remote terminal session in the workspace =="
-REMOTE_SESSION_LINE="$(remote_ssh "$REMOTE_CLI terminal command --workspace $(shell_quote "$REMOTE_WORKSPACE_ID") --command 'bash -i'")"
+REMOTE_SESSION_LINE="$(remote_ssh "$REMOTE_CLI terminal create --workspace $(shell_quote "$REMOTE_WORKSPACE_ID") --command 'bash -i'")"
 echo "$REMOTE_SESSION_LINE"
 REMOTE_SESSION_ID="$(printf '%s' "$REMOTE_SESSION_LINE" | sed -n 's/^Started terminal session //p' | cut -f1 | head -n 1)"
-[[ -n "$REMOTE_SESSION_ID" ]] || fail "remote terminal command did not print a session id"
+[[ -n "$REMOTE_SESSION_ID" ]] || fail "remote terminal create did not print a session id"
 
 echo "== listing remote sessions through the device =="
 LIST_OUTPUT="$("$SPACES_BIN" terminal list --device "$DEVICE_ID")"

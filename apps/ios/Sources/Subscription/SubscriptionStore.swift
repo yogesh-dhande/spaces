@@ -80,11 +80,7 @@ import UIKit
     func start() {
         guard !isBypassed, !hasStarted else { return }
         hasStarted = true
-        transactionListener = Task { [weak self] in
-            for await update in Transaction.updates {
-                await self?.handle(verificationResult: update)
-            }
-        }
+        transactionListener = Task { [weak self] in for await update in Transaction.updates { await self?.handle(verificationResult: update) } }
         Task { await load() }
     }
 
@@ -116,9 +112,7 @@ import UIKit
     /// stays nil, `errorMessage` is cleared, and the paywall shows "Loading subscription…" forever with
     /// no retry affordance. Pure so it is testable without constructing a `Product`.
     static func productLoadOutcome(products: [Product]) -> (product: Product?, errorMessage: String?) {
-        guard let product = products.first else {
-            return (nil, loadFailureMessage)
-        }
+        guard let product = products.first else { return (nil, loadFailureMessage) }
         return (product, nil)
     }
 
@@ -142,16 +136,11 @@ import UIKit
         do {
             let result = try await product.purchase(confirmIn: scene)
             switch result {
-            case .success(let verification):
-                await handle(verificationResult: verification)
-            case .userCancelled, .pending:
-                break
-            @unknown default:
-                break
+            case .success(let verification): await handle(verificationResult: verification)
+            case .userCancelled, .pending: break
+            @unknown default: break
             }
-        } catch {
-            errorMessage = Self.failureMessage(for: error, fallback: Self.purchaseFailureMessage)
-        }
+        } catch { errorMessage = Self.failureMessage(for: error, fallback: Self.purchaseFailureMessage) }
     }
 
     /// The window scene the purchase confirmation sheet is anchored to. Prefers the foreground-active
@@ -168,19 +157,14 @@ import UIKit
         isPurchasing = true
         errorMessage = nil
         defer { isPurchasing = false }
-        do {
-            try await AppStore.sync()
-        } catch {
-            errorMessage = Self.failureMessage(for: error, fallback: Self.restoreFailureMessage)
-        }
+        do { try await AppStore.sync() } catch { errorMessage = Self.failureMessage(for: error, fallback: Self.restoreFailureMessage) }
         await refreshEntitlement()
     }
 
     static let loadFailureMessage = "The subscription is currently unavailable. Please try again later."
     static let purchaseFailureMessage = "The purchase could not be completed. Please try again in a moment."
     static let restoreFailureMessage = "Purchases could not be restored. Please try again in a moment."
-    static let networkFailureMessage =
-        "The App Store could not be reached. Check your internet connection and try again."
+    static let networkFailureMessage = "The App Store could not be reached. Check your internet connection and try again."
 
     /// Maps a thrown StoreKit error to the message the paywall shows, or nil when nothing should be
     /// surfaced. Cancellation arrives both as a `.userCancelled` purchase result and as a thrown
@@ -191,12 +175,9 @@ import UIKit
     static func failureMessage(for error: any Error, fallback: String) -> String? {
         guard let storeKitError = error as? StoreKitError else { return fallback }
         switch storeKitError {
-        case .userCancelled:
-            return nil
-        case .networkError:
-            return networkFailureMessage
-        default:
-            return fallback
+        case .userCancelled: return nil
+        case .networkError: return networkFailureMessage
+        default: return fallback
         }
     }
 
@@ -230,9 +211,7 @@ import UIKit
     /// inspection is only available without deprecation on iOS 17.2+, so on 17.0–17.1 an active trial
     /// reports as `active` rather than `trial` — a cosmetic Settings-label difference only.
     private static func entitlementDetail(for transaction: Transaction) -> EntitlementDetail {
-        if #available(iOS 17.2, *) {
-            return transaction.offer?.type == .introductory ? .trial : .active
-        }
+        if #available(iOS 17.2, *) { return transaction.offer?.type == .introductory ? .trial : .active }
         return .active
     }
 }

@@ -22,6 +22,7 @@ test_log_path="$coverage_dir/swift-test.log"
 test_status_path="$coverage_dir/swift-test-status"
 mkdir -p "$cache_dir"
 mkdir -p "$coverage_dir"
+profile_staging_dir="$(mktemp -d "$coverage_dir/staged-profraw.XXXXXX")"
 rm -rf "$test_config_home"
 mkdir -p "$test_config_home"
 rm -f "$test_log_path" "$test_status_path"
@@ -47,13 +48,18 @@ report_elapsed_time() {
     elapsed_seconds=$((end_epoch - start_epoch))
     echo "Coverage script elapsed: ${elapsed_seconds}s"
 }
-trap report_elapsed_time EXIT
+
+cleanup() {
+    rm -rf "$profile_staging_dir"
+    report_elapsed_time
+}
+trap cleanup EXIT
 
 generate_codecov_artifacts() {
     mkdir -p "$codecov_dir"
-    profraw_count="$(find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' | wc -l | tr -d ' ')"
+    profraw_count="$(find "$profile_staging_dir" -type f -name '*.profraw' | wc -l | tr -d ' ')"
     if [ "$profraw_count" = "0" ]; then
-        echo "Coverage raw profiles not found in SwiftPM codecov directory: $codecov_dir" >&2
+        echo "Coverage raw profiles not found in staging directory: $profile_staging_dir" >&2
         exit 1
     fi
 
@@ -64,9 +70,22 @@ generate_codecov_artifacts() {
     fi
 
     echo "Generating coverage artifacts from $profraw_count raw profile files..."
-    find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' -print0 |
+    find "$profile_staging_dir" -type f -name '*.profraw' -print0 |
         xargs -0 xcrun llvm-profdata merge -sparse -o "$profdata_path"
     xcrun llvm-cov export -format=text -instr-profile "$profdata_path" "$test_binary" >"$codecov_json_path"
+}
+
+stage_profiles() {
+    label="$1"
+    pass_staging_dir="$profile_staging_dir/$label"
+    mkdir -p "$pass_staging_dir"
+    count="$(find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' | wc -l | tr -d ' ')"
+    if [ "$count" = "0" ]; then
+        echo "Coverage pass '$label' produced no raw profiles in $codecov_dir" >&2
+        exit 1
+    fi
+    find "$codecov_dir" -maxdepth 1 -type f -name '*.profraw' \
+        -exec sh -c 'destination="$1"; shift; mv "$@" "$destination"' sh "$pass_staging_dir" {} +
 }
 
 # Decides whether a non-zero `swift test` exit can be attributed to SwiftPM's post-test steps
@@ -79,7 +98,7 @@ generate_codecov_artifacts() {
 # shape of the CI-only SIGTRAP that killed test workers in this suite. Treat the runtime's crash
 # announcements as disqualifying too.
 test_log_reports_success() {
-    python3 - "$test_log_path" <<'PY'
+    python3 - "$1" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -103,6 +122,34 @@ raise SystemExit(0 if swift_testing_passed and not xctest_failed and not test_pr
 PY
 }
 
+run_filtered_coverage_pass() {
+    label="$1"
+    filter="$2"
+    log_path="$coverage_dir/${label}.log"
+    status_path="$coverage_dir/${label}.status"
+    rm -f "$log_path" "$status_path"
+    set +e
+    (
+        run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" test --skip-build \
+            --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" --filter "$filter"
+        printf '%s\n' "$?" >"$status_path"
+    ) 2>&1 | tee "$log_path"
+    tee_status="$?"
+    set -e
+    if [ "$tee_status" -ne 0 ] || [ ! -f "$status_path" ]; then
+        echo "Filtered coverage pass '$label' did not record a command status." >&2
+        return 1
+    fi
+    pass_status="$(cat "$status_path")"
+    if [ "$pass_status" -ne 0 ]; then
+        if test_log_reports_success "$log_path"; then
+            echo "Filtered coverage pass '$label' exited with status $pass_status after a passing test run."
+        else
+            return "$pass_status"
+        fi
+    fi
+}
+
 echo "Building SwiftPM tests with coverage..."
 # This is the only build of the coverage scratch tree, so it is a full compile the first time and
 # incremental afterwards. verify.sh's own build produces the uninstrumented product binaries in the
@@ -120,7 +167,12 @@ echo "Running SwiftPM coverage tests..."
 # are skipped here and run together in their own process below.
 set -- test --skip-build --enable-code-coverage --disable-sandbox --scratch-path "$coverage_scratch_path" \
     --skip GhosttyMirrorGraphemeClusterTests --skip GhosttyMirrorLinkActivationTests --skip GhosttyMirrorSurfaceMRUTests \
-    --skip GhosttyMirrorSurfacePresentationTests
+    --skip GhosttyMirrorSurfacePresentationTests \
+    --skip AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut \
+    --skip AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled \
+    --skip AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting \
+    --skip AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits \
+    --skip AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
@@ -178,12 +230,22 @@ fi
 
 swiftpm_status="$(cat "$test_status_path")"
 if [ "$swiftpm_status" -ne 0 ]; then
-    if test_log_reports_success; then
+    if test_log_reports_success "$test_log_path"; then
         echo "SwiftPM coverage test command exited with status $swiftpm_status after a passing test run; generating coverage artifacts from raw profiles."
     else
         exit "$swiftpm_status"
     fi
 fi
+stage_profiles main
+
+# These tests assert the lifecycle of real child process groups, including TERM-to-KILL escalation. Run them
+# serially in their own process: parallel macOS workers can starve the spawned shell groups and make a correct
+# termination look like a failure. The same coverage scratch is intentional so these profiles merge with the
+# shared run below.
+echo "Running process-lifecycle coverage tests serially..."
+run_filtered_coverage_pass process-group-escalation \
+    "AutomationServiceTests/testTimeoutKillsCommandAndRecordsTimedOut|AutomationServiceTests/testCancelKillsCommandAndRecordsCanceled|AutomationServiceTests/testQueuePolicyWaitsForPendingTerminationBeforePromoting|AutomationServiceTests/testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits|AutomationServiceTests/testHandoffDrainCompletesPendingSIGKILLEscalation"
+stage_profiles process-group
 
 # The mirror-surface suites skipped above, in a process of their own so the mirror service is the
 # process's one embedded ghostty app. Serial and filtered: fresh process, same coverage scratch so
@@ -198,9 +260,9 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "SKIPPING mirror-surface coverage tests: CI runners cannot host a rendering ghostty surface (gated by local verify)."
 else
     echo "Running mirror-surface coverage tests in their own process..."
-    run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" test --skip-build --enable-code-coverage \
-        --disable-sandbox --scratch-path "$coverage_scratch_path" \
-        --filter "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests"
+    run_filtered_coverage_pass mirror-surface \
+        "GhosttyMirrorGraphemeClusterTests|GhosttyMirrorLinkActivationTests|GhosttyMirrorSurfaceMRUTests|GhosttyMirrorSurfacePresentationTests"
+    stage_profiles mirror-surface
 fi
 
 generate_codecov_artifacts

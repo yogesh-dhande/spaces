@@ -209,6 +209,18 @@ struct SpacesDeviceAPIClient: Sendable {
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Hides or unhides a project. `isHidden` is daemon-owned project state, mirroring
+    /// `setWorkspaceHidden` above — the same flag the Mac sidebar's project-level Hide toggles. iOS never
+    /// calls this with `isHidden: true`: hiding a project is Mac-only, iOS only recovers one.
+    func setProjectHidden(projectID: String, isHidden: Bool, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> SpacesDeviceAPIResponse
+    {
+        try await mutation(
+            .init(
+                command: .updateProjectMetadata(.init(projectID: projectID, isHidden: isHidden, updatesHidden: true)),
+                authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
     func openWorkspaceTerminal(workspaceID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
         try await mutation(
             .init(
@@ -292,6 +304,45 @@ struct SpacesDeviceAPIClient: Sendable {
             .init(
                 command: .stopCodingAgent(.init(workspaceID: workspaceID, agentID: agentID)), authToken: settings.trimmedAuthToken,
                 clientApp: clientAppIdentity), commandChannel: commandChannel)
+    }
+
+    /// Manually fires an automation, respecting the daemon's concurrency gate. The response carries the
+    /// resulting run (started, queued, or skipped) but no overview, so the caller reloads the overview to
+    /// reflect it — see `SpacesMobileAppModel.triggerAutomation`.
+    func triggerAutomation(id: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .triggerAutomation(.init(id: id)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
+    /// Cancels a running (or queued) automation run.
+    func cancelAutomationRun(runID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .cancelAutomationRun(.init(runID: runID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
+    /// Ends a finished run's still-live attributed coding agents (the run itself has already reached a
+    /// terminal status; only its spawned coding-agent sessions are still up).
+    func endAutomationAgents(runID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .endAutomationAgents(.init(runID: runID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
+    /// Reads one automation's retained run history from the daemon (the newest runs it keeps per automation),
+    /// rather than the recent-runs window the overview carries. The per-automation "View Runs" screen fetches
+    /// through this so a chatty automation filling the global overview window can't leave another automation's
+    /// history looking empty. Read-only (replay-safe), so it uses `sendRequest` rather than `mutation`.
+    func listAutomationRuns(automationID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> [TerminalServiceAutomationRunSummary]
+    {
+        let response = try await sendRequest(
+            .init(
+                command: .listAutomationRuns(.init(automationID: automationID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        return response.automationRuns ?? []
     }
 
     func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws

@@ -159,6 +159,26 @@
             XCTAssertEqual(refreshedRow.runState, .exited)
         }
 
+        func testWorkspaceTerminalStopFlipsCodingAgentRowMatchedBySessionID() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let runningAgent = try XCTUnwrap(
+                library.overview.workspaces.lazy.flatMap { workspace in
+                    workspace.codingAgentRows.filter { $0.runState == .running && $0.sessionID != nil && $0.canStop }
+                }.first, "Expected a running coding-agent session to stop.")
+            let sessionID = try XCTUnwrap(runningAgent.sessionID)
+
+            let response = await backend.serve(
+                SpacesDeviceAPIRequest(command: .stopWorkspaceTerminal(.init(workspaceID: runningAgent.workspaceID, sessionID: sessionID))))
+            XCTAssertTrue(response.ok)
+
+            let stopped = try XCTUnwrap(
+                response.overview?.workspaces.first { $0.id == runningAgent.workspaceID }?.codingAgentRows.first { $0.id == runningAgent.id })
+            XCTAssertEqual(stopped.runState, .exited)
+            XCTAssertEqual(stopped.activityState, .exited)
+            XCTAssertNotNil(stopped.updatedAt)
+        }
+
         // MARK: - Synthesizing sessions for not-started rows
 
         /// The atlas workspace and its not-started "frontend" process row (nil process/session ids).

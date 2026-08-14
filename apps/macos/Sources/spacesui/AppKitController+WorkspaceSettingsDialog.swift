@@ -99,9 +99,7 @@ extension AppKitController {
             value: config.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and delete.")
         stopScriptSection.onCommit = { value in commit { $0.stopScript = value.isEmpty ? nil : value } }
 
-        for section in [
-            browserSessionsSection.view, processesSection.view, portsSection.view, envSection.view, stopScriptSection.view,
-        ] {
+        for section in [browserSessionsSection.view, processesSection.view, portsSection.view, envSection.view, stopScriptSection.view] {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
         }

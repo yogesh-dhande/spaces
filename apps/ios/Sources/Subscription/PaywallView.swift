@@ -11,8 +11,7 @@ struct PaywallView: View {
     private static let termsOfUseURL = URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")
 
     private static let features = [
-        "Watch and steer terminal sessions and coding agents from your phone.",
-        "Get alerts the moment an agent needs your input.",
+        "Watch and steer terminal sessions and coding agents from your phone.", "Get alerts the moment an agent needs your input.",
         "Works with your own paired Mac and Linux machines.",
     ]
 
@@ -25,31 +24,17 @@ struct PaywallView: View {
                     features
                     Spacer(minLength: 0)
                     purchaseSection
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 48)
-                .padding(.bottom, 28)
-                .frame(maxWidth: .infinity, minHeight: 0)
+                }.padding(.horizontal, 28).padding(.top, 48).padding(.bottom, 28).frame(maxWidth: .infinity, minHeight: 0)
             }
-        }
-        .accessibilityIdentifier("paywall")
+        }.accessibilityIdentifier("paywall")
     }
 
     private var header: some View {
         VStack(spacing: 12) {
-            Image("Logo")
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 72, height: 72)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            Text("Spaces")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(Theme.text)
-            Text("Your coding sessions, on your phone.")
-                .font(.system(size: 15))
-                .foregroundStyle(Theme.muted)
-                .multilineTextAlignment(.center)
+            Image("Logo").resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(width: 72, height: 72).clipShape(
+                RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Text("Spaces").font(.system(size: 30, weight: .bold)).foregroundStyle(Theme.text)
+            Text("Your coding sessions, on your phone.").font(.system(size: 15)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
         }
     }
 
@@ -57,32 +42,20 @@ struct PaywallView: View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(Self.features, id: \.self) { feature in
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                    Text(feature)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.text)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.accent)
+                    Text(feature).font(.system(size: 14)).foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var purchaseSection: some View {
         VStack(spacing: 14) {
-            Text(priceLine)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .multilineTextAlignment(.center)
+            Text(priceLine).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text).multilineTextAlignment(.center)
 
             if let errorMessage = store.errorMessage {
-                Text(errorMessage)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.red)
-                    .multilineTextAlignment(.center)
+                Text(errorMessage).font(.system(size: 12)).foregroundStyle(Theme.red).multilineTextAlignment(.center)
             }
 
             primaryButton
@@ -90,12 +63,8 @@ struct PaywallView: View {
 
             Text(
                 "Payment is charged to your Apple Account. The subscription renews automatically each year "
-                    + "unless canceled at least 24 hours before the end of the current period. Manage or cancel "
-                    + "anytime in Settings."
-            )
-            .font(.system(size: 11))
-            .foregroundStyle(Theme.mutedSecondary)
-            .multilineTextAlignment(.center)
+                    + "unless canceled at least 24 hours before the end of the current period. Manage or cancel " + "anytime in Settings."
+            ).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).multilineTextAlignment(.center)
 
             legalLinks
         }
@@ -103,71 +72,44 @@ struct PaywallView: View {
 
     @ViewBuilder private var primaryButton: some View {
         Button {
-            Task {
-                if store.product == nil {
-                    await store.load()
-                } else {
-                    await store.purchase()
-                }
-            }
+            Task { if store.product == nil { await store.load() } else { await store.purchase() } }
         } label: {
             Group {
                 if store.isPurchasing {
                     ProgressView().tint(Theme.primaryButtonText)
                 } else {
-                    Text(primaryButtonTitle)
-                        .font(.system(size: 16, weight: .semibold))
+                    Text(primaryButtonTitle).font(.system(size: 16, weight: .semibold))
                 }
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 50)
-            .background(Theme.primaryButtonFill)
-            .foregroundStyle(Theme.primaryButtonText)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .disabled(store.isPurchasing)
-        .accessibilityIdentifier("paywall.subscribe")
+            }.frame(maxWidth: .infinity).frame(height: 50).background(Theme.primaryButtonFill).foregroundStyle(Theme.primaryButtonText).clipShape(
+                RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }.disabled(store.isPurchasing).accessibilityIdentifier("paywall.subscribe")
     }
 
     private var restoreButton: some View {
         Button {
             Task { await store.restore() }
         } label: {
-            Text("Restore Purchases")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Theme.accent)
-        }
-        .disabled(store.isPurchasing)
-        .accessibilityIdentifier("paywall.restore")
+            Text("Restore Purchases").font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.accent)
+        }.disabled(store.isPurchasing).accessibilityIdentifier("paywall.restore")
     }
 
     private var legalLinks: some View {
         HStack(spacing: 6) {
-            if let privacyPolicyURL = Self.privacyPolicyURL {
-                Link("Privacy Policy", destination: privacyPolicyURL)
-            }
+            if let privacyPolicyURL = Self.privacyPolicyURL { Link("Privacy Policy", destination: privacyPolicyURL) }
             Text("·")
-            if let termsOfUseURL = Self.termsOfUseURL {
-                Link("Terms of Use", destination: termsOfUseURL)
-            }
-        }
-        .font(.system(size: 11))
-        .tint(Theme.mutedSecondary)
-        .foregroundStyle(Theme.mutedSecondary)
+            if let termsOfUseURL = Self.termsOfUseURL { Link("Terms of Use", destination: termsOfUseURL) }
+        }.font(.system(size: 11)).tint(Theme.mutedSecondary).foregroundStyle(Theme.mutedSecondary)
     }
 
     private var primaryButtonTitle: String {
         guard let product = store.product else { return "Try Again" }
-        return SubscriptionPricing.hasFreeTrial(product, isEligibleForIntroOffer: store.isEligibleForIntroOffer)
-            ? "Start Free Trial" : "Subscribe"
+        return SubscriptionPricing.hasFreeTrial(product, isEligibleForIntroOffer: store.isEligibleForIntroOffer) ? "Start Free Trial" : "Subscribe"
     }
 
     /// The price line derived entirely from the loaded product — no hard-coded price strings. Falls back
     /// to a loading label while the product is being fetched (or a retry hint if the fetch failed).
     private var priceLine: String {
-        guard let product = store.product else {
-            return store.errorMessage == nil ? "Loading subscription…" : "Couldn't load the subscription."
-        }
+        guard let product = store.product else { return store.errorMessage == nil ? "Loading subscription…" : "Couldn't load the subscription." }
         return SubscriptionPricing.priceLine(for: product, isEligibleForIntroOffer: store.isEligibleForIntroOffer)
     }
 }
@@ -178,9 +120,7 @@ enum SubscriptionPricing {
     /// A trial is advertised only when the product has a configured free-trial introductory offer AND
     /// this specific customer is still eligible for it (StoreKit will not grant a second trial to a
     /// lapsed subscriber, so showing one would misstate the purchase).
-    static func showsTrial(hasConfiguredFreeTrial: Bool, isEligibleForIntroOffer: Bool) -> Bool {
-        hasConfiguredFreeTrial && isEligibleForIntroOffer
-    }
+    static func showsTrial(hasConfiguredFreeTrial: Bool, isEligibleForIntroOffer: Bool) -> Bool { hasConfiguredFreeTrial && isEligibleForIntroOffer }
 
     static func hasFreeTrial(_ product: Product, isEligibleForIntroOffer: Bool) -> Bool {
         let hasConfiguredFreeTrial = product.subscription?.introductoryOffer?.paymentMode == .freeTrial
@@ -192,9 +132,7 @@ enum SubscriptionPricing {
         let hasConfiguredFreeTrial = product.subscription?.introductoryOffer?.paymentMode == .freeTrial
         guard let offer = product.subscription?.introductoryOffer,
             showsTrial(hasConfiguredFreeTrial: hasConfiguredFreeTrial, isEligibleForIntroOffer: isEligibleForIntroOffer)
-        else {
-            return perYear
-        }
+        else { return perYear }
         return "\(trialLength(offer.period)) free, then \(perYear)"
     }
 

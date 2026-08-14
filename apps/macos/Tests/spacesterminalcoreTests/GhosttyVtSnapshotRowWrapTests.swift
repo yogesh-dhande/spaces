@@ -31,8 +31,9 @@ import ghosttyvtshim
         let blank = GhosttyTerminalSnapshot(
             columns: Int(columns), rows: Int(rows), cursorColumn: 0, cursorRow: 0, cursorVisible: false,
             defaultForegroundRGB: exported.defaultForegroundRGB, defaultBackgroundRGB: exported.defaultBackgroundRGB,
-            cells: Array(repeating: .init(codepoint: 0, foregroundRGB: exported.defaultForegroundRGB, backgroundRGB: exported.defaultBackgroundRGB, flags: 0),
-                         count: Int(columns) * Int(rows)))
+            cells: Array(
+                repeating: .init(codepoint: 0, foregroundRGB: exported.defaultForegroundRGB, backgroundRGB: exported.defaultBackgroundRGB, flags: 0),
+                count: Int(columns) * Int(rows)))
         let baseline = GhosttyRenderUpdateBaseline(snapshot: blank, sessionRevision: 1, ownerEpoch: 1)
         let frame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 1, snapshot: exported)
         let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
@@ -42,7 +43,8 @@ import ghosttyvtshim
 
         #expect(applied.snapshot == exported)
         #expect(applied.snapshot.cells[Int(columns) - 1].flags & rowWrapFlag != 0, "row wrap survives delta transport")
-        #expect(applied.snapshot.cells[3 * Int(columns) - 1].flags & rowWrapContinuationFlag != 0, "trailing default-fill cell retains row continuation")
+        #expect(
+            applied.snapshot.cells[3 * Int(columns) - 1].flags & rowWrapContinuationFlag != 0, "trailing default-fill cell retains row continuation")
     }
 
     private func snapshot(from session: OpaquePointer) throws -> GhosttyTerminalSnapshot {

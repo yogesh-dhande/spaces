@@ -95,6 +95,7 @@ import spacesterminalcore
         let view = WorkspacePanelView(scope: scope)
         view.onSelectTab = { [weak self] tabID in self?.selectTab(scope: scope, tabID: tabID) }
         view.onCloseTab = { [weak self] tabID in self?.closeTab(scope: scope, tabID: tabID) }
+        view.onMoveTab = { [weak self] tabID, insertionIndex in self?.moveTab(scope: scope, tabID: tabID, insertionIndex: insertionIndex) }
         view.onRenameTab = { [weak self] tabID, title in self?.renameTab(scope: scope, tabID: tabID, title: title) }
         view.onNewTab = { [weak self] in
             guard let self else { return }
@@ -115,6 +116,10 @@ import spacesterminalcore
         panels[scope, default: PanelState()].view = view
         render(scope: scope)
         return view
+    }
+
+    private func moveTab(scope: PanelScope, tabID: String, insertionIndex: Int) {
+        mutateLayout(scope: scope) { PanelLayoutEngine.moveTab(tabID: tabID, toInsertionIndex: insertionIndex, in: $0) }
     }
 
     // MARK: - Registry
@@ -249,9 +254,9 @@ import spacesterminalcore
     /// Answers what it did, not merely that it worked, because the caller has to tell a real claim from a
     /// fallback install: an open that installed a fresh pane leaves any hold on its named predecessor
     /// untouched and still owing a release. Nil means the open failed.
-    @discardableResult func openOrFocusTerminalPane(
-        _ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent
-    ) -> AppKitController.TerminalPaneOpenAction? {
+    @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest, openIntent: TerminalPaneOpenIntent)
+        -> AppKitController.TerminalPaneOpenAction?
+    {
         let focusIntent = openIntent.focus
         // Adopt the workspace's persisted layout first: on a fresh launch a session
         // opened before its panel was ever shown (command palette, focus IPC) is not

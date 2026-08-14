@@ -236,6 +236,39 @@ import Testing
         #expect(PanelLayoutEngine.renameTab(tabID: "missing", title: "x", in: layout) == layout)
     }
 
+    @Test func movingTabToAnInsertionIndexPreservesSelectionAndFocus() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-3", pane: pane("c"), to: layout)
+        layout = PanelLayoutEngine.selectTab(tabID: "tab-2", in: layout)
+
+        layout = PanelLayoutEngine.moveTab(tabID: "tab-1", toInsertionIndex: 3, in: layout)
+
+        #expect(layout.tabs.map(\.id) == ["tab-2", "tab-3", "tab-1"])
+        #expect(layout.selectedTabID == "tab-2")
+        #expect(layout.focusedPaneID == "b")
+    }
+
+    @Test func movingTabBackwardUsesThePreMoveInsertionIndex() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-3", pane: pane("c"), to: layout)
+
+        layout = PanelLayoutEngine.moveTab(tabID: "tab-3", toInsertionIndex: 1, in: layout)
+
+        #expect(layout.tabs.map(\.id) == ["tab-1", "tab-3", "tab-2"])
+    }
+
+    @Test func movingTabIgnoresUnknownTabsAndClampsInsertionIndex() {
+        var layout = layoutWithTab("tab-1", paneID: "a")
+        layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
+        let before = layout
+
+        #expect(PanelLayoutEngine.moveTab(tabID: "missing", toInsertionIndex: 0, in: layout) == before)
+        layout = PanelLayoutEngine.moveTab(tabID: "tab-2", toInsertionIndex: -10, in: layout)
+        #expect(layout.tabs.map(\.id) == ["tab-2", "tab-1"])
+    }
+
     /// A tab is named after the pane the user is looking at, so splitting and then moving focus
     /// re-titles the tab (and with it the panel window) instead of leaving it on the pane that
     /// happens to sit first in the tree.

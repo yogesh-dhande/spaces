@@ -132,7 +132,10 @@ extension SQLiteStore {
                 ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1
                 """, bindings: [sessionID, sessionID, sessionID, sessionID])
-        return row?.first
+        // A generic workspace-less terminal session resolves to a NULL workspace_id,
+        // which surfaces as an empty string; report it as nil so it never leaks into workspace-scoped UI.
+        guard let workspaceID = row?.first, !workspaceID.isEmpty else { return nil }
+        return workspaceID
     }
 
     /// Whether the product still surfaces this terminal session, so its transcript must not be garbage
@@ -142,6 +145,11 @@ extension SQLiteStore {
     /// tracks it. When none of these reference it, the session has been removed from the product and its
     /// ended pane can never be reconstructed from persisted state, so the daemon's session garbage
     /// collector may reclaim its directory and rows.
+    ///
+    /// Automation attribution is the fourth reference source: an automation run listed in the Runs tab
+    /// offers its terminal (and its spawned agents' terminals) for read-only replay, so a session stamped
+    /// with `terminal_sessions.automation_run_id` stays retained for as long as that run row exists. The
+    /// arm JOINs `automation_runs` so a stamp left behind by a deleted run (a dangling id) pins nothing.
     public func terminalSessionIsReferencedByProduct(_ sessionID: String) throws -> Bool {
         let row = try queryRow(
             sql: """
@@ -150,8 +158,12 @@ extension SQLiteStore {
                 SELECT 1 FROM agent_sessions WHERE terminal_session_id = ?
                 UNION ALL
                 SELECT 1 FROM runtime_targets WHERE tracking_id = ?
+                UNION ALL
+                SELECT 1 FROM terminal_sessions
+                JOIN automation_runs ON automation_runs.id = terminal_sessions.automation_run_id
+                WHERE terminal_sessions.session_id = ?
                 LIMIT 1
-                """, bindings: [sessionID, sessionID, sessionID])
+                """, bindings: [sessionID, sessionID, sessionID, sessionID])
         return row != nil
     }
 

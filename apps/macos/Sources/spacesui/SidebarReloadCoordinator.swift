@@ -39,8 +39,7 @@ import Foundation
     init(
         loadSnapshot: @escaping @MainActor () async -> Result<Snapshot, any Error>,
         applySnapshot: @escaping @MainActor (Snapshot, _ forceRemoteRefresh: Bool, _ bypassesBackoff: Bool) -> Void,
-        handleFailure: @escaping @MainActor (any Error, String?) -> Void,
-        minimumStartInterval: Duration = .milliseconds(250)
+        handleFailure: @escaping @MainActor (any Error, String?) -> Void, minimumStartInterval: Duration = .milliseconds(250)
     ) {
         self.loadSnapshot = loadSnapshot
         self.applySnapshot = applySnapshot

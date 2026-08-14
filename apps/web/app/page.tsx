@@ -160,6 +160,11 @@ const keyFeatures: Feature[] = [
       "Terminals and agents run on the daemon, not your SSH connection. Kick off a build on a remote box, close your laptop, and it keeps running — reattach later exactly where it left off.",
   },
   {
+    title: "Automations",
+    description:
+      "Run a shell command on any paired device manually or on a schedule — even while Spaces is closed. Watch a run live, replay it later, or have it spawn a coding agent that keeps working after the run finishes.",
+  },
+  {
     title: "Jump to any workspace",
     description:
       "A global command palette pulls up any window instantly — choose a window and it snaps into focus right where you left it.",

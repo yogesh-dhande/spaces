@@ -28,19 +28,27 @@ import spacesclientcore
         #expect(cases.contains(.guiSidebarPreviousShortcut))
     }
 
-    @Test func commandPaletteDismissShortcutUsesLeaderPlusX() {
+    @Test func commandPaletteDismissShortcutUsesCommandXRegardlessOfLeader() {
+        #expect(AppKitController.commandPaletteDismissShortcutMatches(charactersIgnoringModifiers: "x", modifiers: [.cmd], selectedItemIsAlert: true))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(charactersIgnoringModifiers: "x", modifiers: [.cmd], selectedItemIsAlert: false))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd, .alt], selectedItemIsAlert: true))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd, .shift], selectedItemIsAlert: true))
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(charactersIgnoringModifiers: "c", modifiers: [.cmd], selectedItemIsAlert: true))
+    }
+
+    @Test func commandXPreservesCutWhenPaletteSearchHasSelectedText() {
+        #expect(
+            !AppKitController.commandPaletteDismissShortcutMatches(
+                charactersIgnoringModifiers: "x", modifiers: [.cmd], selectedItemIsAlert: true, searchEditorCanCutSelectedText: true))
         #expect(
             AppKitController.commandPaletteDismissShortcutMatches(
-                charactersIgnoringModifiers: "x", modifiers: [.cmd, .alt], leaderModifiers: [.cmd, .alt]))
-        #expect(
-            !AppKitController.commandPaletteDismissShortcutMatches(
-                charactersIgnoringModifiers: "x", modifiers: [.cmd], leaderModifiers: [.cmd, .alt]))
-        #expect(
-            !AppKitController.commandPaletteDismissShortcutMatches(
-                charactersIgnoringModifiers: "x", modifiers: [.cmd, .alt, .shift], leaderModifiers: [.cmd, .alt]))
-        #expect(
-            !AppKitController.commandPaletteDismissShortcutMatches(
-                charactersIgnoringModifiers: "c", modifiers: [.cmd, .alt], leaderModifiers: [.cmd, .alt]))
+                charactersIgnoringModifiers: "x", modifiers: [.cmd], selectedItemIsAlert: true, searchEditorCanCutSelectedText: false))
     }
 
     @Test func shortcutLeaderSettingRequiresAtLeastTwoModifiers() throws {

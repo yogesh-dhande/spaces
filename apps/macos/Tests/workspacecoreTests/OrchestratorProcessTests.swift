@@ -146,7 +146,8 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.launchMissingConfiguredProcesses(workspaceID: workspace.id, background: false))
 
         XCTAssertEqual(
-            try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["A"], "the retry must not disturb the already-live process")
+            try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["A"],
+            "the retry must not disturb the already-live process")
         XCTAssertFalse(
             PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
             "a retry's failure must not restore the placeholder reservation over the still-live process's port either")
@@ -1474,8 +1475,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
-        XCTAssertEqual(
-            runtimeStatus.missingConfiguredProcessCount, 1, "the stale row must not satisfy the newly configured process by name alone")
+        XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1, "the stale row must not satisfy the newly configured process by name alone")
     }
 
     // Tests configured process names that literally start with key prefixes still match their live runtime records.
@@ -2065,9 +2065,7 @@ extension OrchestratorTests {
     /// to launch is exactly the case that would otherwise slip through as a silent no-op success instead of
     /// surfacing the failure; the top-level setup check in `upWorkspace`'s convergence branch is what catches
     /// it.
-    func testLaunchWorkspaceWithAdHocTerminalAndNoConfiguredProcessesSurfacesFailedSetupInsteadOfSilentlySucceeding()
-        throws
-    {
+    func testLaunchWorkspaceWithAdHocTerminalAndNoConfiguredProcessesSurfacesFailedSetupInsteadOfSilentlySucceeding() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -2109,8 +2107,7 @@ extension OrchestratorTests {
 
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
-        XCTAssertEqual(
-            try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"], "the coding agent is left running, not stopped")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"], "the coding agent is left running, not stopped")
     }
 
     /// Issue #438: once every configured process is already running, Start succeeds as a no-op instead of
@@ -2142,8 +2139,8 @@ extension OrchestratorTests {
         let removedProcessID = "removed-process-b"
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: removedProcessID, workspaceID: workspace.id, templateName: "B", command: "echo b", terminalApp: "Spaces",
-                terminalTarget: nil, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
+                id: removedProcessID, workspaceID: workspace.id, templateName: "B", command: "echo b", terminalApp: "Spaces", terminalTarget: nil,
+                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: "ad-hoc-window", workspaceID: workspace.id, app: "Spaces", title: "ad hoc shell", terminalTrackingID: "ad-hoc-session",
@@ -2189,8 +2186,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "old-api", workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: "Spaces",
-                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: "old-api", workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: "Spaces", terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "ad-hoc-window", workspaceID: workspace.id, app: "Spaces", title: "ad hoc shell", terminalTrackingID: "ad-hoc-session",

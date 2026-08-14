@@ -67,8 +67,7 @@ import Testing
         // An ended session that keeps its product row stays in the catalog and must not close —
         // that is the ended-pane scrollback feature.
         let panes = [pane("local", "ended-but-present")]
-        let toClose = OpenPanePruning.sessionsToClose(
-            openPanes: panes, deviceID: "local", catalogSessionIDs: ["ended-but-present"])
+        let toClose = OpenPanePruning.sessionsToClose(openPanes: panes, deviceID: "local", catalogSessionIDs: ["ended-but-present"])
         #expect(toClose.isEmpty)
     }
 

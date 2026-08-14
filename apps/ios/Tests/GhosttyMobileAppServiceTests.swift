@@ -3993,8 +3993,7 @@
             hostView.layoutIfNeeded()
 
             XCTAssertEqual(
-                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry,
-                "a geometry change must not re-apply an unchanged frame")
+                hostView.renderFrameApplyCountForTesting, appliesAtOriginalGeometry, "a geometry change must not re-apply an unchanged frame")
         }
 
         /// `TerminalViewerModel.updateOwnerRenderSnapshot` is the steady-streaming path: it keeps the

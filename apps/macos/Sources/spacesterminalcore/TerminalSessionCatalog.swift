@@ -27,7 +27,9 @@ public struct TerminalSessionCatalogEntry: Sendable, Equatable {
     }
 
     public var sessionID: String { launchConfiguration.sessionID }
-    public var workspaceID: String { launchConfiguration.workspaceID }
+    /// nil for a generic workspace-less session. Workspace-scoped enumeration must
+    /// tolerate nil rather than assume every session belongs to a workspace.
+    public var workspaceID: String? { launchConfiguration.workspaceID }
     public var kind: TerminalSessionKind { launchConfiguration.kind }
     /// The session's stable name: the user's rename when set, else the launch-generated name. What the
     /// program inside prints never replaces it; that travels beside it as `liveTitle`.

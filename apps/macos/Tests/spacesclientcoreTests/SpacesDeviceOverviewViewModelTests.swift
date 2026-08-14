@@ -25,8 +25,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds)
         XCTAssertGreaterThan(SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
-            SpacesDeviceClient.requestTimeoutSeconds(
-                for: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1"))),
+            SpacesDeviceClient.requestTimeoutSeconds(for: .stopCodingAgent(.init(workspaceID: "workspace-1", agentID: "agent-1"))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
         XCTAssertGreaterThan(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)

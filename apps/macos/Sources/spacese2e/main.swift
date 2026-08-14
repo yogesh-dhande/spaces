@@ -22,20 +22,22 @@ struct SpacesE2ECommand: ParsableCommand {
             E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
             LookupWorkspaceCommand.self, ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self,
             SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self,
-            RestartWorkspaceProcessCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
-            ArchiveWorkspaceCommand.self, HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self,
-            SetWorkspaceBrowserSessionURLsCommand.self, ClearWorkspaceAgentWindowsCommand.self,
-            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
-            CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
-            CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
+            RestartWorkspaceProcessCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
+            ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self,
+            RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
+            CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self, CloseTerminalSessionWindowCommand.self,
+            FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self, TerminalSessionWindowShortcutCommand.self,
+            StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self,
+            TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, SeedPairedDeviceCommand.self, RecordScreenCommand.self, ProfileShowCommand.self,
             ProfileAppOwnerCommand.self, MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
             ProfileCommand.self, ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self,
             ScrollApplicationWindowCommand.self, ClickApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
+            AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
+            AutomationEndAgentsCommand.self,
         ])
 }
 
@@ -1647,9 +1649,7 @@ private struct RunWorkspaceProcessCommand: ParsableCommand {
 
     /// Tells the running Spaces app to launch one configured process through
     /// the same app-side path used by GUI recovery or focus actions.
-    func run() throws {
-        try postWorkspaceTargetIPC(IPCNotification.runWorkspaceProcess, workspaceDir: workspaceDir, processName: processName)
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.runWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct StopWorkspaceProcessCommand: ParsableCommand {
@@ -1658,9 +1658,7 @@ private struct StopWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var processName: String
 
-    func run() throws {
-        try postWorkspaceTargetIPC(IPCNotification.stopWorkspaceProcess, workspaceDir: workspaceDir, processName: processName)
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.stopWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct RestartWorkspaceProcessCommand: ParsableCommand {
@@ -1669,9 +1667,7 @@ private struct RestartWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var processName: String
 
-    func run() throws {
-        try postWorkspaceTargetIPC(IPCNotification.restartWorkspaceProcess, workspaceDir: workspaceDir, processName: processName)
-    }
+    func run() throws { try postWorkspaceTargetIPC(IPCNotification.restartWorkspaceProcess, workspaceDir: workspaceDir, processName: processName) }
 }
 
 private struct CleanupFixturesCommand: ParsableCommand {
@@ -2638,6 +2634,137 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
 }
 
 /// Shared JSON encoder for the shell harness.
+// MARK: - Automation helpers (test seam; automation authoring is GUI-only in the product)
+
+/// Sends a profile automation command to the adjacent daemon and emits its response section as JSON,
+/// exactly like the app/CLI would over the same profile socket, so the shell harness drives real
+/// scheduler state. The harness binds to this worktree's profile via `profile-show --shell` before use.
+private func sendAutomationProfileCommand(_ command: TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse {
+    try TerminalService.sendProfileCommand(command)
+}
+
+private func automationFields(
+    name: String, enabled: Bool, trigger: String, cron: String?, kind: String, script: String, agentCommand: String?, agentPrompt: String?,
+    workspaceID: String, timeoutSeconds: Int?, concurrency: String, missedRun: String
+) -> TerminalServiceAutomationFields {
+    TerminalServiceAutomationFields(
+        name: name, enabled: enabled, triggerKind: trigger, cronExpression: normalizedOptional(cron), kind: kind, script: script,
+        agentCommand: normalizedOptional(agentCommand), agentPrompt: normalizedOptional(agentPrompt), workspaceID: workspaceID,
+        timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
+}
+
+private struct AutomationCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-create")
+
+    @Option(name: .long) var name: String
+    @Option(name: .long) var script: String
+    @Option(name: .long) var trigger: String = "manual"
+    @Option(name: .long) var cron: String?
+    /// `script` or `agent` — plumbed through so a later commit can e2e agent-kind automations; the daemon's
+    /// scheduler does not yet execute an agent-kind run (see `AutomationService`'s launch guard).
+    @Option(name: .long) var kind: String = "script"
+    @Option(name: .long) var agentCommand: String?
+    @Option(name: .long) var agentPrompt: String?
+    @Option(name: .long) var workspaceID: String
+    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var missedRun: String = "run_once"
+    @Option(name: .long) var timeoutSeconds: Int?
+    @Flag(name: .long, inversion: .prefixedNo) var enabled = true
+
+    func run() throws {
+        let fields = automationFields(
+            name: name, enabled: enabled, trigger: trigger, cron: cron, kind: kind, script: script, agentCommand: agentCommand,
+            agentPrompt: agentPrompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
+        try emitJSON(try sendAutomationProfileCommand(.automationCreate(fields)).automations ?? [])
+    }
+}
+
+private struct AutomationUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-update")
+
+    @Option(name: .long) var id: String
+    @Option(name: .long) var name: String
+    @Option(name: .long) var script: String
+    @Option(name: .long) var trigger: String = "manual"
+    @Option(name: .long) var cron: String?
+    @Option(name: .long) var kind: String = "script"
+    @Option(name: .long) var agentCommand: String?
+    @Option(name: .long) var agentPrompt: String?
+    @Option(name: .long) var workspaceID: String
+    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var missedRun: String = "run_once"
+    @Option(name: .long) var timeoutSeconds: Int?
+    @Flag(name: .long, inversion: .prefixedNo) var enabled = true
+
+    func run() throws {
+        let fields = automationFields(
+            name: name, enabled: enabled, trigger: trigger, cron: cron, kind: kind, script: script, agentCommand: agentCommand,
+            agentPrompt: agentPrompt, workspaceID: workspaceID, timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
+        try emitJSON(try sendAutomationProfileCommand(.automationUpdate(.init(id: id, fields: fields))).automations ?? [])
+    }
+}
+
+private struct AutomationDeleteCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-delete")
+
+    @Option(name: .long) var id: String
+
+    func run() throws {
+        let response = try sendAutomationProfileCommand(.automationDelete(id: try required(id, label: "id")))
+        try emitJSON(AutomationDeletePayload(success: true, message: response.message))
+    }
+}
+
+private struct AutomationDeletePayload: Encodable {
+    let success: Bool
+    let message: String
+}
+
+private struct AutomationListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-list")
+
+    func run() throws { try emitJSON(try sendAutomationProfileCommand(.automationList).automations ?? []) }
+}
+
+private struct AutomationRunsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-runs")
+
+    @Option(name: .long) var automationID: String?
+
+    func run() throws {
+        try emitJSON(
+            try sendAutomationProfileCommand(.automationRunsList(.init(automationID: normalizedOptional(automationID)))).automationRuns ?? [])
+    }
+}
+
+private struct AutomationTriggerCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-trigger")
+
+    @Option(name: .long) var id: String
+
+    func run() throws { try emitJSON(try sendAutomationProfileCommand(.automationTrigger(id: try required(id, label: "id"))).automationRuns ?? []) }
+}
+
+private struct AutomationCancelCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-cancel")
+
+    @Option(name: .long) var runID: String
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationRunCancel(runID: try required(runID, label: "run-id"))).automationRuns ?? [])
+    }
+}
+
+private struct AutomationEndAgentsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-end-agents")
+
+    @Option(name: .long) var runID: String
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationEndAgents(runID: try required(runID, label: "run-id"))).automationRuns ?? [])
+    }
+}
+
 private func emitJSON<T: Encodable>(_ value: T) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

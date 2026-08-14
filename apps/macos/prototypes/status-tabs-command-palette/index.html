@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spaces — status, palette, and tab-reorder directions</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #0b1113;
+      --panel: #0f1719;
+      --surface: #172225;
+      --surface-2: #1d292c;
+      --surface-3: #243236;
+      --border: #304247;
+      --border-soft: #253439;
+      --text: #eaf0ef;
+      --muted: #a8b9bc;
+      --quiet: #71868a;
+      --brand: #59dbcd;
+      --brand-deep: #15978e;
+      --green: #55d68a;
+      --amber: #f1ba58;
+      --gray: #849397;
+      --blue: #69aef8;
+      --red: #ef726b;
+      --green-wash: rgba(85, 214, 138, .10);
+      --amber-wash: rgba(241, 186, 88, .11);
+      --gray-wash: rgba(132, 147, 151, .08);
+      --blue-wash: rgba(105, 174, 248, .11);
+      --red-wash: rgba(239, 114, 107, .11);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1120px; background: var(--canvas); color: var(--text); }
+    button { font: inherit; color: inherit; }
+    .page { width: min(1440px, calc(100vw - 64px)); margin: 0 auto; padding: 42px 0 72px; }
+    .eyebrow { color: var(--brand); font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .11em; text-transform: uppercase; }
+    h1 { max-width: 880px; margin: 9px 0 10px; font-size: 30px; letter-spacing: -.03em; }
+    .intro { max-width: 890px; margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55; }
+    .picker { display: flex; gap: 8px; margin: 28px 0 24px; padding: 6px; width: fit-content; background: var(--panel); border: 1px solid var(--border-soft); border-radius: 10px; }
+    .picker button { border: 0; background: transparent; border-radius: 7px; padding: 8px 13px; color: var(--muted); cursor: pointer; }
+    .picker button[aria-selected="true"] { color: var(--text); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border); }
+    .option { display: none; }
+    .option.active { display: block; }
+    .option-head { display: grid; grid-template-columns: 1fr 1.1fr; gap: 24px; margin-bottom: 16px; }
+    .option-title h2 { margin: 4px 0 7px; font-size: 20px; }
+    .option-title p, .tradeoff { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .tradeoff { align-self: end; padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--panel); }
+    .tradeoff strong { color: var(--text); }
+
+    .app { height: 720px; position: relative; overflow: hidden; display: grid; grid-template-columns: 286px 1fr; border: 1px solid var(--border); border-radius: 14px; background: #101719; box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+    .sidebar { padding: 14px 10px; background: #0f1618; border-right: 1px solid var(--border-soft); overflow: hidden; }
+    .traffic { display: flex; gap: 7px; height: 26px; padding: 2px 3px; }
+    .traffic i { width: 11px; height: 11px; border-radius: 50%; background: #39484b; }
+    .top-actions { display: flex; gap: 6px; margin: 3px 2px 13px; }
+    .top-actions span { flex: 1; padding: 7px 9px; background: var(--surface); border: 1px solid var(--border-soft); border-radius: 6px; color: var(--muted); font-size: 11px; }
+    .project { margin-top: 10px; }
+    .project-head { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 8px; color: #d8e2e1; font-size: 12px; font-weight: 650; }
+    .project-head .chev { margin-left: auto; color: var(--quiet); }
+    .workspace { margin-left: 14px; border-radius: 7px; }
+    .workspace.selected { background: rgba(255,255,255,.055); box-shadow: inset 2px 0 var(--brand); }
+    .workspace-head { position: relative; display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 6px 9px; border-radius: 7px; font-size: 12px; font-weight: 650; }
+    .workspace-head .actions { margin-left: auto; color: var(--quiet); letter-spacing: 4px; }
+    .target { position: relative; display: flex; align-items: center; gap: 6px; min-height: 23px; margin-left: 21px; padding: 3px 8px 3px 4px; border-radius: 5px; color: var(--muted); font-size: 11px; }
+    .shortcut { width: 24px; color: var(--quiet); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+    .kind { width: 13px; text-align: center; font-size: 10px; }
+    .secondary { overflow: hidden; color: var(--quiet); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .status-dot { flex: none; width: 8px; height: 8px; border: 1.5px solid currentColor; border-radius: 50%; }
+    .status-dot.filled { background: currentColor; }
+    .status-dot.halo { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent); }
+    .green { color: var(--green); } .amber { color: var(--amber); } .gray { color: var(--gray); }
+    .blue { color: var(--blue); } .red { color: var(--red); }
+
+    .main { min-width: 0; display: grid; grid-template-rows: 42px 1fr; background: #11191b; }
+    .tabbar { display: flex; align-items: center; gap: 0; padding-right: 12px; border-bottom: 1px solid var(--border-soft); background: #101719; }
+    .tabs { min-width: 0; flex: 1; height: 28px; display: flex; align-items: stretch; margin-top: 5px; }
+    .tab { width: 170px; display: flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 4px; color: var(--muted); font-size: 11px; cursor: grab; user-select: none; }
+    .tab.active { color: var(--text); background: var(--surface-2); font-weight: 650; }
+    .tab.dragging { opacity: .46; }
+    .tab.drop-before { box-shadow: -3px 0 0 var(--brand); }
+    .tab .close { margin-left: auto; color: var(--quiet); opacity: .7; }
+    .tabbar-actions { color: var(--quiet); letter-spacing: 10px; font-size: 13px; }
+    .terminal { padding: 22px 26px; color: #c8d4d2; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; background: #0d1416; }
+    .terminal .prompt { color: var(--brand); }
+    .terminal .output { color: #73878a; }
+    .terminal .comment { color: #526467; }
+
+    .palette { position: absolute; z-index: 4; left: 50%; top: 72px; transform: translateX(-35%); width: 660px; padding: 15px; border: 1px solid #3a4c50; border-radius: 12px; background: rgba(19,29,31,.985); box-shadow: 0 28px 80px rgba(0,0,0,.55); }
+    .palette-brand { font-size: 15px; font-weight: 700; }
+    .search { margin: 10px 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: #0e1517; color: var(--muted); font-size: 12px; }
+    .palette-row { height: 48px; display: grid; grid-template-columns: 16px 27px 25px minmax(0,1fr) auto; gap: 7px; align-items: center; padding: 5px 7px; border-radius: 7px; }
+    .palette-row.selected { background: rgba(89,219,205,.08); box-shadow: inset 0 0 0 1px rgba(89,219,205,.24); }
+    .palette-row .num { color: var(--quiet); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tile { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 5px; background: var(--surface-3); color: var(--muted); font-size: 11px; }
+    .palette-copy { min-width: 0; }
+    .palette-top { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+    .palette-name { flex: none; font-size: 12px; font-weight: 650; }
+    .palette-detail { min-width: 0; overflow: hidden; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .source-tag { display: none; }
+    .palette-context { margin-top: 2px; color: var(--brand); font-size: 9px; }
+    .palette-context code { margin-left: 5px; color: var(--quiet); }
+    .alert { color: var(--red); }
+    .palette-footer { display: flex; gap: 9px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-soft); color: var(--quiet); font-size: 9px; }
+    kbd { padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .legend { display: flex; flex-wrap: wrap; gap: 11px 16px; margin-top: 15px; color: var(--muted); font-size: 11px; }
+    .legend span { display: flex; align-items: center; gap: 5px; }
+    .legend i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .drag-hint { position: absolute; right: 24px; top: 53px; z-index: 2; color: var(--quiet); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    /* A — colored text and icon, with header dot. */
+    .style-a .target[data-state] .target-name, .style-a .target[data-state] .kind { color: var(--state); }
+    .style-a .workspace-head { color: var(--state, var(--text)); }
+
+    /* B — compact leading rail plus neutral text. */
+    .style-b .target[data-state]::before { content:""; position:absolute; left:-3px; top:4px; bottom:4px; width:2px; border-radius:2px; background:var(--state); }
+    .style-b .workspace-head::before { content:""; position:absolute; left:3px; top:6px; bottom:6px; width:3px; border-radius:3px; background:var(--state,var(--gray)); }
+    .style-b .workspace-head { padding-left: 12px; }
+
+    /* C — low-alpha semantic washes. */
+    .style-c .target[data-state], .style-c .workspace-head { background: color-mix(in srgb, var(--state) 11%, transparent); }
+    .style-c .target[data-state] { margin-top:1px; margin-bottom:1px; }
+    .style-c .workspace-head { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--state) 22%, transparent); }
+
+    /* D — explicit compact status chips. */
+    .status-pill { display:none; margin-left:auto; padding:2px 5px; border:1px solid color-mix(in srgb, currentColor 45%, transparent); border-radius:4px; background:color-mix(in srgb, currentColor 9%, transparent); font: 8px ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:uppercase; }
+    .style-d .target .status-pill, .style-d .workspace-head .status-pill { display:block; }
+    .style-d .workspace-head .actions { display:none; }
+    .style-d .target .status-dot { display:none; }
+
+    .current .palette-detail.new-only, .current .source-tag, .current .status-pill { display:none; }
+    .current .tab { cursor:default; }
+    .current .tab.drop-before { box-shadow:none; }
+    .current .drag-hint { display:none; }
+    .current .workspace.selected .workspace-head > .status-dot { color: var(--green); }
+    .current .workspace.selected .target:nth-of-type(4) .status-dot { color: var(--green); }
+    .current .workspace-head { color: var(--text); }
+
+    .note-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px; }
+    .note { padding:11px 12px; border:1px solid var(--border-soft); border-radius:8px; background:var(--panel); color:var(--muted); font-size:11px; line-height:1.45; }
+    .note b { color:var(--text); }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="eyebrow">UI decision mockup · August 2026</div>
+    <h1>Command palette context, operational sidebar color, and draggable tabs</h1>
+    <p class="intro">Each direction uses the same information and interactions. Click a direction below, then drag the terminal tabs to test the reorder cue. The command palette shows both terminal-label cases: a reported terminal title takes priority; a foreground command is used only when no title is available.</p>
+
+    <nav class="picker" aria-label="Design directions">
+      <button aria-selected="true" data-target="current">Current</button>
+      <button aria-selected="false" data-target="a">A · Text tint</button>
+      <button aria-selected="false" data-target="b">B · Status rail</button>
+      <button aria-selected="false" data-target="c">C · Row wash</button>
+      <button aria-selected="false" data-target="d">D · Status chips</button>
+    </nav>
+
+    <section class="option current active" id="current">
+      <div class="option-head">
+        <div class="option-title"><div class="eyebrow">Baseline</div><h2>Current — small glyphs carry most state</h2><p>Workspace headers report lifecycle only. Runtime state appears on a small icon. Tabs select and rename, but do not reorder.</p></div>
+        <p class="tradeoff"><strong>Observed issue:</strong> the footer promises ⌘X, while matching currently requires the configured leader + X (⌘⌥X by default). A terminal without an OSC title has no foreground-command fallback in the palette.</p>
+      </div>
+      <div class="app-shell"></div>
+    </section>
+
+    <section class="option style-a" id="a">
+      <div class="option-head">
+        <div class="option-title"><div class="eyebrow">Direction A</div><h2>Text tint — fastest scan, smallest layout change</h2><p>Color the target name and kind glyph. The workspace name adopts the highest-attention child color, while selection keeps its neutral fill and teal rail.</p></div>
+        <p class="tradeoff"><strong>Tradeoff:</strong> strongest scanability and closest to the request, but several colored labels can feel lively in a busy workspace. Recommended starting point.</p>
+      </div>
+      <div class="app-shell"></div>
+    </section>
+
+    <section class="option style-b" id="b">
+      <div class="option-head">
+        <div class="option-title"><div class="eyebrow">Direction B</div><h2>Status rail — quiet text, clear hierarchy</h2><p>Keep labels neutral and add a narrow semantic rail to each target and workspace header. Status stays visible without recoloring typography.</p></div>
+        <p class="tradeoff"><strong>Tradeoff:</strong> calm and dense, but the workspace rail competes with the existing teal selection rail and needs careful indentation to avoid ambiguity.</p>
+      </div>
+      <div class="app-shell"></div>
+    </section>
+
+    <section class="option style-c" id="c">
+      <div class="option-head">
+        <div class="option-title"><div class="eyebrow">Direction C</div><h2>Row wash — attention reads as a region</h2><p>Apply a low-alpha semantic surface behind each status-bearing row. Workspace headers use the strongest descendant state as a subtle outlined wash.</p></div>
+        <p class="tradeoff"><strong>Tradeoff:</strong> easiest to notice peripherally and works well for workspace headers, but repeated fills make the sidebar visually heavier.</p>
+      </div>
+      <div class="app-shell"></div>
+    </section>
+
+    <section class="option style-d" id="d">
+      <div class="option-head">
+        <div class="option-title"><div class="eyebrow">Direction D</div><h2>Status chips — explicit and accessible</h2><p>Use compact semantic words at the trailing edge: working, blocked, done, stopped, running, and exited. Workspace chips show the highest-attention state.</p></div>
+        <p class="tradeoff"><strong>Tradeoff:</strong> removes all interpretation and never relies on color alone, but adds the most visual and horizontal weight to a compact sidebar.</p>
+      </div>
+      <div class="app-shell"></div>
+    </section>
+
+    <div class="legend">
+      <span class="red"><i></i>process exited · highest attention</span><span class="amber"><i></i>agent blocked</span><span class="blue"><i></i>agent done</span><span class="green"><i></i>working / running</span><span class="gray"><i></i>not running</span>
+    </div>
+    <div class="note-grid">
+      <div class="note"><b>Proposed attention order</b><br>exited process → blocked agent → done agent → active runtime → not running. This is the unresolved product rule behind workspace-header color.</div>
+      <div class="note"><b>Drag behavior shown</b><br>Dragging moves a tab within its current strip, shows a brand-teal insertion marker, and persists the resulting array order. It does not imply drag-out or cross-window movement.</div>
+      <div class="note"><b>Palette priority shown</b><br>stable session name · reported OSC title; if absent, stable session name · foreground display command. Workspace and branch remain on the lower line.</div>
+    </div>
+  </main>
+
+  <template id="app-template">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="top-actions"><span>⌘ Search</span><span>＋ Workspace</span></div>
+        <div class="project">
+          <div class="project-head"><span>⌘</span><span>Spaces</span><span class="chev">⌄</span></div>
+          <div class="workspace selected" style="--state:var(--red)">
+            <div class="workspace-head"><span class="status-dot red filled"></span><span>feature/palette</span><span class="status-pill red">exited</span><span class="actions">⚙⌄</span></div>
+            <div class="target" data-state style="--state:var(--green)"><span class="shortcut">⌘1</span><span class="kind">✦</span><span class="status-dot green filled halo"></span><span class="target-name">Codex</span><span class="secondary">implement palette</span><span class="status-pill green">working</span></div>
+            <div class="target" data-state style="--state:var(--amber)"><span class="shortcut">⌘2</span><span class="kind">✦</span><span class="status-dot amber filled"></span><span class="target-name">Claude</span><span class="secondary">waiting for input</span><span class="status-pill amber">blocked</span></div>
+            <div class="target" data-state style="--state:var(--blue)"><span class="shortcut">⌘3</span><span class="kind">✦</span><span class="status-dot blue filled"></span><span class="target-name">Review</span><span class="secondary">finished</span><span class="status-pill blue">done</span></div>
+            <div class="target" data-state style="--state:var(--gray)"><span class="shortcut">⌘4</span><span class="kind">✦</span><span class="status-dot gray"></span><span class="target-name">Agent shell</span><span class="secondary"></span><span class="status-pill gray">stopped</span></div>
+            <div class="target" data-state style="--state:var(--green)"><span class="shortcut">⌘5</span><span class="kind">›_</span><span class="status-dot green filled halo"></span><span class="target-name">web</span><span class="secondary"></span><span class="status-pill green">running</span></div>
+            <div class="target" data-state style="--state:var(--red)"><span class="shortcut">⌘6</span><span class="kind">›_</span><span class="status-dot red"></span><span class="target-name">tests</span><span class="secondary"></span><span class="status-pill red">exited</span></div>
+          </div>
+          <div class="workspace" style="--state:var(--blue)">
+            <div class="workspace-head"><span class="status-dot blue filled"></span><span>docs</span><span class="status-pill blue">done</span><span class="actions">⚙›</span></div>
+          </div>
+          <div class="workspace" style="--state:var(--gray)">
+            <div class="workspace-head"><span class="status-dot gray"></span><span>main</span><span class="status-pill gray">stopped</span><span class="actions">⚙›</span></div>
+          </div>
+        </div>
+        <div class="project">
+          <div class="project-head"><span>⌘</span><span>Marketing</span><span class="chev">›</span></div>
+        </div>
+      </aside>
+      <section class="main">
+        <div class="tabbar"><div class="tabs"><div class="tab active" draggable="true"><span>feature/palette</span><span class="close">×</span></div><div class="tab" draggable="true"><span>Review</span><span class="close">×</span></div><div class="tab" draggable="true"><span>Tests</span><span class="close">×</span></div></div><div class="tabbar-actions">▥▤＋</div></div>
+        <div class="terminal"><span class="prompt">spaces-ui-status-tabs %</span> swift test --filter CommandPalette<br><span class="output">Test Suite 'CommandPalette' started</span><br><span class="output">Executed 42 tests, with 0 failures</span><br><br><span class="prompt">spaces-ui-status-tabs %</span> <span class="comment">▌</span></div>
+      </section>
+      <div class="drag-hint">drag tabs · insertion marker follows pointer</div>
+      <div class="palette">
+        <div class="palette-brand">◈&nbsp; Spaces</div>
+        <div class="search">Search workspaces, targets, and details <span style="float:right;color:var(--quiet)">6</span></div>
+        <div class="palette-row selected"><span class="status-dot red"></span><span class="num">⌘1</span><span class="tile">›_</span><div class="palette-copy"><div class="palette-top"><span class="palette-name">tests</span><span class="palette-detail">pnpm test --watch</span></div><div class="palette-context">Spaces › feature/palette <code>⑂ feature/palette</code></div></div><span class="alert">♟</span></div>
+        <div class="palette-row"><span></span><span class="num">⌘2</span><span class="tile">›_</span><div class="palette-copy"><div class="palette-top"><span class="palette-name">Shell 2</span><span class="palette-detail new-only">spaces — nvim</span><span class="source-tag">title</span></div><div class="palette-context">Spaces › feature/palette <code>⑂ feature/palette</code></div></div><span></span></div>
+        <div class="palette-row"><span></span><span class="num">⌘3</span><span class="tile">›_</span><div class="palette-copy"><div class="palette-top"><span class="palette-name">Shell 3</span><span class="palette-detail new-only">pnpm test --watch</span><span class="source-tag">foreground fallback</span></div><div class="palette-context">Spaces › feature/palette <code>⑂ feature/palette</code></div></div><span></span></div>
+        <div class="palette-row"><span class="status-dot green filled halo"></span><span class="num">⌘4</span><span class="tile">✦</span><div class="palette-copy"><div class="palette-top"><span class="palette-name">Codex</span><span class="palette-detail">implement palette</span></div><div class="palette-context">Spaces › feature/palette <code>⑂ feature/palette</code></div></div><span></span></div>
+        <div class="palette-footer"><span><kbd>↑</kbd><kbd>↓</kbd> Move</span><span>·</span><span><kbd>↵</kbd> Open</span><span>·</span><span><kbd>esc</kbd> Close</span><span>·</span><span><kbd>⌘ X</kbd> Dismiss alert</span></div>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    const template = document.querySelector('#app-template');
+    document.querySelectorAll('.app-shell').forEach(shell => shell.append(template.content.cloneNode(true)));
+
+    const buttons = [...document.querySelectorAll('.picker button')];
+    const options = [...document.querySelectorAll('.option')];
+    buttons.forEach(button => button.addEventListener('click', () => {
+      buttons.forEach(candidate => candidate.setAttribute('aria-selected', String(candidate === button)));
+      options.forEach(option => option.classList.toggle('active', option.id === button.dataset.target));
+    }));
+
+    document.querySelectorAll('.option:not(.current) .tabs').forEach(tabs => {
+      let dragged = null;
+      tabs.addEventListener('dragstart', event => {
+        dragged = event.target.closest('.tab');
+        if (!dragged) return;
+        dragged.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+      });
+      tabs.addEventListener('dragover', event => {
+        event.preventDefault();
+        const target = event.target.closest('.tab');
+        tabs.querySelectorAll('.tab').forEach(tab => tab.classList.remove('drop-before'));
+        if (target && target !== dragged) target.classList.add('drop-before');
+      });
+      tabs.addEventListener('drop', event => {
+        event.preventDefault();
+        const target = event.target.closest('.tab');
+        if (dragged && target && target !== dragged) tabs.insertBefore(dragged, target);
+        tabs.querySelectorAll('.tab').forEach(tab => tab.classList.remove('drop-before'));
+      });
+      tabs.addEventListener('dragend', () => {
+        tabs.querySelectorAll('.tab').forEach(tab => tab.classList.remove('dragging', 'drop-before'));
+        dragged = null;
+      });
+    });
+  </script>
+</body>
+</html>

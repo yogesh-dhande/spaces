@@ -1,0 +1,411 @@
+import Foundation
+import spacesterminalcore
+
+extension SQLiteStore {
+    // MARK: - Epoch helpers
+
+    /// Timestamps in the automation tables are REAL epoch seconds. Bindings are text-only, so a Date is
+    /// written as its epoch string (SQLite's REAL affinity converts it) and read back through `Double`.
+    private static func epochString(_ date: Date) -> String { String(date.timeIntervalSince1970) }
+    private static func date(fromEpoch text: String) -> Date? {
+        guard !text.isEmpty, let seconds = Double(text) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    // MARK: - Automations CRUD
+
+    private static let automationColumns = """
+        id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
+        timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
+        """
+
+    public func upsertAutomation(_ automation: Automation) throws {
+        try execute(
+            sql: """
+                INSERT INTO automations(
+                  id, name, enabled, trigger_kind, cron_expression, kind, script, agent_command, agent_prompt, workspace_id,
+                  timeout_seconds, concurrency_policy, missed_run_policy, next_fire_time, anchor_time_zone_identifier, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name,
+                  enabled = excluded.enabled,
+                  trigger_kind = excluded.trigger_kind,
+                  cron_expression = excluded.cron_expression,
+                  kind = excluded.kind,
+                  script = excluded.script,
+                  agent_command = excluded.agent_command,
+                  agent_prompt = excluded.agent_prompt,
+                  workspace_id = excluded.workspace_id,
+                  timeout_seconds = excluded.timeout_seconds,
+                  concurrency_policy = excluded.concurrency_policy,
+                  missed_run_policy = excluded.missed_run_policy,
+                  next_fire_time = excluded.next_fire_time,
+                  anchor_time_zone_identifier = excluded.anchor_time_zone_identifier,
+                  updated_at = excluded.updated_at
+                """,
+            bindings: [
+                automation.id, automation.name, automation.enabled ? "1" : "0", automation.triggerKind.rawValue, automation.cronExpression ?? "",
+                automation.kind.rawValue, automation.script, automation.agentCommand ?? "", automation.agentPrompt ?? "", automation.workspaceID,
+                automation.timeoutSeconds.map(String.init) ?? "", automation.concurrencyPolicy.rawValue, automation.missedRunPolicy.rawValue,
+                automation.nextFireTime.map(Self.epochString) ?? "", automation.anchorTimeZoneIdentifier ?? "",
+                Self.epochString(automation.createdAt), Self.epochString(automation.updatedAt),
+            ])
+    }
+
+    public func automation(id: String) throws -> Automation? {
+        guard let row = try queryRow(sql: "SELECT \(Self.automationColumns) FROM automations WHERE id = ?", bindings: [id]) else { return nil }
+        return Self.decodeAutomation(row: row)
+    }
+
+    public func automations() throws -> [Automation] {
+        try queryRows(sql: "SELECT \(Self.automationColumns) FROM automations ORDER BY created_at, id").compactMap(Self.decodeAutomation)
+    }
+
+    public func enabledCronAutomations() throws -> [Automation] {
+        try queryRows(sql: "SELECT \(Self.automationColumns) FROM automations WHERE enabled = 1 AND trigger_kind = 'cron' ORDER BY created_at, id")
+            .compactMap(Self.decodeAutomation)
+    }
+
+    /// Persists a cron automation's next-due time (the missed-run anchor a restarted daemon reads). Touches
+    /// only `next_fire_time`, never `updated_at`, so the scheduler advancing the anchor is not mistaken for a
+    /// user edit.
+    public func setAutomationNextFireTime(id: String, nextFireTime: Date?, anchorTimeZoneIdentifier: String?) throws {
+        try execute(
+            sql: "UPDATE automations SET next_fire_time = NULLIF(?, ''), anchor_time_zone_identifier = NULLIF(?, '') WHERE id = ?",
+            bindings: [nextFireTime.map(Self.epochString) ?? "", anchorTimeZoneIdentifier ?? "", id])
+    }
+
+    public func deleteAutomation(id: String) throws { try execute(sql: "DELETE FROM automations WHERE id = ?", bindings: [id]) }
+
+    public func automationIDs(workspaceID: String) throws -> [String] {
+        try queryRows(sql: "SELECT id FROM automations WHERE workspace_id = ? ORDER BY created_at, id", bindings: [workspaceID]).compactMap(\.first)
+    }
+
+    private static func decodeAutomation(row: [String]) -> Automation? {
+        guard row.count >= 17 else { return nil }
+        guard let triggerKind = AutomationTriggerKind(rawValue: row[3]) else { return nil }
+        guard let kind = AutomationKind(rawValue: row[5]) else { return nil }
+        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: row[11]) else { return nil }
+        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: row[12]) else { return nil }
+        guard let createdAt = date(fromEpoch: row[15]), let updatedAt = date(fromEpoch: row[16]) else { return nil }
+        return Automation(
+            id: row[0], name: row[1], enabled: row[2] == "1", triggerKind: triggerKind, cronExpression: row[4].isEmpty ? nil : row[4], kind: kind,
+            script: row[6], agentCommand: row[7].isEmpty ? nil : row[7], agentPrompt: row[8].isEmpty ? nil : row[8], workspaceID: row[9],
+            timeoutSeconds: row[10].isEmpty ? nil : Int(row[10]), concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy,
+            nextFireTime: date(fromEpoch: row[13]), createdAt: createdAt, updatedAt: updatedAt,
+            anchorTimeZoneIdentifier: row[14].isEmpty ? nil : row[14])
+    }
+
+    // MARK: - Automation runs
+
+    private static let automationRunColumns = """
+        id, automation_id, kind, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
+        prompt_delivered_at
+        """
+
+    public func insertAutomationRun(_ run: AutomationRun) throws {
+        try execute(
+            sql: """
+                INSERT INTO automation_runs(
+                  id, automation_id, kind, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
+                  prompt_delivered_at
+                )
+                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''))
+                """,
+            bindings: [
+                run.id, run.automationID, run.kind.rawValue, run.status.rawValue, run.skipReason?.rawValue ?? "", run.trigger.rawValue,
+                run.exitCode.map(String.init) ?? "", run.terminalSessionID ?? "", run.startedAt.map(Self.epochString) ?? "",
+                run.endedAt.map(Self.epochString) ?? "", Self.epochString(run.createdAt), run.promptDeliveredAt.map(Self.epochString) ?? "",
+            ])
+    }
+
+    /// Updates the mutable fields of a run row. Every field is written from the passed value, so the caller
+    /// composes the full desired state (e.g. terminal state + exit code + ended_at) in one update.
+    public func updateAutomationRun(
+        id: String, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?, exitCode: Int?, terminalSessionID: String?, startedAt: Date?,
+        endedAt: Date?, promptDeliveredAt: Date?
+    ) throws {
+        try execute(
+            sql: """
+                UPDATE automation_runs
+                SET status = ?, skip_reason = NULLIF(?, ''), exit_code = NULLIF(?, ''), terminal_session_id = NULLIF(?, ''),
+                    started_at = NULLIF(?, ''), ended_at = NULLIF(?, ''), prompt_delivered_at = NULLIF(?, '')
+                WHERE id = ?
+                """,
+            bindings: [
+                status.rawValue, skipReason?.rawValue ?? "", exitCode.map(String.init) ?? "", terminalSessionID ?? "",
+                startedAt.map(Self.epochString) ?? "", endedAt.map(Self.epochString) ?? "", promptDeliveredAt.map(Self.epochString) ?? "", id,
+            ])
+    }
+
+    public func automationRun(id: String) throws -> AutomationRun? {
+        guard let row = try queryRow(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE id = ?", bindings: [id]) else { return nil }
+        return Self.decodeAutomationRun(row: row)
+    }
+
+    /// Runs for one automation, newest first.
+    public func automationRuns(automationID: String) throws -> [AutomationRun] {
+        try queryRows(
+            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE automation_id = ? ORDER BY created_at DESC, id DESC",
+            bindings: [automationID]
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Runs across every automation, newest first — the unfiltered runs listing.
+    public func allAutomationRuns() throws -> [AutomationRun] {
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC").compactMap(
+            Self.decodeAutomationRun)
+    }
+
+    /// The newest terminal-status runs across every automation, capped at `limit` — the overview's recent-run
+    /// window. Only terminal runs count against the window so a burst of active (queued/running) runs can
+    /// never crowd out completed history; the overview unions these with the active runs separately. The
+    /// status filter is derived from `AutomationRunStatus.isTerminal` so it can't drift from the enum.
+    public func terminalAutomationRuns(limit: Int) throws -> [AutomationRun] {
+        let terminalStatuses = AutomationRunStatus.allCases.filter(\.isTerminal).map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return try queryRows(
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs
+                WHERE status IN (\(terminalStatuses))
+                ORDER BY created_at DESC, id DESC
+                LIMIT \(limit)
+                """
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Each automation's single newest terminal-status run (one row per automation), newest first. The
+    /// overview unions this with the recent-run window so every automation's last-run status stays accurate
+    /// even when a chatty automation's runs fill the global recent window and evict the quieter ones. The
+    /// status filter is derived from `AutomationRunStatus.isTerminal` (same pattern as `terminalAutomationRuns`)
+    /// so it can't drift from the enum; ties on `created_at` break on `id` for a deterministic single winner.
+    public func latestTerminalAutomationRunPerAutomation() throws -> [AutomationRun] {
+        let terminalStatuses = AutomationRunStatus.allCases.filter(\.isTerminal).map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return try queryRows(
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs a
+                WHERE a.status IN (\(terminalStatuses))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM automation_runs b
+                    WHERE b.automation_id = a.automation_id AND b.status IN (\(terminalStatuses))
+                      AND (b.created_at > a.created_at OR (b.created_at = a.created_at AND b.id > a.id))
+                  )
+                ORDER BY a.created_at DESC, a.id DESC
+                """
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Runs across every automation that are still active (queued or running), oldest first — the overview
+    /// always includes these regardless of the recent-run window so a live run is never dropped.
+    public func activeAutomationRuns() throws -> [AutomationRun] {
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status IN ('queued', 'running') ORDER BY created_at, id")
+            .compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Runs of one automation in a non-terminal state (queued or running), oldest first.
+    public func activeAutomationRuns(automationID: String) throws -> [AutomationRun] {
+        try queryRows(
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs
+                WHERE automation_id = ? AND status IN ('queued', 'running')
+                ORDER BY created_at, id
+                """, bindings: [automationID]
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Every run across all automations that is currently `running` — the executor's poll set.
+    public func runningAutomationRuns() throws -> [AutomationRun] {
+        try queryRows(sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status = 'running' ORDER BY created_at, id").compactMap(
+            Self.decodeAutomationRun)
+    }
+
+    /// The single pending queued run for one automation (there is at most one under the queue policy),
+    /// oldest first for determinism.
+    public func queuedAutomationRun(automationID: String) throws -> AutomationRun? {
+        try queryRows(
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs
+                WHERE automation_id = ? AND status = 'queued'
+                ORDER BY created_at, id
+                LIMIT 1
+                """, bindings: [automationID]
+        ).compactMap(Self.decodeAutomationRun).first
+    }
+
+    public func deleteAutomationRun(id: String) throws { try execute(sql: "DELETE FROM automation_runs WHERE id = ?", bindings: [id]) }
+
+    /// The ids of terminal runs of one automation beyond the newest `keeping`, oldest first — the retention
+    /// prune set. Non-terminal runs (queued/running) never appear, so a live run is never pruned.
+    public func prunableAutomationRunIDs(automationID: String, keeping: Int) throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT id FROM automation_runs
+                WHERE automation_id = ? AND status NOT IN ('queued', 'running')
+                ORDER BY created_at DESC, id DESC
+                LIMIT -1 OFFSET ?
+                """, bindings: [automationID, String(keeping)]
+        ).compactMap { $0.first }
+    }
+
+    private static func decodeAutomationRun(row: [String]) -> AutomationRun? {
+        guard row.count >= 12 else { return nil }
+        guard let kind = AutomationKind(rawValue: row[2]) else { return nil }
+        guard let status = AutomationRunStatus(rawValue: row[3]) else { return nil }
+        guard let trigger = AutomationRunTrigger(rawValue: row[5]) else { return nil }
+        guard let createdAt = date(fromEpoch: row[10]) else { return nil }
+        return AutomationRun(
+            id: row[0], automationID: row[1], kind: kind, status: status,
+            skipReason: row[4].isEmpty ? nil : AutomationRunSkipReason(rawValue: row[4]), trigger: trigger,
+            exitCode: row[6].isEmpty ? nil : Int(row[6]), terminalSessionID: row[7].isEmpty ? nil : row[7], startedAt: date(fromEpoch: row[8]),
+            endedAt: date(fromEpoch: row[9]), createdAt: createdAt, promptDeliveredAt: date(fromEpoch: row[11]))
+    }
+
+    // MARK: - Attributed terminal sessions
+
+    /// The terminal sessions stamped with a given automation run id, in creation order. Includes the run's
+    /// own `.automation` session and every coding-agent session spawned during the run.
+    public func terminalSessionIDs(automationRunID: String) throws -> [String] {
+        try queryRows(
+            sql: "SELECT session_id FROM terminal_sessions WHERE automation_run_id = ? ORDER BY created_at, session_id", bindings: [automationRunID]
+        ).compactMap { $0.first }
+    }
+
+    /// The automation run that owns a terminal session, when the session was launched by an automation.
+    public func automationRunID(terminalSessionID: String) throws -> String? {
+        try queryRow(sql: "SELECT automation_run_id FROM terminal_sessions WHERE session_id = ?", bindings: [terminalSessionID])?.first.flatMap {
+            $0.isEmpty ? nil : $0
+        }
+    }
+
+    /// The persisted workspace of an automation run's own terminal session. It remains valid after the
+    /// automation is edited, which is why replay reads it rather than the automation's current target.
+    public func workspaceID(automationRunID: String) throws -> String? {
+        try queryRow(
+            sql: """
+                SELECT terminal_sessions.workspace_id
+                FROM automation_runs
+                JOIN terminal_sessions ON terminal_sessions.session_id = automation_runs.terminal_session_id
+                WHERE automation_runs.id = ?
+                """, bindings: [automationRunID])?.first.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The persisted workspace for each requested run's own terminal session. The mapping follows
+    /// `automation_runs.terminal_session_id`, not the broader set of attributed sessions, so replay stays
+    /// with the terminal that actually executed the run even when its automation is later retargeted.
+    public func workspaceIDs(automationRunIDs: [String]) throws -> [String: String] {
+        let runIDs = Array(Set(automationRunIDs)).sorted()
+        guard !runIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: runIDs.count).joined(separator: ", ")
+        let rows = try queryRows(
+            sql: """
+                SELECT automation_runs.id, terminal_sessions.workspace_id
+                FROM automation_runs
+                JOIN terminal_sessions ON terminal_sessions.session_id = automation_runs.terminal_session_id
+                WHERE automation_runs.id IN (\(placeholders))
+                """, bindings: runIDs)
+        return Dictionary(
+            uniqueKeysWithValues: rows.compactMap { row in
+                guard row.count >= 2, !row[1].isEmpty else { return nil }
+                return (row[0], row[1])
+            })
+    }
+
+    /// Exited automation sessions that still have a live workspace runtime target. Restricting the scheduler
+    /// sweep to this set avoids rescanning every retained historical run on every tick. A missing runtime row
+    /// becomes detachable only after its run is terminal, preserving the launch-persistence grace for a run
+    /// whose runtime write has not landed yet.
+    public func exitedAutomationSessionIDsWithRuntimeTargets() throws -> [String] {
+        let interactiveStates = TerminalSessionState.allCases.filter(\.isInteractive).map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return try queryRows(
+            sql: """
+                SELECT DISTINCT s.session_id
+                FROM terminal_sessions s
+                JOIN automation_runs ar ON ar.id = s.automation_run_id
+                JOIN runtime_targets rt ON rt.tracking_id = s.session_id
+                LEFT JOIN terminal_runtime_states r ON r.root_directory = s.root_directory
+                WHERE r.state NOT IN (\(interactiveStates))
+                   OR (r.state IS NULL AND ar.status NOT IN ('queued', 'running'))
+                ORDER BY s.session_id
+                """
+        ).compactMap(\.first)
+    }
+
+    /// The persisted attributed sessions for exactly the requested run window, grouped by run id and ordered
+    /// by session creation. One statement replaces both a full-table attribution scan and a query per run on
+    /// the frequently-pushed overview path.
+    public func automationAttributedSessionsByRunID(runIDs: [String]) throws -> [String: [AutomationAttributedSession]] {
+        let runIDs = Array(Set(runIDs)).sorted()
+        guard !runIDs.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: runIDs.count).joined(separator: ", ")
+        let rows = try queryRows(
+            sql: """
+                SELECT automation_run_id, session_id, kind, title, user_title, workspace_id
+                FROM terminal_sessions
+                WHERE automation_run_id IN (\(placeholders))
+                ORDER BY automation_run_id, created_at, session_id
+                """, bindings: runIDs)
+        var sessionsByRunID: [String: [AutomationAttributedSession]] = [:]
+        for row in rows where row.count >= 6 {
+            guard let kind = TerminalSessionKind(rawValue: row[2]) else { continue }
+            sessionsByRunID[row[0], default: []].append(
+                AutomationAttributedSession(
+                    sessionID: row[1], kind: kind, name: TerminalSessionTitle.name(userTitle: row[4].isEmpty ? nil : row[4], launchTitle: row[3]),
+                    workspaceID: row[5].isEmpty ? nil : row[5]))
+        }
+        return sessionsByRunID
+    }
+
+    /// Every terminal session attributed to a run row that still exists: the automation half of the daemon's
+    /// retained-session keep-set, matching the `automation_runs` JOIN in
+    /// `terminalSessionIsReferencedByProduct`. A stamp whose run was pruned or deleted is excluded, so a
+    /// dangling id never keeps a pane open.
+    public func terminalSessionIDsAttributedToExistingAutomationRuns() throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT terminal_sessions.session_id
+                FROM terminal_sessions
+                JOIN automation_runs ON automation_runs.id = terminal_sessions.automation_run_id
+                ORDER BY terminal_sessions.created_at, terminal_sessions.session_id
+                """
+        ).compactMap { $0.first }
+    }
+
+    /// Drops a terminal session's automation attribution, releasing the reference that keeps a retained
+    /// run's session replayable. Called only by the session-retention release path, where a long-ended (or
+    /// over-budget) session's product rows are cleared so the daemon's garbage collector may reclaim it:
+    /// automation sessions then age out on exactly the same 7-day / byte-budget terms as ended panes,
+    /// leaving the run row itself untouched so the run still lists in the Runs tab without a replay.
+    public func clearTerminalSessionAutomationAttribution(sessionID: String) throws {
+        try execute(sql: "UPDATE terminal_sessions SET automation_run_id = NULL WHERE session_id = ?", bindings: [sessionID])
+    }
+
+    /// Deletes a terminal session and every companion row keyed by its session id — used to remove an
+    /// automation-attributed session from the product when its run is pruned or its automation deleted. The session row
+    /// and its runtime state, client, attachment, remote-session-state, and agent-signal-event rows are
+    /// removed in one transaction so a deleted session leaves no orphaned persistence behind (none of these
+    /// tables declares a foreign-key cascade onto `terminal_sessions`, so each must be deleted explicitly).
+    /// `terminal_agent_signal_events` lives in the profile store (not a per-session database), so deleting the
+    /// session directory alone would leave a signaling agent's signal history behind forever.
+    ///
+    /// The session may itself be an agent-watch SUBSCRIBER (its script ran `spaces agent … --subscribe`).
+    /// Retention/automation-deletion reaches this transaction directly and never routes the orchestrator's
+    /// `subscriberDidExit` path, so its subscriber-keyed edges in `agent_subscriptions`,
+    /// `agent_pending_notifications`, and `agent_remote_subscriptions` are dropped here — otherwise remote
+    /// watch streams stay alive and notifications target a nonexistent session. Only the subscriber SIDE is
+    /// cleared: rows where this session is the WATCHED agent (child) are owned by the agent-row lifecycle
+    /// (`finalizeAgentRow`, behind the `agent_subscriptions` RESTRICT foreign key) and must not be touched
+    /// here.
+    public func deleteTerminalSession(sessionID: String) throws {
+        try withImmediateTransaction {
+            try execute(sql: "DELETE FROM terminal_sessions WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_runtime_states WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_clients WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_attachments WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_remote_session_states WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_agent_signal_events WHERE session_id = ?", bindings: [sessionID])
+            try deleteAgentSubscriptions(subscriberTerminalSessionID: sessionID)
+            try deletePendingAgentNotifications(subscriberTerminalSessionID: sessionID)
+            try deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: sessionID)
+        }
+    }
+}

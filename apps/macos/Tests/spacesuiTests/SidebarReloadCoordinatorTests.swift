@@ -12,8 +12,7 @@ import Testing
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
-            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) },
-            minimumStartInterval: .zero)
+            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) }, minimumStartInterval: .zero)
 
         coordinator.request()
         while continuations.isEmpty { await Task.yield() }
@@ -45,8 +44,7 @@ import Testing
         let coordinator = SidebarReloadCoordinator<Int>(
             loadSnapshot: { await withCheckedContinuation { continuation in continuations.append(continuation) } },
             applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
-            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) },
-            minimumStartInterval: .zero)
+            handleFailure: { _, failurePlaceholderMessage in failures.append(failurePlaceholderMessage) }, minimumStartInterval: .zero)
 
         coordinator.request()
         #expect(await eventually { continuations.count == 1 })
@@ -125,10 +123,7 @@ import Testing
             loadSnapshot: {
                 loads += 1
                 return .success(loads)
-            },
-            applySnapshot: { snapshot, _, _ in applied.append(snapshot) },
-            handleFailure: { _, _ in },
-            minimumStartInterval: .seconds(60))
+            }, applySnapshot: { snapshot, _, _ in applied.append(snapshot) }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
 
         coordinator.request()
         for _ in 0..<20 { coordinator.request() }
@@ -153,10 +148,8 @@ import Testing
             loadSnapshot: {
                 loads += 1
                 return .success(loads)
-            },
-            applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
-            handleFailure: { _, _ in },
-            minimumStartInterval: .milliseconds(60))
+            }, applySnapshot: { snapshot, forceRemoteRefresh, bypassesBackoff in applied.append((snapshot, forceRemoteRefresh, bypassesBackoff)) },
+            handleFailure: { _, _ in }, minimumStartInterval: .milliseconds(60))
 
         coordinator.request()
         for _ in 0..<5 { coordinator.request() }
@@ -176,10 +169,7 @@ import Testing
             loadSnapshot: {
                 loads += 1
                 return .success(loads)
-            },
-            applySnapshot: { _, _, _ in },
-            handleFailure: { _, _ in },
-            minimumStartInterval: .seconds(60))
+            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
 
         coordinator.request()
         #expect(coordinator.state == .loading)
@@ -196,10 +186,7 @@ import Testing
             loadSnapshot: {
                 loads += 1
                 return .success(loads)
-            },
-            applySnapshot: { _, _, _ in },
-            handleFailure: { _, _ in },
-            minimumStartInterval: interval)
+            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: interval)
 
         coordinator.request()
         await coordinator.drainCurrentReloadForTesting()
@@ -221,10 +208,7 @@ import Testing
             loadSnapshot: {
                 loads += 1
                 return .success(loads)
-            },
-            applySnapshot: { _, _, _ in },
-            handleFailure: { _, _ in },
-            minimumStartInterval: .seconds(60))
+            }, applySnapshot: { _, _, _ in }, handleFailure: { _, _ in }, minimumStartInterval: .seconds(60))
 
         coordinator.request()
         await coordinator.drainCurrentReloadForTesting()

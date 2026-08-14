@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 13
+    public static let currentVersion = 16
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -87,6 +87,95 @@ public enum DatabaseSchema {
               row_json TEXT NOT NULL,
               PRIMARY KEY (device_id, agent_session_id)
             );
+        """
+
+    /// Daemon-owned scheduled automations that run a shell script or coding agent in a selected workspace.
+    /// `trigger_kind` is `manual` or `cron`; `cron_expression` holds the 5-field cron string and is NULL for
+    /// manual automations. Scripts run verbatim at the selected workspace root; agents run `agent_command`
+    /// seeded with `agent_prompt` there. `workspace_id` is required for every kind. `next_fire_time` is the
+    /// persisted next-due epoch for a cron automation and doubles as the missed-run anchor a restarted
+    /// daemon reads to decide whether a fire was missed while it was down. `anchor_time_zone_identifier`
+    /// records the zone that produced that absolute instant, so a restart after an offline zone change can
+    /// reinterpret the same wall-clock occurrence in the device's current zone. Timestamps are stored as
+    /// REAL epoch seconds.
+    static let automationsSQL = """
+            CREATE TABLE IF NOT EXISTS automations (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              trigger_kind TEXT NOT NULL,
+              cron_expression TEXT,
+              kind TEXT NOT NULL DEFAULT 'script',
+              script TEXT NOT NULL,
+              agent_command TEXT,
+              agent_prompt TEXT,
+              workspace_id TEXT NOT NULL,
+              timeout_seconds INTEGER,
+              concurrency_policy TEXT NOT NULL,
+              missed_run_policy TEXT NOT NULL,
+              next_fire_time REAL,
+              anchor_time_zone_identifier TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+        """
+
+    /// Frozen v14 automation shape, used only by the v13→v14 migration. The next step adds the anchor-zone
+    /// column; using the latest table SQL in the older step would make a serial v13 upgrade add it twice.
+    static let automationsV14SQL = """
+            CREATE TABLE IF NOT EXISTS automations (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              trigger_kind TEXT NOT NULL,
+              cron_expression TEXT,
+              kind TEXT NOT NULL DEFAULT 'script',
+              script TEXT NOT NULL,
+              agent_command TEXT,
+              agent_prompt TEXT,
+              workspace_id TEXT NOT NULL,
+              timeout_seconds INTEGER,
+              concurrency_policy TEXT NOT NULL,
+              missed_run_policy TEXT NOT NULL,
+              next_fire_time REAL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+        """
+
+    /// One row per automation execution attempt. The foreign key mirrors the `agent_session_events →
+    /// agent_sessions` precedent (`ON DELETE CASCADE`): a run history row is a child of its automation and
+    /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
+    /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
+    /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
+    /// `terminal_session_id` links to the workspace-bound session that carried the command. `kind` is the
+    /// automation's `script`/`agent` kind stamped onto the run at creation time: an automation's kind can be
+    /// edited once its runs are terminal, but a retained historical run keeps the session shape it actually
+    /// ran with, so opening its history dispatches on the run's own kind rather than the automation's current
+    /// one. `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been written
+    /// to its session; it makes prompt delivery survive a daemon restart deterministically — the two
+    /// agent-run phases (detecting/sending while NULL, awaiting done/end once set) derive from it so no
+    /// in-memory state is lost on restart. Named separately so the fresh-schema SQL and the v11→v12 migration
+    /// step share one definition.
+    static let automationRunsSQL = """
+            CREATE TABLE IF NOT EXISTS automation_runs (
+              id TEXT PRIMARY KEY,
+              automation_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              status TEXT NOT NULL,
+              skip_reason TEXT,
+              trigger_kind TEXT NOT NULL,
+              exit_code INTEGER,
+              terminal_session_id TEXT,
+              started_at REAL,
+              ended_at REAL,
+              created_at REAL NOT NULL,
+              prompt_delivered_at REAL,
+              FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS automation_runs_automation_created_idx
+              ON automation_runs(automation_id, created_at);
         """
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
@@ -371,6 +460,94 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_sessions DROP COLUMN claimed_launcher_name;
                     """)
         },
+        // Adds the scheduled-automation surface (`automations`, `automation_runs`) and makes terminal
+        // sessions carry `automation_run_id` so an automation command is attributed back to its run.
+        // SQLite cannot add a column mid-table in place, so `terminal_sessions` is rebuilt: create the new shape, copy
+        // every row (workspace_id carried forward unchanged; automation_run_id defaults NULL), drop the
+        // old table, and rename. No table declares a foreign key onto `terminal_sessions`, so the
+        // drop/rename touches nothing else even with foreign_keys ON inside the migration transaction. The
+        // new-table column shape here must match `terminalSessionsTableSQL`, which the fresh schema uses.
+        //
+        // The frozen pre-v14 shape is created first for the same reason the v7→v8 and v8→v9 steps create
+        // theirs: a database that predates the terminal tables carries none of them (they were only ever
+        // created by the fresh-schema SQL), and the rebuild needs a table to copy from; on a database
+        // that already has the table the CREATE is a no-op.
+        DatabaseMigrationStep(
+            fromVersion: 13, toVersion: 14, description: "Add automations tables and make terminal_sessions workspace-optional", requiresBackup: true
+        ) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    \(automationsV14SQL)
+                    \(automationRunsSQL)
+                    CREATE TABLE IF NOT EXISTS terminal_sessions (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      lifetime_policy TEXT NOT NULL,
+                      workspace_id TEXT NOT NULL,
+                      kind TEXT NOT NULL DEFAULT 'shell',
+                      title TEXT NOT NULL,
+                      user_title TEXT,
+                      working_directory TEXT NOT NULL,
+                      shell TEXT NOT NULL,
+                      command TEXT,
+                      created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE terminal_sessions_new (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      lifetime_policy TEXT NOT NULL,
+                      workspace_id TEXT,
+                      kind TEXT NOT NULL DEFAULT 'shell',
+                      title TEXT NOT NULL,
+                      user_title TEXT,
+                      working_directory TEXT NOT NULL,
+                      shell TEXT NOT NULL,
+                      command TEXT,
+                      created_at TEXT NOT NULL,
+                      automation_run_id TEXT
+                    );
+                    INSERT INTO terminal_sessions_new (
+                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title,
+                      working_directory, shell, command, created_at
+                    )
+                      SELECT session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title,
+                             working_directory, shell, command, created_at
+                    FROM terminal_sessions;
+                    DROP TABLE terminal_sessions;
+                    ALTER TABLE terminal_sessions_new RENAME TO terminal_sessions;
+                    """)
+        },
+        DatabaseMigrationStep(fromVersion: 14, toVersion: 15, description: "Persist automation cron anchor time zones", requiresBackup: true) {
+            handle in try migrationExecuteBatch(handle, sql: "ALTER TABLE automations ADD COLUMN anchor_time_zone_identifier TEXT;")
+        },
+        // Records whether the user has hidden a project, independent of the per-workspace hidden flag.
+        // Existing rows carry 0: nothing could hide a project before this version.
+        //
+        // The frozen pre-v16 shape is created first for the same reason the v9→v10 step creates
+        // `agent_sessions`: no migration step has ever created `projects` — it is defined only in the
+        // fresh-schema SQL, which runs only on a database with no tables at all — so an upgrade chain that
+        // reaches here without it has nothing to alter. Creating it, rather than making the ALTER
+        // conditional, is what guarantees a v16 database always HAS `projects`; on every database that
+        // already has the table the CREATE is a no-op and every existing row is preserved.
+        DatabaseMigrationStep(fromVersion: 15, toVersion: 16, description: "Persist project hidden state", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS projects (
+                      id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      dir TEXT NOT NULL UNIQUE,
+                      is_git INTEGER NOT NULL,
+                      default_branch TEXT,
+                      setup_script TEXT,
+                      stop_script TEXT
+                    );
+                    ALTER TABLE projects ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0;
+                    """)
+        },
     ]
 
     /// The persisted final-render state of a session, one row per session. `has_final_render` stores
@@ -406,21 +583,30 @@ public enum DatabaseSchema {
             ON terminal_agent_signal_events(session_id, acknowledged_at, created_at);
         """
 
-    static let terminalSchemaSQL = """
+    /// The `terminal_sessions` table. `workspace_id` is nullable for generic session persistence, while
+    /// automation sessions always carry their selected workspace and `automation_run_id` attribution.
+    /// The unique `root_directory` constraint keeps one live session per session directory. Named
+    /// separately so the fresh-schema SQL and the v13→v14 rebuild step share one column shape.
+    static let terminalSessionsTableSQL = """
             CREATE TABLE IF NOT EXISTS terminal_sessions (
               session_id TEXT PRIMARY KEY,
               root_directory TEXT NOT NULL UNIQUE,
               backend TEXT NOT NULL,
               lifetime_policy TEXT NOT NULL,
-              workspace_id TEXT NOT NULL,
+              workspace_id TEXT,
               kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
               user_title TEXT,
               working_directory TEXT NOT NULL,
               shell TEXT NOT NULL,
               command TEXT,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              automation_run_id TEXT
             );
+        """
+
+    static let terminalSchemaSQL = """
+            \(terminalSessionsTableSQL)
 
             CREATE TABLE IF NOT EXISTS terminal_runtime_states (
               session_id TEXT PRIMARY KEY,
@@ -499,7 +685,8 @@ public enum DatabaseSchema {
               is_git INTEGER NOT NULL,
               default_branch TEXT,
               setup_script TEXT,
-              stop_script TEXT
+              stop_script TEXT,
+              is_hidden INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS project_services (
@@ -678,6 +865,10 @@ public enum DatabaseSchema {
             );
 
             \(terminalSchemaSQL)
+
+            \(automationsSQL)
+
+            \(automationRunsSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL

@@ -34,6 +34,11 @@ import Testing
         return nil
     }
 
+    private func layerRedComponent(_ view: NSView) -> CGFloat? {
+        guard let color = view.layer?.backgroundColor, let resolved = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return nil }
+        return resolved.redComponent
+    }
+
     private func mouseEvent(_ type: NSEvent.EventType, at pointInWindow: NSPoint, in window: NSWindow) -> NSEvent {
         NSEvent.mouseEvent(
             with: type, location: pointInWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -108,6 +113,43 @@ import Testing
         let (bar, _) = makeBarInWindow()
         let item = try #require(tabItemView(withID: "t2", in: bar))
         #expect(!item.mouseDownCanMoveWindow)
+    }
+
+    @Test func dragPointerMapsToTabInsertionBoundaries() {
+        let midpoints: [CGFloat] = [50, 150, 250]
+        #expect(PanelTabBarView.insertionIndex(tabMidpoints: midpoints, pointerX: 0) == 0)
+        #expect(PanelTabBarView.insertionIndex(tabMidpoints: midpoints, pointerX: 100) == 1)
+        #expect(PanelTabBarView.insertionIndex(tabMidpoints: midpoints, pointerX: 200) == 2)
+        #expect(PanelTabBarView.insertionIndex(tabMidpoints: midpoints, pointerX: 300) == 3)
+    }
+
+    @Test func overflowingTabStripAutoScrollsTowardDragEdge() {
+        #expect(
+            PanelTabBarView.dragAutoScrollTargetOffset(currentOffset: 100, contentWidth: 600, viewportWidth: 300, pointerX: 295, viewportMinX: 0)
+                > 100)
+        #expect(
+            PanelTabBarView.dragAutoScrollTargetOffset(currentOffset: 100, contentWidth: 600, viewportWidth: 300, pointerX: 5, viewportMinX: 0) < 100)
+        #expect(
+            PanelTabBarView.dragAutoScrollTargetOffset(currentOffset: 100, contentWidth: 600, viewportWidth: 300, pointerX: 150, viewportMinX: 0)
+                == 100)
+        #expect(
+            PanelTabBarView.dragAutoScrollTargetOffset(currentOffset: 300, contentWidth: 600, viewportWidth: 300, pointerX: 295, viewportMinX: 0)
+                == 300)
+        #expect(
+            PanelTabBarView.dragAutoScrollTargetOffset(currentOffset: 0, contentWidth: 600, viewportWidth: 300, pointerX: 5, viewportMinX: 0) == 0)
+    }
+
+    @Test func tabInsertionMarkerRecolorsWhenAppearanceChanges() throws {
+        let bar = PanelTabBarView()
+        let marker = try #require(view(withAccessibilityIdentifier: "tab-insertion-indicator", in: bar))
+
+        bar.appearance = NSAppearance(named: .darkAqua)
+        NotificationCenter.default.post(name: .spacesAppAppearanceDidChange, object: nil)
+        #expect((layerRedComponent(marker) ?? 0) > 0.15)
+
+        bar.appearance = NSAppearance(named: .aqua)
+        NotificationCenter.default.post(name: .spacesAppAppearanceDidChange, object: nil)
+        #expect((layerRedComponent(marker) ?? 1) < 0.1)
     }
 
     /// Re-rendering with unchanged state must not recreate the tab item views —

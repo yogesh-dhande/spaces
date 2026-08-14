@@ -100,6 +100,119 @@
             }
         }
 
+        /// Before the first hook signal, a spawned agent still appears as a workspace terminal row. Its
+        /// run may already be finished (the agent prompt completed) while its terminal remains live. Stop
+        /// must proceed through agent teardown rather than treating the run's no-op cancellation as done.
+        func testStopWorkspaceTerminalStopsLiveAgentAfterItsAutomationRunFinished() throws {
+            try withTemporaryProfile { _ in
+                let run = try seedPreSignalAgentTerminal(terminalSessionID: "automation-agent-session", runStatus: .succeeded)
+                let killer = AgentSessionKillerRecorder(result: true)
+                let canceller = AutomationRunCancelRecorder(result: run)
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    agentSessionKiller: { killer.record($0) }, automationOperations: automationOperations(cancelRun: { canceller.record($0) }))
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "automation-agent-session")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Stopped workspace terminal"), response.message)
+                XCTAssertEqual(killer.sessionIDs(), ["automation-agent-session"])
+                XCTAssertEqual(canceller.runIDs(), [run.id])
+            }
+        }
+
+        /// A configured process can be recognized as an agent after its hook arrives. Its launch kind is
+        /// still `.process`, so terminal Stop must recognize the persisted agent row before it applies the
+        /// pre-signal `.agent` launch-kind gate.
+        func testStopWorkspaceTerminalStopsHookRegisteredConfiguredProcessAgent() throws {
+            try withTemporaryProfile { _ in
+                _ = try seedAgentSession(
+                    terminalSessionID: "configured-process-agent-session", label: "Codex", status: .spinning, note: nil, signalAt: nil)
+                let killer = AgentSessionKillerRecorder(result: true)
+                let (server, client, clientApp, token) = try startServerAndClient(agentSessionKiller: { killer.record($0) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "configured-process-agent-session")),
+                        authToken: token, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Stopped workspace terminal"), response.message)
+                XCTAssertEqual(killer.sessionIDs(), ["configured-process-agent-session"])
+            }
+        }
+
+        /// The row may read `running` just before the service serializes cancellation, then complete before
+        /// cancellation obtains queue ownership. A terminal result from cancellation means Stop still has to
+        /// reach the live agent session rather than returning as though it canceled work.
+        func testStopWorkspaceTerminalContinuesToAgentKillerWhenActiveRunCompletesBeforeCancellation() throws {
+            try withTemporaryProfile { _ in
+                let running = try seedPreSignalAgentTerminal(terminalSessionID: "automation-agent-session", runStatus: .running)
+                let completed = AutomationRun(
+                    id: running.id, automationID: running.automationID, kind: running.kind, status: .succeeded, skipReason: nil,
+                    trigger: running.trigger, exitCode: nil, terminalSessionID: running.terminalSessionID, startedAt: running.startedAt,
+                    endedAt: Date(), createdAt: running.createdAt, promptDeliveredAt: running.promptDeliveredAt)
+                let killer = AgentSessionKillerRecorder(result: true)
+                let canceller = AutomationRunCancelRecorder(result: completed)
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    agentSessionKiller: { killer.record($0) }, automationOperations: automationOperations(cancelRun: { canceller.record($0) }))
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "automation-agent-session")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Stopped workspace terminal"), response.message)
+                XCTAssertEqual(canceller.runIDs(), [running.id])
+                XCTAssertEqual(killer.sessionIDs(), ["automation-agent-session"])
+            }
+        }
+
+        /// A live automation command owns the Stop action itself. Cancelling the run records cancellation
+        /// and returns without also terminating a session that the automation service is already stopping.
+        func testStopWorkspaceTerminalCancelsActiveAutomationRunWithoutKillingItsSessionAgain() throws {
+            try withTemporaryProfile { _ in
+                let run = try seedPreSignalAgentTerminal(terminalSessionID: "automation-agent-session", runStatus: .running)
+                let killer = AgentSessionKillerRecorder(result: true)
+                let canceled = AutomationRun(
+                    id: run.id, automationID: run.automationID, kind: run.kind, status: .canceled, skipReason: nil, trigger: run.trigger,
+                    exitCode: nil, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt, endedAt: Date(), createdAt: run.createdAt,
+                    promptDeliveredAt: run.promptDeliveredAt)
+                let canceller = AutomationRunCancelRecorder(result: canceled)
+                let (server, client, clientApp, token) = try startServerAndClient(
+                    agentSessionKiller: { killer.record($0) }, automationOperations: automationOperations(cancelRun: { canceller.record($0) }))
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "automation-agent-session")), authToken: token,
+                        clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Canceled automation run"), response.message)
+                XCTAssertEqual(canceller.runIDs(), [run.id])
+                XCTAssertTrue(killer.sessionIDs().isEmpty)
+            }
+        }
+
         /// A false return from the killer means the id names no agent session — the same loud
         /// invalidArgument the local `.agentKill` path raises.
         func testKillAgentSessionFailsLoudlyWhenKillerReportsNoSession() throws {
@@ -350,13 +463,56 @@
             return agent
         }
 
-        private func startServerAndClient(agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil) throws -> (
-            server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String
-        ) {
+        @discardableResult private func seedPreSignalAgentTerminal(terminalSessionID: String, runStatus: AutomationRunStatus) throws -> AutomationRun
+        {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-1", name: "Spaces", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil, ports: [],
+                    processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", dir: dir + "/ws", dirname: nil, branch: "feature", isDefault: false, isRunning: true,
+                    lastLaunchedAt: nil))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "window-1", workspaceID: "workspace-1", app: TerminalHost.spaces.appName, name: "Automation agent", detail: nil,
+                    targetURL: nil, terminalTrackingID: terminalSessionID, role: "terminal", orderIndex: 200, lastSeenAt: "2026-08-12T00:00:00Z"))
+            let automation = Automation(
+                id: "automation-1", name: "Automation agent", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "",
+                agentCommand: "codex", agentPrompt: "Inspect the project", workspaceID: "workspace-1", timeoutSeconds: nil, concurrencyPolicy: .allow,
+                missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+            try store.upsertAutomation(automation)
+            let run = AutomationRun(
+                id: "run-1", automationID: automation.id, kind: .agent, status: runStatus, skipReason: nil, trigger: .manual, exitCode: nil,
+                terminalSessionID: terminalSessionID, startedAt: Date(), endedAt: runStatus.isTerminal ? Date() : nil, createdAt: Date())
+            try store.insertAutomationRun(run)
+            let paths = try TerminalSessionPaths.forSession(id: terminalSessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: terminalSessionID, title: "Automation agent", workingDirectory: dir + "/ws", shell: "/bin/zsh", command: "codex",
+                    createdAt: "2026-08-12T00:00:00Z", workspaceID: "workspace-1", kind: .agent, automationRunID: "run-1"), paths: paths)
+            return run
+        }
+
+        private func automationOperations(cancelRun: @escaping @Sendable (String) throws -> AutomationRun) -> AutomationOperations {
+            AutomationOperations(
+                create: { _ in throw AutomationValidationError("unused test operation") },
+                update: { _, _ in throw AutomationValidationError("unused test operation") }, delete: { _ in }, list: { [] }, runs: { _ in [] },
+                trigger: { _ in throw AutomationValidationError("unused test operation") }, cancelRun: cancelRun,
+                endAgents: { _ in throw AutomationValidationError("unused test operation") })
+        }
+
+        private func startServerAndClient(
+            agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil
+        ) throws -> (server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String) {
             let identity = try agentOrchestrationTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedAgentOrchestrationPairingStore()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller)
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller,
+                automationOperations: automationOperations)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
                 resolver: SpacesDeviceEndpointResolver(
@@ -435,6 +591,27 @@
         }
 
         func sessionIDs() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return ids
+        }
+    }
+
+    private final class AutomationRunCancelRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ids: [String] = []
+        private let result: AutomationRun
+
+        init(result: AutomationRun) { self.result = result }
+
+        func record(_ runID: String) -> AutomationRun {
+            lock.lock()
+            defer { lock.unlock() }
+            ids.append(runID)
+            return result
+        }
+
+        func runIDs() -> [String] {
             lock.lock()
             defer { lock.unlock() }
             return ids

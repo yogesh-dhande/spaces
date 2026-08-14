@@ -14,7 +14,11 @@ import Foundation
 /// afterwards, which is precisely what this integer exists to prevent. Rebase or merge first, then take
 /// the next unused number.
 public enum SpacesWireProtocol {
-    public static let version = 24
+    public static let version = currentVersion()
+
+    // A non-literal initializer keeps dependent targets from baking the value into default arguments;
+    // an incremental rebuild must observe the contract exported by this module.
+    @inline(never) private static func currentVersion() -> Int { 29 }
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

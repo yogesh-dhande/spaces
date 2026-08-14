@@ -19,7 +19,7 @@ struct AlertsTabView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.attentionGroups.isEmpty {
+        if model.attentionGroups.isEmpty && model.automationAlerts.isEmpty {
             ContentUnavailableView {
                 Label("No Alerts", systemImage: "bell")
             } description: {
@@ -29,8 +29,38 @@ struct AlertsTabView: View {
             List {
                 swipeHint
                 ForEach(model.attentionGroups) { group in alertGroupSection(group) }
+                if !model.automationAlerts.isEmpty { automationAlertsSection(model.automationAlerts) }
             }.listStyle(.plain).scrollContentBackground(.hidden)
         }
+    }
+
+    /// Failed/timed-out automation runs get their own band rather than joining coding-agent attention
+    /// grouped by workspace — mirrors the Mac's synthetic "Automations" alerts group.
+    @ViewBuilder private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
+        HeaderBand {
+            Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+            Spacer(minLength: 0)
+            Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+        }.accessibilityIdentifier("alerts.band.automations").bandListHeaderRow()
+        ForEach(entries) { entry in
+            automationAlertRow(entry).bandListRow().swipeActions(edge: .trailing) {
+                Button(role: .destructive) {
+                    model.dismissAutomationAlert(entry)
+                } label: {
+                    Label("Dismiss", systemImage: "bell.slash")
+                }.accessibilityIdentifier("alert.dismiss.\(entry.id)")
+            }
+        }
+    }
+
+    /// Status-level only: automation terminal and replay navigation lives in the Runs screens, so unlike
+    /// `eventRow` this alert row is never a button.
+    private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
+        BandRow(
+            dotKind: .exited,
+            tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
+            title: entry.automationName, detail: entry.outcome, detailIsMonospaced: false
+        ) { EmptyView() }.accessibilityIdentifier("alert.automation.\(entry.id)")
     }
 
     /// Swiping is the only way to dismiss a single alert, and nothing on the row advertises it, so the

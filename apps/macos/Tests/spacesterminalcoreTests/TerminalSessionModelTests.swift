@@ -122,19 +122,71 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(decoded.kind, .shell)
     }
 
-    func testLaunchConfigurationDecodeFailsWithoutWorkspaceID() {
+    func testLaunchConfigurationDecodesWithoutWorkspaceIDAsWorkspaceLess() throws {
+        // Generic session persistence accepts a workspace-less shell and yields nil rather than failing.
         let json = """
             {
-              "sessionID": "session-legacy",
-              "title": "legacy",
+              "sessionID": "session-automation",
+              "title": "automation",
               "workingDirectory": "/tmp/work",
               "shell": "/bin/zsh",
               "command": "cat",
-              "createdAt": "2026-05-08T00:00:00Z"
+              "createdAt": "2026-05-08T00:00:00Z",
+              "kind": "shell"
             }
             """.data(using: .utf8)!
 
-        XCTAssertThrowsError(try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: json))
+        let decoded = try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: json)
+
+        XCTAssertNil(decoded.workspaceID)
+        XCTAssertEqual(decoded.kind, .shell)
+    }
+
+    func testAutomationSessionRoundTripsThroughPersistence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        defer { if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") } }
+
+        let sessionID = "session-automation-roundtrip"
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        // Product automation sessions carry both their workspace and run attribution.
+        let configuration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "nightly backup", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "backup.sh",
+            createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .automation, automationRunID: "run-42")
+
+        try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+
+        let read = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        XCTAssertEqual(read, configuration)
+        XCTAssertEqual(read.workspaceID, "workspace-1")
+        XCTAssertEqual(read.kind, .automation)
+        XCTAssertEqual(read.automationRunID, "run-42")
+        // The same values survive the profile-wide listing query.
+        XCTAssertEqual(try TerminalSessionPersistence.listKnownSessions().map(\.launchConfiguration), [configuration])
+    }
+
+    func testAutomationRunIDSurvivesBatchedRuntimeReads() throws {
+        let runningID = "session-automation-running"
+        let endedID = "session-automation-ended"
+        for (sessionID, state) in [(runningID, TerminalSessionState.running), (endedID, .exited)] {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, title: "automation", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "backup.sh",
+                    createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .automation, automationRunID: "run-42"), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-08T00:00:01Z",
+                    exitedAt: state == .exited ? "2026-05-08T00:00:01Z" : nil), paths: paths)
+        }
+
+        let running = try XCTUnwrap(try TerminalSessionPersistence.listInteractiveSessionRuntimeStates().first { $0.sessionID == runningID })
+        let ended = try XCTUnwrap(try TerminalSessionPersistence.endedSessionRuntimes(sessionIDs: [endedID]).first)
+
+        XCTAssertEqual(running.launchConfiguration.automationRunID, "run-42")
+        XCTAssertEqual(ended.launchConfiguration.automationRunID, "run-42")
     }
 
     func testLaunchConfigurationPersistenceRoundTripsWorkspaceIDAndKind() throws {

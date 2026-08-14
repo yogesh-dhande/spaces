@@ -18,9 +18,7 @@ import spacesterminalcore
 
     /// `Cmd+0` is the numbered window shortcut for a workspace's tenth runtime target, not a zoom
     /// chord, so it must resolve to nil here: that is what leaves the window shortcut alone.
-    @Test func commandZeroIsNotAZoomChord() {
-        #expect(TerminalTextZoomKeyBinding.command(keyCode: kVK_ANSI_0, modifierFlags: [.command]) == nil)
-    }
+    @Test func commandZeroIsNotAZoomChord() { #expect(TerminalTextZoomKeyBinding.command(keyCode: kVK_ANSI_0, modifierFlags: [.command]) == nil) }
 
     /// Hardware modifiers the user is not holding (caps lock state, the numeric-pad and function bits
     /// a laptop keyboard sets on its own) must not stop a zoom key from being recognized.
@@ -34,9 +32,8 @@ import spacesterminalcore
     /// rest of the app: the zoom keys pressed without command, and other modifier combinations.
     @Test(arguments: [
         (kVK_ANSI_Equal, NSEvent.ModifierFlags([])), (kVK_ANSI_Minus, NSEvent.ModifierFlags([])),
-        (kVK_ANSI_0, NSEvent.ModifierFlags([.command, .shift])),
-        (kVK_ANSI_Equal, NSEvent.ModifierFlags([.command, .option])), (kVK_ANSI_Equal, NSEvent.ModifierFlags([.control])),
-        (kVK_ANSI_C, NSEvent.ModifierFlags([.command])),
+        (kVK_ANSI_0, NSEvent.ModifierFlags([.command, .shift])), (kVK_ANSI_Equal, NSEvent.ModifierFlags([.command, .option])),
+        (kVK_ANSI_Equal, NSEvent.ModifierFlags([.control])), (kVK_ANSI_C, NSEvent.ModifierFlags([.command])),
     ]) func nonZoomChordsAreNotClaimed(keyCode: Int, modifierFlags: NSEvent.ModifierFlags) {
         #expect(TerminalTextZoomKeyBinding.command(keyCode: keyCode, modifierFlags: modifierFlags) == nil)
     }

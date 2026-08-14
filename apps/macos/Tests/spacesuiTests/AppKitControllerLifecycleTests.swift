@@ -60,6 +60,17 @@ import workspacecore
         #expect(selection.associatedLiveSessionIDs == ["session-owned-a", "session-owned-b", "session-owned-c"])
     }
 
+    @Test func stopAllQuitRoutesWorkspaceStopThroughDaemonProfileCommand() throws {
+        var sent: TerminalServiceProfileCommand?
+
+        try AppKitController.stopWorkspaceForStopAllQuit(workspaceID: "workspace-automation") { command in
+            sent = command
+            return TerminalServiceProfileCommandResponse(message: "Workspace stopped.")
+        }
+
+        #expect(sent == .workspaceStop(workspaceID: "workspace-automation"))
+    }
+
     @Test func stopAllQuitCleanupMappingFailureRequiresFailureChoice() {
         let liveSessions = [Self.terminalSessionSummary(id: "session-unknown")]
         var terminatedSessionIDs: [String] = []

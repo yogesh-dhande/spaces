@@ -193,40 +193,6 @@ import workspacecore
         #expect(entries.first?.processID == "process-web")
     }
 
-    @Test func adHocDetectedAgentUsesForegroundCommandAsDetail() {
-        let windows = [
-            WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex --model gpt-5",
-                targetURL: nil, terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
-        ]
-        let agentWindows = [
-            AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now")
-        ]
-
-        let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
-
-        #expect(titleByAgentID["agent"] == "codex --model gpt-5")
-    }
-
-    @Test func adHocDetectedAgentHidesRedundantForegroundCommandDetail() {
-        let windows = [
-            WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex", targetURL: nil,
-                terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
-        ]
-        let agentWindows = [
-            AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session", sessionKey: nil,
-                status: .idle, createdAt: "now", updatedAt: "now")
-        ]
-
-        let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
-
-        #expect(titleByAgentID["agent"] == nil)
-    }
-
     @Test func demotedAdHocSpacesTerminalReturnsToProcessOrderingAsWindow() {
         let windows = [
             WindowRecord(
@@ -510,8 +476,8 @@ import workspacecore
             AppKitController.deviceWindowShortcutResolution(index: 4, selectedWorkspaceID: "workspace", overview: overview)
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
-                        workspaceID: "workspace", sessionID: "session-agent", title: "claude", workingDirectory: "/tmp/project-feature",
-                        kind: .agent)))
+                        workspaceID: "workspace", sessionID: "session-agent", title: "claude", workingDirectory: "/tmp/project-feature", kind: .agent)
+                ))
     }
 
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
@@ -551,8 +517,8 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1",
-                    sessionID: "session-agent", runState: .running, activityState: .idle, canStop: true)
+                    id: "agent:agent-1", workspaceID: "workspace", name: "claude", command: "claude", agentID: "agent-1", sessionID: "session-agent",
+                    runState: .running, activityState: .idle, canStop: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(

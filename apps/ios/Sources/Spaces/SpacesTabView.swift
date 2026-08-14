@@ -52,9 +52,8 @@ struct SpacesTabView: View {
                 workspace.isRunning
                     ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and moves it to the Hidden section at the end of this list."
                     : "\"\(workspace.displayName)\" will move to the Hidden section at the end of this list.")
-        }.confirmationDialog(
-            pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop
-        ) { stop in
+        }.confirmationDialog(pendingStop?.title ?? "", isPresented: pendingStopDialogBinding, titleVisibility: .visible, presenting: pendingStop) {
+            stop in
             Button("Stop", role: .destructive) { Task { await performPendingStop(stop) } }
             Button("Cancel", role: .cancel) {}
         } message: { stop in
@@ -70,9 +69,7 @@ struct SpacesTabView: View {
         Binding(get: { pendingHideWorkspace != nil }, set: { if !$0 { pendingHideWorkspace = nil } })
     }
 
-    private var pendingStopDialogBinding: Binding<Bool> {
-        Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } })
-    }
+    private var pendingStopDialogBinding: Binding<Bool> { Binding(get: { pendingStop != nil }, set: { if !$0 { pendingStop = nil } }) }
 
     private func performPendingStop(_ stop: PendingStop) async {
         switch stop {
@@ -209,6 +206,7 @@ struct SpacesTabView: View {
             if !model.isActiveDeviceBlocked, isHiddenSectionVisible {
                 sections.append(["hiddenHeader@\(SpacesListRowID.hiddenHeader)"])
                 if model.isHiddenSectionExpanded {
+                    sections.append(contentsOf: model.hiddenProjects.map { ["hiddenProject@\(SpacesListRowID.hiddenProject($0.projectID))"] })
                     sections.append(contentsOf: model.hiddenWorkspaces.map { ["hiddenWorkspace@\(SpacesListRowID.hiddenWorkspace($0.id))"] })
                 }
             }
@@ -391,8 +389,7 @@ struct SpacesTabView: View {
                 // this workspace's own delete dims it via `isDeleting`.
                 workspace: group.workspace, isBusy: model.isMutating || isDeleting,
                 onStart: { Task { await model.launchWorkspace(group.workspace) } },
-                onRestart: { Task { await model.restartWorkspace(group.workspace) } },
-                onStop: { pendingStop = .workspace(group.workspace) },
+                onRestart: { Task { await model.restartWorkspace(group.workspace) } }, onStop: { pendingStop = .workspace(group.workspace) },
                 // Demo Mode's backend does not open ad hoc terminals; hide the action there.
                 onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
             ).opacity(isDeleting ? 0.5 : 1).bandListRow().id(SpacesListRowID.workspaceControlBar(group.id))
@@ -565,20 +562,23 @@ struct SpacesTabView: View {
 
     // MARK: - Hidden workspaces
 
-    /// Demo Mode's backend cannot serve `setWorkspaceHidden`, so the recovery section that depends on it
-    /// stays off there — the same reasoning that keeps Hide itself out of `WorkspaceBandActions`. The
-    /// section is otherwise unfiltered by search or the row/state filters: it exists to recover a
-    /// workspace that the filtered browse below can no longer show, not to be browsed itself. Loose
-    /// terminal-session groups set the precedent for how search affects an auxiliary section here — they
-    /// stay on screen and filter their own contents rather than disappearing outright — so this section
-    /// likewise stays on screen while a search is active instead of hiding.
-    private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && !model.hiddenWorkspaces.isEmpty }
+    /// Demo Mode's backend cannot serve `setWorkspaceHidden`/`setProjectHidden`, so the recovery section
+    /// that depends on them stays off there — the same reasoning that keeps Hide itself out of
+    /// `WorkspaceBandActions`. The section is otherwise unfiltered by search or the row/state filters: it
+    /// exists to recover a workspace or project that the filtered browse below can no longer show, not to
+    /// be browsed itself. Loose terminal-session groups set the precedent for how search affects an
+    /// auxiliary section here — they stay on screen and filter their own contents rather than disappearing
+    /// outright — so this section likewise stays on screen while a search is active instead of hiding.
+    private var isHiddenSectionVisible: Bool { !model.isDemoModeEnabled && (!model.hiddenWorkspaces.isEmpty || !model.hiddenProjects.isEmpty) }
 
-    /// The Hidden header and each hidden workspace are separate list sections rather than rows of one
-    /// section, for the same reason each workspace is its own section: hiding and unhiding add and remove
-    /// a row while the section around it survives, and a row leaving a surviving section is the update the
-    /// collection view miscounts (see `workspaceSection`). A whole section arriving or leaving is sound,
-    /// so every row that can come and go independently owns one.
+    /// The Hidden header and each hidden row (project or workspace) are separate list sections rather than
+    /// rows of one section, for the same reason each workspace is its own section: hiding and unhiding add
+    /// and remove a row while the section around it survives, and a row leaving a surviving section is the
+    /// update the collection view miscounts (see `workspaceSection`). A whole section arriving or leaving
+    /// is sound, so every row that can come and go independently owns one.
+    ///
+    /// Hidden projects list before hidden workspaces: a project entry recovers a whole group of workspaces
+    /// at once, so it reads as the "bigger" recovery action and leads.
     @ViewBuilder private var hiddenSection: some View {
         if isHiddenSectionVisible {
             Section {
@@ -588,14 +588,30 @@ struct SpacesTabView: View {
                     HeaderBand {
                         Text("Hidden").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
                         Spacer(minLength: 0)
-                        Text("\(model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+                        Text("\(model.hiddenProjects.count + model.hiddenWorkspaces.count)").font(.system(size: 12)).foregroundStyle(
+                            Theme.mutedSecondary
+                        ).monospacedDigit()
                         Image(systemName: model.isHiddenSectionExpanded ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Theme.mutedSecondary)
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityIdentifier("spaces.hiddenSection").bandListHeaderRow().id(SpacesListRowID.hiddenHeader)
             }
-            if model.isHiddenSectionExpanded { ForEach(model.hiddenWorkspaces) { workspace in Section { hiddenWorkspaceRow(workspace) } } }
+            if model.isHiddenSectionExpanded {
+                ForEach(model.hiddenProjects) { project in Section { hiddenProjectRow(project) } }
+                ForEach(model.hiddenWorkspaces) { workspace in Section { hiddenWorkspaceRow(workspace) } }
+            }
         }
+    }
+
+    /// One hidden project's recovery row: unhiding clears only the project's own flag, resurfacing every
+    /// workspace under it (each still subject to its own `isHidden` flag independently).
+    private func hiddenProjectRow(_ project: SpacesMobileHiddenProjectSummary) -> some View {
+        BandRow(
+            dotKind: nil, tile: TypeIconTile(systemName: "folder"), title: project.projectName,
+            detail: project.workspaceCount == 1 ? "1 workspace" : "\(project.workspaceCount) workspaces", detailIsMonospaced: false
+        ) { EmptyView() }.bandListRow().accessibilityIdentifier("project.hidden.\(project.projectID)").contextMenu { unhideProjectButton(project) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) { unhideProjectButton(project) }.id(
+                SpacesListRowID.hiddenProject(project.projectID))
     }
 
     private func hiddenWorkspaceRow(_ workspace: SpacesDeviceWorkspaceSummary) -> some View {
@@ -618,6 +634,15 @@ struct SpacesTabView: View {
         } label: {
             Label("Unhide", systemImage: "eye")
         }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("workspace.unhide.\(workspace.id)")
+    }
+
+    /// Same no-confirmation reasoning as `unhideButton`: unhiding a project only changes visibility.
+    private func unhideProjectButton(_ project: SpacesMobileHiddenProjectSummary) -> some View {
+        Button {
+            Task { await model.unhideProject(project) }
+        } label: {
+            Label("Unhide", systemImage: "eye")
+        }.tint(Theme.accent).disabled(model.isMutating).accessibilityIdentifier("project.unhide.\(project.projectID)")
     }
 
     // MARK: - Loose terminal-session groups
@@ -715,6 +740,7 @@ private enum SpacesListRowID {
     static func looseBand(_ workspaceID: String) -> String { "loose.band.\(workspaceID)" }
     static func looseSession(_ sessionID: String) -> String { "loose.session.\(sessionID)" }
     static func hiddenWorkspace(_ workspaceID: String) -> String { "hidden.workspace.\(workspaceID)" }
+    static func hiddenProject(_ projectID: String) -> String { "hidden.project.\(projectID)" }
 }
 
 /// The workspace band's actions — Hide and Delete — offered both on long press and on trailing swipe.
@@ -833,7 +859,11 @@ struct WorkspaceCreateSheet: View {
     @State private var selectedProjectID: String?
     @State private var branch = ""
 
-    private var projects: [SpacesDeviceProjectSummary] { model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? [] }
+    // The daemon's create options already exclude hidden projects; the overview fallback carries them
+    // (the Hidden section is built from it), so it filters here to offer the same set.
+    private var projects: [SpacesDeviceProjectSummary] {
+        model.workspaceCreateOptions?.projects ?? model.overview?.projects.filter { !$0.isHidden } ?? []
+    }
 
     private var project: SpacesDeviceProjectSummary? { projects.first(where: { $0.id == selectedProjectID }) }
 

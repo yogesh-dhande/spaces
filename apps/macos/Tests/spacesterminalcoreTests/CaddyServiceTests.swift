@@ -188,9 +188,7 @@ import XCTest
             }
 
             XCTAssertThrowsError(try CaddyService.ensureRunning(configJSON: Data("{}".utf8), timeout: 2)) { error in
-                guard case CaddyServiceError.reloadFailed = error else {
-                    return XCTFail("expected reloadFailed, got \(error)")
-                }
+                guard case CaddyServiceError.reloadFailed = error else { return XCTFail("expected reloadFailed, got \(error)") }
             }
 
             XCTAssertFalse(FileManager.default.fileExists(atPath: runMarker.path))

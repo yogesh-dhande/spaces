@@ -80,12 +80,24 @@ extension OrchestratorTests {
         let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: projectsRoot)
 
         let project = try orchestrator.addProject(gitURL: fixture.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+        let automation = Automation(
+            id: "automation-project-delete", name: "Remove me", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "true", workspaceID: workspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce, nextFireTime: nil,
+            createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let automationService = AutomationService(store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
+            try automationService.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.dir))
 
         try orchestrator.removeProject(dir: project.dir)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: project.dir))
         XCTAssertNil(try store.project(dir: project.dir))
+        XCTAssertNil(try store.automation(id: automation.id), "project deletion tears down target automations before workspace records disappear")
         XCTAssertTrue(try orchestrator.listProjects().isEmpty)
     }
 
@@ -216,9 +228,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
 
-        let project = try orchestrator.addProject(dir: projectDir.path) { config in
-            config.stopScript = "echo ignored"
-        }
+        let project = try orchestrator.addProject(dir: projectDir.path) { config in config.stopScript = "echo ignored" }
 
         XCTAssertEqual(project.stopScript, "echo yaml-stop")
         XCTAssertEqual(project.ports.map(\.name), ["api"])
@@ -434,12 +444,11 @@ extension OrchestratorTests {
     /// imported at all instead of surfacing later as a launch failure).
     func testAddProjectByGitURLRollsBackManagedCloneWhenSpacesYAMLHasAnUnnamedProcess() throws {
         let fixture = try makeTempGitRepo(name: "unnamed-process-yaml-git-import")
-        try "processes:\n  - command: npm run api\n".write(
-            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try "processes:\n  - command: npm run api\n".write(to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
         try runGit(["add", "spaces.yaml"], cwd: fixture.path)
         try runGit(
-            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add unnamed process spaces yaml"],
-            cwd: fixture.path)
+            ["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add unnamed process spaces yaml"], cwd: fixture.path
+        )
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)

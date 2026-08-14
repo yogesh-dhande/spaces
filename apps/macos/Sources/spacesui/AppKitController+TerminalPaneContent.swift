@@ -379,8 +379,6 @@ extension AppKitController {
             let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
             let shortcutTargets = orderedWorkspaceRunShortcutTargets(
                 browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID, agentWindows: agentWindowRecords)
-            let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindowRecords, trackedWindows: windows)
-
             for (offset, target) in shortcutTargets.enumerated() {
                 // Browser targets can't live in a terminal pane, so the picker never offers them.
                 if target.kind == .browser { continue }
@@ -395,10 +393,11 @@ extension AppKitController {
                     status = .process(process.status)
                 case .window:
                     guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
-                    let rowText = terminalFallbackRowText(
-                        name: windows[windowListIndex].name, detail: windows[windowListIndex].detail, app: windows[windowListIndex].app)
+                    let window = windows[windowListIndex]
+                    let rowText = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
                     label = rowText.label
-                    detailText = rowText.detail
+                    detailText = terminalPaletteSecondaryLabel(
+                        liveTitle: rowText.detail, sessionID: window.terminalTrackingID, sessions: overview.sessions)
                     status = .none
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { continue }
@@ -406,9 +405,12 @@ extension AppKitController {
                     detailText = nil
                     status = .idle
                 case .agent:
-                    guard let agentWindow = target.agentWindow else { continue }
+                    guard let agentWindow = target.agentWindow,
+                        let agentRow = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
+                    else { continue }
                     label = agentWindow.label?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
-                    detailText = runtimeWindowTitleByAgentID[agentWindow.id]
+                    detailText = terminalPaletteSecondaryLabel(
+                        liveTitle: agentRow.liveTitle, sessionID: agentRow.sessionID, sessions: overview.sessions)
                     status = .agent(agentWindow.status)
                 case .browser: continue
                 }

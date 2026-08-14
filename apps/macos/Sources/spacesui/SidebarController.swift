@@ -136,6 +136,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private var alertsRowStack: NSStackView?
     private var alertsRowRail: NSView?
     private var alertsRowBadge: NSTextField?
+
+    // Automations sidebar row
+    private var automationsRowContainer: NSView?
+    private var automationsHeaderStack: NSStackView?
+    private var automationsRowRail: NSView?
+    private var automationsRowBadge: NSTextField?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -237,8 +243,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if host.projectSettingsProjectID != nil { return true }
         if host.workspaceSettingsWorkspaceID != nil { return true }
         if host.showingAlerts || host.showingSettings { return true }
-        if let selectedWorkspaceID = host.selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
-        if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID }) }
+        // Effective visibility, not mere existence: `findWorkspace` resolves hidden rows on purpose, but
+        // a selection whose workspace or project was hidden by another client (arriving through an
+        // overview refresh, never through the local hide path, which clears the selection itself) has no
+        // sidebar row left, so preserving it would keep a detail pane open with nothing behind it.
+        if let selectedWorkspaceID = host.selectedWorkspaceID {
+            guard let (project, workspace) = findWorkspace(id: selectedWorkspaceID) else { return false }
+            return SidebarVisibility.isVisibleWorkspace(workspace, inProject: project)
+        }
+        if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID && !$0.isHidden }) }
         if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
             return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
         }
@@ -1049,7 +1062,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
+            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
+                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
@@ -1105,13 +1119,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.reopenPersistedPanelWindowsIfPossible()
         // The Alerts pane's cards and `alertsFocusRequestMap` were built from the pre-rebuild groups, so
         // when it is visible it must be rebuilt to pick up this device's new state — its alerts stay
-        // listed, marked stale. The selection itself is deliberately left alone: an unreachable device's
-        // rows stay in the merged data, so a selection under it is still valid and its detail pane still
-        // renders from the retained overview. Only the pane's controls have to be rebuilt, and only when
-        // this device crossed into or out of being actionable — every earlier branch of the switch
-        // returned for a report that changed nothing.
+        // listed, marked stale. The Automations pane is rebuilt for the same reason: its tables and run
+        // cards were rendered from the pre-rebuild sections. The selection itself is deliberately left
+        // alone: an unreachable device's rows stay in the merged data, so a selection under it is still
+        // valid and its detail pane still renders from the retained overview. Only the pane's controls
+        // have to be rebuilt, and only when this device crossed into or out of being actionable — every
+        // earlier branch of the switch returned for a report that changed nothing.
         if host.showingAlerts {
             host.showAlertsDetail()
+        } else if host.showingAutomations {
+            host.showAutomationsDetail()
         } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
             visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
             newLoadState: host.deviceSections[index].loadState)
@@ -1284,6 +1301,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             SidebarProjectRowSignature(
                 device: device, project: project, standInWorkspace: standInWorkspace,
                 standInRuntimeStatus: standInWorkspace.flatMap { host.workspaceRuntimeStatusByID[$0.id] },
+                standInAttentionStatus: standInWorkspace.map { workspaceAttentionStatus(workspaceID: $0.id) },
                 standInIsPendingDeletion: standInWorkspace.map { host.isWorkspaceMarkedDeleting($0.id) } ?? false,
                 isExpandable: project.isGitRepo || !nonGitProjectRuntimeTargetChildren(project).isEmpty))
     }
@@ -1292,8 +1310,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         .workspace(
             SidebarWorkspaceRowSignature(
                 device: device, workspace: workspace, runtimeStatus: host.workspaceRuntimeStatusByID[workspace.id],
-                isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id), isExpanded: isWorkspaceExpanded(workspace.id),
-                hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
+                attentionStatus: workspaceAttentionStatus(workspaceID: workspace.id), isPendingDeletion: host.isWorkspaceMarkedDeleting(workspace.id),
+                isExpanded: isWorkspaceExpanded(workspace.id), hasRuntimeTargets: !runtimeTargetItems(workspaceID: workspace.id).isEmpty))
     }
 
     private func runtimeTargetRowSignature(
@@ -1319,11 +1337,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return (project, entry.workspace)
     }
 
-    private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isHidden }
-
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         if let cached = visibleWorkspacesCache[projectID] { return cached }
-        let result = (host.workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
+        let project = host.projects.first(where: { $0.id == projectID })
+        let result = (host.workspacesByProject[projectID] ?? []).filter { SidebarVisibility.isVisibleWorkspace($0, inProject: project) }.sorted {
+            lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
             return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
         }
@@ -1342,15 +1360,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
-        host.projects.filter { project in
-            guard project.deviceID == deviceID else { return false }
-            // A non-git project's row stands in for its single workspace. If that
-            // workspace is hidden it has no visible workspace, so drop the row entirely
-            // (it stays reachable from the Workspace Visibility dialog) rather than
-            // leaving a dead stand-in that selects nothing.
-            if !project.isGitRepo, visibleWorkspaces(projectID: project.id).isEmpty { return false }
-            return true
-        }
+        SidebarVisibility.deviceProjects(host.projects, deviceID: deviceID, workspacesByProject: host.workspacesByProject)
     }
 
     func navigateSidebarSelection(direction: Int) -> Bool {
@@ -1360,10 +1370,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
                 }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
-                showingAlerts: host.showingAlerts, direction: direction)
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
         else { return false }
         switch target {
         case .alerts: host.showAlertsDetail(presentation: .userNavigation)
+        case .automations: host.showAutomationsDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
@@ -1416,6 +1427,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let items = host.sidebarRuntimeTargetItems(workspaceID: workspaceID)
         runtimeTargetItemsCache[workspaceID] = items
         return items
+    }
+
+    private func workspaceAttentionStatus(workspaceID: String) -> SidebarAttentionStatus {
+        SidebarAttentionStatus.highest(runtimeTargetItems(workspaceID: workspaceID).compactMap(\.attentionStatus))
     }
 
     /// A non-git project row stands in for its single workspace, so its outline
@@ -1657,6 +1672,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let usesGroupedWorkspaceSelection = isSelected && !project.isGitRepo && host.selectedWorkspaceID != nil
         // A non-git project row is its single workspace's row, so it carries that workspace's delete.
         let rowState = projectRowState(project)
+        let standInAttentionStatus = nonGitProjectTargetWorkspace(project).map { workspaceAttentionStatus(workspaceID: $0.id) }
         cell.alphaValue = rowState.alpha
 
         let rowBackground = NSView()
@@ -1673,7 +1689,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = Typography.sectionTitle
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
+        titleLabel.textColor =
+            standInAttentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarPrimaryTextColor(isSelected: isSelected)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
 
@@ -1703,13 +1720,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 leadingIcon.contentTintColor = .tertiaryLabelColor
                 leadingIcon.toolTip = "Git repository"
             } else {
-                let workspace = nonGitProjectTargetWorkspace(project)
-                let lifecycleRunning =
-                    (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
-                        ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
-                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
-                leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-                leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+                let attentionStatus = standInAttentionStatus ?? .inactive
+                leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: sidebarAttentionDescription(attentionStatus))
+                leadingIcon.contentTintColor = sidebarAttentionColor(attentionStatus)
+                leadingIcon.toolTip = sidebarAttentionDescription(attentionStatus)
             }
             leadingIndicator = leadingIcon
         }
@@ -1839,30 +1853,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         titleRow.spacing = 6
         titleRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let runtimeStatus =
-            host.workspaceRuntimeStatusByID[workspace.id]
-            ?? WorkspaceRuntimeStatus(
-                workspaceID: workspace.id, lifecycleState: WorkspaceLifecycleState(isRunning: workspace.isRunning), runtimeHealth: .healthy,
-                hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
-                missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
+        let attentionStatus = workspaceAttentionStatus(workspaceID: workspace.id)
         // While the delete runs, the row's leading indicator is a spinner: the workspace's run state is on
         // its way out and says nothing the user can act on, so the row reports the delete instead.
-        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(runtimeStatus)
-        statusIndicator.translatesAutoresizingMaskIntoConstraints = false
-        statusIndicator.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        statusIndicator.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        let statusIndicator = rowState.showsDeletingProgress ? deletingProgressIndicator(workspaceID: workspace.id) : statusDot(attentionStatus)
 
         let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = Typography.controlLabel
         nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected)
+        nameLabel.textColor = sidebarAttentionTextColor(attentionStatus, isSelected: isSelected)
         nameLabel.setAccessibilityIdentifier("sidebar-workspace-title-\(workspace.id)")
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         titleRow.addArrangedSubview(statusIndicator)
         titleRow.addArrangedSubview(nameLabel)
-        if let warningSummary = runtimeStatus.warningSummary {
+        if let warningSummary = host.workspaceRuntimeStatusByID[workspace.id]?.warningSummary {
             let warningIcon = NSImageView()
             warningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
             warningIcon.contentTintColor = sidebarFailedIndicatorColor()
@@ -1916,14 +1922,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return cell
     }
 
-    /// A workspace row's run-state dot: filled while the workspace runs, hollow while it is stopped.
-    private func statusDot(_ runtimeStatus: WorkspaceRuntimeStatus) -> NSView {
-        let isLifecycleRunning = runtimeStatus.lifecycleState == .running
-        let statusIcon = NSImageView()
-        statusIcon.image = NSImage(systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-        statusIcon.contentTintColor = isLifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-        statusIcon.toolTip = isLifecycleRunning ? "Running" : "Stopped"
-        return statusIcon
+    /// A workspace row reports the highest-attention semantic status among its descendant targets.
+    private func statusDot(_ status: SidebarAttentionStatus) -> NSView {
+        RowPrimitives.compactStatusDot(
+            filled: status.usesFilledIndicator, tint: sidebarAttentionColor(status), tooltip: sidebarAttentionDescription(status))
     }
 
     /// The spinner a workspace row shows in place of its run-state dot while its delete runs, matching the
@@ -1934,6 +1936,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         spinner.controlSize = .mini
         spinner.toolTip = "Deleting…"
         spinner.setAccessibilityIdentifier("sidebar-workspace-deleting-\(workspaceID)")
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10)])
         spinner.startAnimation(nil)
         return spinner
     }
@@ -1950,20 +1954,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func runtimeTargetSymbolColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
-        switch item.runState {
-        case .running: return sidebarRunningIndicatorColor()
-        case .exited: return sidebarFailedIndicatorColor()
-        case .notStarted, nil: return sidebarMetadataTextColor(isSelected: isSelected)
-        }
+        item.attentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarMetadataTextColor(isSelected: isSelected)
     }
 
     private func runtimeTargetTextColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
-        switch item.runState {
-        case .running: return sidebarRunningIndicatorColor()
-        case .exited: return sidebarFailedIndicatorColor()
-        case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
-        case nil: return sidebarPrimaryTextColor(isSelected: isSelected)
-        }
+        item.attentionStatus.map { sidebarAttentionTextColor($0, isSelected: isSelected) } ?? sidebarPrimaryTextColor(isSelected: isSelected)
     }
 
     private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool) -> NSTableCellView {
@@ -1999,7 +1994,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
             .init(pointSize: 10, weight: .medium))
         icon.contentTintColor = runtimeTargetSymbolColor(item: item, isSelected: isWorkspaceSelected)
-        icon.toolTip = item.runState.map { $0 == .running ? "Running" : ($0 == .exited ? "Exited" : "Not started") }
+        icon.toolTip = item.attentionStatus.map(sidebarAttentionDescription)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
@@ -2382,7 +2377,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func sidebarFailedIndicatorColor() -> NSColor { Theme.statusFailed }
 
-    func sidebarIdleIndicatorColor() -> NSColor { sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85) }
+    func sidebarIdleIndicatorColor() -> NSColor { SidebarAttentionStatus.inactive.indicatorColor }
+
+    func sidebarAttentionColor(_ status: SidebarAttentionStatus) -> NSColor { status.indicatorColor }
+
+    func sidebarAttentionTextColor(_ status: SidebarAttentionStatus, isSelected: Bool) -> NSColor {
+        status == .inactive ? sidebarMetadataTextColor(isSelected: isSelected) : sidebarAttentionColor(status)
+    }
+
+    func sidebarAttentionDescription(_ status: SidebarAttentionStatus) -> String {
+        switch status {
+        case .failed: return "Exited"
+        case .blocked: return "Blocked"
+        case .done: return "Done"
+        case .working: return "Working"
+        case .inactive: return "Not running"
+        }
+    }
 
     func sidebarThemeColor(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -2756,7 +2767,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let project = host.projects[index]
         host.projects[index] = ProjectSummary(
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-            isCollapsed: isCollapsed, deviceID: project.deviceID)
+            isHidden: project.isHidden, isCollapsed: isCollapsed, deviceID: project.deviceID)
     }
 
     /// Update the Alerts sidebar row badge with the current attention item count.
@@ -2768,6 +2779,93 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         NSApp.dockTile.badgeLabel = totalCount == 0 ? nil : "\(totalCount)"
         NSApp.dockTile.display()
+        // The automations row's running-run count and children track the same overview changes as the alerts
+        // badge, so refresh them here to cover every sidebar-refresh path in one place.
+        updateAutomationsSidebarRow()
+    }
+
+    func makeAutomationsSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-automations")
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Automations")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Automations")
+        titleLabel.font = Typography.controlLabel
+        titleLabel.textColor = .labelColor
+
+        let badge = NSTextField(labelWithString: "")
+        badge.font = Typography.monoBadgeStrong
+        badge.textColor = sidebarRunningIndicatorColor()
+        badge.alignment = .right
+        badge.isBordered = false
+        badge.isEditable = false
+        badge.drawsBackground = false
+        badge.isHidden = true
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        automationsRowBadge = badge
+
+        let header = NSStackView(views: [icon, titleLabel, NSView(), badge, makeSidebarBadgeTrailingSlot()])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        automationsHeaderStack = header
+        // The whole row opens Automations.
+        let click = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
+        header.addGestureRecognizer(click)
+
+        container.addSubview(header)
+        // Selection rail: same squared teal bar as the Alerts row, on the container's leading edge and
+        // spanning only the header — the expanded running-run children are navigation shortcuts, not part
+        // of the selected surface.
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        container.addSubview(rail)
+        automationsRowRail = rail
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor), header.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: container.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: header.topAnchor), rail.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        automationsRowContainer = container
+
+        updateAutomationsSidebarRow()
+        return container
+    }
+
+    /// Refreshes the automations row's running-run count badge across reachable devices.
+    func updateAutomationsSidebarRow() {
+        guard automationsRowContainer != nil else { return }
+        let runningCount = AutomationsViewModel.runningRunCount(from: host.automationDeviceInputs())
+        if let badge = automationsRowBadge {
+            badge.stringValue = "\(runningCount)"
+            badge.isHidden = runningCount == 0
+        }
+        updateAutomationsRowAppearance()
+    }
+
+    func updateAutomationsRowAppearance() {
+        guard let header = automationsHeaderStack else { return }
+        // Selection reads from the leading teal rail alone, matching the Alerts row — no fill/border.
+        header.layer?.borderWidth = 0
+        header.layer?.backgroundColor = NSColor.clear.cgColor
+        automationsRowRail?.isHidden = !host.showingAutomations
+        if let rail = automationsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
+        }
     }
 
     func makeSidebarTopBarRow() -> NSView {
@@ -2877,6 +2975,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
+        stack.addArrangedSubview(makeSidebarBadgeTrailingSlot())
         alertsRowStack = stack
 
         row.addSubview(stack)
@@ -2901,6 +3000,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.addGestureRecognizer(click)
         alertsRowView = row
         return row
+    }
+
+    /// Keeps top-level navigation counts in one trailing column, inset from the row edge where
+    /// project and workspace rows carry their accessories.
+    private func makeSidebarBadgeTrailingSlot() -> NSView {
+        let slot = NSView()
+        slot.translatesAutoresizingMaskIntoConstraints = false
+        slot.setContentHuggingPriority(.required, for: .horizontal)
+        slot.setContentCompressionResistancePriority(.required, for: .horizontal)
+        slot.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        return slot
     }
 
     func updateAlertsRowAppearance() {

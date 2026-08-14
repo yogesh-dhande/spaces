@@ -5,8 +5,8 @@ import systembridge
 
 extension SQLiteStore {
     /// Canonical column order for a full `projects` row read; reused by every SELECT and by the
-    /// INSERT below since both list the same 7 columns in the same order.
-    private static let projectColumns = "id, name, dir, is_git, default_branch, setup_script, stop_script"
+    /// INSERT below since both list the same 8 columns in the same order.
+    private static let projectColumns = "id, name, dir, is_git, default_branch, setup_script, stop_script, is_hidden"
 
     public func upsert(project: ProjectRecord) throws {
         let normalizedServiceDefinitions = try validatedServiceDefinitions(project.ports)
@@ -14,18 +14,19 @@ extension SQLiteStore {
             try execute(
                 sql: """
                     INSERT INTO projects(\(Self.projectColumns))
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       dir = excluded.dir,
                       is_git = excluded.is_git,
                       default_branch = excluded.default_branch,
                       setup_script = excluded.setup_script,
-                      stop_script = excluded.stop_script
+                      stop_script = excluded.stop_script,
+                      is_hidden = excluded.is_hidden
                     """,
                 bindings: [
                     project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
-                    project.stopScript ?? "",
+                    project.stopScript ?? "", project.isHidden ? "1" : "0",
                 ])
             try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [project.id])
             for (index, definition) in normalizedServiceDefinitions.enumerated() {
@@ -106,8 +107,12 @@ extension SQLiteStore {
         }
     }
 
+    public func updateProjectHidden(id: String, isHidden: Bool) throws {
+        try execute(sql: "UPDATE projects SET is_hidden = ? WHERE id = ?", bindings: [isHidden ? "1" : "0", id])
+    }
+
     func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
-        guard row.count >= 7 else { return nil }
+        guard row.count >= 8 else { return nil }
         let id = row[0]
         let portRows = try queryRows(sql: "SELECT id, name FROM project_services WHERE project_id = ? ORDER BY order_index", bindings: [id])
         let ports = portRows.map { row in ServiceDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
@@ -122,7 +127,7 @@ extension SQLiteStore {
             sql: "SELECT name, url FROM project_browser_sessions WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
         return ProjectRecord(
-            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
+            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isHidden: row[7] == "1",
             setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
             browserSessions: browserSessions)
     }

@@ -5,6 +5,16 @@ import systembridge
 extension WorkspaceOrchestrator {
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? { try store.workspaceIDForTerminalSession(sessionID) }
 
+    /// Whether a workspace terminal row names a session launched through the coding-agent path. Before
+    /// the agent's first hook signal there is no agent row to render or address, so an explicit Stop still
+    /// arrives as a workspace-terminal request and must select teardown from the persisted launch kind.
+    public func workspaceTerminalSessionIsSpawnedAgent(workspaceID: String, sessionID: String) -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID),
+            let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
+        else { return false }
+        return launchConfiguration.workspaceID == workspaceID && launchConfiguration.kind == .agent
+    }
+
     @discardableResult public func stopBuiltInTerminalSessionClosedByUser(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
@@ -52,6 +62,17 @@ extension WorkspaceOrchestrator {
             try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
             return true
         }
+    }
+
+    /// Destroys an automation-attributed terminal while its workspace lifecycle gate is already held by
+    /// workspace/project teardown. This deliberately performs the same terminal-window, agent-row, and
+    /// subscriber cleanup as the public stop paths without trying to claim the gate a second time.
+    /// Automation deletion supplies only sessions stamped with its run id; callers must therefore never
+    /// use this as a general terminal-stop shortcut.
+    func terminateAutomationTerminalSessionDuringWorkspaceTeardown(sessionID: String) throws {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
+        terminateBuiltInTerminalSession(sessionID)
+        try removeAutomationTerminalSessionRuntimeTargetDuringWorkspaceTeardown(sessionID: sessionID)
     }
 
     @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
@@ -167,7 +188,8 @@ extension WorkspaceOrchestrator {
     /// false when no ad-hoc session in the workspace matches.
     ///
     /// An empty (or whitespace-only) title clears the rename instead of setting one, restoring the
-    /// generated name the session was launched under — the only way back from a rename.
+    /// generated name the session was launched under — the only way back from a rename. The resulting
+    /// name must remain unique among the workspace's focusable runtime rows.
     @discardableResult public func renameAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String, title: String) throws -> Bool {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         // The lifecycle lock keeps the rename from re-upserting a window row that a concurrent
@@ -183,22 +205,33 @@ extension WorkspaceOrchestrator {
             } else {
                 guard terminalSession(sessionID: sessionID, belongsTo: workspace) else { return false }
             }
-            let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
-                $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
-            }
             let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID)
-            // The window record names its row only once the session is gone, so a rename writes it to
-            // outlive the session and clearing one puts back the launch-generated name the record was
-            // created with. With no session record left there is no name to restore, so it stands.
-            if let windowName = title.isEmpty ? launchConfiguration?.title : title {
-                for window in matchingWindows {
-                    try store.upsert(
-                        window: WindowRecord(
-                            id: window.id, workspaceID: window.workspaceID, app: window.app, name: windowName, detail: window.detail,
-                            targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role,
-                            orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+            // Read, validate, and update the window rows under one immediate transaction. Like an agent
+            // rename, two terminal renames cannot both validate against the old names and then commit the
+            // same candidate.
+            try store.withTransaction {
+                let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
+                    $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+                }
+                if let resultingName = title.isEmpty ? launchConfiguration?.title : title {
+                    try validateAvailableWorkspaceFocusName(
+                        workspaceID: workspaceID, name: resultingName, excludingWindowIDs: Set(matchingWindows.map(\.id)))
+                }
+                // The window record names its row only once the session is gone, so a rename writes it to
+                // outlive the session and clearing one puts back the launch-generated name the record was
+                // created with. With no session record left there is no name to restore, so it stands.
+                if let windowName = title.isEmpty ? launchConfiguration?.title : title {
+                    for window in matchingWindows {
+                        try store.upsert(
+                            window: WindowRecord(
+                                id: window.id, workspaceID: window.workspaceID, app: window.app, name: windowName, detail: window.detail,
+                                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role,
+                                orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                    }
                 }
             }
+            // The terminal-session catalog shares the profile database through its own serialized
+            // connection, so write it after the store transaction releases its SQLite write lock.
             if launchConfiguration != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try TerminalSessionPersistence.writeUserTitle(title, sessionID: sessionID, paths: paths)
@@ -224,10 +257,47 @@ extension WorkspaceOrchestrator {
     }
 
     func generatedAdHocTerminalWindowName(workspaceID: String) throws -> String {
-        let usedNames = Set(try workspaceFocusableWindowNames(workspaceID: workspaceID).map(normalizedFocusName))
+        let visibleNames = try workspaceFocusableWindowNames(workspaceID: workspaceID)
+        let reservedLaunchNames = try reservedAdHocTerminalLaunchNames(workspaceID: workspaceID, excludingWindowIDs: [])
+        let usedNames = Set((visibleNames + reservedLaunchNames).map(normalizedFocusName))
         var suffix = 1
         while usedNames.contains(normalizedFocusName("shell-\(suffix)")) { suffix += 1 }
         return "shell-\(suffix)"
+    }
+
+    /// An ad-hoc terminal's launch name remains its clear-rename destination while a user title is
+    /// displayed, so no other row may claim it in the meantime. The terminal window supplies the
+    /// authoritative workspace/session relationship; the persisted shell launch supplies the reserved
+    /// name. Callers exclude a session's own window while validating its clear operation.
+    func reservedAdHocTerminalLaunchNames(workspaceID: String, excludingWindowIDs: Set<String>) throws -> [String] {
+        try adHocTerminalNamePairs(workspaceID: workspaceID, excludingWindowIDs: excludingWindowIDs).map { $0.launchName }
+    }
+
+    /// Names a full-workspace uniqueness check must reserve for each ad-hoc terminal. An unrenamed
+    /// terminal contributes its one name once; a renamed terminal contributes its visible user title and
+    /// its distinct launch title, which remains the destination of a later clear.
+    func adHocTerminalFocusNames(workspaceID: String) throws -> [String] {
+        try adHocTerminalNamePairs(workspaceID: workspaceID, excludingWindowIDs: []).flatMap { pair in
+            normalizedFocusName(pair.effectiveName) == normalizedFocusName(pair.launchName)
+                ? [pair.effectiveName] : [pair.effectiveName, pair.launchName]
+        }
+    }
+
+    private func adHocTerminalNamePairs(workspaceID: String, excludingWindowIDs: Set<String>) throws -> [(effectiveName: String, launchName: String)]
+    {
+        var seenSessionIDs = Set<String>()
+        return try store.windows(workspaceID: workspaceID).compactMap { window in
+            guard !excludingWindowIDs.contains(window.id), window.roleValue == .terminal, terminalHost(for: window.app) == .spaces,
+                let sessionID = terminalSessionID(for: window), let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID),
+                launchConfiguration.workspaceID == workspaceID, launchConfiguration.kind == .shell, !seenSessionIDs.contains(sessionID),
+                let launchName = sanitizedFocusName(launchConfiguration.title)
+            else { return nil }
+            seenSessionIDs.insert(sessionID)
+            let effectiveName =
+                sanitizedFocusName(TerminalSessionTitle.name(userTitle: launchConfiguration.userTitle, launchTitle: launchConfiguration.title))
+                ?? launchName
+            return (effectiveName, launchName)
+        }
     }
 
     func terminalTargetID(process: RunningProcessRecord) -> String? {
@@ -275,7 +345,7 @@ extension WorkspaceOrchestrator {
 
     /// Runs `command` through an interactive login shell (`-l -i -c`), the single shell form every
     /// command Spaces launches into a terminal goes through — workspace processes, ad-hoc
-    /// `terminal command` sessions, and spawned coding agents.
+    /// `terminal create` sessions, and spawned coding agents.
     ///
     /// `-l` alone sources only the profile files (`~/.zshenv`, `~/.zprofile`). The PATH entries and
     /// version-manager shims that put a user's tools on PATH — `~/.local/bin`, nvm/fnm/asdf/volta —
@@ -464,7 +534,8 @@ extension WorkspaceOrchestrator {
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
         switch terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind {
         case .agent: return true
-        case .shell, .process: return false
+        // An automation session is never a workspace's configured coding agent.
+        case .shell, .process, .automation: return false
         case nil: return ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
         }
     }
@@ -594,7 +665,7 @@ extension WorkspaceOrchestrator {
     /// Resolves the workspace owning a built-in terminal session: the workspace behind its
     /// running-process/agent/terminal-window row if it has one, else the workspace stamped
     /// on its own launch configuration — which every session now carries, since
-    /// `spaces terminal command` always resolves a workspace before launching. Returns nil
+    /// `spaces terminal create` always resolves a workspace before launching. Returns nil
     /// only when the session's launch configuration itself can't be read (deleted/pruned).
     func workspaceForBuiltInTerminalSession(sessionID: String, ownership existingOwnership: BuiltInTerminalSessionOwnership? = nil) throws
         -> WorkspaceRecord?
@@ -652,7 +723,8 @@ extension WorkspaceOrchestrator {
         if ownership.process != nil { return true }
         switch ownership.launchKind {
         case .process, .agent: return true
-        case .shell: return false
+        // An automation session is never a workspace's configured owner.
+        case .shell, .automation: return false
         case nil: return false
         }
     }

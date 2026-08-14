@@ -152,7 +152,7 @@ APP_PID="$!"
 sleep 3
 
 command_output="$(
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command \
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal create \
     --workspace "$FIXTURE_WORKSPACE_ID" --command "$COMMAND_TEXT" --title "terminal-mouse-reporting-scroll"
 )"
 session_id="$(extract_session_id "$command_output")"

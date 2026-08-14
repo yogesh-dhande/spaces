@@ -333,9 +333,9 @@ import workspacecore
         #expect(items.contains { $0.kind == .window && $0.label == "shell-1" })
     }
 
-    /// Palette rows for ad hoc shells read the way the sidebar rows do: the terminal's name, described
-    /// by the title its program reported. A shell that has reported none is named and nothing more.
-    @Test func commandPaletteTerminalRowsShowTheNameDescribedByTheLiveTitle() throws {
+    /// Palette rows for ad hoc shells prefer the live title and otherwise describe the name with the
+    /// generic foreground command already carried by the session overview.
+    @Test func commandPaletteTerminalRowsPreferLiveTitleThenForegroundCommand() throws {
         let overview = SpacesDeviceOverviewPayload(
             projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
             workspaces: [
@@ -351,12 +351,196 @@ import workspacecore
                             id: "terminal-busy", workspaceID: "workspace-1", title: "shell-2", workingDirectory: "/device/project-feature",
                             sessionID: "session-busy", runState: .running, canOpenTerminal: true, canStop: true, liveTitle: "vim main.swift"),
                     ])
-            ], sessions: [])
+            ],
+            sessions: [
+                terminalSessionSummary(id: "session-quiet", title: "shell-1", foregroundCommand: "pnpm test --watch"),
+                terminalSessionSummary(id: "session-busy", title: "shell-2", foregroundCommand: "ignored foreground"),
+            ])
 
         let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
 
-        #expect(try #require(items.first { $0.label == "shell-1" }).detail == nil)
+        #expect(try #require(items.first { $0.label == "shell-1" }).detail == "pnpm test --watch")
         #expect(try #require(items.first { $0.label == "shell-2" }).detail == "vim main.swift")
+    }
+
+    @Test func commandPaletteAgentRowsPreferTheirOverviewLiveTitleThenSessionForegroundCommand() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                    codingAgentRows: [
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy",
+                            sessionID: "session-busy", runState: .running, activityState: .spinning, canStop: true, liveTitle: "reviewing PR 493"),
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
+                            sessionID: "session-quiet", runState: .running, activityState: .idle, canStop: true),
+                    ])
+            ],
+            sessions: [
+                terminalSessionSummary(id: "session-busy", title: "Codex busy", foregroundCommand: "ignored foreground"),
+                terminalSessionSummary(id: "session-quiet", title: "Codex quiet", foregroundCommand: "codex --model gpt-5.6-sol"),
+            ])
+
+        let items = AppKitController.deviceCommandPaletteWorkspaceItems(from: overview)
+
+        #expect(try #require(items.first { $0.label == "Codex busy" }).detail == "reviewing PR 493")
+        #expect(try #require(items.first { $0.label == "Codex quiet" }).detail == "codex --model gpt-5.6-sol")
+    }
+
+    @Test func commandPaletteAgentAlertsPreferLiveTitleThenSessionForegroundCommandAndDedupeWithDetail() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                    codingAgentRows: [
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent:busy", workspaceID: "workspace-1", name: "Codex busy", command: "codex", agentID: "busy",
+                            sessionID: "session-busy", runState: .running, activityState: .waiting, updatedAt: "2026-08-14T09:00:00Z", canStop: true,
+                            liveTitle: "waiting for approval"),
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent:quiet", workspaceID: "workspace-1", name: "Codex quiet", command: "codex", agentID: "quiet",
+                            sessionID: "session-quiet", runState: .running, activityState: .done, updatedAt: "2026-08-14T09:01:00Z", canStop: true),
+                    ])
+            ],
+            sessions: [
+                terminalSessionSummary(id: "session-busy", title: "Codex busy", foregroundCommand: "ignored foreground"),
+                terminalSessionSummary(id: "session-quiet", title: "Codex quiet", foregroundCommand: "codex --model gpt-5.6-sol"),
+            ])
+        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+
+        let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: items, query: "", currentWorkspaceID: nil, recentFocusIdentities: [], maxEmptyQueryItems: 20)
+
+        let busyRows = visible.filter { $0.label == "Codex busy" }
+        #expect(busyRows.count == 1)
+        let busy = try #require(busyRows.first)
+        #expect(busy.source == .alertsAttention)
+        #expect(busy.detail == "waiting for approval")
+        let quietRows = visible.filter { $0.label == "Codex quiet" }
+        #expect(quietRows.count == 1)
+        let quiet = try #require(quietRows.first)
+        #expect(quiet.source == .alertsAttention)
+        #expect(quiet.detail == "codex --model gpt-5.6-sol")
+    }
+
+    @Test func commandPaletteBellAlertFallsBackToSessionForegroundCommand() throws {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 1,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    ])
+            ],
+            sessions: [
+                SpacesDeviceTerminalSessionSummary(
+                    id: "session-shell", title: "shell-1", liveTitle: nil, workingDirectory: "/device/project-feature", shell: "/bin/zsh",
+                    command: nil, state: .running, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil,
+                    workspaceID: "workspace-1", workspaceTitle: nil, projectID: "project-1", projectName: "Project",
+                    createdAt: "2026-08-14T09:00:00Z", updatedAt: "2026-08-14T09:00:00Z", isControlAvailable: true, isSubscriptionAvailable: true,
+                    attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundCommand: "make test", bellAt: "2026-08-14T09:02:00Z")
+            ])
+        let alerts = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+
+        let items = AppKitController.buildCommandPaletteItems(overview: overview, alertsGroups: alerts)
+        let alert = try #require(items.first { $0.source == .alertsAttention && $0.label == "shell-1" })
+
+        #expect(alert.detail == "make test")
+    }
+
+    @Test func commandPaletteAgentAlertPreservesLiveDetailWhenOverviewDoesNotContainAgent() throws {
+        let focusRequest = AppKitController.WindowFocusRequest.agentWindow(
+            AgentWindowRecord(
+                id: "remote-agent", workspaceID: "remote-workspace", provider: .spaces, label: "Remote Codex", terminalTrackingID: "remote-session",
+                sessionKey: nil, status: .waiting, createdAt: "2026-08-14T09:00:00Z", updatedAt: "2026-08-14T09:00:00Z"))
+        let alerts = [
+            AppKitController.AlertsGroup(
+                projectName: "Remote Project", workspaceID: "remote-workspace", workspaceName: "Remote Workspace", workspaceBranch: "feature",
+                items: [
+                    AppKitController.AlertsAttentionEntry(
+                        attentionID: "remote-agent-alert", icon: "cpu.fill", iconTint: .warning, label: "Remote Codex",
+                        detail: "  waiting for review  ", shortcut: "", processStatus: nil, agentStatus: .waiting, countsTowardBadge: true,
+                        eventDate: nil, focusRequest: focusRequest)
+                ])
+        ]
+
+        let items = AppKitController.buildCommandPaletteItems(
+            overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []), alertsGroups: alerts)
+        let alert = try #require(items.first { $0.source == .alertsAttention })
+
+        #expect(alert.detail == "waiting for review")
+    }
+
+    @Test func commandPaletteBellAlertPreservesLiveDetailWhenOverviewDoesNotContainSession() throws {
+        let focusRequest = AppKitController.WindowFocusRequest.terminalSession(workspaceID: "remote-workspace", sessionID: "remote-session")
+        let alerts = [
+            AppKitController.AlertsGroup(
+                projectName: "Remote Project", workspaceID: "remote-workspace", workspaceName: "Remote Workspace", workspaceBranch: "feature",
+                items: [
+                    AppKitController.AlertsAttentionEntry(
+                        attentionID: "remote-bell-alert", icon: "terminal", iconTint: .terminal, label: "shell-1", detail: "  vim remote.swift  ",
+                        shortcut: "", processStatus: nil, agentStatus: nil, countsTowardBadge: true, eventDate: nil, focusRequest: focusRequest)
+                ])
+        ]
+
+        let items = AppKitController.buildCommandPaletteItems(
+            overview: SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: []), alertsGroups: alerts)
+        let alert = try #require(items.first { $0.source == .alertsAttention })
+
+        #expect(alert.detail == "vim remote.swift")
+    }
+
+    @Test func mergedRemoteAlertsCarryOwningOverviewForegroundCommandsIntoLocalPaletteAndDedupe() throws {
+        let remoteOverview = SpacesDeviceOverviewPayload(
+            projects: [
+                SpacesDeviceProjectSummary(
+                    id: "remote-project", name: "Remote Project", dir: "/remote/project", isGitRepo: true, defaultBranch: "main")
+            ],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "remote-workspace", projectID: "remote-project", projectName: "Remote Project", branch: "feature", baseBranch: "main",
+                    dir: "/remote/project-feature", isRunning: true, isHidden: false, isDefault: false, notes: nil, sessionCount: 2,
+                    assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded), config: SpacesDeviceWorkspaceConfig(),
+                    codingAgentRows: [
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent:remote", workspaceID: "remote-workspace", name: "Remote Codex", command: "codex", agentID: "remote-agent",
+                            sessionID: "remote-agent-session", runState: .running, activityState: .waiting, updatedAt: "2026-08-14T09:00:00Z",
+                            canStop: true)
+                    ])
+            ],
+            sessions: [
+                terminalSessionSummary(
+                    id: "remote-agent-session", title: "Remote Codex", foregroundCommand: "codex --remote", workspaceID: "remote-workspace"),
+                terminalSessionSummary(
+                    id: "remote-bell-session", title: "remote-shell", foregroundCommand: "make remote-test", workspaceID: "remote-workspace",
+                    bellAt: "2026-08-14T09:01:00Z"),
+            ])
+        let mergedAlerts = AppKitController.buildOverviewAlertsGroups(from: remoteOverview, deviceID: "remote-device")
+        let localOverview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+
+        let items = AppKitController.buildCommandPaletteItems(overview: localOverview, alertsGroups: mergedAlerts)
+        let visible = AppKitController.visibleCommandPaletteItems(
+            allItems: items, query: "", currentWorkspaceID: nil, recentFocusIdentities: [], maxEmptyQueryItems: 20)
+
+        let agentRows = visible.filter { $0.label == "Remote Codex" }
+        #expect(agentRows.count == 1)
+        #expect(try #require(agentRows.first).detail == "codex --remote")
+        let bellRows = visible.filter { $0.label == "remote-shell" }
+        #expect(bellRows.count == 1)
+        #expect(try #require(bellRows.first).detail == "make remote-test")
     }
 
     @Test func deviceTerminalRowsRenderThroughWorkspaceRuntimeRows() {
@@ -544,8 +728,7 @@ import workspacecore
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "agent:agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-1",
-                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z",
-                            canStop: true)
+                            sessionID: "session-agent", runState: .running, activityState: .waiting, updatedAt: "2026-06-28T09:00:00Z", canStop: true)
                     ])
             ], sessions: [])
 
@@ -587,6 +770,133 @@ import workspacecore
                     workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
                     kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
                     createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
+    }
+
+    private func automationSummary(
+        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String = "workspace-1"
+    ) -> TerminalServiceAutomationSummary {
+        TerminalServiceAutomationSummary(
+            id: id, name: name, enabled: true, triggerKind: "manual", cronExpression: nil, kind: kind.rawValue, script: script,
+            agentCommand: kind == .agent ? "codex" : nil, agentPrompt: kind == .agent ? "do it" : nil, workspaceID: workspaceID, timeoutSeconds: nil,
+            concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:00Z")
+    }
+
+    private func automationRunSummary(
+        automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?, workspaceID: String? = "workspace-1"
+    ) -> TerminalServiceAutomationRunSummary {
+        TerminalServiceAutomationRunSummary(
+            id: "run-1", automationID: automationID, automationName: nil, kind: kind.rawValue, status: status, trigger: "manual", skipReason: nil,
+            exitCode: nil, terminalSessionID: terminalSessionID, workspaceID: workspaceID, startedAt: nil, endedAt: nil,
+            createdAt: "2026-06-22T12:00:00Z")
+    }
+
+    // A script-kind run's terminal opens in its persisted workspace.
+    @Test func automationRunTerminalRequestSynthesizesScriptKindPane() {
+        let automation = automationSummary(name: "Nightly", kind: .script, script: "echo hi")
+        let run = automationRunSummary(kind: .script, status: "running", terminalSessionID: "auto-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .running))
+    }
+
+    // A live agent session resolves from the overview.
+    @Test func automationRunTerminalRequestResolvesAgentKindFromOverview() {
+        let session = SpacesDeviceTerminalSessionSummary(
+            id: "agent-session", title: "Codex", workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: "codex", state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: 654, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .agent)
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
+        let run = automationRunSummary(kind: .agent, status: "running", terminalSessionID: "agent-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "agent-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "agent-session", title: "Codex",
+                    workingDirectory: "/device/project-feature", kind: .agent, shell: "/bin/zsh", command: "codex", initialState: .running,
+                    servicePID: 321, childPID: 654, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
+    }
+
+    // An ended agent session replays in the workspace persisted on its run.
+    @Test func automationRunTerminalRequestFallsBackForEndedAgentSession() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: "codex", initialState: .exited))
+    }
+
+    // A run without a persisted session workspace has no pane destination.
+    @Test func automationRunTerminalRequestFallsBackForEndedAgentSessionWithNoAutomation() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Automation", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
+    }
+
+    @Test func automationRunTerminalRequestRequiresPersistedSessionWorkspace() {
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "gone-session", workspaceID: nil)
+
+        #expect(
+            AppKitController.automationRunTerminalOpenRequest(
+                deviceID: "local", sessionID: "gone-session", run: run, automation: nil, overview: nil, loginShell: "/bin/zsh") == nil)
+    }
+
+    // Dispatch keys off the run's kind, not the automation's current kind.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameAgent() {
+        let automation = automationSummary(name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "edited-workspace")
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "auto-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .exited))
+    }
+
+    // The reverse uses the run's agent shape with its persisted workspace.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameScript() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let automation = automationSummary(name: "Reviewer", kind: .script, script: "echo hi")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: "/bin/zsh", command: nil, initialState: .exited))
     }
 
     @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {
@@ -900,6 +1210,17 @@ import workspacecore
         #expect(BrowserSSHForwardManager().forwardedServicePorts(deviceID: "remote", workspaceID: "workspace-1").isEmpty)
     }
 
+    private func terminalSessionSummary(
+        id: String, title: String, foregroundCommand: String?, workspaceID: String = "workspace-1", bellAt: String? = nil
+    ) -> SpacesDeviceTerminalSessionSummary {
+        SpacesDeviceTerminalSessionSummary(
+            id: id, title: title, workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: nil, state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: workspaceID,
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundCommand: foregroundCommand, bellAt: bellAt)
+    }
+
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(
@@ -1054,7 +1375,7 @@ import workspacecore
     private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
             sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp",
             outputByteCount: nil)
     }
 

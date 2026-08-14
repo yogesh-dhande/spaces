@@ -17,8 +17,7 @@ final class WorkspaceSetupDirectorySweepTests: XCTestCase {
         WorkspaceSetupDirectorySweep.sweep(workspaceSetupDirectory: root.path, knownWorkspaceIDs: [])
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(orphanID, isDirectory: true).path))
-        XCTAssertTrue(
-            FileManager.default.fileExists(atPath: root.appendingPathComponent(orphanID).appendingPathComponent(orphanMarkerFileName).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(orphanID).appendingPathComponent(orphanMarkerFileName).path))
     }
 
     func testOrphanWithMarkerOlderThanRetentionIsDeleted() throws {

@@ -34,8 +34,8 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, userLabel: String? = nil, runtimeTargetID: String? = nil,
-        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil,
-        status: AgentWindowStatus, note: String? = nil, detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
+        terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, status: AgentWindowStatus, note: String? = nil,
+        detectedAgentKind: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -89,7 +89,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     public func withUserLabel(_ userLabel: String?) -> AgentWindowRecord {
         AgentWindowRecord(
             id: id, workspaceID: workspaceID, provider: provider, label: label, userLabel: userLabel, runtimeTargetID: runtimeTargetID,
-            terminalTarget: terminalTarget, sessionKey: sessionKey,
-            status: status, note: note, detectedAgentKind: detectedAgentKind, createdAt: createdAt, updatedAt: updatedAt)
+            terminalTarget: terminalTarget, sessionKey: sessionKey, status: status, note: note, detectedAgentKind: detectedAgentKind,
+            createdAt: createdAt, updatedAt: updatedAt)
     }
 }

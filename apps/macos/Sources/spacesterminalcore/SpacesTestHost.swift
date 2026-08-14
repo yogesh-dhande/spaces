@@ -33,7 +33,7 @@ public enum SpacesTestHost {
     ///
     /// Restricted to the executable on purpose. The rest of `argv` is data the executable was asked to
     /// operate on, and a Spaces command may legitimately name a test bundle in it: running
-    /// `spaces terminal command 'xcrun xctest ./Foo.xctest'`, or tailing a path under a `.xctest`
+    /// `spaces terminal create --command 'xcrun xctest ./Foo.xctest'`, or tailing a path under a `.xctest`
     /// directory, must not make the CLI classify itself as a test host and then refuse the user's own
     /// live profile. Empty arguments answer `false` rather than trapping.
     static func executableIsTestBundle(arguments: [String]) -> Bool { arguments.first?.hasSuffix(".xctest") ?? false }

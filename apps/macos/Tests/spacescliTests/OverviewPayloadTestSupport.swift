@@ -22,9 +22,11 @@ extension SpacesDeviceOverviewBuilder {
 
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry]
+        liveSessions: [TerminalSessionCatalogEntry], automationAttributedSessionIDs: [String] = []
     ) -> SpacesDeviceOverviewPayload {
-        build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: liveSessions, daemonStatus: .testStatus)
+        build(
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: liveSessions, daemonStatus: .testStatus,
+            automationAttributedSessionIDs: automationAttributedSessionIDs)
     }
 
     /// Builds the payload the daemon actually serves: the server derives the workspace terminal rows from

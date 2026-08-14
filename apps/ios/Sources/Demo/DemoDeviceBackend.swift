@@ -106,8 +106,9 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
                 })
 
         case .stopCodingAgent(let request):
-            return serveStopAgent(
-                workspaceID: request.workspaceID, matches: { matchesAgent($0, agentID: request.agentID) })
+            return serveStopAgent(workspaceID: request.workspaceID, matches: { matchesAgent($0, agentID: request.agentID) })
+        case .stopWorkspaceTerminal(let request):
+            return serveStopAgent(workspaceID: request.workspaceID, matches: { $0.sessionID == request.sessionID })
 
         case .createWorkspace, .createProject, .importProject, .exportProject, .deleteProject, .pair, .requestDaemonRestart, .resolveTerminalLink,
             .readTerminalLinkChunk:
@@ -274,7 +275,8 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             workspaceID: workspaceID, workspaceTitle: template.workspaceTitle, projectID: template.projectID, projectName: template.projectName,
             createdAt: timestamp, updatedAt: timestamp, isControlAvailable: template.isControlAvailable,
             isSubscriptionAvailable: template.isSubscriptionAvailable, attachmentSnapshot: template.attachmentSnapshot, rowKind: template.rowKind,
-            rowSourceID: rowSourceID, hasFinalRender: template.hasFinalRender, foregroundDetectedAgentKind: template.foregroundDetectedAgentKind)
+            rowSourceID: rowSourceID, hasFinalRender: template.hasFinalRender, foregroundDetectedAgentKind: template.foregroundDetectedAgentKind,
+            foregroundCommand: template.foregroundCommand)
     }
 
     /// Registers the synthesized aliases and publishes their summaries, then replaces the workspace's rows

@@ -494,6 +494,16 @@ extension OrchestratorTests {
         let project = try holder.addProject(dir: repo.path)
         let busyWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-busy")
         let otherWorkspace = try holder.createWorkspace(projectID: project.id, branch: "feature-other")
+        let automation = Automation(
+            id: "project-busy-automation", name: "Project busy", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script,
+            script: "true", workspaceID: otherWorkspace.id, timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce,
+            nextFireTime: nil, createdAt: Date(), updatedAt: Date())
+        try store.upsertAutomation(automation)
+        let service = AutomationService(store: store, orchestrator: contender, binaryDirectory: "/usr/bin", logError: { _ in })
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown {
+            try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: $0)
+        }
+        defer { WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil) }
         let workspaceCountBeforeDelete = try store.workspaces(projectID: project.id).count
 
         let lockHeld = expectation(description: "a workspace action is in flight")
@@ -513,6 +523,7 @@ extension OrchestratorTests {
         XCTAssertNotNil(try store.project(id: project.id), "the project survives a rejected delete")
         XCTAssertEqual(try store.workspaces(projectID: project.id).count, workspaceCountBeforeDelete, "no workspace record is dropped")
         XCTAssertTrue(FileManager.default.fileExists(atPath: otherWorkspace.dir), "no worktree is removed by a rejected delete")
+        XCTAssertNotNil(try store.automation(id: automation.id), "a rejected project delete keeps targeting automations")
     }
 
     /// A workspace created while its project is being deleted would outlive the project as an orphan, and
@@ -865,6 +876,42 @@ extension OrchestratorTests {
         XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isHidden)
     }
 
+    // Tests a project's hidden state can be toggled independently of its workspaces' own hidden state.
+    func testUpdateProjectHiddenPersistsState() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: true)
+        XCTAssertTrue(try XCTUnwrap(store.project(id: project.id)).isHidden)
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isHidden, "the project flag is independent of the workspace flag")
+        XCTAssertTrue(try XCTUnwrap(orchestrator.listProjects().first { $0.id == project.id }).isHidden)
+
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: false)
+        XCTAssertFalse(try XCTUnwrap(store.project(id: project.id)).isHidden)
+    }
+
+    // A project settings save rewrites the project row, and must not un-hide the project as a side effect.
+    func testUpdateProjectConfigPreservesHiddenState() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: true)
+
+        try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo setup" }
+
+        let updated = try XCTUnwrap(store.project(id: project.id))
+        XCTAssertTrue(updated.isHidden)
+        XCTAssertEqual(updated.setupScript, "echo setup")
+    }
+
     // Tests workspace metadata update rejects renaming protected main branch by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataRejectsRenamingProtectedMainBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-update-main-protected")
@@ -1200,6 +1247,29 @@ extension OrchestratorTests {
         // Setting to true should persist.
         try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
+    }
+
+    // Tests updateProjectHidden is a no-op when the project already carries the requested value.
+    func testUpdateProjectHiddenIdempotentWhenSameValue() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+
+        // Default isHidden is false; setting it to false again should be a no-op.
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: false)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, false)
+
+        // Setting to true should persist.
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: true)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, true)
+
+        // And repeating it leaves the project hidden.
+        try orchestrator.updateProjectHidden(projectID: project.id, isHidden: true)
+        XCTAssertEqual(try store.project(id: project.id)?.isHidden, true)
     }
 
     // Tests updateWorkspaceNotes persists notes through orchestrator by arranging representative inputs and asserting the expected result.

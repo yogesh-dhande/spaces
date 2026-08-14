@@ -170,6 +170,20 @@ public enum TerminalForegroundProcessInspector {
         return Array(bounded)
     }
 
+    /// A compact command line for an already-inspected foreground process. This performs no process
+    /// inspection: callers pass the bounded argv/executable name already stored in terminal runtime
+    /// state. The executable is rendered by basename and arguments use the same quoting as detected-agent
+    /// commands so UI consumers never need to reconstruct a command independently.
+    public static func displayCommand(executableName: String?, argv: [String]?) -> String? {
+        var arguments = boundedArguments(argv ?? [])
+        if !arguments.isEmpty {
+            if let invokedName = lastPathComponent(of: arguments[0]).nilIfEmpty { arguments[0] = invokedName }
+            return arguments.map(renderArgument).joined(separator: " ")
+        }
+        guard let executableName = executableName?.trimmingCharacters(in: .whitespacesAndNewlines), !executableName.isEmpty else { return nil }
+        return lastPathComponent(of: executableName).nilIfEmpty
+    }
+
     static func procCmdlineArguments(from data: Data) -> [String] {
         guard !data.isEmpty else { return [] }
         var arguments: [String] = []

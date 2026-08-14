@@ -26,6 +26,28 @@ import Testing
         #expect(dot.kind == .waiting)
     }
 
+    @Test func compactStatusDotUsesWorkspaceRowGeometryAndFillStyle() {
+        let running = RowPrimitives.compactStatusDot(filled: true, tint: .systemGreen, tooltip: "Running")
+        let stopped = RowPrimitives.compactStatusDot(filled: false, tint: .systemGray, tooltip: "Stopped")
+
+        #expect(running.intrinsicContentSize == NSSize(width: 10, height: 10))
+        #expect(stopped.intrinsicContentSize == NSSize(width: 10, height: 10))
+        #expect(running.isFilled)
+        #expect(!stopped.isFilled)
+        #expect(running.toolTip == "Running")
+        #expect(stopped.toolTip == "Stopped")
+    }
+
+    @Test func workingAttentionUsesSharedBrandGreenToken() { #expect(SidebarAttentionStatus.working.indicatorColor === Theme.green) }
+
+    @Test func failedAttentionDotIsHollowWhileBlockedAttentionDotIsFilled() throws {
+        let failed = RowPrimitives.attentionStatusDot(.failed)
+        let blocked = RowPrimitives.attentionStatusDot(.blocked)
+
+        #expect(try centerAlpha(of: failed) < 0.05)
+        #expect(try centerAlpha(of: blocked) > 0.5)
+    }
+
     @Test func emptyStatusSlotPreservesFixedWidth() {
         let slot = RowPrimitives.statusSlot()
         let parent = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
@@ -138,5 +160,20 @@ import Testing
 
         #expect(view.layer?.cornerRadius == 8)
         #expect(view.layer?.backgroundColor != nil)
+    }
+
+    private func centerAlpha(of view: NSView) throws -> CGFloat {
+        view.frame = NSRect(x: 0, y: 0, width: 14, height: 14)
+        let bitmap = try #require(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 14, pixelsHigh: 14, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        view.draw(view.bounds)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return try #require(bitmap.colorAt(x: 7, y: 7)).alphaComponent
     }
 }

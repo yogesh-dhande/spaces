@@ -156,8 +156,30 @@ final class DaemonLivenessState: @unchecked Sendable {
         let snapshot = snapshot()
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
-            activeSessionCount: snapshot.sessionCount, deviceAPIAddresses: currentDeviceAPIAddresses())
+            activeSessionCount: snapshot.sessionCount, protocolVersion: SpacesWireProtocol.version,
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier, deviceAPIAddresses: currentDeviceAPIAddresses())
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
+    }
+}
+
+/// Lock-guarded holder for the one live `AutomationService`, shared between the main actor (which creates
+/// and clears it across the service's lifecycle) and the off-main automation handlers — the profile-command
+/// `automationCommandOffMain` and the Device API `AutomationOperations` — that resolve it from the transport
+/// thread. The service is queue-confined and must never be entered synchronously from the main actor (see
+/// `AutomationService`), so its handlers run off main and read the reference through this box rather than
+/// through the main-actor `automationService` property.
+final class AutomationServiceBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var service: AutomationService?
+    func get() -> AutomationService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return service
+    }
+    func set(_ newValue: AutomationService?) {
+        lock.lock()
+        service = newValue
+        lock.unlock()
     }
 }
 
@@ -175,12 +197,49 @@ enum SpacesDaemonProfileCommandRouting {
         // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
         // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
         // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
-        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal: true
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceStop, .workspaceRestart, .agentKill, .agentSignal: true
+        // Every automation command is peeled off main for two reasons. First, trigger/cancel/end-agents/delete
+        // reach the automation executor's launcher/terminator call graph directly (starting or tearing down a
+        // run's terminal/agent session), which hops the engine actor. Second, ALL of them — create/update/list/
+        // runs-list included — enter the queue-confined `AutomationService`, whose serial queue can be mid-tick
+        // behind an engine→main hop; bridging any automation command onto the main actor could block main behind
+        // that hop (a transitive one-way-rule violation). So the whole family runs on the transport thread.
+        case .automationCreate, .automationUpdate, .automationDelete, .automationList, .automationRunsList, .automationTrigger, .automationRunCancel,
+            .automationEndAgents:
+            true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
         case .terminalList, .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
             .agentUnsubscribe, .agentConsumePendingEvents:
             false
         }
+    }
+}
+
+/// Maps a thrown error to its machine-readable `SpacesDeviceErrorCode` for the profile (terminal-service)
+/// transport. Factored out of the daemon controller so it is unit-testable and stays byte-for-byte aligned
+/// with the Device API server's `SpacesDeviceAPIServer.errorCode(for:)`: both wire surfaces must classify
+/// the same failure identically, so a client sees one code for one cause regardless of transport.
+enum SpacesDaemonErrorClassification {
+    static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode {
+        if let workspaceError = error as? WorkspaceError {
+            switch workspaceError {
+            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
+            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
+            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
+            // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
+            // handoff code, not the generic teardown one.
+            case .daemonHandoffInProgress: return .handingOff
+            }
+        }
+        if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
+        // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are
+        // well-formed-request client errors, so they surface as invalidArgument with their descriptive
+        // message rather than a generic internal error.
+        if error is AutomationValidationError { return .invalidArgument }
+        if error is AutomationCronScheduleError { return .invalidArgument }
+        if error is DecodingError { return .invalidArgument }
+        return .internalError
     }
 }
 
@@ -278,6 +337,13 @@ enum SpacesDaemonProfileCommandRouting {
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     private var remoteAgentWatchService: RemoteAgentWatchService?
+    private var automationService: AutomationService?
+    /// The same live `AutomationService` as `automationService`, held in a lock-guarded box so the off-main
+    /// automation handlers (profile-command `automationCommandOffMain`, Device API `AutomationOperations`)
+    /// can resolve it from the transport thread without touching the main actor. Set and cleared alongside
+    /// `automationService` in the service lifecycle.
+    private nonisolated let automationServiceBox = AutomationServiceBox()
+    private var automationTimer: Timer?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(Linux)
         private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
@@ -317,6 +383,18 @@ enum SpacesDaemonProfileCommandRouting {
             guard !self.handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
             let orchestrator = try self.makeProfileOrchestrator()
             return try orchestrator.killAgentSession(terminalSessionID: sessionID)
+        },
+        // The Device API automation handlers route through these closures to the one live queue-confined
+        // `AutomationService`, resolved from the lock-guarded box off the main actor, so a remote automation
+        // command drives the exact scheduler state a local profile command would — the "one implementation,
+        // two transports" seam. Both closures run on the Device API connection queue (never main), and the
+        // service serializes internally, so calling it directly is deadlock-safe (the one-way rule).
+        automationOperations: Self.makeAutomationOperations { [weak self] in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            guard let service = self.automationServiceBox.get() else {
+                throw SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon.")
+            }
+            return service
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } },
         // Same queue guarantee as the closures above (the Device API's own connection-handling queue, never
         // main), so the engine hop is deadlock-safe. Lets a Device API `.state` read — one per pane attach —
@@ -430,6 +508,7 @@ enum SpacesDaemonProfileCommandRouting {
             }, logError: { writeStandardError($0) })
         remoteAgentWatch.start()
         remoteAgentWatchService = remoteAgentWatch
+        startAutomationService()
         #if os(macOS)
             // The router port is a Mac-only concept: only the macOS client runs Caddy, so only it
             // pins/consumes a real listening port. Seed it alongside the router service and never on
@@ -469,6 +548,72 @@ enum SpacesDaemonProfileCommandRouting {
         #endif
     }
 
+    /// Starts the scheduled-automation scheduler/executor: reconciles runs missed while the daemon was
+    /// down, then drives its poll-based `tick` from a periodic timer. The command's PATH is seeded with the
+    /// running daemon's own binary directory so an automation's `spaces` invocations resolve to the sibling
+    /// CLI. Runs on every device, including headless remotes, since automations are daemon-owned.
+    private func startAutomationService() {
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let binaryDirectory = URL(fileURLWithPath: launchExecutablePath, isDirectory: false).deletingLastPathComponent().path
+            let service = AutomationService(
+                store: orchestrator.store, orchestrator: orchestrator, binaryDirectory: binaryDirectory,
+                // Foundation caches the system zone, so re-read it fresh each tick: reset the cache, then
+                // return the current zone. This is what lets a running daemon notice a device zone change and
+                // recompute cron anchors without a restart.
+                timeZone: {
+                    NSTimeZone.resetSystemTimeZone()
+                    return TimeZone.current
+                },
+                // The teardown latches are re-checked inside the service queue: scheduler work that passed
+                // its outer gate but was scheduled late no-ops during handoff or final shutdown.
+                ticksSuspended: { [livenessState] in
+                    let snapshot = livenessState.snapshot()
+                    return snapshot.handoffInProgress || snapshot.shutdownInProgress
+                }, logError: { writeStandardError("spacesd automation_error \($0)\n") })
+            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown { workspaceID in
+                try service.deleteAutomationsTargetingWorkspaceDuringTeardown(workspaceID: workspaceID)
+            }
+            WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation { workspaceID, orchestration in
+                try service.cancelRunsForWorkspaceStop(workspaceID: workspaceID, orchestration: orchestration)
+            }
+            // Set the main-actor identity immediately (the lifecycle/identity guard below depends on it) but
+            // publish the off-main box only after reconciliation. Transports (Device API listeners already
+            // opened by `startSharedServices`) may reach the service through the box, so exposing it before
+            // startup catch-up would let an early update/disable request recompute or clear an overdue cron
+            // automation's anchor before the missed-run policy is applied, silently losing the catch-up. An
+            // early request instead gets the same "Automations are unavailable" rejection as a failed service
+            // start — honest and transient.
+            automationService = service
+            // Startup catch-up must strictly precede the first tick, but `reconcileMissedRunsOnStart` enters
+            // the service's serial queue whose executor hops the engine actor (and thus main): running it on
+            // main would deadlock (the one-way rule). Run it on a detached task, then publish the box and
+            // create the timer only after it returns. The timer callback likewise fires `tick()` off main via
+            // a detached task; the service's serial queue serializes any overlapping fires.
+            Task.detached(priority: .utility) { [weak self] in
+                service.reconcileMissedRunsOnStart()
+                await MainActor.run { [weak self] in
+                    guard let self, self.automationService === service else { return }
+                    // Publish the off-main box inside the identity guard so a shutdown during reconciliation
+                    // (which nils `automationService`) can never resurrect the gate.
+                    self.automationServiceBox.set(service)
+                    // Capture the off-actor liveness box so the timer can gate on it without hopping the main
+                    // actor: a tick observing quiesced cores mid-handoff would misread preserved sessions as
+                    // dead and falsely finalize their runs, so skip ticking while a handoff is in progress.
+                    // `performExecHandoff` drains any tick already in flight before quiescing.
+                    let livenessState = self.livenessState
+                    let tickCoalescer = AutomationTickCoalescer { service.tick() }
+                    let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                        guard !livenessState.snapshot().handoffInProgress else { return }
+                        tickCoalescer.submit()
+                    }
+                    RunLoop.main.add(timer, forMode: .common)
+                    self.automationTimer = timer
+                }
+            }
+        } catch { writeStandardError("spacesd automation_service_error error=\(error)\n") }
+    }
+
     /// One-shot startup maintenance: removes `workspace-setup` run directories that no longer belong
     /// to any workspace in the store (see `WorkspaceSetupDirectorySweep`, issue #423). Best-effort —
     /// this is diagnostic-file cleanup, not part of the daemon's operational path, so a failure here
@@ -477,8 +622,9 @@ enum SpacesDaemonProfileCommandRouting {
         do {
             let store = try SQLiteStore(path: databasePath)
             let knownWorkspaceIDs = Set(try store.projects().flatMap { project in try store.workspaces(projectID: project.id).map(\.id) })
-            let setupDirectory = URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
-                .appendingPathComponent("workspace-setup", isDirectory: true).path
+            let setupDirectory = URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true).appendingPathComponent(
+                "workspace-setup", isDirectory: true
+            ).path
             WorkspaceSetupDirectorySweep.sweep(workspaceSetupDirectory: setupDirectory, knownWorkspaceIDs: knownWorkspaceIDs)
         } catch { writeStandardError("spacesd workspace_setup_sweep_error error=\(error)\n") }
     }
@@ -547,6 +693,18 @@ enum SpacesDaemonProfileCommandRouting {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { [weak self] sessionID, line in
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
             try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
+        }
+        // The automation executor delivers an agent-kind automation's seed prompt through this writer. It
+        // sends with `appendNewline: false` because the executor issues the submitting CR as its own
+        // separate byte write (the provider-neutral two-write submit), routing through the same off-main
+        // send path the `.terminalSend` profile command uses (`terminalSendOffMain`). The executor runs on
+        // the automation service's own serial queue, never main, so the engine hop inside that send path
+        // is deadlock-safe (the one-way rule).
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input, appendNewline in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            let response = self.terminalSendOffMain(
+                TerminalServiceTerminalSendPayload(sessionID: sessionID, input: input, appendNewline: appendNewline))
+            guard response.ok else { throw Self.requestFailedError(response.message) }
         }
         // Same off-actor, lock-guarded flag `makeProfileOrchestrator` reads: safe to poll from any
         // orchestrator's transport-thread/detached-task call graph. This is what makes the transient
@@ -664,7 +822,13 @@ enum SpacesDaemonProfileCommandRouting {
     /// belongs there by default; only a teardown that genuinely must be awaited goes in phase 2, and by
     /// then everything is already latched.
     private func stopSharedServices() async {
+        // Capture before phase 1 clears both published references. This also includes startup
+        // reconciliation, for which `automationService` is set before the off-main box is published.
+        let automationServiceToDrain = automationService
         stopWorkProducers()
+        // Teardown is latched before this wait. A scheduler pass still queued on the service no-ops; one
+        // already executing finishes before session teardown takes its runtime snapshot.
+        if let automationServiceToDrain { await automationServiceToDrain.waitUntilIdle() }
         await releaseReconcileStores()
     }
 
@@ -681,6 +845,12 @@ enum SpacesDaemonProfileCommandRouting {
         server.stop()
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
+        automationTimer?.invalidate()
+        automationTimer = nil
+        automationService = nil
+        automationServiceBox.set(nil)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceTeardown(nil)
+        WorkspaceOrchestrator.setProcessWideAutomationWorkspaceCancellation(nil)
         if let databaseChangeObserver {
             NotificationCenter.default.removeObserver(databaseChangeObserver)
             self.databaseChangeObserver = nil
@@ -754,17 +924,30 @@ enum SpacesDaemonProfileCommandRouting {
         // main-blocked context would deadlock (see the one-way rule).
         case .profileCommand(.terminalCommand(let payload)): return terminalCommandOffMain(payload)
         case .profileCommand(.agentSpawn(let payload)): return agentSpawnOffMain(payload)
-        // Workspace start/restart and agent kill/signal are peeled off main for the SAME reason as the
+        // Workspace start/stop/restart and agent kill/signal are peeled off main for the SAME reason as the
         // three cases above: their orchestrator call graph reaches the built-in terminal launcher (start/
         // restart) or terminator (agent kill's stop chokepoint, and an agent-signal `exit` whose
         // `handleAgentExit` tears down an already-dead backing terminal), and both closures enter the
         // terminal engine actor via `TerminalEngineActor.runSynchronously` — which traps when called from
         // the main actor (the one-way rule). `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`
         // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
-        case .profileCommand(.workspaceStart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: false)
-        case .profileCommand(.workspaceRestart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: true)
+        case .profileCommand(.workspaceStart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: false)
+        case .profileCommand(.workspaceStop(let workspaceID)): return workspaceStopOffMain(workspaceID: workspaceID)
+        case .profileCommand(.workspaceRestart(let payload)): return workspaceStartOffMain(payload: payload, restartIfRunning: true)
         case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
         case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
+        // The whole automation command family is peeled off main: trigger/cancel/end-agents/delete reach the
+        // executor's launcher/terminator (engine hop), and every automation command enters the queue-confined
+        // `AutomationService`, which a main-actor caller must never block on behind an engine→main tick hop
+        // (see `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`).
+        case .profileCommand(.automationCreate(let payload)): return automationCommandOffMain(.automationCreate(payload))
+        case .profileCommand(.automationUpdate(let payload)): return automationCommandOffMain(.automationUpdate(payload))
+        case .profileCommand(.automationDelete(let id)): return automationCommandOffMain(.automationDelete(id: id))
+        case .profileCommand(.automationList): return automationCommandOffMain(.automationList)
+        case .profileCommand(.automationRunsList(let payload)): return automationCommandOffMain(.automationRunsList(payload))
+        case .profileCommand(.automationTrigger(let id)): return automationCommandOffMain(.automationTrigger(id: id))
+        case .profileCommand(.automationRunCancel(let runID)): return automationCommandOffMain(.automationRunCancel(runID: runID))
+        case .profileCommand(.automationEndAgents(let runID)): return automationCommandOffMain(.automationEndAgents(runID: runID))
         // Every remaining profile command (listings, workspace/agent metadata, subscriptions) touches no
         // engine state, so it keeps running the *bulk* of its work on the main actor (through
         // `handleProfileCommand`/`runProfileCommand`, unchanged main-actor methods) — only the calling
@@ -845,7 +1028,8 @@ enum SpacesDaemonProfileCommandRouting {
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
             // Reads the off-actor liveness mirror rather than the now engine-isolated `sessionCores`
             // directly, so this main-actor status read never needs to hop onto the engine actor.
-            activeSessionCount: livenessState.snapshot().sessionCount,
+            activeSessionCount: livenessState.snapshot().sessionCount, protocolVersion: SpacesWireProtocol.version,
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
             // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
             // addresses without duplicating the bound-host cache.
             deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
@@ -945,6 +1129,10 @@ enum SpacesDaemonProfileCommandRouting {
         }
         writeStandardError("spacesd handoff_preflight_ok\n")
 
+        // Capture the automation service before `stopSharedServices()` nils its box, so its in-flight tick can
+        // be drained below. `resumeInPlaceAfterFailedHandoff` restarts shared services and rebuilds a fresh
+        // automation service, so nothing needs re-arming here on a failed handoff.
+        let automationServiceToDrain = automationServiceBox.get()
         await stopSharedServices()
         writeStandardError("spacesd handoff_intake_stopped\n")
 
@@ -957,6 +1145,16 @@ enum SpacesDaemonProfileCommandRouting {
         // main thread. Intake is already stopped, so nothing new enqueues after this.
         await withCheckedContinuation { continuation in agentNotificationDeliveryQueue.async { continuation.resume() } }
         writeStandardError("spacesd handoff_delivery_drained\n")
+
+        // Drain a possibly in-flight automation tick before quiescing cores. `handoffInProgress` is already set,
+        // so the timer gate stops new ticks; this awaits the one that may already be running so it cannot land
+        // mid-quiesce and misread preserved sessions as dead. The drain also immediately SIGKILLs any process
+        // group whose timeout/cancel escalation was pending: exec preserves those children but replaces the
+        // service's in-memory pending table, so carrying the grace across the image boundary would lose it.
+        // AWAITED (not `.sync`-blocked) for the same one-way-rule reason as the delivery drain above: the tick's
+        // executor hops the terminal engine actor (and thus main), so a blocked main thread would deadlock it.
+        if let automationServiceToDrain { await automationServiceToDrain.completePendingTerminationsForHandoff() }
+        writeStandardError("spacesd handoff_automation_drained\n")
 
         // Quiesce each live core. A nil return means the child already exited — finalize that session
         // through the normal dead-session teardown before exec so it lands `.exited`, not resumed.
@@ -1481,12 +1679,13 @@ enum SpacesDaemonProfileCommandRouting {
             let workspace = try orchestrator.createWorkspaceOnDevice(
                 projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
-        // Workspace start/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
-        // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `agentKillOffMain`,
+        // Workspace start/stop/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
+        // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `workspaceStopOffMain`, `agentKillOffMain`,
         // `agentSignalOffMain`) because their call graph reaches the launcher/terminator, whose engine hop
         // would trap on the main-actor `runProfileCommand` switch (see `SpacesDaemonProfileCommandRouting`).
         // Kept in the switch for exhaustiveness and to fail loudly if that peeling ever regresses.
         case .workspaceStart: preconditionFailure("`.workspaceStart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .workspaceStop: preconditionFailure("`.workspaceStop` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .workspaceRestart: preconditionFailure("`.workspaceRestart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSignal: preconditionFailure("`.agentSignal` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentList(let payload):
@@ -1534,6 +1733,116 @@ enum SpacesDaemonProfileCommandRouting {
                 message: events.isEmpty ? "No pending agent events." : "Consumed \(events.count) pending agent event(s).",
                 pendingAgentEvents: events.isEmpty ? nil : events)
         case .terminalCommand: preconditionFailure("`.terminalCommand` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        // The whole automation family is peeled off main by `dispatch(_:)` into `automationCommandOffMain`,
+        // because it enters the queue-confined `AutomationService` (and, for trigger/cancel/end-agents/delete,
+        // the executor's launcher/terminator engine hop) — a main-actor caller blocking on that service could
+        // deadlock behind an engine→main tick hop (the one-way rule). Kept in the switch for exhaustiveness and
+        // to fail loudly if that peeling ever regresses.
+        case .automationCreate: preconditionFailure("`.automationCreate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationUpdate: preconditionFailure("`.automationUpdate` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationDelete: preconditionFailure("`.automationDelete` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationList: preconditionFailure("`.automationList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationRunsList: preconditionFailure("`.automationRunsList` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationTrigger: preconditionFailure("`.automationTrigger` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationRunCancel:
+            preconditionFailure("`.automationRunCancel` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .automationEndAgents:
+            preconditionFailure("`.automationEndAgents` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        }
+    }
+
+    /// RPC automation profile-command handler. The whole automation family is peeled off main by `dispatch(_:)`
+    /// because it enters the queue-confined `AutomationService` (and, for trigger/cancel/end-agents/delete, the
+    /// executor's launcher/terminator engine hop): a main-actor caller blocking on that service could deadlock
+    /// behind an engine→main tick hop (the one-way rule). Runs on the transport thread, resolving the one live
+    /// service from the lock-guarded box, and mirrors the `handleProfileCommand` success/failure envelope.
+    private nonisolated func automationCommandOffMain(_ command: TerminalServiceProfileCommand) -> TerminalServiceResponse {
+        precondition(
+            SpacesDaemonProfileCommandRouting.requiresOffMainExecution(command),
+            "non-automation profile command reached automationCommandOffMain; route it in dispatch(_:)")
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            guard let service = automationServiceBox.get() else {
+                throw SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon.")
+            }
+            let profile = try runAutomationCommand(command, service: service)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// The per-command automation logic, identical for both transports. Runs on the caller's thread (the
+    /// transport thread for `automationCommandOffMain`); the service serializes internally.
+    private nonisolated func runAutomationCommand(_ command: TerminalServiceProfileCommand, service: AutomationService) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        switch command {
+        case .automationCreate(let payload):
+            let automation = try service.createAutomation(automationDraft(from: payload))
+            return TerminalServiceProfileCommandResponse(message: "Created automation.", automations: [TerminalServiceAutomationSummary(automation)])
+        case .automationUpdate(let payload):
+            let automation = try service.updateAutomation(id: payload.id, draft: automationDraft(from: payload.fields))
+            return TerminalServiceProfileCommandResponse(message: "Updated automation.", automations: [TerminalServiceAutomationSummary(automation)])
+        case .automationDelete(let id):
+            try service.deleteAutomationCommand(id: id)
+            return TerminalServiceProfileCommandResponse(message: "Deleted automation.")
+        case .automationList:
+            let summaries = try service.listAutomations().map(TerminalServiceAutomationSummary.init)
+            return TerminalServiceProfileCommandResponse(message: "Listed automations.", automations: summaries)
+        case .automationRunsList(let payload):
+            let runs = try service.listAutomationRuns(automationID: normalizedProfileArgument(payload.automationID))
+            return TerminalServiceProfileCommandResponse(message: "Listed automation runs.", automationRuns: try automationRunSummaries(runs))
+        case .automationTrigger(let id):
+            let run = try service.triggerAutomation(id: id)
+            return TerminalServiceProfileCommandResponse(message: "Triggered automation.", automationRuns: try automationRunSummaries([run]))
+        case .automationRunCancel(let runID):
+            let run = try service.cancelAutomationRun(runID: runID)
+            return TerminalServiceProfileCommandResponse(message: "Canceled automation run.", automationRuns: try automationRunSummaries([run]))
+        case .automationEndAgents(let runID):
+            let run = try service.endAttributedAgents(runID: runID)
+            return TerminalServiceProfileCommandResponse(message: "Ended automation run agents.", automationRuns: try automationRunSummaries([run]))
+        default: preconditionFailure("runAutomationCommand received a non-automation profile command")
+        }
+    }
+
+    private nonisolated func automationDraft(from fields: TerminalServiceAutomationFields) throws -> AutomationDraft {
+        guard let triggerKind = AutomationTriggerKind(rawValue: fields.triggerKind) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation trigger kind '\(fields.triggerKind)'.")
+        }
+        guard let kind = AutomationKind(rawValue: fields.kind) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation kind '\(fields.kind)'.")
+        }
+        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: fields.concurrencyPolicy) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation concurrency policy '\(fields.concurrencyPolicy)'.")
+        }
+        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: fields.missedRunPolicy) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation missed-run policy '\(fields.missedRunPolicy)'.")
+        }
+        return AutomationDraft(
+            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, kind: kind,
+            script: fields.script, agentCommand: fields.agentCommand, agentPrompt: fields.agentPrompt, workspaceID: fields.workspaceID,
+            timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy)
+    }
+
+    /// Maps runs to wire summaries, denormalizing each run's automation name and its attributed coding-agent
+    /// breakdown (built once for the whole listing against the daemon's current live-session set).
+    private nonisolated func automationRunSummaries(_ runs: [AutomationRun]) throws -> [TerminalServiceAutomationRunSummary] {
+        guard !runs.isEmpty else { return [] }
+        let store = try makeProfileOrchestrator().store
+        let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
+        let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
+        let workspaceIDsByRunID = try store.workspaceIDs(automationRunIDs: runs.map(\.id))
+        var namesByAutomationID: [String: String] = [:]
+        return try runs.map { run in
+            let name: String?
+            if let cached = namesByAutomationID[run.automationID] {
+                name = cached
+            } else {
+                let resolved = try store.automation(id: run.automationID)?.name
+                if let resolved { namesByAutomationID[run.automationID] = resolved }
+                name = resolved
+            }
+            return TerminalServiceAutomationRunSummary(
+                run, automationName: name, workspaceID: workspaceIDsByRunID[run.id], attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 
@@ -1568,7 +1877,7 @@ enum SpacesDaemonProfileCommandRouting {
         if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
-            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+            let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspaceID, title: payload.title, command: payload.command)
             let profile = TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
@@ -1591,14 +1900,31 @@ enum SpacesDaemonProfileCommandRouting {
     /// closures, which hop the engine actor via `TerminalEngineActor.runSynchronously`; that traps if
     /// driven from the main actor (the one-way rule), so this runs on the transport thread where the
     /// synchronous engine hop is safe. Mirrors the `handleProfileCommand` success/failure envelope.
-    private nonisolated func workspaceStartOffMain(workspaceID: String, restartIfRunning: Bool) -> TerminalServiceResponse {
+    private nonisolated func workspaceStartOffMain(payload: TerminalServiceWorkspaceLifecyclePayload, restartIfRunning: Bool)
+        -> TerminalServiceResponse
+    {
         if let rejection = livenessState.teardownRejection() { return rejection }
         do {
             let orchestrator = try makeProfileOrchestrator()
+            let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             let profile = TerminalServiceProfileCommandResponse(
                 message: restartIfRunning ? "Workspace restarted." : "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.workspaceStop)` handler. Stop reaches automation cancellation and terminal
+    /// termination, both daemon-owned and potentially engine-touching, so the synchronous profile route
+    /// stays off the main actor just like workspace start/restart.
+    private nonisolated func workspaceStopOffMain(workspaceID: String) -> TerminalServiceResponse {
+        if let rejection = livenessState.teardownRejection() { return rejection }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            _ = try orchestrator.stopWorkspace(workspaceID: workspaceID)
+            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+            let profile = TerminalServiceProfileCommandResponse(message: "Workspace stopped.", workspace: profileWorkspaceRecord(workspace))
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
@@ -1760,6 +2086,21 @@ enum SpacesDaemonProfileCommandRouting {
 
     private nonisolated static func requestFailedError(_ message: String) -> NSError {
         NSError(domain: "spacesd", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    /// Wraps the live automation scheduler as a Device API `AutomationOperations` bundle: each op resolves the
+    /// same queue-confined `AutomationService` the profile-command handlers use and calls it directly, so both
+    /// transports share one scheduler. `service` resolves that instance from the off-main box (throwing during
+    /// shutdown). No main-actor hop: the Device API connection queue is never main and the service serializes
+    /// internally, so entering it directly is deadlock-safe (a main-actor caller blocking on it could deadlock
+    /// behind an engine→main tick hop — the one-way rule).
+    private static func makeAutomationOperations(_ service: @escaping @Sendable () throws -> AutomationService) -> AutomationOperations {
+        AutomationOperations(
+            create: { draft in try service().createAutomation(draft) }, update: { id, draft in try service().updateAutomation(id: id, draft: draft) },
+            delete: { id in try service().deleteAutomationCommand(id: id) }, list: { try service().listAutomations() },
+            runs: { automationID in try service().listAutomationRuns(automationID: automationID) },
+            trigger: { id in try service().triggerAutomation(id: id) }, cancelRun: { runID in try service().cancelAutomationRun(runID: runID) },
+            endAgents: { runID in try service().endAttributedAgents(runID: runID) })
     }
 
     private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
@@ -2008,8 +2349,9 @@ enum SpacesDaemonProfileCommandRouting {
         do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command) } catch let error as AgentSpawnCommandGate.GateError {
             throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
         }
-        let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
-        let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
+        let workspaceID = try orchestrator.resolveWorkspaceID(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+        let session = try orchestrator.createWorkspaceAgentSession(
+            workspaceID: workspaceID, command: payload.command, title: payload.title, automationRunID: payload.automationRunID)
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
     }
 
@@ -2614,25 +2956,10 @@ enum SpacesDaemonProfileCommandRouting {
         return String(describing: error)
     }
 
-    /// Machine-readable failure category for a thrown error at the terminal-service flatten points,
-    /// mirroring the `WorkspaceError` mapping used by the Device API server so both wire surfaces
-    /// classify the same failures identically.
-    private nonisolated static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode {
-        if let workspaceError = error as? WorkspaceError {
-            switch workspaceError {
-            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
-            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            // Only ever thrown by the handoff-only admission guard (`Orchestrator`'s
-            // `daemonHandoffInProgress` predicate) — never by a shutdown — so it always carries the
-            // handoff code, not the generic teardown one.
-            case .daemonHandoffInProgress: return .handingOff
-            }
-        }
-        if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
-        if error is DecodingError { return .invalidArgument }
-        return .internalError
-    }
+    /// Machine-readable failure category for a thrown error at the terminal-service flatten points.
+    /// Delegates to `SpacesDaemonErrorClassification`, which owns the mapping so it stays testable and
+    /// aligned with the Device API server's classification.
+    private nonisolated static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode { SpacesDaemonErrorClassification.errorCode(error) }
 
     /// Flattens a thrown error into a failure response, pairing the localized message with its
     /// machine-readable category. Used at handler catch sites so clients can branch on the code.
@@ -2669,13 +2996,14 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil,
         liveTerminalSessionStateProvider: (@Sendable (String) -> GhosttyRemoteSessionStatePayload?)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested,
+                agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested,
                 liveTerminalSessionStateProvider: liveTerminalSessionStateProvider)
         #endif
     }

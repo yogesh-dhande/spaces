@@ -387,9 +387,7 @@ final class GitClientTests: XCTestCase {
         // as a genuinely missing branch under `--quiet`, so it cannot stand in for a probe failure here.
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: gitDir.path)
         defer {
-            if let originalPermissions {
-                try? FileManager.default.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: gitDir.path)
-            }
+            if let originalPermissions { try? FileManager.default.setAttributes([.posixPermissions: originalPermissions], ofItemAtPath: gitDir.path) }
         }
 
         let client = GitClient()

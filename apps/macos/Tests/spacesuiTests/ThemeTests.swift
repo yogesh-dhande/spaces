@@ -21,6 +21,7 @@ import Testing
         expect(Theme.green, matches: (58, 158, 95), under: light)
         expect(Theme.red, matches: (198, 58, 47), under: light)
         expect(Theme.orange, matches: (208, 122, 26), under: light)
+        expect(Theme.blue, matches: (52, 101, 164), under: light)
     }
 
     @Test func darkModeResolvesToBrandTokens() {
@@ -37,6 +38,7 @@ import Testing
         expect(Theme.green, matches: (76, 208, 122), under: dark)
         expect(Theme.red, matches: (255, 107, 96), under: dark)
         expect(Theme.orange, matches: (245, 167, 66), under: dark)
+        expect(Theme.blue, matches: (122, 162, 210), under: dark)
     }
 
     @Test func accentTintUsesDifferentAlphasPerMode() {
