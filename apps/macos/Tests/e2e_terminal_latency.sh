@@ -198,9 +198,11 @@ socket_path_cache: dict[str, Path] = {}
 # Budgets for `host_input_to_frame_apply_ms`: the host receiving the input to the client applying the
 # frame it produced. They are set from measured p95s with headroom rather than round numbers, because
 # the metric no longer carries the CLI spawn that used to dominate it and dwarf any render cost.
-# Measured p95 over 12 samples each: input 4.9ms, scrollback 6.1ms, partial scrollback 5.6ms, command
-# catchup 23.2ms. Catchup is the outlier by design: one Return produces the line break, the command's
-# own output, and the redrawn prompt, and its total ends at the last of those.
+# Measured p95 over two runs of 12 samples each: input 4.9-5.0ms, scrollback 6.1ms, partial scrollback
+# 5.6-9.9ms, command catchup 23.2-24.5ms. Each budget clears the wider of the two, because a run to run
+# spread this size is the machine, not the product. Catchup is the outlier by design: one Return
+# produces the line break, the command's own output, and the redrawn prompt, and its total ends at the
+# last of those.
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 15, "target_p95_ms": 10},
     "mac-scrollback-latency": {"gross_p95_ms": 18, "target_p95_ms": 12},
@@ -261,6 +263,21 @@ def performance_event_uptime(record: dict) -> int | None:
         return None
 
 
+def attributes_at_least(attributes: dict, minimums: dict[str, int]) -> bool:
+    """Whether every named attribute parses as a number that reached its minimum.
+
+    An attribute that is absent or unparseable fails the match rather than passing it, so a record
+    that never carried the attribute cannot be selected by a threshold on it.
+    """
+    for key, minimum in minimums.items():
+        try:
+            if int(attributes.get(key)) < minimum:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def performance_event(
     session_id: str,
     source: str,
@@ -270,6 +287,7 @@ def performance_event(
     timeout: float = 1.0,
     require_render_frame: bool = True,
     attribute_equals: dict[str, str] | None = None,
+    attribute_at_least: dict[str, int] | None = None,
     latest: bool = True,
 ) -> tuple[dict, int] | None:
     deadline = time.monotonic() + timeout
@@ -288,6 +306,8 @@ def performance_event(
                 if attributes.get("render_frame") != "1" or attributes.get("drop_reason") not in (None, "none"):
                     continue
             if attribute_equals and any(attributes.get(key) != value for key, value in attribute_equals.items()):
+                continue
+            if attribute_at_least and not attributes_at_least(attributes, attribute_at_least):
                 continue
             candidates.append((emitted_ns, record))
         if candidates:
@@ -329,6 +349,7 @@ def first_performance_event(
     timeout: float = 1.0,
     require_render_frame: bool = True,
     attribute_equals: dict[str, str] | None = None,
+    attribute_at_least: dict[str, int] | None = None,
 ) -> tuple[dict, int] | None:
     return performance_event(
         session_id,
@@ -339,6 +360,7 @@ def first_performance_event(
         timeout=timeout,
         require_render_frame=require_render_frame,
         attribute_equals=attribute_equals,
+        attribute_at_least=attribute_at_least,
         latest=False,
     )
 
@@ -358,23 +380,33 @@ def first_mac_frame_export(session_id: str, begin_ns: int, visible_ns: int) -> t
 def mac_frame_apply_for_export(
     session_id: str, frame_export: tuple[dict, int] | None, visible_ns: int
 ) -> tuple[dict, int] | None:
-    """The client apply that carried the revision this host export shipped.
+    """The client apply that first put this host export's revision on screen.
 
     Pairing by revision rather than by time is what lets the phase split add up: every stage is
     resolved against the same frame, so `frame_export_to_frame_apply_ms` measures one frame's trip to
     the client instead of subtracting one frame's export from another frame's apply.
+
+    Matched at or above the exported revision, not equal to it. The client's apply mailbox
+    deliberately collapses frames that queue up together and applies only the newest, so the exported
+    revision often has no apply of its own while a newer revision carrying the same content is on
+    screen promptly. Demanding equality left that sample unresolved and failed the coverage check on a
+    healthy run; revisions only move forward, so the first apply that reached this one is the apply
+    that showed it.
     """
     if not frame_export:
         return None
     target_revision = (frame_export[0].get("attributes") or {}).get("target_revision")
-    attribute_filter = {"applied_revision": target_revision} if target_revision and target_revision != "nil" else None
+    try:
+        revision_floor = {"applied_revision": int(target_revision)}
+    except (TypeError, ValueError):
+        revision_floor = None
     return first_performance_event(
         session_id,
         "mac-mirror",
         "render_frame_mirror_apply",
         frame_export[1],
         before_ns=visible_ns,
-        attribute_equals=attribute_filter,
+        attribute_at_least=revision_floor,
     )
 
 
@@ -392,6 +424,12 @@ def host_input_activity(session_id: str, begin_ns: int, visible_ns: int) -> tupl
     request starting and its frame becoming visible is this one. That is also why the catchup probe
     waits for the typed line to render before pressing Return, since the text write emits this event
     too.
+
+    Accepted limit: a scroll logs this as the host takes the request, but a key or text write logs it
+    from inside the write itself, which the control input sequencer runs, so the sequencer hop sits
+    outside the gated total. It is left outside rather than instrumented because these probes are
+    serialized and never queue behind another input, so the hop they would measure is an empty queue,
+    and any real growth there still shows in the reported `rpc_ms` and `event_to_host_input_ms`.
     """
     return first_performance_event(
         session_id,
@@ -904,7 +942,7 @@ def run_mac_scrollback_latency(
         event_to_host_input_ms = None
         host_input_to_frame_apply_ms = None
         frame_apply_to_visible_ms = None
-        no_op = False
+        unrendered_with_frame = False
         try:
             visible_state, visible_ns = wait_for_state(session_id, lambda state, before=before: rendered_output(state) != before, 5, probe_id)
             rendered_change_latency_ms = ms_between(begin_ns, visible_ns)
@@ -942,14 +980,18 @@ def run_mac_scrollback_latency(
                 event_to_visible_ms=rendered_change_latency_ms,
             )
         except TimeoutError:
-            # A gesture at the scrollback boundary renders nothing, and so does a regression that stops
-            # the screen updating; the timeout alone cannot tell them apart. The host can: at a boundary
-            # ghostty has nothing to redraw and exports no frame, so an attempt that did export one is
-            # an unresolved sample rather than a no-op, and stays in the coverage denominator to fail
-            # the run instead of being excused.
+            # Every gesture here is expected to move the screen, so a timeout is a failure and stays in
+            # the coverage denominator. The fixture prints 1600 lines and the probe alternates one fixed
+            # delta against its own inverse, so the viewport oscillates between the bottom and one delta
+            # above it and never reaches a scrollback boundary. Whether the host exported a frame is
+            # recorded to tell the two shapes of failure apart: no export means the gesture never
+            # reached ghostty, and an export means it did and the screen still did not change. It is
+            # deliberately not read as a boundary no-op, because a boundary gesture exports a frame too:
+            # `controlResponseForScrollRequest` broadcasts whenever the driver accepted the scroll, and
+            # the driver accepts every scroll on a live surface.
             timeout_ns = now_ns()
-            no_op = first_mac_frame_export(session_id, begin_ns, timeout_ns) is None
-            visible_state = dump_state(session_id, f"{probe_id}-noop")
+            unrendered_with_frame = first_mac_frame_export(session_id, begin_ns, timeout_ns) is not None
+            visible_state = dump_state(session_id, f"{probe_id}-unrendered")
             # Every key `mac_host_latency_split` returns, because the measurement below reads all of
             # them: a short dict here turns a supported no-op into a KeyError.
             stage_split = {
@@ -960,7 +1002,7 @@ def run_mac_scrollback_latency(
                 "frame_export_to_frame_apply_ms": None,
             }
             event(
-                "mac_scroll_noop" if no_op else "mac_scroll_unrendered_frame",
+                "mac_scroll_unrendered_with_frame" if unrendered_with_frame else "mac_scroll_unrendered_no_frame",
                 scenario,
                 probe_id,
                 timeout_ns,
@@ -988,7 +1030,7 @@ def run_mac_scrollback_latency(
                 "rpc_ms": ms_between(rpc_begin_ns, rpc_end_ns),
                 "rpc_begin_to_scroll_event_ms": ms_between(rpc_begin_ns, begin_ns),
                 "scroll_end_to_rpc_end_ms": ms_between(scroll_end_ns, rpc_end_ns),
-                "no_op": no_op,
+                "unrendered_with_frame": unrendered_with_frame,
                 "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
             }
         )
@@ -1000,8 +1042,8 @@ def run_mac_scrollback_latency(
         "summary": summarize_latencies(measurements, "host_input_to_frame_apply_ms"),
         "summary_metric": "host_input_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
-        "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
-        "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
+        "unrendered_gestures": sum(1 for item in measurements if item.get("event_to_visible_ms") is None),
+        "rendered_change_count": sum(1 for item in measurements if item.get("event_to_visible_ms") is not None),
         "budget_enforced": True,
     }
 
@@ -1180,10 +1222,10 @@ for name, result in scenario_results.items():
         # normal-looking number while the attempts that did not are exactly the ones a regression
         # would show up in.
         resolved = result["summary"]["count"]
-        # No-op scroll gestures are excluded from the denominator, not from the check: a gesture at the
-        # scrollback boundary is expected to render nothing, so it has no frame apply to resolve, while
-        # every attempt that did change the screen still has to.
-        attempted = sum(1 for item in result["measurements"] if not item.get("no_op"))
+        # Every attempt counts. No scenario here makes an input the product is allowed to ignore, so
+        # there is no attempt that legitimately has no frame to resolve, and nothing may leave the
+        # denominator: an excused attempt is exactly the shape a regression takes.
+        attempted = len(result["measurements"])
         if p95 is None:
             failures.append(
                 f"{name} collected no {result.get('summary_metric')} samples, so its gross budget "
@@ -1241,8 +1283,8 @@ for name, result in scenario_results.items():
         )
     if result.get("measurements"):
         print(f"  samples: {sample_series(result['measurements'], result.get('summary_metric', 'event_to_visible_ms'))}")
-    if "no_op_gestures" in result:
-        print(f"  scroll movement: rendered_changes={result['rendered_change_count']} no_ops={result['no_op_gestures']}")
+    if "unrendered_gestures" in result:
+        print(f"  scroll movement: rendered_changes={result['rendered_change_count']} unrendered={result['unrendered_gestures']}")
 if failures:
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
